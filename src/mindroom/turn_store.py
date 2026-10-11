@@ -932,12 +932,14 @@ def _remove_runs_for_sources(
     removed_any = False
     for source_event_id in source_event_ids:
         removed_any = (
-            remove_run_by_event_id(
-                storage,
-                session_id,
-                source_event_id,
-                session_type=session_type,
-                remove_following_runs=True,
+            bool(
+                remove_run_by_event_id(
+                    storage,
+                    session_id,
+                    source_event_id,
+                    session_type=session_type,
+                    remove_following_runs=True,
+                ),
             )
             or removed_any
         )

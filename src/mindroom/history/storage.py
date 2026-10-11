@@ -381,13 +381,13 @@ def remove_run_by_event_id(
     session_type: SessionType = SessionType.AGENT,
     include_seen_event_ids: bool = False,
     remove_following_runs: bool = False,
-) -> bool:
+) -> list[str]:
     """Remove a run whose Matrix source identity, or with ``include_seen_event_ids`` its whole history, matches.
 
     Its whole history is what it read, what revisions it consumed, and the reply it wrote.
     Redaction cleanup can also remove the causal suffix after the first match,
     because later model output may depend on content from the matching run.
-    Returns True if any run was removed.
+    Returns the ids of the removed runs.
     """
     session = (
         get_team_session(storage, session_id)
@@ -395,7 +395,7 @@ def remove_run_by_event_id(
         else get_agent_session(storage, session_id)
     )
     if session is None or not session.runs:
-        return False
+        return []
     removed_runs: list[RunOutput | TeamRunOutput] = []
     for run in session.runs:
         if not isinstance(run, (RunOutput, TeamRunOutput)):
@@ -406,11 +406,12 @@ def remove_run_by_event_id(
         if (removed_runs and remove_following_runs) or event_id in matched_event_ids:
             removed_runs.append(run)
     if not removed_runs:
-        return False
+        return []
+    removed_run_ids = [run.run_id for run in removed_runs if run.run_id]
     # Team member runs hang off the team run through parent_run_id and go with it.
-    kept = runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
+    kept = runs_without(session.runs, removed_run_ids)
     replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
-    return True
+    return removed_run_ids
 
 
 def _remove_redacted_event_from_history(
@@ -427,7 +428,7 @@ def _remove_redacted_event_from_history(
     and compacted history is rolled back the same way. ``session`` is synced to
     the stored result. Returns whether the scope's history changed.
     """
-    removed_run = remove_run_by_event_id(
+    removed_run_ids = remove_run_by_event_id(
         storage,
         session.session_id,
         event_id,
@@ -441,11 +442,12 @@ def _remove_redacted_event_from_history(
         latest_session,
         scope,
         event_id=event_id,
-        removed_live_run=removed_run,
+        removed_live_run=bool(removed_run_ids),
         legacy_source_event_id=legacy_source_event_id,
+        removed_run_ids=removed_run_ids,
     )
     _adopt_session_fields(session, latest_session)
-    return removed_run or removed_compacted
+    return bool(removed_run_ids) or removed_compacted
 
 
 async def remove_history_of_redacted_events(
@@ -492,6 +494,7 @@ def _remove_redacted_event_from_compaction(
     event_id: str,
     removed_live_run: bool,
     legacy_source_event_id: str | None = None,
+    removed_run_ids: Sequence[str] = (),
 ) -> bool:
     """Remove a redacted Matrix event from compacted history, keeping everything before it.
 
@@ -522,11 +525,12 @@ def _remove_redacted_event_from_compaction(
             live_run_ids=live_run_ids,
         )
     elif (
-        hit := archive.find_archived_event(
+        hit := _earliest_dependent_row(
             storage,
-            session_id=session.session_id,
-            scope_key=scope.key,
+            session,
+            scope,
             event_id=event_id,
+            removed_run_ids=removed_run_ids,
         )
     ) is not None:
         archive.roll_back_to(
@@ -548,6 +552,34 @@ def _remove_redacted_event_from_compaction(
     storage.upsert_session(target_session)
     _adopt_session_fields(session, target_session)
     return True
+
+
+def _earliest_dependent_row(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    *,
+    event_id: str,
+    removed_run_ids: Sequence[str],
+) -> archive.ArchiveHit | None:
+    """Return the earliest archived row that derives from the event or from a run redaction removed.
+
+    A run that compacted while it was still running left snapshots holding its earlier work, but events it
+    consumed later and its reply belong only to the run itself, so the run and its snapshots go together.
+    """
+    hit = archive.find_archived_event(storage, session_id=session.session_id, scope_key=scope.key, event_id=event_id)
+    origins = set(removed_run_ids)
+    if hit is not None:
+        origins.add(archive.snapshot_origin(hit.run_id) or hit.run_id)
+    related = archive.earliest_archived_run(
+        storage,
+        session_id=session.session_id,
+        scope_key=scope.key,
+        run_ids=origins,
+    )
+    if hit is None or (related is not None and related.archived_row_id < hit.archived_row_id):
+        return related
+    return hit
 
 
 # LEGACY_COMPAT: Redaction of history compacted before the archive existed.
