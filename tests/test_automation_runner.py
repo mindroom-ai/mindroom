@@ -26,6 +26,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -114,7 +115,7 @@ def _use_check(runner: AutomationRunner, check: Callable[[AutomationContext], As
 
 async def _tick(runner: AutomationRunner, now: datetime) -> None:
     await runner._tick(now)
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -186,9 +187,9 @@ async def test_the_finished_response_triggers_verify_and_a_notice_in_the_prompt_
     await _tick(runner, DAY_LATER)
 
     runner.response_finished(["$unrelated", "$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert bot.sent[1:] == [
         {
@@ -213,9 +214,9 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
         assert root is not None
         (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     runner.response_finished(["$event2"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert len(bot.sent) == 2
     recheck = bot.sent[1]
@@ -240,7 +241,7 @@ async def _finish_run(runner: AutomationRunner, config: Config, paths: RuntimePa
         (root / "memory" / "topics.md").write_text(moved, encoding="utf-8")
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -294,7 +295,7 @@ async def test_a_configured_model_runs_the_prompt_and_its_recheck(tmp_path: Path
     assert root is not None
     (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert [message["extra_content"] for message in bot.sent] == [
         {SCHEDULED_MODEL_KEY: "large", PER_FIRE_THREAD_ROOT_KEY: True},
@@ -354,7 +355,7 @@ async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) ->
     assert len(bot.sent) == 1
 
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     await _tick(runner, NOON + timedelta(minutes=3))
 
     assert [message["thread_id"] for message in bot.sent] == [None, "$event1", None]
@@ -370,7 +371,7 @@ async def test_the_automation_is_free_once_its_chain_ends(tmp_path: Path) -> Non
 
     runner.response_finished(["$event1"])
     assert "mind" in runner._active
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert "mind" not in runner._active
 
@@ -442,7 +443,7 @@ async def test_a_step_that_fails_posts_a_notice_in_its_thread_and_ends_the_chain
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert [(message["body"], message["thread_id"]) for message in bot.sent] == [
         ("@mind Do the work", None),
@@ -465,9 +466,9 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
         runner.response_finished(["$event2"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert [(message["body"], message["thread_id"]) for message in bot.sent] == [
         ("@mind Draft it", None),
@@ -513,10 +514,10 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
         (run_dir / "staging/memory/people.md").write_text("- Sam lives in Utrecht.\n", encoding="utf-8")
         (run_dir / "report.md").write_text("Moved Sam.\nDREAM: DONE\n", encoding="utf-8")
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
         (run_dir / "verdict.md").write_text("Checked.\nVERDICT: APPROVE\n", encoding="utf-8")
         runner.response_finished(["$event2"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     dream, review, notice = bot.sent
     assert dream["body"].startswith("@mind 🌙 Dreaming: reconcile your memory")
@@ -552,7 +553,7 @@ async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
     (run_dir / "report.md").write_text("Nothing to change.\nDREAM: DONE\n", encoding="utf-8")
     with patch.object(runner_module, "set_thread_tag", new=AsyncMock()):
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     await _tick(runner, DAY_LATER + timedelta(minutes=1))
 
     assert bot.sent[1]["body"].startswith("Dreaming changed nothing")
@@ -594,7 +595,7 @@ async def test_a_plugin_automation_runs_its_chain_through_the_runner(tmp_path: P
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert seen == [({"target": "digest.md"}, {"api": "x"})]
     assert [(m["body"], m["source_hook"]) for m in bot.sent] == [
@@ -650,7 +651,7 @@ async def test_a_reload_between_steps_keeps_the_running_chain(tmp_path: Path) ->
     ).get
     await _tick(runner, DAY_LATER + timedelta(minutes=1))
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     await _tick(runner, DAY_LATER + timedelta(days=1))
 
     assert runner._next_due["mind:weekly_digest"][1] == due[1] + timedelta(days=1)

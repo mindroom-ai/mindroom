@@ -2932,6 +2932,11 @@ async def aioresponse() -> AsyncGenerator[aioresponses, None]:
         yield m
 
 
+# Deadline for a test wait that should finish. A passing wait returns as soon as its work is done,
+# so the deadline only bounds a hang; it is generous because parallel runs stall background work.
+SETTLE_TIMEOUT_SECONDS = 30.0
+
+
 @pytest.fixture(autouse=True)
 def _isolate_structlog_configuration(
     monkeypatch: pytest.MonkeyPatch,

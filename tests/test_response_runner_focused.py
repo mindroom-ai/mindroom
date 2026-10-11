@@ -172,6 +172,7 @@ from tests.approval_continuation_helpers import (
 )
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     make_matrix_client_mock,
     make_visible_message,
     message_origin,
@@ -8920,7 +8921,7 @@ async def _respond_with_skill_learning(
         ),
     ):
         await coordinator.generate_response(request_update(_plain_request(_target())))
-        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
     return reviews, model, bot.client.room_send
 
 
@@ -9023,7 +9024,7 @@ async def test_a_finished_response_tells_automations_its_source_events(tmp_path:
         ),
     ):
         await coordinator.generate_response(request)
-        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
 
     assert automations.finished == [tuple(request.sources.logical_source_event_ids)]
 

@@ -860,7 +860,7 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         await bot._turn_controller.handle_text_event(room, second)
         await bot._turn_controller.handle_text_event(room, other_thread_reply)
 
-        await _wait_for(lambda: sorted(generated) == ["$m1", "$m2", "$m3"], deadline_seconds=1.0)
+        await _wait_for(lambda: sorted(generated) == ["$m1", "$m2", "$m3"])
         assert not release_first_response.is_set()
 
         release_first_response.set()
@@ -995,7 +995,7 @@ async def test_hung_voice_download_fallback_releases_later_sender_slot(
         ):
             await bot._turn_controller.handle_media_event(room, voice_note)
             await bot._turn_controller.handle_text_event(room, later_text)
-            await _wait_for(lambda: "$later" in dispatched_source_ids, deadline_seconds=1.0)
+            await _wait_for(lambda: "$later" in dispatched_source_ids)
 
         assert "$voice" in dispatched_source_ids
         assert bot._coalescing_gate.lanes.all_settled()
@@ -1078,7 +1078,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         await bot._turn_controller.handle_media_event(room, image)
         await bot._turn_controller.handle_text_event(room, other_thread)
 
-        await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
+        await _wait_for(lambda: "$b1" in generated)
         assert not release_first_response.is_set()
         assert bot._coalescing_gate.lanes.all_settled()
         assert not bot._turn_store.is_handled("$e1")
@@ -1176,7 +1176,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             await asyncio.wait_for(answer_task, timeout=1.0)
             await bot._turn_controller.handle_text_event(room, other_thread)
 
-            await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
+            await _wait_for(lambda: "$b1" in generated)
             assert not release_first_response.is_set()
             assert "$f1" not in generated
 

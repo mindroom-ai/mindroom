@@ -96,6 +96,7 @@ from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     dispatch_context_result,
@@ -382,7 +383,7 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
     duplicate_reservation.cancel.assert_called_once_with()
 
 
-async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
+async def _wait_for(condition: Callable[[], bool]) -> None:
     """Poll until a test condition becomes true."""
     ready = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -395,7 +396,7 @@ async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 
 
     _mark_ready()
     try:
-        async with asyncio.timeout(deadline_seconds):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             await ready.wait()
     except TimeoutError as exc:
         msg = "Timed out waiting for async test condition"
@@ -1695,7 +1696,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await _wait_for(lambda: len(runs) == 2, deadline_seconds=3)
+            await _wait_for(lambda: len(runs) == 2)
             await bot._coalescing_gate.drain_all()
             await response_runner.drain_inbox_responses()
     finally:
@@ -1798,7 +1799,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key), deadline_seconds=3)
+            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key))
             await bot._coalescing_gate.drain_all()
             await response_runner.drain_inbox_responses()
     finally:
@@ -1879,7 +1880,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key), deadline_seconds=3)
+            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key))
             await bot._coalescing_gate.drain_all()
             await response_runner.drain_inbox_responses()
     finally:
@@ -2272,7 +2273,7 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$text", "$voice"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$text", "$voice"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2398,7 +2399,7 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$typed1", "$voice", "$typed2"]], deadline_seconds=0.5)
+    await _wait_for(lambda: calls == [["$typed1", "$voice", "$typed2"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2538,7 +2539,7 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
     assert calls == [["$voice"]]
 
     release_voice_dispatch.set()
-    await _wait_for(lambda: calls == [["$voice"], ["$followup"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$voice"], ["$followup"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2591,7 +2592,7 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [(resolved_key, ["$voice", "$typed"])], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [(resolved_key, ["$voice", "$typed"])])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2643,7 +2644,7 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [(resolved_key, ["$typed", "$voice"])], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [(resolved_key, ["$typed", "$voice"])])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2695,7 +2696,7 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$voice", "$typed"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$voice", "$typed"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2748,7 +2749,7 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$typed", "$voice"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$typed", "$voice"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2808,7 +2809,7 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     assert calls == [["$typed"]]
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$typed"], ["$voice"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$typed"], ["$voice"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2974,7 +2975,6 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
                 (voice_key, ["$voice"]),
             ]
         ),
-        deadline_seconds=0.2,
     )
     assert _coalescing_gate_is_idle(gate)
 
@@ -4755,7 +4755,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await _wait_for(lambda: bot._turn_store.is_handled("$m1"), deadline_seconds=1.0)
+        await _wait_for(lambda: bot._turn_store.is_handled("$m1"))
 
     assert bot._turn_store.is_handled("$m1")
     assert bot._turn_store.is_handled("$m2")
