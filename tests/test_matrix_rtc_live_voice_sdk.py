@@ -502,7 +502,7 @@ async def test_live_sdk_times_delegation_stages_through_the_provider_ack(provide
             )
             append = await provider.socket.next_event("session.commentary.append")
             session = cast("Agent", bridge._live_agent).duplex_session
-            # Registered after MindRoom's listener, so the acknowledgement has been handled first.
+            # `emit` runs every listener before this waiter can resume, so MindRoom's listener has handled the acknowledgement.
             session.on("openai_server_event_received", lambda event: acked.set() if event["type"] == ack else None)
             provider.socket.feed({"type": ack, "client_event_id": append["event_id"]})
             await asyncio.wait_for(acked.wait(), timeout=2)
