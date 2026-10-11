@@ -67,7 +67,8 @@ class ClaudeProviderSDKCompat:
 
     id: str
     # Usage from message_start of the stream this model is reading, until it reports its final usage.
-    # A model streams one request at a time, and settlement of an interrupted request may run in another task.
+    # A turn's model normally streams one request at a time, and settlement of an interrupted request may run in
+    # another task. Agno can run two delegations to one team member in parallel, which share this value.
     _stream_start_usage: MessageMetrics | None = None
 
     def take_unfinished_stream_usage(self) -> MessageMetrics | None:
