@@ -27,11 +27,10 @@ from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs import runtime as background
 from mindroom.tool_jobs.control import (
     JobControl,
-    QueuedTurnSignal,
     job_checkpoint,
     job_control_context,
     job_stopped_by_shutdown,
-    queued_turn_signal_context,
+    pending_human_messages_context,
 )
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
@@ -228,7 +227,7 @@ async def test_wait_claim_released_without_ack_keeps_outcome_pending(tmp_path: P
 async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
     """Human input cannot block later tools inside an accepted subagent turn."""
     runtime = await tool_job_runtime(tmp_path)
-    human = QueuedTurnSignal()
+    human = asyncio.Event()
     started, proceed, next_tool = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -241,12 +240,12 @@ async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
     try:
         job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
         await started.wait()
-        human.notify()
-        with queued_turn_signal_context(human):
+        human.set()
+        with pending_human_messages_context(human):
             assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
         proceed.set()
         await asyncio.wait_for(next_tool.wait(), JOB_TEST_TIMEOUT)
-        human.settle()
+        human.clear()
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "finished"
     finally:
         await runtime.shutdown()
@@ -317,8 +316,8 @@ async def test_restart_retains_result_and_marks_live_work_interrupted(tmp_path: 
 async def test_existing_queued_human_releases_wait_without_blocking_first_tool(tmp_path: Path) -> None:
     """Pending input is observed on subscription while accepted work still starts."""
     runtime = await tool_job_runtime(tmp_path)
-    human = QueuedTurnSignal()
-    human.notify()
+    human = asyncio.Event()
+    human.set()
     entered, finish = asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -329,7 +328,7 @@ async def test_existing_queued_human_releases_wait_without_blocking_first_tool(t
 
     try:
         job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
-        with queued_turn_signal_context(human):
+        with pending_human_messages_context(human):
             assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
         await asyncio.wait_for(entered.wait(), JOB_TEST_TIMEOUT)
     finally:

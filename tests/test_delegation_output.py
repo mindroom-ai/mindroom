@@ -24,7 +24,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
-from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
+from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -98,7 +98,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
     if runtime is not None:
         register_background_runtime(paths, runtime)
     release = asyncio.Event()
-    signal = QueuedTurnSignal()
+    signal = asyncio.Event()
     if execution != "detached":
         release.set()
 
@@ -112,7 +112,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         supports_native_tool_approval: bool,
     ) -> str:
         if execution == "excluded":
-            signal.notify()
+            signal.set()
         await release.wait()
         return await run_delegated_child_response(
             child,
@@ -166,7 +166,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
     try:
         with (
             tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
-            queued_turn_signal_context(signal),
+            pending_human_messages_context(signal),
         ):
             response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
             result = await drive_delegations(parent, response, run_child=run_child, **options)

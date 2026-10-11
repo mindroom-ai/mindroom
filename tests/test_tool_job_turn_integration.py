@@ -20,7 +20,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
-from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
+from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
@@ -199,7 +199,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    signal = QueuedTurnSignal()
+    signal = asyncio.Event()
     storage_file = str(tmp_path / "turns.db")
 
     def storage_factory() -> SqliteDb:
@@ -229,17 +229,17 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     first_pending = None
     second_pending = None
     try:
-        with tool_runtime_context(context), queued_turn_signal_context(signal):
+        with tool_runtime_context(context), pending_human_messages_context(signal):
             first_pending = asyncio.create_task(run_turn("Start the report"))
             await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
-            signal.notify()
+            signal.set()
             first = await asyncio.wait_for(first_pending, JOB_TEST_TIMEOUT)
         assert first.tools is not None
         job_id = json.loads(cast("str", first.tools[0].result))["job_id"]
         assert "released" in str(first.content)
         assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"
 
-        signal.settle()
+        signal.clear()
         model.responses.extend(
             [
                 ModelResponse(tool_calls=[_call("job", "list-call", action="list")]),
@@ -251,7 +251,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
                 ModelResponse(content="The retained report was retrieved."),
             ],
         )
-        with tool_runtime_context(context), queued_turn_signal_context(signal):
+        with tool_runtime_context(context), pending_human_messages_context(signal):
             second_pending = asyncio.create_task(run_turn("Check the earlier report"))
             await asyncio.wait_for(model.list_observed.wait(), JOB_TEST_TIMEOUT)
             assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"

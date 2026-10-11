@@ -1,48 +1,27 @@
-"""Lightweight queued-turn signals and child tool cancellation checkpoints."""
+"""Newer human messages that release a reply's waits, and child tool cancellation checkpoints."""
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Iterator
 
 
-@dataclass
-class QueuedTurnSignal:
-    """Release a reply's waits inside its model run while newer messages or turns wait for its conversation.
+class PendingHumanMessages(Protocol):
+    """Newer human messages waiting for the running reply of their conversation; set while any waits."""
 
-    Releasing such a wait never stops the work: the reply finishes its run, and its message holds what is still
-    outstanding while the conversation's other turns run.
-    """
+    def is_set(self) -> bool:
+        """Return whether a human message waits now."""
+        ...
 
-    _subscribers: set[Callable[[], None]] = field(default_factory=set)
-    # Newer messages and turns of the conversation still waiting for this reply.
-    _pending: int = 0
-
-    def subscribe(self, callback: Callable[[], None]) -> None:
-        """Subscribe one wait, releasing it at once while anything is still pending."""
-        self._subscribers.add(callback)
-        if self._pending > 0:
-            callback()
-
-    def unsubscribe(self, callback: Callable[[], None]) -> None:
-        """Release a finished wait's subscription."""
-        self._subscribers.discard(callback)
-
-    def notify(self) -> None:
-        """A newer message or turn waits: release subscribed waits without changing the execution of their jobs."""
-        self._pending += 1
-        for callback in tuple(self._subscribers):
-            callback()
-
-    def settle(self) -> None:
-        """A pending message or turn was handled, so later waits stay attached unless another one is pending."""
-        self._pending -= 1
+    async def wait(self) -> None:
+        """Return once a human message waits."""
+        ...
 
 
 @dataclass
@@ -63,23 +42,23 @@ class JobControl:
             raise asyncio.CancelledError
 
 
-_turn_signal: ContextVar[QueuedTurnSignal | None] = ContextVar("job_turn_signal", default=None)
+_pending_human: ContextVar[PendingHumanMessages | None] = ContextVar("job_pending_human_messages", default=None)
 _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
 
 
-def current_queued_turn_signal() -> QueuedTurnSignal | None:
-    """Return the signal of the reply this task belongs to; background work has none."""
-    return _turn_signal.get()
+def current_pending_human_messages() -> PendingHumanMessages | None:
+    """Return the human messages waiting for the reply this task belongs to; background work has none."""
+    return _pending_human.get()
 
 
 @contextmanager
-def queued_turn_signal_context(signal: QueuedTurnSignal | None) -> Iterator[None]:
-    """Bind the queued-turn signal of one response lifecycle, or clear it for background work."""
-    token = _turn_signal.set(signal)
+def pending_human_messages_context(messages: PendingHumanMessages | None) -> Iterator[None]:
+    """Bind the waiting human messages of one response lifecycle, or clear them for background work."""
+    token = _pending_human.set(messages)
     try:
         yield
     finally:
-        _turn_signal.reset(token)
+        _pending_human.reset(token)
 
 
 @contextmanager

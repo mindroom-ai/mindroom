@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -22,9 +21,9 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import (
     JobControl,
-    current_queued_turn_signal,
+    current_pending_human_messages,
     job_control_context,
-    queued_turn_signal_context,
+    pending_human_messages_context,
 )
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
@@ -39,6 +38,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import SavedToolJob, ToolJobStore
+    from mindroom.tool_jobs.control import PendingHumanMessages
 
 type _OutcomeStatus = Literal["completed", "failed", "cancelled", "denied", "interrupted"]
 # A running job that waits for human decisions on the approval cards it posted is `awaiting_approval`.
@@ -255,6 +255,25 @@ def _approval_deadline(
     if job.status != "awaiting_approval" or approval_timeout is None:
         return None
     return now + approval_timeout if current is None else current
+
+
+async def _changed_or_released(
+    changed: asyncio.Event,
+    human: PendingHumanMessages | None,
+    *,
+    timeout: float | None,  # noqa: ASYNC109
+) -> bool:
+    """Wait until the job changes, a human message arrives, or ``timeout`` passes; return whether the message came."""
+    change = asyncio.ensure_future(changed.wait())
+    message = None if human is None else asyncio.ensure_future(human.wait())
+    tasks = [change] if message is None else [change, message]
+    try:
+        await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        return message is not None and message.done() and not message.cancelled()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class ToolJobRuntime:
@@ -514,8 +533,8 @@ class ToolJobRuntime:
         try:
             try:
                 with (
-                    # Queued turns release replies, never the background work they wait for.
-                    queued_turn_signal_context(None),
+                    # A newer human message releases replies, never the background work they wait for.
+                    pending_human_messages_context(None),
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     without_tool_call_recording(),
                     job_control_context(entry.control),
@@ -595,16 +614,9 @@ class ToolJobRuntime:
             claim = entry.claim_for(claim) if readable else None
             if claim is None:
                 return _JobWait(await self._snapshot(entry))
-            turn_queued = asyncio.Event()
-
-            def notify_turn_queued() -> None:
-                turn_queued.set()
-                entry.notify_changed()
-
-            # Only the waiting reply's own conversation releases it, when its agent answers a newer message there.
-            turn_signal = current_queued_turn_signal()
-            if turn_signal is not None:
-                turn_signal.subscribe(notify_turn_queued)
+        # A newer human message in the waiting reply's own conversation releases the wait; the job runs on.
+        human = current_pending_human_messages()
+        released = False
         try:
             while True:
                 async with self._lock:
@@ -621,14 +633,12 @@ class ToolJobRuntime:
                     approval_deadline = _approval_deadline(entry.job, approval_timeout, approval_deadline, now)
                     ends = [end for end in (deadline, approval_deadline) if end is not None]
                     remaining = min(ends) - now if ends else None
-                    if turn_queued.is_set() or (remaining is not None and remaining <= 0):
+                    released = released or (human is not None and human.is_set())
+                    if released or (remaining is not None and remaining <= 0):
                         return _JobWait(await self._snapshot(entry))
                     changed = entry.changed
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(changed.wait(), remaining)
+                released = await _changed_or_released(changed, human, timeout=remaining)
         finally:
-            if turn_signal is not None:
-                turn_signal.unsubscribe(notify_turn_queued)
             if not retained:
                 await self.release_wait(job_id, claim)
 

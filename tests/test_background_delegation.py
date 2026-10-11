@@ -44,10 +44,9 @@ from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import (
     JobControl,
-    QueuedTurnSignal,
     job_control_context,
     job_owns_execution,
-    queued_turn_signal_context,
+    pending_human_messages_context,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -360,7 +359,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     release = asyncio.Event()
     completed = asyncio.Event()
     children = []
-    signal = QueuedTurnSignal()
+    signal = asyncio.Event()
     side_effects = []
     child_storages = []
     child_responses = ([ModelResponse(tool_calls=[_call("write_report", "write-once")])] if approval else []) + [
@@ -398,7 +397,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     ) -> str:
         children.append(child)
         if human:
-            signal.notify()
+            signal.set()
         if detach:
             await release.wait()
         child_identity = replace(identity, agent_name="code", session_id=child.session_id)
@@ -477,7 +476,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     membership_turn_id="$native-reader",
                 ),
             ),
-            queued_turn_signal_context(signal),
+            pending_human_messages_context(signal),
             recording_tool_calls(recorder),
         ):
             current_parent = parent(
@@ -513,7 +512,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 release.set()
                 if human:
                     # The newer reply that took the work over has started.
-                    signal.settle()
+                    signal.clear()
                 if approval:
                     await decide()
                 status = "cancelled" if approval == "cancelled" else "completed"
@@ -850,7 +849,7 @@ async def test_human_followup_does_not_stop_next_provider_invocation(
     fallback_config = FallbackConfig(on_error=[fallback_model]) if fallback else None
     install_tool_job_execution(primary, fallback_config)
     model = fallback_model if fallback else primary
-    signal = QueuedTurnSignal()
+    signal = asyncio.Event()
 
     async def invoke() -> str:
         called.set()
@@ -862,10 +861,10 @@ async def test_human_followup_does_not_stop_next_provider_invocation(
                 await events.aclose()
         return str((await model.ainvoke()).content)
 
-    with queued_turn_signal_context(signal):
+    with pending_human_messages_context(signal):
         first = asyncio.create_task(invoke())
         await entered.wait()
-        signal.notify()
+        signal.set()
         release.set()
         assert await asyncio.wait_for(first, JOB_TEST_TIMEOUT) == "Provider finished"
         assert not stream or closed.is_set()

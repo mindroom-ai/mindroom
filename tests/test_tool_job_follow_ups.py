@@ -24,7 +24,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot
+from tests.response_runner_helpers import _bot, _envelope, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter
 from tests.test_response_turn import _continuation as _turn_continuation
 from tests.test_response_turn import _ctx as _turn_ctx
@@ -335,34 +335,27 @@ async def test_an_interrupted_job_gets_a_follow_up_saying_it_may_have_partly_run
         await runtime.shutdown()
 
 
-async def test_a_follow_up_never_releases_a_running_wait() -> None:
-    """A follow-up queued behind a running reply leaves that reply's tool waits alone; only a human message ends them."""
+@pytest.mark.parametrize("turn", ["follow_up", "scheduled"])
+async def test_only_a_human_message_releases_a_running_wait(turn: str) -> None:
+    """A follow-up or a scheduled turn queued behind a running reply leaves its tool waits alone."""
     coordinator = ResponseLifecycleCoordinator()
-    signal = _QueuedMessageState()
-    released = asyncio.Event()
-    signal.turn_signal.subscribe(released.set)
-    signal.begin_response_turn()
-    key = ConversationKey(
-        "general",
-        "!room:localhost",
-        "$thread",
-        "@user:localhost",
-        silent=False,
-        participants=("general",),
+    queued = _QueuedMessageState()
+    queued.begin_response_turn()
+    key = ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False, participants=())
+    envelope = (
+        follow_up_envelope(key, follow_up_id="job-follow-up:1", sender_id="@mindroom_general:localhost", prompt="")
+        if turn == "follow_up"
+        else _envelope(_target(thread_id="$thread"))
     )
     notice = coordinator._begin_response_turn_notice(
         lifecycle_lock=asyncio.Lock(),
-        queued_signal=signal,
-        response_envelope=follow_up_envelope(
-            key,
-            follow_up_id="job-follow-up:1",
-            sender_id="@mindroom_general:localhost",
-            prompt="ended",
-        ),
-        signal_queued_message=True,
+        queued_signal=queued,
+        response_envelope=envelope,
+        # A scheduled turn is no human message for the running reply to hear about.
+        signal_queued_message=turn == "follow_up",
     )
     assert notice is None
-    assert not released.is_set()
+    assert not queued.is_set()
 
 
 async def test_a_reply_never_waits(tmp_path: Path) -> None:

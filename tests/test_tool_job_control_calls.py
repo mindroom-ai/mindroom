@@ -20,7 +20,7 @@ from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
-from mindroom.tool_jobs.control import QueuedTurnSignal, queued_turn_signal_context
+from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -64,7 +64,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
     bind_toolkit_authority(toolkit, authored_name="thread_model")
     function = toolkit.async_functions["switch_thread_model"]
     started, release = asyncio.Event(), asyncio.Event()
-    signal = QueuedTurnSignal()
+    signal = asyncio.Event()
 
     async def before() -> None:
         started.set()
@@ -89,11 +89,11 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
     pending = None
     try:
         async with execution_resources():
-            with tool_runtime_context(context), queued_turn_signal_context(signal):
+            with tool_runtime_context(context), pending_human_messages_context(signal):
                 pending = asyncio.create_task(actor.arun("Switch the model", session_id=context.session_id))
                 if wait_timeout is None:
                     await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
-                    signal.notify()
+                    signal.set()
                     done, _ = await asyncio.wait({pending}, timeout=0.05)
                     assert not done, "A control result cannot become a background handle on human follow-up"
                     release.set()
