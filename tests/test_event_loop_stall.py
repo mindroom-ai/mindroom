@@ -17,8 +17,10 @@ from mindroom import event_loop_stall
 from mindroom.constants import RuntimePaths
 from mindroom.event_loop_stall import (
     _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS,
+    _EVENT_LOOP_STALL_STACK_ENV,
     _EVENT_LOOP_STALL_THRESHOLD_ENV,
     EventLoopStallDetector,
+    _event_loop_stall_stack_seconds,
     _event_loop_stall_threshold_seconds,
     start_event_loop_stall_detector,
 )
@@ -574,6 +576,104 @@ async def test_start_helper_honors_disable_knob() -> None:
     assert detector is not None
     assert detector.threshold_seconds == _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS
     detector.stop()
+
+
+def _short_stall_detector(monkeypatch: pytest.MonkeyPatch) -> tuple[EventLoopStallDetector, list[None]]:
+    """Return a detector whose loop-thread stack snapshots are deterministic and counted."""
+    detector = EventLoopStallDetector(heartbeat_interval_seconds=0.05, stack_threshold_seconds=0.25)
+    detector._loop_thread_ident = 1
+    captures: list[None] = []
+
+    def capture_frames() -> dict[int, _FakeFrame]:
+        captures.append(None)
+        return {1: _FakeFrame()}
+
+    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", capture_frames)
+    monkeypatch.setattr(event_loop_stall.traceback, "format_stack", lambda *_args, **_kwargs: ["blocking-frame"])
+    return detector, captures
+
+
+def _beat(monotonic_seconds: float) -> event_loop_stall._Heartbeat:
+    return event_loop_stall._Heartbeat(monotonic_seconds=monotonic_seconds, process_cpu_seconds=0.0)
+
+
+def test_short_stall_logs_mid_stall_stack_with_total_lag_after_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sub-second stall keeps the stack sampled while blocked and reports the full lag once."""
+    detector, captures = _short_stall_detector(monkeypatch)
+
+    with capture_logs() as logs:
+        detector._observe_short_stall(1.2, _beat(1.0))  # 150 ms late: below the threshold
+        detector._observe_short_stall(1.35, _beat(1.0))  # 300 ms late: sample now, report later
+        assert logs == []
+        detector._observe_short_stall(1.4, _beat(1.0))  # still the same stall
+        detector._observe_short_stall(1.6, _beat(1.55))  # the late heartbeat finally ran
+
+    assert len(captures) == 1
+    [entry] = logs
+    assert entry["event"] == "event_loop_stall_stack"
+    assert entry["lag_ms"] == 500.0
+    assert entry["stack_lag_ms"] == 300.0
+    assert entry["threshold_ms"] == 250.0
+    assert entry["stack"] == "blocking-frame"
+    assert entry["suppressed_count"] == 0
+    assert entry["process_cpu_seconds_since_heartbeat"] >= 0
+
+
+def test_short_stall_stacks_share_a_cooldown_and_count_suppressed_stalls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At most one stack per cooldown; skipped stalls are counted on the next reported stack."""
+    detector, captures = _short_stall_detector(monkeypatch)
+
+    with capture_logs() as logs:
+        for last_beat in (1.0, 3.0, 5.0, 12.0):
+            detector._observe_short_stall(last_beat + 0.4, _beat(last_beat))
+            detector._observe_short_stall(last_beat + 0.5, _beat(last_beat + 0.45))
+
+    assert len(captures) == 2
+    assert [(entry["event"], entry["suppressed_count"]) for entry in logs] == [
+        ("event_loop_stall_stack", 0),
+        ("event_loop_stall_stack", 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_detector_samples_the_stack_of_a_sub_second_stall() -> None:
+    """A stall far below the long-stall threshold still names the blocking frame."""
+    detector = EventLoopStallDetector(heartbeat_interval_seconds=0.02, stack_threshold_seconds=0.1)
+    with capture_logs() as logs:
+        detector.start()
+        await asyncio.sleep(0.1)
+        time.sleep(0.4)  # noqa: ASYNC251 - deliberately block the event loop.
+        await asyncio.sleep(0.2)
+        detector.stop()
+
+    [entry] = [entry for entry in logs if entry["event"] == "event_loop_stall_stack"]
+    assert "time.sleep(0.4)" in entry["stack"]
+    assert entry["lag_ms"] >= 300
+    assert entry["stack_lag_ms"] >= 100
+    assert _stall_logs(logs) == []
+
+
+def test_stack_threshold_defaults_and_env_override() -> None:
+    """Stack sampling defaults to 250 ms; zero or negative disables only the sampling."""
+    assert _event_loop_stall_stack_seconds(_fake_runtime_paths()) == 0.25
+    assert _event_loop_stall_stack_seconds(_fake_runtime_paths(**{_EVENT_LOOP_STALL_STACK_ENV: "100"})) == 0.1
+    assert _event_loop_stall_stack_seconds(_fake_runtime_paths(**{_EVENT_LOOP_STALL_STACK_ENV: "0"})) is None
+
+
+@pytest.mark.asyncio
+async def test_start_helper_polls_fast_enough_to_sample_sub_second_stalls() -> None:
+    """The watcher polls within a fifth of the stack threshold, or as before when sampling is off."""
+    detector = start_event_loop_stall_detector(_fake_runtime_paths())
+    assert detector is not None
+    detector.stop()
+    assert detector.stack_threshold_seconds == 0.25
+    assert detector.poll_interval_seconds == pytest.approx(0.05)
+
+    detector = start_event_loop_stall_detector(_fake_runtime_paths(**{_EVENT_LOOP_STALL_STACK_ENV: "-1"}))
+    assert detector is not None
+    detector.stop()
+    assert detector.stack_threshold_seconds is None
+    assert detector.poll_interval_seconds == 1.0
 
 
 def test_gc_timing_is_deferred_and_keeps_collecting_thread_cpu(monkeypatch: pytest.MonkeyPatch) -> None:

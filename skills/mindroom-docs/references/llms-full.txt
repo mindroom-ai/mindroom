@@ -18157,6 +18157,7 @@ alert if  median(metric) over 10 minutes > 20
 ```
 
 When it fires, look for `event_loop_stall_detected` and `event_loop_stall_ongoing` records, which include the blocking stack when one stall exceeds `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`).
+Shorter stalls above `MINDROOM_EVENT_LOOP_STALL_STACK_MS` (default `250`, `0` disables) log one `event_loop_stall_stack` record with the blocking stack and the stall's `lag_ms`, at most once every 10 seconds.
 Compare the frequency of `event_loop_gc_collection` records, which report garbage collections slower than 50 ms.
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
 Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables stall detection and this summary.

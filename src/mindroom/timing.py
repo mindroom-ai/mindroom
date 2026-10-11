@@ -6,6 +6,7 @@ import asyncio
 import functools
 import inspect
 import logging
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -63,6 +64,11 @@ def elapsed_ms_since(
 ) -> float:
     """Return elapsed milliseconds from ``start`` using the shared rounding policy."""
     return elapsed_ms_between(start, clock(), ndigits=ndigits)
+
+
+def nearest_rank_percentile(samples: list[float], percentile: int) -> float:
+    """Return one nearest-rank percentile from sorted non-empty samples."""
+    return samples[math.ceil(len(samples) * percentile / 100) - 1]
 
 
 type _TimingMetadataValue = str | int | float | bool
