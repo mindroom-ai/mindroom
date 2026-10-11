@@ -380,7 +380,7 @@ async def _run_operation(
                 )
                 try:
                     encoded = encode_result_payload(payload)
-                except ValueError as error:
+                except (ValueError, OSError) as error:
                     # The call already ran, so its lost result must not read as a call that did not take effect.
                     return BackgroundOutcome(
                         "failed",
