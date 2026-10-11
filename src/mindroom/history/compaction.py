@@ -526,7 +526,7 @@ def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_to
     }
 
 
-async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
+async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     *,
     summary_model: SummaryModel,
     previous_summary: str | None,
@@ -549,15 +549,14 @@ async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
     failure from the fallback propagates. The switch shares the retry policy's
     attempt bound, so a
     refusal after an earlier shrink or transient retry propagates without a
-    fallback call. All other failures keep the existing shrink, transient
-    same-input, and output-limit shorter-summary retry behavior.
+    fallback call. All other failures keep the existing shrink and transient
+    same-input retry behavior.
     """
     summary_input = initial_summary_input
     included_runs = initial_included_runs
     budget = summary_model.input_budget_tokens
     token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
-    summary_length_divisor = retry_policy.summary_length_divisor
     minimum_progress_input_tokens = await asyncio.to_thread(
         minimum_summary_input_tokens,
         previous_summary=previous_summary,
@@ -591,7 +590,6 @@ async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
                 summary_prompt=summary_prompt,
                 timeout_seconds=timeout_seconds,
                 on_response=partial(on_response, summary_model.model) if on_response is not None else None,
-                summary_length_divisor=summary_length_divisor,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -660,10 +658,6 @@ async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
                     await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
                     attempt += 1
                     continue
-                if retry_decision.kind == "shorter-summary":
-                    summary_length_divisor *= retry_policy.shrink_divisor
-                    attempt += 1
-                    continue
                 rebuilt_input, rebuilt_runs = await asyncio.to_thread(
                     build_summary_input,
                     previous_summary=previous_summary,
@@ -674,7 +668,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
                 )
                 if rebuilt_runs:
                     rebuilt_input_tokens = await asyncio.to_thread(token_estimator, rebuilt_input)
-                    if rebuilt_input_tokens >= summary_input_estimate:
+                    if retry_decision.kind == "shrink" and rebuilt_input_tokens >= summary_input_estimate:
                         raise
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
