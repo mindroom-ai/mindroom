@@ -69,7 +69,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -4401,7 +4401,10 @@ async def test_cancelled_reload_preserves_completed_durable_and_broker_revocatio
 
 
 @pytest.mark.asyncio
-async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall_deadline(tmp_path: Path) -> None:
+async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A deadline cannot return while an accepted durable revocation is still running."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
@@ -4421,7 +4424,6 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         return store.get_run(run_id)
 
     current = _config()
-    pass_timeout_seconds = 0.5
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
@@ -4436,15 +4438,29 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: current,
         worker_lease_provider=lambda _locator: None,
-        pass_timeout_seconds=pass_timeout_seconds,
+        pass_timeout_seconds=0.05,
     )
+    boundaries: list[asyncio.Task[None]] = []
+    wait_for = asyncio.wait_for
+
+    async def deadline_from_acceptance(awaitable: Awaitable[object], timeout: float | None) -> object:  # noqa: ASYNC109
+        if getattr(awaitable, "__name__", None) != "apply_update_boundary":
+            return await wait_for(awaitable, timeout)
+        boundary = asyncio.ensure_future(awaitable)
+        boundaries.append(boundary)
+        # The reload's pass deadline starts only once the revocation is accepted, however slow the runner.
+        await asyncio.to_thread(accepted.wait, SETTLE_TIMEOUT_SECONDS)
+        return await wait_for(boundary, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", deadline_from_acceptance)
     loop = asyncio.get_running_loop()
     released_at: list[float] = []
 
     async def release_after_the_deadline() -> None:
-        # The deadline started before the revocation was accepted, so it has passed well before this release.
-        await asyncio.to_thread(accepted.wait, SETTLE_TIMEOUT_SECONDS)
-        await asyncio.sleep(pass_timeout_seconds + 1.0)
+        # The expired deadline is cancelling the reload while the accepted revocation still holds it.
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not (boundaries and boundaries[0].cancelling()):  # noqa: ASYNC110
+                await asyncio.sleep(0.005)
         released_at.append(loop.time())
         release.set()
 

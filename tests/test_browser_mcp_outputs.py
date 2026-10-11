@@ -1,5 +1,6 @@
 """Native output paths are confined before MCP startup or dispatch."""
 
+import asyncio
 import base64
 import json
 import os
@@ -17,6 +18,7 @@ from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer import mcp_provider
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 _OUTPUT_FUNCTIONS = [
     "browser_console_messages",
@@ -78,18 +80,30 @@ async def test_inline_screenshot_preparation_does_not_block_browser_loop(
     provider._ready = True
     loop_thread = threading.get_ident()
     preparation_threads: list[int] = []
+    preparation_started = threading.Event()
+    release_preparation = threading.Event()
+    released_by_test: list[bool] = []
 
     original_image_result = mcp_provider.image_result
 
-    def recording_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
+    def held_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
         preparation_threads.append(threading.get_ident())
+        preparation_started.set()
+        released_by_test.append(release_preparation.wait(timeout=SETTLE_TIMEOUT_SECONDS))
         return original_image_result(data, metadata=metadata)
 
-    monkeypatch.setattr(mcp_provider, "image_result", recording_image_result)
+    monkeypatch.setattr(mcp_provider, "image_result", held_image_result)
 
-    await provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"})
+    task = asyncio.create_task(provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"}))
+    try:
+        # A loop blocked on the held preparation could not resume here until preparation gave up waiting.
+        assert await asyncio.to_thread(preparation_started.wait, SETTLE_TIMEOUT_SECONDS)
+        assert not task.done()
+    finally:
+        release_preparation.set()
+        await task
 
-    assert preparation_threads
+    assert released_by_test == [True]
     assert loop_thread not in preparation_threads
 
 
