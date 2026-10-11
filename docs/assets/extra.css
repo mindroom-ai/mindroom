@@ -9,7 +9,6 @@
   --md-primary-fg-color: #0b6f86;
   --md-accent-fg-color: #08566a;
   --md-accent-fg-color--transparent: #08566a1a;
-  --md-typeset-a-color: #0b6f86;
   --mr-heading-gradient: linear-gradient(120deg, var(--mr-navy) 10%, #0b6f86 90%);
   --mr-card-border: #0b6f8626;
   --mr-glow: #ffd25e55;
@@ -63,11 +62,10 @@
 }
 
 .md-typeset .mr-hero .mr-tagline {
-  margin: 0 auto 0.6rem;
+  margin: 0 0 0.6rem;
   font-size: 1.35em;
   font-weight: 600;
   line-height: 1.4;
-  color: var(--md-default-fg-color);
 }
 
 .md-typeset .mr-hero .mr-lede {
@@ -78,6 +76,13 @@
 
 .md-typeset .mr-hero .md-button {
   margin: 0.25rem 0.2rem;
+}
+
+/* The theme fades hovered and focused buttons, which makes their text hard to read, so they fill with the accent color instead. */
+.md-typeset .md-button:is(:focus, :hover) {
+  background-color: var(--md-accent-fg-color);
+  color: var(--md-accent-bg-color);
+  opacity: 1;
 }
 
 .md-typeset .mr-video {

@@ -19,7 +19,8 @@ import yaml
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
-_HEADING = re.compile(r"^(#{1,6}) (.*?)\s*#*\s*$")
+# A heading may also open a list item, as a card title does.
+_HEADING = re.compile(r"^(?:[-*+] +)?(#{1,6}) (.*?)\s*#*\s*$")
 _EXPLICIT_ID = re.compile(r"^(.*?)\s*\{#([^}\s]+)\}$")
 _ANCHOR = re.compile(r'<a id="([^"]+)"></a>')
 _INLINE_CODE = re.compile(r"(`+)(?:(?!\1).)+\1")
@@ -64,7 +65,7 @@ def _slug(text: str) -> str:
     text = "".join(
         part.strip("`")
         if part.startswith("`")
-        else re.sub(r"(?<!\w)[*_]{1,3}|[*_]{1,3}(?!\w)", "", re.sub(r"<[^>]+>", "", part))
+        else re.sub(r"(?<!\w)[*_]{1,3}|[*_]{1,3}(?!\w)", "", re.sub(r"<[^>]+>|:[\w+-]+:(?:\{[^}]*\})?", "", part))
         for part in parts
     )
     text = html.unescape(text)
@@ -170,6 +171,17 @@ def test_links_and_fragments_resolve() -> None:
             problem = _link_problem(page, target)
             if problem:
                 problems.append(f"{page}:{number}: {target}: {problem}")
+    assert problems == []
+
+
+def test_readme_docs_links_resolve() -> None:
+    """README links into the published docs reach an existing page and id."""
+    readme = (DOCS.parent / "README.md").read_text(encoding="utf-8")
+    problems = []
+    for location in re.findall(r"https://docs\.mindroom\.chat/([^)\s\"'>]*)", readme):
+        page, fragment = _url_page("index.md", location)
+        if page is None or _is_stub(page) or (fragment and fragment not in _ids(page)[0]):
+            problems.append(location)
     assert problems == []
 
 
