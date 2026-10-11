@@ -377,6 +377,25 @@ async def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: li
 
 
 @pytest.mark.asyncio
+async def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: Path) -> None:
+    """A persona keeping only skills its caller has since lost is offered no skill functions, even beside configured skills."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file", skills=["configured"])
+    identity = build_execution_identity_from_runtime_context(runtime)
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        identity,
+        persist_runtime_state=False,
+        persona=inline_persona("P", ["file"], ["removed"]),
+    )
+
+    assert agent.skills is None
+    assert not {"get_skill_instructions", "get_skill_reference", "get_skill_script"} & set(await _function_names(agent))
+
+
+@pytest.mark.asyncio
 async def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
     """An explicit tool list hides generated functions but still offers the functions that load its skills."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")

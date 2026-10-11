@@ -355,7 +355,8 @@ def build_agent_skills(
         only=only,
         unavailable_functions=unavailable_functions,
     )
-    if agent_config.skills or skills.get_skill_names():
+    # A narrowed set with no surviving skill offers nothing, even beside configured skills.
+    if skills.get_skill_names() or (agent_config.skills and only is None):
         return skills
     return None
 
