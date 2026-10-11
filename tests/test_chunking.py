@@ -16,7 +16,7 @@ from agno.knowledge.document.base import Document
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from mindroom.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.chunking import SafeFixedSizeChunking
 
 #: One 2-byte, one 3-byte and one 4-byte character, so generated content
 #: exercises the gap between character counts and UTF-8 byte counts.

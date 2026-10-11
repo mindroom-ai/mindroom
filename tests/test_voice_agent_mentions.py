@@ -11,7 +11,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.voice_handler import _process_transcription, _sanitize_unavailable_mentions
+from mindroom.voice.handler import _process_transcription, _sanitize_unavailable_mentions
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
@@ -61,8 +61,8 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
 
     # Test 1: Simple agent mention
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_agent.arun = AsyncMock(return_value=mock_response)
@@ -75,8 +75,8 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
     # Test 2: Agent mention stays natural language
     mock_response.content = "@home schedule to turn off the lights in 10 minutes"
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_agent.arun = AsyncMock(return_value=mock_response)
@@ -92,8 +92,8 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
     # Test 3: Research agent (multi-word display name)
     mock_response.content = "@research find papers on AI"
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_agent.arun = AsyncMock(return_value=mock_response)
@@ -125,8 +125,8 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
         return mock_resp
 
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_agent.arun = AsyncMock(side_effect=capture_run)
@@ -162,8 +162,8 @@ async def test_voice_prompt_uses_persisted_current_username_drift() -> None:
         return mock_resp
 
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_agent.arun = AsyncMock(side_effect=capture_run)
@@ -196,8 +196,8 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
         return mock_resp
 
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_agent.arun = AsyncMock(side_effect=capture_run)
@@ -227,8 +227,8 @@ async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
     )
 
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_response = MagicMock()
@@ -259,8 +259,8 @@ async def test_voice_transcription_preserves_bare_persisted_localpart() -> None:
     _persist_voice_accounts(config, usernames={"code": "actual_code_live"})
 
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_response = MagicMock()
@@ -291,8 +291,8 @@ async def test_voice_transcription_strips_unavailable_full_persisted_mxid() -> N
     _persist_voice_accounts(config, usernames={"code": "actual_code_live"})
 
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_response = MagicMock()
@@ -368,8 +368,8 @@ async def test_voice_transcription_does_not_rewrite_schedule_language_to_command
     config = _voice_config({})
 
     with (
-        patch("mindroom.voice_handler.Agent") as mock_agent_class,
-        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+        patch("mindroom.voice.handler.Agent") as mock_agent_class,
+        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
     ):
         mock_agent = MagicMock()
         mock_response = MagicMock()

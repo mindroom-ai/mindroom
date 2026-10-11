@@ -24,20 +24,20 @@ from agno.models.response import ModelResponse
 from agno.utils.models.claude import format_messages as claude_format_messages
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputItemDoneEvent, ResponseTextDeltaEvent
 
-from mindroom import codex_model
-from mindroom.codex_model import (
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import resolve_runtime_paths
+from mindroom.providers import codex_model
+from mindroom.providers.codex_model import (
     _CODEX_BASE_URL,
     CodexResponses,
     _borrow_codex_key,
     _codex_home_path,
     normalize_codex_model_id,
 )
-from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
-from mindroom.model_loading import get_model_instance
-from mindroom.openai_models import MindRoomOpenAIResponses
-from mindroom.openai_tool_search import (
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.openai_tool_search import (
     _DEFERRED_TOOL_NAMES_ATTR,
     install_openai_deferred_tool_search,
     openai_native_tool_search_supported,
@@ -117,7 +117,7 @@ def test_borrow_codex_key_refreshes_expired_access_token(tmp_path: Path) -> None
     new_refresh_value = "new-refresh-value"
 
     with patch(
-        "mindroom.codex_model._refresh_codex_tokens",
+        "mindroom.providers.codex_model._refresh_codex_tokens",
         return_value={
             "access_token": refreshed_token,
             "id_token": new_id_value,
@@ -375,7 +375,7 @@ def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
         prompts={"CODEX_DEFAULT_INSTRUCTIONS": "Custom Codex default instructions."},
     )
 
-    with patch("mindroom.model_loading.logger.info") as log_info:
+    with patch("mindroom.providers.model_loading.logger.info") as log_info:
         model = get_model_instance(config, runtime_paths)
 
     assert isinstance(model, CodexResponses)

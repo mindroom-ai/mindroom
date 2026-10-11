@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
-from mindroom.private_instance_identity import private_instances_for_agent
+from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.runtime_shutdown import gather_shutdown_phase
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader

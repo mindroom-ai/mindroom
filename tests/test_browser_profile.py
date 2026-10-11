@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.browser_profile import clear_stale_singleton_locks
+from mindroom.browser.profile_locks import clear_stale_singleton_locks
 
 
 @pytest.mark.parametrize("name", ["SingletonLock", "SingletonCookie", "SingletonSocket"])

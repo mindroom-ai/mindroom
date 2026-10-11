@@ -10,8 +10,8 @@ from typing import TextIO
 
 import pytest
 
+from mindroom.config.bundle import BundleChange, classify_bundle_change, install_config_bundle
 from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, load_config
-from mindroom.config_bundle import BundleChange, classify_bundle_change, install_config_bundle
 from mindroom.constants import resolve_runtime_paths
 from mindroom.file_watcher import changed_watched_paths, paths_mtime_snapshot
 

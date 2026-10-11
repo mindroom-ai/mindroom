@@ -13,7 +13,7 @@ from authlib.integrations import httpx_client as authlib_httpx_client
 from fastapi.testclient import TestClient
 
 from mindroom.api import main
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.registry import load_oauth_providers
 from tests.api.test_api import (
     _trusted_upstream_jwks,

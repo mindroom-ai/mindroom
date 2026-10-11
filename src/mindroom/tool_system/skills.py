@@ -24,7 +24,7 @@ from agno.skills.skill import Skill
 from mindroom import yaml_io
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import runtime_env_values
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files

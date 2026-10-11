@@ -24,11 +24,10 @@ from mindroom.agents import (
     create_agent,
     get_agent_toolkit_names,
 )
-from mindroom.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.desktop.credentials import (
@@ -36,7 +35,8 @@ from mindroom.desktop.credentials import (
     save_desktop_credentials,
 )
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
-from mindroom.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
+from mindroom.providers.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
+from mindroom.providers.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (

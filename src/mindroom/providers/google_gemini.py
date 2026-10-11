@@ -1,0 +1,173 @@
+"""MindRoom compatibility adapter for the Gemini API."""
+
+from __future__ import annotations
+
+from copy import copy, deepcopy
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from agno.models.google import Gemini
+from agno.utils.message import normalize_tool_messages
+from google.genai.types import (
+    FunctionCallingConfig,
+    FunctionCallingConfigMode,
+    GenerateContentConfig,
+    HttpOptions,
+    Tool,
+    ToolConfig,
+)
+
+from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.providers.tool_policy import provider_tools_disabled
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    from agno.metrics import MessageMetrics
+    from agno.models.message import Message
+    from google.genai.types import GenerateContentResponseUsageMetadata, ToolListUnion
+
+_SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
+
+
+def _provider_tool_call_id(value: object) -> str | None:
+    """Return a non-empty provider tool-call ID."""
+    return value if isinstance(value, str) and value else None
+
+
+def _without_tool_selection(config: object, *, vertexai: bool) -> GenerateContentConfig:
+    """Preserve function schemas, remove native tools, and request JSON output for a decision request.
+
+    JSON output is requested except on Vertex AI when the request keeps function declarations.
+    """
+    generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
+    if generation_config.cached_content:
+        # Cached content may contain native tools that this request cannot inspect.
+        msg = "Participation decisions cannot inspect tools in Gemini cached content"
+        raise ValueError(msg)
+    if generation_config.http_options is not None and generation_config.http_options.extra_body:
+        msg = "Participation decisions cannot safely apply Gemini body overrides"
+        raise ValueError(msg)
+    # Function-calling NONE does not disable grounding or other native tools.
+    declaration_tools: ToolListUnion = [
+        Tool(function_declarations=tool.function_declarations)
+        for tool in generation_config.tools or []
+        if isinstance(tool, Tool) and tool.function_declarations
+    ]
+    # Without declarations, function-calling settings govern nothing and are dropped.
+    function_calling = FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE)
+    tool_config = ToolConfig(function_calling_config=function_calling) if declaration_tools else None
+    # Gemini can emit function calls under NONE and even without declarations; JSON output cannot.
+    # Google documents JSON output beside function calling only for Gemini 3 models. Live Gemini API
+    # runs in September 2026 saw it accepted under NONE by the Gemini 3 and 2.5 models tried.
+    # Accepted risk: models that reject JSON output with declarations, or JSON output at all (reportedly
+    # older Gemini models and Gemma), fail every check closed, the same outcome as a leaked function call.
+    # Vertex AI acceptance beside declarations is unverified, so Vertex gets JSON only without them.
+    json_output = not (vertexai and declaration_tools)
+    # The reply's authored output schema never shapes a decision.
+    return generation_config.model_copy(
+        update={
+            "tools": declaration_tools or None,
+            "tool_config": tool_config,
+            "response_mime_type": "application/json" if json_output else None,
+            "response_schema": None,
+            "response_json_schema": None,
+        },
+    )
+
+
+@dataclass
+class MindRoomGoogleGemini(Gemini):
+    """Gemini model that preserves provider call IDs across tool loops and counts thinking as output."""
+
+    def get_request_params(
+        self,
+        system_message: str | None = None,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build request parameters accepted by the selected Gemini generation."""
+        request_model = self
+        if provider_tools_disabled():
+            client_http_options = (self.client_params or {}).get("http_options")
+            if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
+                msg = "Participation decisions cannot safely apply Gemini body overrides"
+                raise ValueError(msg)
+            # Agno updates authored generation dictionaries in place while merging.
+            request_model = copy(self)
+            request_model.generation_config = deepcopy(self.generation_config)
+        request_params = super(MindRoomGoogleGemini, request_model).get_request_params(
+            system_message=system_message,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        if provider_tools_disabled() and (generation_config := request_params.get("config")) is not None:
+            request_params["config"] = _without_tool_selection(generation_config, vertexai=self.get_client().vertexai)
+        if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
+            return request_params
+
+        generation_config = request_params.get("config")
+        if isinstance(generation_config, GenerateContentConfig):
+            generation_config.temperature = None
+            generation_config.top_p = None
+            generation_config.top_k = None
+        elif isinstance(generation_config, dict):
+            for parameter_name in _SAMPLING_CONTROL_NAMES:
+                generation_config.pop(parameter_name, None)
+        return request_params
+
+    def _format_messages(
+        self,
+        messages: list[Message],
+        compress_tool_results: bool = False,
+    ) -> tuple[list[object], object]:
+        normalized_messages = normalize_tool_messages(messages)
+        tool_call_ids = [
+            _provider_tool_call_id(tool_call.get("id"))
+            for message in normalized_messages
+            for tool_call in (message.tool_calls or [])
+        ]
+        tool_response_ids = [
+            _provider_tool_call_id(message.tool_call_id)
+            for message in normalized_messages
+            if message.role == "tool" and message.tool_call_id is not None and message.tool_name is not None
+        ]
+
+        formatted_messages, system_message = super()._format_messages(
+            normalized_messages,
+            compress_tool_results=compress_tool_results,
+        )
+        tool_call_id_iter = iter(tool_call_ids)
+        tool_response_id_iter = iter(tool_response_ids)
+        for message in formatted_messages:
+            for part in message.parts:
+                if part.function_call is not None:
+                    tool_call_id = next(tool_call_id_iter, None)
+                    if tool_call_id is not None:
+                        part.function_call.id = tool_call_id
+                if part.function_response is not None:
+                    tool_response_id = next(tool_response_id_iter, None)
+                    if tool_response_id is not None:
+                        part.function_response.id = tool_response_id
+
+        return formatted_messages, system_message
+
+    # AGNO_COMPAT: Gemini usage leaves thinking out of output tokens.
+    # Reason: Agno maps candidates_token_count to output and keeps thoughts_token_count only as reasoning.
+    # Google bills thinking as output, and every other provider reports reasoning inside output, so Gemini
+    # output and totals missed all thinking.
+    # Upstream issue: https://github.com/agno-agi/agno/issues/10763
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10764 counts thinking in output;
+    # https://github.com/agno-agi/agno/pull/10722 does too since commit 2232999, and also uses the provider total.
+    # Remove when: The pinned Agno release counts thinking in output while totalling input and output;
+    # PR #10722's provider total would also add tool-use prompt tokens, which MindRoom leaves uncounted.
+    # Coverage: tests/test_provider_usage_metrics.py::test_gemini_output_includes_thinking.
+    def _get_metrics(self, response_usage: GenerateContentResponseUsageMetadata) -> MessageMetrics:
+        metrics = super()._get_metrics(response_usage)
+        # Read the provider fields directly, so an upstream fix cannot count thinking twice.
+        metrics.reasoning_tokens = response_usage.thoughts_token_count or 0
+        metrics.output_tokens = (response_usage.candidates_token_count or 0) + metrics.reasoning_tokens
+        metrics.total_tokens = metrics.input_tokens + metrics.output_tokens
+        return metrics

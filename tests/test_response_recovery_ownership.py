@@ -14,9 +14,9 @@ from mindroom import reply_lifecycle as rl
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
+from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.response_runner import ResponseRunner

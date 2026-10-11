@@ -69,7 +69,7 @@ from mindroom.config.memory import MemoryConfig  # noqa: E402
 from mindroom.config.models import ModelConfig  # noqa: E402
 from mindroom.config.voice import SpeechServiceConfig  # noqa: E402
 from mindroom.constants import resolve_runtime_paths  # noqa: E402
-from mindroom.credentials_sync import sync_env_to_credentials  # noqa: E402
+from mindroom.credentials.sync import sync_env_to_credentials  # noqa: E402
 from mindroom.matrix.state import MatrixState  # noqa: E402
 from mindroom.matrix_rtc import call_manager as cm  # noqa: E402
 from mindroom.matrix_rtc.events import (  # noqa: E402

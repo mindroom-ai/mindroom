@@ -20,7 +20,7 @@ from mindroom.constants import (
     resolve_config_relative_path_preserving_leaf,
     resolve_session_state_root,
 )
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,

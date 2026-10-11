@@ -27,7 +27,7 @@ from mindroom.knowledge.index_metadata import (
     state_for_publication,
 )
 from mindroom.knowledge.read_proxy import ChromaReadProxy, collection_exists
-from mindroom.strict_knowledge import StrictSearchKnowledge
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import _config
 

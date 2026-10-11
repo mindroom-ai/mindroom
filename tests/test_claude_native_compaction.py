@@ -25,19 +25,19 @@ from google.oauth2.credentials import Credentials
 from openai import AsyncOpenAI, OpenAI
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
-from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.types import PreparedHistoryState
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.teams import (
     _build_streamed_team_run_metadata_content,
     _build_team_run_metadata_content,
     _PreparedMaterializedTeamExecution,
     _TeamStreamUsage,
 )
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.history_helpers import _make_config
 
 if TYPE_CHECKING:

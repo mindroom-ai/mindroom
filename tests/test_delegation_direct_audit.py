@@ -19,8 +19,8 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import observe_child_event, prepare_child_turn
-from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.history_helpers import RecordingModel

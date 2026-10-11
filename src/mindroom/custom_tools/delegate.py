@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
+from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import authorize_delegation, live_delegation_config, prepare_child_turn
@@ -25,7 +26,6 @@ from mindroom.delegation.personas import (
 )
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
-from mindroom.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,

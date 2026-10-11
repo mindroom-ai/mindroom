@@ -401,7 +401,10 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
             execution_identity=None,
             team_name="pair",
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="fake-model", provider="fake"),
+        ),
         patch("mindroom.teams.install_model_call_cap", wraps=install_model_call_cap) as install_cap,
     ):
         assert scope_context is not None
@@ -465,7 +468,10 @@ def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None
             execution_identity=None,
             team_name="pair",
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="fake-model", provider="fake"),
+        ),
     ):
         assert scope_context is not None
         team = _create_team_instance(

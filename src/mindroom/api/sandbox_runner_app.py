@@ -27,9 +27,9 @@ from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts
 from mindroom.api.worker_computer import router as worker_computer_router
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope
-from mindroom.worker_browser import WorkerBrowserRuntime
 from mindroom.worker_computer.display import WorkerDisplay
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
+from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.compatibility import worker_health_payload
 
 

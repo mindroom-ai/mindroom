@@ -17,7 +17,7 @@ from agno.team import Team
 from agno.tools.function import Function
 
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
-from mindroom.approval_receipt import approval_receipt_context, install_approval_receipt_hooks
+from mindroom.approval.receipt import approval_receipt_context, install_approval_receipt_hooks
 from mindroom.mid_turn import QueuedMessage
 from tests.history_helpers import RecordingModel
 

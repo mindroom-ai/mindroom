@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
-from mindroom.agno_compat_cli_checkpoint import checkpoint_resolver
+from mindroom.agent_cli.agno_compat_cli_checkpoint import checkpoint_resolver
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
     from agno.tools.function import Function
 
+    from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_cli.turn import LiveTurnTools
-    from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 
 _CURRENT: ContextVar[CliTurnLifetime | None] = ContextVar("cli_turn_lifetime", default=None)
 

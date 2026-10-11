@@ -17,8 +17,8 @@ from mindroom.cli.config_reload import request_reload_status, wait_for_applied
 from mindroom.constants import exported_process_env
 
 if TYPE_CHECKING:
-    from mindroom.config_bundle import BundleInstallResult
-    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.config.bundle import BundleInstallResult
+    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.constants import RuntimePaths
 
 type _ApplyStatus = Literal["applied", "pending", "failed", "rolled_back", "unconfirmed", "restart_required"]
@@ -42,8 +42,8 @@ def initialize_runtime_bundle(
     """Initialize the selected config directory before the runtime captures its environment."""
     # Both modules load Pydantic config models and cryptography-backed credentials;
     # keep that graph out of CLI help startup (see tests/test_import_graph.py).
+    from mindroom.config.bundle import install_config_bundle  # noqa: PLC0415
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-    from mindroom.config_bundle import install_config_bundle  # noqa: PLC0415
 
     runtime = activate_cli_runtime(config_path, storage_path=storage_path)
     process_env = exported_process_env()
@@ -81,8 +81,8 @@ def config_install_bundle(
     """Validate and install a complete tree; use check-applied to confirm runtime reload."""
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.
+    from mindroom.config.bundle import install_config_bundle  # noqa: PLC0415
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-    from mindroom.config_bundle import install_config_bundle  # noqa: PLC0415
 
     try:
         # Native config loading may log to stdout before logging is configured.
@@ -127,8 +127,8 @@ def config_classify_change(
     """Classify tree differences; exit 0 YAML/include sources only, 1 other changes, 2 error."""
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.
+    from mindroom.config.bundle import classify_bundle_change  # noqa: PLC0415
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-    from mindroom.config_bundle import classify_bundle_change  # noqa: PLC0415
 
     try:
         change = classify_bundle_change(old, new, config)
@@ -219,8 +219,8 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
 ) -> _ApplyReceipt:
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.
+    from mindroom.config.bundle import install_config_bundle  # noqa: PLC0415
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-    from mindroom.config_bundle import install_config_bundle  # noqa: PLC0415
 
     try:
         runtime_paths = activate_cli_runtime(target / config)

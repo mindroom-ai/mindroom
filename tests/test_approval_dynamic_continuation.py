@@ -15,12 +15,12 @@ from agno.tools.calculator import CalculatorTools
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
-from mindroom.approval_execution import (
+from mindroom.approval.execution import (
     _collect_agent_continuation,
     _continuation_turn_context,
     _stream_continuation_turn,
 )
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.sleep import SleepTools
@@ -28,6 +28,7 @@ from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.message_target import MessageTarget
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -37,7 +38,6 @@ from mindroom.response_turn import (
     ResumedAttempt,
     paused_attempt_from_response,
 )
-from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StructuredStreamChunk,
@@ -505,7 +505,7 @@ async def test_approval_settlement_uses_typed_status(
         yield RunContentEvent(content="Terminal response")
         on_completed(CompletedAttempt(status=status))
 
-    monkeypatch.setattr("mindroom.approval_execution.stream_agent_response", stream)
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
     settlement = _stream_continuation_turn(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=False),
@@ -725,7 +725,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
             PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),
         )
 
-    monkeypatch.setattr("mindroom.approval_execution.stream_agent_response", stream)
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
     published: list[str] = []
 
     async def progress(chunk: StructuredStreamChunk) -> None:

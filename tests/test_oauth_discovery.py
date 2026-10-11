@@ -11,12 +11,12 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import (
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
 )
-from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
 from mindroom.oauth.discovery import (
     _DISCOVERY_CACHE,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
 
 
 class _Response:

@@ -30,7 +30,7 @@ from mindroom.api.dashboard_credential_scope import (
 )
 from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.oauth import (
     OAuthClaimValidationError,

@@ -21,7 +21,7 @@ from mindroom.config.main import Config, load_config_or_user_error
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
-from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.credentials.policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
