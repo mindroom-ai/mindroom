@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run the voice-test MindRoom instance against the local stack.
 # Usage: run_instance.sh [venv-dir]   (default .venv314, the production Python version)
-# MINDROOM_VOICETEST_REPO selects the checkout to run (default: this one).
+# MINDROOM_VOICETEST_REPO selects the checkout to run (default: this one);
+# MINDROOM_VOICETEST_LOG_LEVEL=DEBUG also logs MINDROOM_TIMING stage timings.
 # The process allows any same-user process to ptrace it, so voice_call_e2e.py
 # can inject event-loop stalls with sys.remote_exec (test instance only).
 set -euo pipefail
@@ -24,4 +25,5 @@ from mindroom.cli.main import main
 sys.argv[0] = "mindroom"
 sys.exit(main())
 ' run --config "$ROOT/config.yaml" --storage-path "$ROOT/mindroom_data" \
-  --api-port "${MINDROOM_VOICETEST_API_PORT:-8799}" --api-host 127.0.0.1
+  --api-port "${MINDROOM_VOICETEST_API_PORT:-8799}" --api-host 127.0.0.1 \
+  --log-level "${MINDROOM_VOICETEST_LOG_LEVEL:-INFO}"

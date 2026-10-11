@@ -266,28 +266,42 @@ class Caller:
 
 
 async def load_caller(http: httpx.AsyncClient) -> Caller:
-    """Log in the persistent caller account, registering it on first use."""
+    """Reuse the persistent caller session, logging in or registering only when needed."""
     secret_path = ROOT / "caller.json"
-    if not secret_path.exists():
-        password = secrets.token_hex(16)
+    saved = json.loads(secret_path.read_text(encoding="utf-8")) if secret_path.exists() else {}
+    if "access_token" in saved:
+        whoami = await http.get(
+            "/_matrix/client/v3/account/whoami",
+            headers={"Authorization": f"Bearer {saved['access_token']}"},
+        )
+        if whoami.status_code == 200:
+            return Caller(user_id=saved["user_id"], device_id=saved["device_id"], token=saved["access_token"])
+    if "password" not in saved:
+        saved["password"] = secrets.token_hex(16)
         response = await http.post(
             "/_matrix/client/v3/register",
-            json={"username": CALLER_LOCALPART, "password": password, "auth": {"type": "m.login.dummy"}},
+            json={"username": CALLER_LOCALPART, "password": saved["password"], "auth": {"type": "m.login.dummy"}},
         )
         response.raise_for_status()
-        secret_path.write_text(json.dumps({"password": password}), encoding="utf-8")
-        secret_path.chmod(0o600)
-    password = json.loads(secret_path.read_text(encoding="utf-8"))["password"]
-    response = await http.post(
-        "/_matrix/client/v3/login",
-        json={
-            "type": "m.login.password",
-            "identifier": {"type": "m.id.user", "user": CALLER_LOCALPART},
-            "password": password,
-        },
-    )
+    while True:
+        response = await http.post(
+            "/_matrix/client/v3/login",
+            json={
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": CALLER_LOCALPART},
+                "password": saved["password"],
+            },
+        )
+        if response.status_code != 429:
+            break
+        retry_ms = response.json().get("retry_after_ms", 5000)
+        log(f"login rate limited, retrying in {retry_ms} ms")
+        await asyncio.sleep(retry_ms / 1000)
     response.raise_for_status()
     body = response.json()
+    saved |= {"user_id": body["user_id"], "device_id": body["device_id"], "access_token": body["access_token"]}
+    secret_path.write_text(json.dumps(saved), encoding="utf-8")
+    secret_path.chmod(0o600)
     return Caller(user_id=body["user_id"], device_id=body["device_id"], token=body["access_token"])
 
 
