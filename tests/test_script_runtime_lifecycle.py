@@ -66,7 +66,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -4407,9 +4407,12 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
     store = ScriptRunStore(runtime_paths)
     _stored_run(store, runtime_paths)
     broker_revocations: list[str] = []
+    accepted = threading.Event()
+    release = threading.Event()
 
-    def slow_request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
-        time.sleep(0.2)
+    def held_request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        accepted.set()
+        release.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return store.request_cancel(run_id, reason=reason)
 
     async def revoke(run_id: str, *, reason: str) -> ScriptRunRecord:
@@ -4418,6 +4421,7 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         return store.get_run(run_id)
 
     current = _config()
+    pass_timeout_seconds = 0.5
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
@@ -4425,21 +4429,36 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         manager=SimpleNamespace(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
-            request_revocation=slow_request_revocation,
+            request_revocation=held_request_revocation,
             revoke=revoke,
             reconcile_durable=AsyncMock(),
         ),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: current,
         worker_lease_provider=lambda _locator: None,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=pass_timeout_seconds,
     )
-    started = asyncio.get_running_loop().time()
+    loop = asyncio.get_running_loop()
+    released_at: list[float] = []
 
-    with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
-        await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+    async def release_after_the_deadline() -> None:
+        # The deadline started before the revocation was accepted, so it has passed well before this release.
+        await asyncio.to_thread(accepted.wait, SETTLE_TIMEOUT_SECONDS)
+        await asyncio.sleep(pass_timeout_seconds + 1.0)
+        released_at.append(loop.time())
+        release.set()
 
-    assert asyncio.get_running_loop().time() - started >= 0.15
+    releaser = asyncio.create_task(release_after_the_deadline())
+    try:
+        with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
+            await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+        returned_at = loop.time()
+    finally:
+        release.set()
+        await releaser
+
+    assert released_at
+    assert returned_at >= released_at[0]
     assert store.get_run("run-1").cancel_requested_at is not None
     assert broker_revocations == []
 
