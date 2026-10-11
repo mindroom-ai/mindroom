@@ -1925,7 +1925,7 @@ def _install_background_jobs(
 
 
 @timed("system_prompt_assembly.agent_create")
-def create_agent(
+def create_agent(  # noqa: PLR0915
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
