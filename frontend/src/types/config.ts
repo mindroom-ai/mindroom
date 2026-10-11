@@ -21,7 +21,6 @@ export interface ModelPricing {
 export interface BudgetsConfig {
   monthly_limit_usd?: number | null; // Default cap per user; unset leaves users uncapped
   fallback_model: string;
-  users?: Record<string, number>; // Per-user caps overriding the default
 }
 
 export interface ModelConfig {
