@@ -36,10 +36,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
+from analyze import delegation_answered
 from google.protobuf.json_format import MessageToDict
 from livekit import rtc
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
@@ -49,6 +48,7 @@ from mindroom.matrix_rtc.events import (
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant
 
 ROOT = Path(os.environ.get("MINDROOM_VOICETEST_ROOT", Path.home() / ".mindroom-voicetest"))
+INSTANCE_LOG = ROOT / "run" / "instance.log"
 HOMESERVER = "http://localhost:8008"
 SERVICE_URL = "http://127.0.0.1:8781"
 AGENT_NAME = "openclaw"
@@ -254,41 +254,24 @@ class Caller:
 
 
 async def load_caller(http: httpx.AsyncClient) -> Caller:
-    """Reuse the persistent caller session, logging in or registering only when needed."""
+    """Reuse the saved caller session, registering the caller only when it is missing or invalid."""
     secret_path = ROOT / "caller.json"
-    saved = json.loads(secret_path.read_text(encoding="utf-8")) if secret_path.exists() else {}
-    if "access_token" in saved:
+    if secret_path.exists():
+        saved = json.loads(secret_path.read_text(encoding="utf-8"))
         whoami = await http.get(
             "/_matrix/client/v3/account/whoami",
             headers={"Authorization": f"Bearer {saved['access_token']}"},
         )
         if whoami.status_code == 200:
             return Caller(user_id=saved["user_id"], device_id=saved["device_id"], token=saved["access_token"])
-    if "password" not in saved:
-        saved["password"] = secrets.token_hex(16)
-        response = await http.post(
-            "/_matrix/client/v3/register",
-            json={"username": CALLER_LOCALPART, "password": saved["password"], "auth": {"type": "m.login.dummy"}},
-        )
-        response.raise_for_status()
-    while True:
-        response = await http.post(
-            "/_matrix/client/v3/login",
-            json={
-                "type": "m.login.password",
-                "identifier": {"type": "m.id.user", "user": CALLER_LOCALPART},
-                "password": saved["password"],
-            },
-        )
-        if response.status_code != 429:
-            break
-        retry_ms = response.json().get("retry_after_ms", 5000)
-        log(f"login rate limited, retrying in {retry_ms} ms")
-        await asyncio.sleep(retry_ms / 1000)
+    response = await http.post(
+        "/_matrix/client/v3/register",
+        json={"username": CALLER_LOCALPART, "password": secrets.token_hex(16), "auth": {"type": "m.login.dummy"}},
+    )
     response.raise_for_status()
     body = response.json()
-    saved |= {"user_id": body["user_id"], "device_id": body["device_id"], "access_token": body["access_token"]}
-    secret_path.write_text(json.dumps(saved), encoding="utf-8")
+    session = {key: body[key] for key in ("user_id", "device_id", "access_token")}
+    secret_path.write_text(json.dumps(session), encoding="utf-8")
     secret_path.chmod(0o600)
     return Caller(user_id=body["user_id"], device_id=body["device_id"], token=body["access_token"])
 
@@ -395,6 +378,15 @@ def transcript_text(started_after: float) -> str:
     return max(files, key=lambda path: path.stat().st_mtime).read_text(encoding="utf-8") if files else ""
 
 
+def delegation_records(offset: int) -> list[dict]:
+    """Delegation events among the complete instance log lines after byte `offset`."""
+    with INSTANCE_LOG.open("rb") as log_file:
+        log_file.seek(offset)
+        data = log_file.read()
+    lines = data[: data.rfind(b"\n") + 1].decode("utf-8", errors="replace").splitlines()
+    return [json.loads(line) for line in lines if line.startswith("{") and '"delegation_id"' in line]
+
+
 class Scenario:
     """Step helpers shared by scenario scripts."""
 
@@ -403,6 +395,7 @@ class Scenario:
         self.recorder = recorder
         self.openai_key = openai_key
         self.started = started
+        self.log_offset = 0
 
     @property
     def listener(self) -> Listener:
@@ -414,6 +407,7 @@ class Scenario:
         """Speak an utterance and mark when it starts and finishes."""
         assert self.caller.mic is not None
         pcm = await utterance_pcm(parts, self.openai_key)
+        self.log_offset = INSTANCE_LOG.stat().st_size
         self.recorder.mark("say_start", label=label, audio_ms=len(pcm) // 2 * 1000 // SAMPLE_RATE)
         self.caller.mic.say(pcm)
         await self.caller.mic.wait_done()
@@ -454,11 +448,30 @@ class Scenario:
         self.recorder.mark("timeout_transcript", label=label, pattern=pattern)
         return False
 
-    async def reply(self, label: str, pattern: str | None = None, timeout_s: float = 90.0) -> None:
-        """Wait for a complete agent reply, optionally one matching `pattern`."""
+    async def wait_delegated(self, label: str, timeout_s: float = 90.0) -> bool:
+        """Wait until the delegations since the last utterance finished and the agent spoke after them."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if delegation_answered(delegation_records(self.log_offset), self.listener.last_voiced_ns / 1e9):
+                self.recorder.mark("delegation_answered", label=label)
+                return True
+            await asyncio.sleep(0.25)
+        self.recorder.mark("timeout_delegation", label=label)
+        return False
+
+    async def reply(
+        self,
+        label: str,
+        pattern: str | None = None,
+        timeout_s: float = 90.0,
+        delegated: bool = False,
+    ) -> None:
+        """Wait for a complete agent reply, optionally one matching `pattern` or answering a delegation."""
         await self.wait_speaking(label, timeout_s=timeout_s)
         if pattern is not None:
             await self.wait_transcript(label, pattern, timeout_s=timeout_s)
+        if delegated:
+            await self.wait_delegated(label, timeout_s=timeout_s)
         await self.wait_quiet(label)
 
     async def wait_voiced(self, label: str, seconds: float, timeout_s: float = 120.0) -> bool:
@@ -583,12 +596,10 @@ async def scenario_latency(s: Scenario) -> None:
         await asyncio.sleep(1.0)
     for index, topic in enumerate(("the most recent Tour de France winner", "the current price of Bitcoin")):
         await s.say(f"search_{index}", [f"Use your web search tool to look up {topic}. Answer in one sentence."])
-        await s.reply(f"search_{index}", timeout_s=120)
-        await s.wait_quiet(f"search_{index}_settled", quiet_s=4.0, timeout_s=120)
+        await s.reply(f"search_{index}", timeout_s=120, delegated=True)
     for index, question in enumerate(("what my favorite programming language is", "where I live")):
         await s.say(f"memory_{index}", [f"Check your memory notes for {question}. Answer in one sentence."])
-        await s.reply(f"memory_{index}", timeout_s=120)
-        await s.wait_quiet(f"memory_{index}_settled", quiet_s=4.0, timeout_s=120)
+        await s.reply(f"memory_{index}", timeout_s=120, delegated=True)
     await s.say("closing", ["Thanks, bye."])
     await s.reply("closing", timeout_s=30)
 
@@ -597,8 +608,7 @@ async def scenario_probe(s: Scenario) -> None:
     """One delegated memory question, for profiling a single delegate turn."""
     await s.reply("greeting", timeout_s=45)
     await s.say("memory_probe", ["Check your memory notes for what my favorite programming language is. One sentence."])
-    await s.reply("memory_probe", timeout_s=120)
-    await s.wait_quiet("memory_probe_settled", quiet_s=4.0, timeout_s=120)
+    await s.reply("memory_probe", timeout_s=120, delegated=True)
     await s.say("closing", ["Thanks, bye."])
     await s.reply("closing", timeout_s=30)
 
@@ -635,11 +645,10 @@ def copy_instance_artifacts(out: Path, started: float) -> None:
     text = transcript_text(started)
     if text:
         (out / "transcript.md").write_text(text, encoding="utf-8")
-    log_path = ROOT / "run" / "instance.log"
-    if log_path.exists():
+    if INSTANCE_LOG.exists():
         start_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(started - 5))
         rows = []
-        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in INSTANCE_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.startswith("{"):
                 continue
             try:

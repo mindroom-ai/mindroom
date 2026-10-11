@@ -13,9 +13,6 @@ services:
       TUWUNEL_PORT: 8008
       TUWUNEL_ALLOW_REGISTRATION: "true"
       TUWUNEL_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "true"
-      TUWUNEL_CREATE_ADMIN_ROOM: "true"
-      TUWUNEL_ALLOW_FEDERATION: "true"
-      TUWUNEL_WELL_KNOWN__CLIENT: http://localhost:8008
       TUWUNEL_WELL_KNOWN__SERVER: localhost:443
     volumes:
       - tuwunel_data:/var/lib/tuwunel
@@ -49,7 +46,6 @@ services:
       LIVEKIT_SECRET: ${LIVEKIT_SECRET}
       LIVEKIT_JWT_BIND: 127.0.0.1:8781
       LIVEKIT_FULL_ACCESS_HOMESERVERS: localhost
-      LIVEKIT_CS_API_URL_OVERRIDES: localhost=http://127.0.0.1:8008
       LIVEKIT_INSECURE_SKIP_VERIFY_TLS: YES_I_KNOW_WHAT_I_AM_DOING
     restart: unless-stopped
 

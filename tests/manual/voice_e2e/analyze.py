@@ -14,10 +14,11 @@ import itertools
 import json
 import re
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+SAMPLE_RATE = 24000
 VOICED_RMS = 200
 MERGE_GAP_NS = 300_000_000
 STOP_QUIET_NS = 700_000_000
@@ -34,6 +35,25 @@ class Burst:
     def ms(self) -> float:
         """Duration in milliseconds."""
         return (self.end_ns - self.start_ns) / 1e6
+
+
+@dataclass(frozen=True)
+class Utterance:
+    """One caller utterance with its first and last voiced microphone frame."""
+
+    label: str
+    first_voiced_ns: int
+    last_voiced_ns: int
+
+
+@dataclass
+class DelegateTurn:
+    """One delegate turn from the instance log, in epoch seconds."""
+
+    request_s: float
+    prep_s: float | None = None
+    llm_s: list[float] = field(default_factory=list)
+    output_tokens: int = 0
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -63,7 +83,7 @@ def rx_bursts(rx: list[dict]) -> list[Burst]:
     return bursts
 
 
-def utterances(markers: list[dict], mic: list[dict]) -> list[dict]:
+def utterances(markers: list[dict], mic: list[dict]) -> list[Utterance]:
     """Return each spoken utterance with its first/last voiced mic frame."""
     out = []
     starts = [m for m in markers if m["step"] == "say_start"]
@@ -71,17 +91,17 @@ def utterances(markers: list[dict], mic: list[dict]) -> list[dict]:
         until = starts[index + 1]["t_ns"] if index + 1 < len(starts) else float("inf")
         voiced = [row["t_ns"] for row in mic if row["voiced"] and marker["t_ns"] <= row["t_ns"] < until]
         if voiced:
-            out.append({"label": marker["label"], "first_voiced_ns": voiced[0], "last_voiced_ns": voiced[-1]})
+            out.append(Utterance(marker["label"], voiced[0], voiced[-1]))
     return out
 
 
-def reply_timing(utterance: dict, bursts: list[Burst], next_start_ns: float) -> dict:
+def reply_timing(utterance: Utterance, bursts: list[Burst], next_start_ns: float) -> dict:
     """Agent bursts after an utterance, relative to the end of the caller's speech."""
-    end = utterance["last_voiced_ns"]
+    end = utterance.last_voiced_ns
     after = [b for b in bursts if end < b.start_ns < next_start_ns]
     overlapping = [b for b in bursts if b.start_ns <= end < b.end_ns]
     return {
-        "label": utterance["label"],
+        "label": utterance.label,
         "first_audio_ms": round((after[0].start_ns - end) / 1e6) if after else None,
         "burst_onsets_ms": [round((b.start_ns - end) / 1e6) for b in after],
         "burst_ms": [round(b.ms) for b in after],
@@ -89,20 +109,20 @@ def reply_timing(utterance: dict, bursts: list[Burst], next_start_ns: float) -> 
     }
 
 
-def barge_in_timing(utterance: dict, rx: list[dict]) -> dict:
+def barge_in_timing(utterance: Utterance, rx: list[dict]) -> dict:
     """Time from the caller's interruption onset until the agent goes quiet for 700 ms."""
-    onset = utterance["first_voiced_ns"]
-    voiced_after = [row["t_ns"] for row in rx if row["t_ns"] >= onset and row["rms"] > VOICED_RMS]
+    onset = utterance.first_voiced_ns
+    voiced_after = [row for row in rx if row["t_ns"] >= onset and row["rms"] > VOICED_RMS]
     last = onset
-    for t in voiced_after:
-        if t - last > STOP_QUIET_NS:
+    for row in voiced_after:
+        if row["t_ns"] - last > STOP_QUIET_NS:
             break
-        last = t
-    window = [t for t in voiced_after if t <= onset + 10_000_000_000]
+        last = row["t_ns"]
+    window = [row for row in voiced_after if row["t_ns"] <= onset + 10_000_000_000]
     return {
-        "label": utterance["label"],
+        "label": utterance.label,
         "stop_ms": round((last - onset) / 1e6),
-        "agent_voiced_ms_in_10s_after_onset": len(window) * 10,
+        "agent_voiced_ms_in_10s_after_onset": sum(row["samples"] for row in window) * 1000 // SAMPLE_RATE,
     }
 
 
@@ -122,8 +142,8 @@ def stall_impact(marker: dict, rx: list[dict], stats: list[dict]) -> dict:
         concealed = stats_summary([before[-1], after[0]]).get("concealment_events")
     return {
         "seconds": marker["seconds"],
-        "longest_rx_quiet_ms": round(longest * 1000 / 24000),
-        "voiced_ms_in_window": sum(row["samples"] for row in window if row["rms"] > VOICED_RMS) * 1000 // 24000,
+        "longest_rx_quiet_ms": round(longest * 1000 / SAMPLE_RATE),
+        "voiced_ms_in_window": sum(row["samples"] for row in window if row["rms"] > VOICED_RMS) * 1000 // SAMPLE_RATE,
         "concealment_events": concealed,
     }
 
@@ -186,41 +206,64 @@ def transcript_summary(path: Path) -> dict:
     }
 
 
-def delegations(run: Path) -> list[dict]:
+def log_seconds(record: dict) -> float:
+    """Epoch seconds of one MindRoom JSON log record."""
+    return datetime.fromisoformat(record["timestamp"]).timestamp()
+
+
+def delegation_answered(records: list[dict], last_voiced_s: float) -> bool:
+    """Whether every delegation in `records` finished and the agent spoke after the last one finished.
+
+    Uses the `call_delegation_stage` and `call_live_delegation_failed` events (mindroom-ai/mindroom#2810).
+    """
+    running: set[str] = set()
+    last_done_s = None
+    for record in records:
+        event, stage = record.get("event"), record.get("stage")
+        if event == "call_delegation_stage" and stage == "created":
+            running.add(record["delegation_id"])
+        elif (event == "call_delegation_stage" and stage == "response_done") or event == "call_live_delegation_failed":
+            running.discard(record["delegation_id"])
+            last_done_s = log_seconds(record)
+    return not running and last_done_s is not None and last_voiced_s > last_done_s
+
+
+def delegations(run: Path) -> list[DelegateTurn]:
     """Delegate turns from the instance log: request, preparation and final model output times."""
-    rows = []
+    turns: list[DelegateTurn] = []
     for line in read_jsonl(run / "instance.jsonl"):
         event = line.get("event", "")
-        if event in ("AI request", "Preparing agent and prompt", "LLM usage"):
-            stamp = line["timestamp"].replace("Z", "+00:00")
-            rows.append((datetime.fromisoformat(stamp).timestamp(), event, line))
-    turns: list[dict] = []
-    for t, event, line in rows:
         if event == "AI request":
-            turns.append({"request_s": t, "prep_s": None, "llm_s": [], "output_tokens": 0})
+            turns.append(DelegateTurn(log_seconds(line)))
         elif turns and event == "Preparing agent and prompt":
-            turns[-1]["prep_s"] = t
-        elif turns:
-            turns[-1]["llm_s"].append(t)
-            turns[-1]["output_tokens"] += int(line.get("output_tokens") or 0)
+            turns[-1].prep_s = log_seconds(line)
+        elif turns and event == "LLM usage":
+            turns[-1].llm_s.append(log_seconds(line))
+            turns[-1].output_tokens += int(line.get("output_tokens") or 0)
     return turns
 
 
-def delegation_timing(utterance: dict, turns: list[dict], bursts: list[Burst], next_start_ns: float) -> dict | None:
-    """Join one utterance to its delegate turn and the first agent audio after the result."""
-    end_s = utterance["last_voiced_ns"] / 1e9
-    turn = next((t for t in turns if end_s - 1 < t["request_s"] < next_start_ns / 1e9 and t["llm_s"]), None)
+def delegation_timing(
+    utterance: Utterance,
+    turns: list[DelegateTurn],
+    bursts: list[Burst],
+    next_start_ns: float,
+) -> dict | None:
+    """Join one utterance to its delegate turn and the first agent audio after the result, before the next utterance."""
+    end_s = utterance.last_voiced_ns / 1e9
+    next_start_s = next_start_ns / 1e9
+    turn = next((t for t in turns if end_s - 1 < t.request_s < next_start_s and t.llm_s), None)
     if turn is None:
         return None
-    done_s = turn["llm_s"][-1]
-    answer = next((b for b in bursts if b.start_ns / 1e9 > done_s), None)
+    done_s = turn.llm_s[-1]
+    answer = next((b for b in bursts if done_s < b.start_ns / 1e9 < next_start_s), None)
     return {
-        "label": utterance["label"],
-        "to_request_ms": round((turn["request_s"] - end_s) * 1000),
-        "prep_ms": round((turn["prep_s"] - turn["request_s"]) * 1000) if turn["prep_s"] else None,
-        "model_ms": round((done_s - (turn["prep_s"] or turn["request_s"])) * 1000),
-        "model_calls": len(turn["llm_s"]),
-        "output_tokens": turn["output_tokens"],
+        "label": utterance.label,
+        "to_request_ms": round((turn.request_s - end_s) * 1000),
+        "prep_ms": round((turn.prep_s - turn.request_s) * 1000) if turn.prep_s else None,
+        "model_ms": round((done_s - (turn.prep_s or turn.request_s)) * 1000),
+        "model_calls": len(turn.llm_s),
+        "output_tokens": turn.output_tokens,
         "result_to_audio_ms": round((answer.start_ns / 1e9 - done_s) * 1000) if answer else None,
         "speech_end_to_answer_audio_ms": round((answer.start_ns / 1e9 - end_s) * 1000) if answer else None,
     }
@@ -238,10 +281,10 @@ def main() -> int:
     replies, barge_ins, delegated = [], [], []
     turns = delegations(run)
     for index, utterance in enumerate(spoken):
-        next_start = spoken[index + 1]["first_voiced_ns"] if index + 1 < len(spoken) else float("inf")
+        next_start = spoken[index + 1].first_voiced_ns if index + 1 < len(spoken) else float("inf")
         if timing := delegation_timing(utterance, turns, bursts, next_start):
             delegated.append(timing)
-        if utterance["label"].startswith("barge_in"):
+        if utterance.label.startswith("barge_in"):
             barge_ins.append(barge_in_timing(utterance, rx))
         replies.append(reply_timing(utterance, bursts, next_start))
     greeting_joined = next((m["t_ns"] for m in markers if m["step"] == "caller_joined_sfu"), None)

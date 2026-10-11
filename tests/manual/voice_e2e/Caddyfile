@@ -1,17 +1,9 @@
 {
 	default_bind 127.0.0.1
-	local_certs
 	skip_install_trust
 	admin off
 }
 
 localhost {
-	tls internal
-	handle /.well-known/matrix/server {
-		header Content-Type application/json
-		respond `{"m.server":"localhost:443"}`
-	}
-	handle {
-		reverse_proxy 127.0.0.1:8008
-	}
+	reverse_proxy 127.0.0.1:8008
 }
