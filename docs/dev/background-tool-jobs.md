@@ -7,64 +7,65 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 
 - Disabled by default.
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
+  With the feature off, startup builds no job runtime and leaves saved jobs untouched; the next enabled start recovers them, reporting unfinished ones as interrupted, and an approval continuation that needed a job fails on resume.
 - Tools block by default.
   `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
-  A newer human message in the conversation, or any turn already queued for its lock other than a follow-up, releases that wait while accepted work continues; the reply then finishes without it.
-  Other agents' messages and scheduled turns that arrive during such a wait queue as behind any running reply.
-  Neither action pauses a job or authorizes a protected tool.
-- One `job` tool provides scoped list, wait, cancel, and collect.
+  Only a newer human message in the conversation releases that wait while accepted work continues; scheduled turns, other agents' messages, and follow-ups queued behind the reply wait for it.
+  Releasing a wait neither pauses a job nor authorizes a protected tool.
+- One `job` tool provides scoped `list`, `wait`, `cancel`, and `collect`; `cancel` asks a job to stop and returns at once.
   Complete registered toolkits can be excluded, including plugins.
   Shell is excluded by default and keeps its own execution and cancellation controls.
+- A job belongs to its conversation and requester, and to the entity that answers there: the agent, or the team that owns the jobs its members started for it.
+  That entity's `job` tool sees all of them; a team member sees only its own, and a team's leader has its own `job` tool.
 - A reply never waits for background work: it ends with its answer while its jobs run on.
-  A running reply of the same agent, requester, and conversation is told once, on a tool result or at the start of its next turn, about every job that ended, and is asked to acknowledge them with one `job(action="collect")` call; a noticed cancellation needs none.
-  Ended jobs no reply collected get one follow-up turn per conversation, which posts a new reply; it waits for the conversation to be free, never ends a running reply's tool waits, and runs nothing once a reply collected the jobs.
-  At most 20 follow-ups run in a row: a job a follow-up turn started counts that follow-up, and a job a human message started counts none.
-  Cancelled jobs and a silent schedule's jobs get no follow-up; the next notice or turn reports them.
+  Every model step of the answering entity hears once, on the batch's last tool result, which of the conversation's jobs ended since its last step, and a reply that starts after jobs ended hears of them in its prompt; both ask for one `job(action="collect")` call.
+  Hearing of a cancellation acknowledges it.
+  Ended jobs no reply collected get one follow-up per conversation and set of jobs: an internal `job_follow_up` journal source that starts an ordinary turn posting a new reply.
+  Under the conversation lock, a follow-up whose jobs a reply already collected runs nothing, unless its own reply a restart cut short needs answering again.
+  At most 20 follow-ups run in a row: a job a follow-up turn started counts that follow-up, a job a human message started counts none, and a job past the limit waits for a human message without holding back other jobs.
+  Cancelled jobs and a silent schedule's jobs get no follow-up.
 - Stop, an edit, or deleting a message stops only the reply.
   Background jobs end only through their own cancel: the client's jobs bar, `!cancel_job`, `job(action="cancel")`, revoked access, or the bot leaving the room.
+- Each agent publishes its live jobs per room as `io.mindroom.background_jobs` state keyed by its user ID, carrying no arguments or results, for the client's jobs bar; a client cancels with an `io.mindroom.background_job_cancel` event.
 - A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.
 - A background child that needs approval asks through cards its job posts, and the job stays `awaiting_approval` until the decisions arrive.
-  A gated call of a top-level agent that can become a managed job asks the same way, as its job's first phase: it is marked `mindroom_job` instead of pausing the run, the reply waits up to `approval_wait_timeout` for the decision and then goes on, and the call runs only once approved.
+  A gated call of a top-level agent that can become a managed job asks the same way, as its job's first phase: it is marked `mindroom_job` instead of pausing the run, and the reply waits up to `approval_wait_timeout` for the decision before going on.
   Such a call never runs inline: one that cannot become a job fails, and the agent CLI never offers it.
   Calls that must finish inside their run, tools whose own definition requires confirmation, excluded toolkits, subagents, and minimal mode keep the paused-run approval.
-  Turning the feature off parks saved work.
 
 ## Ownership
 
 | Owner | Responsibility |
 | --- | --- |
-| `tool_jobs/runtime.py` | One accepted execution, its durable outcome, result claims, cancellation and retention |
+| `tool_jobs/runtime.py` | One accepted execution, its durable outcome, result claims, ownership, cancellation, the ended-jobs query, and retention |
 | `tool_jobs/authorization.py` | Current local grants using shared construction policy |
 | `tool_jobs/agno_compat_*.py` | Explicit, version-checked SDK bindings; no application authorization policy |
-| `tool_jobs/agno_execution.py` and `consumption.py` | Exact call execution and acknowledgement after the SDK saves consumption |
+| `tool_jobs/agno_execution.py` and `consumption.py` | Exact call execution, and acknowledgement once the parent run saves the exact call that read a result |
 | `tool_jobs/resources.py` | Defer model and storage cleanup until the reply and its detached jobs release them |
 | `delegation/background.py` | Native child identity and cleanup inside the generic execution owner |
 | `tool_jobs/approvals.py` | Approval cards a job posts for its child's or its own gated call, and denies when the job ends early |
 | `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
-| `tool_jobs/completion.py` | The response boundary: ready results to continue with, or the key of the work the span's answer waits for |
-| `tool_jobs/wakes.py` | A wake's journal source and identity, and the envelope of the turn that continues a waiting reply |
-| Reply records (`reply_lifecycle.py`, `event_journal/replies.py`) | Whether a reply waits and for which key, wake spans, takeover, and the job Stops a reply's Stop records |
-| `orchestration/tool_job_runtime.py` | Startup, policy revocation, applying recorded job Stops, card expiry, admitting wakes, retention and shutdown coordination |
-| `response_runner.py` | Running a wake under the conversation lock, retrieving only what is still ready |
+| `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and that conversation's ended jobs |
+| `tool_jobs/notices.py` | The notice on a tool result and the turn-start note, once per job per reply |
+| `tool_jobs/follow_ups.py` | A follow-up's journal source, identity, streak, and envelope |
+| `tool_jobs/publication.py` | The jobs state each agent publishes per room |
+| `tool_jobs/client_cancel.py` | Client cancel events, `!jobs` and `!cancel_job`, and cancelling a left room's jobs |
+| `orchestration/tool_job_runtime.py` | Startup, policy revocation, publishing state, card expiry, admitting follow-ups, retention and shutdown coordination |
+| `response_runner.py` | Running a follow-up under the conversation lock |
 | Response and delivery owners | Serialize turns, preserve published text and tool traces, settle visible delivery |
 
 Execution lifetime is independent of a caller's wait.
 Each outcome has one active result claim; only persisted consumption acknowledges it.
-Consumption records the reply that first consumed the outcome, so that unfinished reply can recover after the model reads the result.
 A job's approval cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
-Cancelling, stopping, or restarting a job that waits for approval denies its open cards.
+Cancelling or restarting a job that waits for approval denies its open cards.
 Cancellation is saved before cleanup and stays pending until owned work settles.
 Permission revocation uses internal ownership to stop execution, even though public discovery and control are no longer authorized.
 Config reload retains active jobs; controls and result admission check current authorization.
-A wait is the span's exit: its sources settle answered, its turn records like any other, and the reply's records keep the key of the work it waits for.
-The coordinator admits one internal `job_wake` journal source per set of ready outcomes of a waiting reply, or one that ends a wait no work is left for; each wake is named by what it was admitted for, so admitting it again changes nothing.
-Under the conversation lock the wake finds which work is still ready: it claims a `wake` span and continues with that work, or runs nothing and settles; a wait whose key has no outstanding work left ends with its answer.
-A wake that pauses for an approval, or that a process stop cuts short, keeps its source pending, and its retry continues as a wake.
-A reply continues with ready results at most 20 times in one span, apart from dynamic tool continuations, and a waiting message is woken at most 20 times; then the next reply takes the remaining work.
-A reply that a process stop cuts short continues in place by journal replay, below what the stopped attempt showed, with an account that names the finished calls it must not repeat (see [Bot Runtime](../architecture/bot-runtime.md)); background jobs add no restart path of their own.
+A follow-up is named by its conversation and the set of jobs it reports, so admitting it again changes nothing, and the coordinator does not admit one again in the same process.
+A reply that a process stop cuts short continues in place by journal replay, below what the stopped attempt showed, with an account that names the finished calls it must not repeat (see [Bot Runtime](../architecture/bot-runtime.md)).
 A detached job start is such a finished call, and its result names the job ID.
-Jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the new attempt at its response boundary like any other ready work.
-An interrupted outcome tells the model that a call with side effects may already have taken effect and must not run again, while a read-only call can run again for its lost result; replayed against real models, this wording stopped repeated side effects without stopping read-only calls from running again.
+Jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the conversation like any other ended job.
+An interrupted outcome tells the model that a call with side effects may already have taken effect and must not run again, while a read-only call can run again for its lost result.
 
 Shutdown first stops the coordinator's worker and drains execution.
 Receipt access remains available until response finalizers finish.
@@ -82,17 +83,13 @@ Custom events replay as fixed SDK subclasses; plugin class identity and methods 
 
 Jobs live in the event journal's `tool_jobs` table, so they share the journal's database and backend.
 Job metadata stays in memory, while the outcome's payload is saved with that outcome in one statement and retrieval reads it on demand.
-Only work that a shutdown, restart, or event-loop teardown cut short is interrupted; a cancellation or Stop saved before a crash still settles as cancelled, and a child settlement saved before a crash stands.
-Waiting replies are reply records and survive restarts; recovered outcomes wake them.
-`tests/test_tool_job_fuzz.py` and `tests/test_delegation_job_fuzz.py` generate interleaved job and subagent lifecycles, including failed saves, Stops, restarts, and crashes, and `tests/test_reply_lifecycle_fuzz.py` drives waits, wakes, takeovers, and job Stops through the reply rules; both check their guarantees after every step.
+Only work that a shutdown, restart, or event-loop teardown cut short is interrupted; a cancellation saved before a crash still settles as cancelled, and a child settlement saved before a crash stands.
+`tests/test_tool_job_fuzz.py` and `tests/test_delegation_job_fuzz.py` generate interleaved job and subagent lifecycles, including failed saves, client cancels, restarts, and crashes.
 Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.
 Expiry then deletes the job; its originating turn has finished, so the call cannot run again.
-A Stop's job cancellation stays recorded until the runtime applies it, so a Stop recorded while the runtime was starting or disabled still cancels that work.
-A call checks its reply span again once its job is saved, so a Stop or deletion that committed during the job's admission, before any job existed to record, still cancels that job.
 Constructor identity is a digest, not a retained settings blob.
 
 Enabled recovery fails on a snapshot it cannot read and names its job.
-A disabled instance never opted in, so it logs a warning and skips unreadable snapshots while parking the others.
 
 ## Limits
 
@@ -100,13 +97,9 @@ Cancellation cannot undo remote side effects or forcibly stop arbitrary Python t
 Excluded tools retain native behavior.
 Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
-A reply waits only for the work of its own requester, so a reply to another requester in the conversation leaves the first requester's message waiting.
-A wake runs only once the turn running at that moment lets the conversation go.
-An ad hoc team's message and its host agent's own message can both wait for that agent's work; the first to continue retrieves it, and the other then ends its wait with its answer.
-An ad hoc team's wake runs in coordinate mode, since the key keeps its members but not the mode its reply chose, and one whose member left the configuration ends its wait instead.
-A Stop on a reply whose work a newer reply already took over cancels nothing, since that reply already ended.
-Removing an agent or team from the configuration ends its waiting replies, but their messages keep their waiting notice, since no bot remains to edit them.
-Turning the feature off ends waiting replies at startup, keeping their answers.
+A notice reaches only a model step after a tool batch; a reply that ends without another tool call leaves the job to its follow-up.
+A follow-up in a session switched to minimal mode runs and reports results it cannot acknowledge, so a later standard reply may report them again.
+A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
 Job cards offer no timed automatic approvals, and automatic approvals granted on paused-run cards do not apply to them.

@@ -184,9 +184,9 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-Turning the option off parks unfinished jobs and their approvals without replaying their tools, and later messages in their conversations are answered as usual; re-enable it and restart to recover them.
-A reply that a crash cut short while it used jobs stays unfinished while the option is off, and continues once it is back on.
-When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function, and shell tools keep their own background commands.
+With the option off, tools run as they always do, without the generic `wait_timeout` argument or the `job` function, and shell tools keep their own background commands.
+Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
+An approval that needed a job fails when it resumes while the option is off.
 
 Tools that can run as background jobs accept an optional `wait_timeout` argument, which the tool itself never receives.
 This waiting budget is separate from a tool's own execution or network timeout.
@@ -215,7 +215,9 @@ A tool's own argument named `wait_timeout` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
 With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
-Shell handles do not appear in `job(action="list")` or keep a reply waiting, and cannot be controlled with `job`.
+Shell handles do not appear in `job(action="list")` or the jobs bar, and cannot be controlled with `job`.
+
+### When a call becomes a job
 
 | `wait_timeout` | Behavior |
 | --- | --- |
@@ -224,17 +226,33 @@ Shell handles do not appear in `job(action="list")` or keep a reply waiting, and
 | Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
 
 Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
-When a newer human message arrives in the conversation, or another turn is already queued for it, the foreground wait is released without pausing or cancelling the accepted work, and once the reply finishes its answer, its message waits for that work.
-The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
+A newer human message in the conversation releases the wait without pausing or cancelling the work, so the agent answers the new message while the job runs on.
+Scheduled turns and other agents' messages queued behind the reply wait for it instead.
 
-Pressing **Stop** cancels the reply and requests cancellation of the managed jobs it started; on a message that waits for background work, it also cancels the work it waits for, including jobs from earlier follow-ups it took over.
-Their outcomes are no longer offered to later replies, and a restart does not resume them.
-Jobs belonging to other requesters, conversations, agents, or newer messages remain unaffected.
-Deleting the message a reply answers cancels that reply's jobs the same way, and editing your message while its reply is still running or waiting stops that reply the same way and answers the edit in its place.
-Removing the agent from a room cancels the jobs of its unfinished replies there the same way.
+### Seeing and cancelling jobs
+
+MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
+In any client, `!jobs` lists the conversation's running jobs and `!cancel_job <id|all>` cancels them; sent outside any thread, both cover the whole room.
+Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
+**Stop**, an edit, or deleting a message stops only that reply; its jobs keep running until they are cancelled.
+Removing the agent from a room cancels its jobs there.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
-Saved results remain available for explicit retrieval.
-Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
+Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
+
+### How results reach the agent
+
+A job belongs to its conversation and requester, and to the agent that answers there; a team owns the jobs its members start for it.
+While a reply of that agent runs, it is told after its next tool call which jobs ended meanwhile and is asked to acknowledge them with one `job(action="collect")` call, which returns their results.
+A job with no useful output still needs acknowledging; a cancelled job needs none.
+A reply that starts after jobs ended is told the same way when it begins.
+Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
+A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
+Cancelled jobs and a silent schedule's jobs get no follow-up; the next reply hears of them, and a silent schedule's next run reports its own work.
+At most 20 follow-ups run in a row without a human message; after that, results wait for the next human message, whose reply hears of them.
+Another requester's reply in a shared room never hears of these results.
+A job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own.
+
+### The `job` function
 
 The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
 The management function never backgrounds itself.
@@ -243,15 +261,16 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 | Action | Behavior |
 | --- | --- |
 | `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes. |
-| `wait` | Retrieve the original result, including supported structured data and media, using the same optional waiting budget. |
-| `cancel` | Request cancellation and wait for owned execution and cleanup to settle. |
+| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget. |
+| `cancel` | Ask one job to stop and return at once; the next notice reports how it ended. |
+| `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
-Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
 A job whose cleanup fails ends as failed.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
-Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
+Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.
+A team member sees only its own jobs.
 Changing a tool's authored settings, other than for MCP tools, cancels its still-running jobs and blocks access to their saved results until the settings match again.
 Include/exclude filters remain checked per function.
 Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and result delivery.
@@ -260,49 +279,36 @@ Output redirection and automatic output saving apply to the completed child resu
 For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
-A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
 Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
 Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
 Remote service availability alone does not revoke access to a saved result.
 
+### Approvals
+
 A managed tool call that needs approval asks for it from its job, so a pending approval never blocks the conversation.
 The job posts the approval card, reports `awaiting_approval`, and runs the call only once it is approved; a denied or expired approval becomes the job's `denied` outcome.
-The reply waits for the decision for `background_tool_jobs.approval_wait_timeout` seconds, then continues its answer while the job keeps waiting, and its message waits for that job.
-The setting is a non-negative number of seconds, defaulting to `300`; `0` continues at once, and `null` waits until the decision or a newer human message.
+The reply waits for the decision for `background_tool_jobs.approval_wait_timeout` seconds, then goes on while the job keeps waiting; the result arrives like any other job's.
+The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
 A call's own `wait_timeout`, or a newer human message, releases the reply the same way.
-Pressing **Stop** before the decision cancels the call, even when it is approved afterwards.
+Cancelling the job before the decision denies its card.
 Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
-A job's cards show that it waits for approval; pressing **Stop** on the waiting message or cancelling the job denies its open cards.
-A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job; the waiting message then continues with that interrupted outcome.
+Cancelling the job denies its open cards.
+A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job.
 Cards a job posts offer no automatic approval option, and automatic approvals granted on other cards do not apply to them.
 A message never counts as an approval, and current permissions are rechecked before a job's call runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
 Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
 Tools the model provider runs itself never become jobs.
+Tool calls made through `mindroom-agent` inside a shell command or during a voice call never become jobs, and a [minimal-mode](agent-cli.md) reply leaves background results to the agent's next standard reply.
 Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
 
-After its own work, a reply continues with every ready outcome of this agent and requester in the conversation, including outcomes of jobs that earlier replies started, without repeated model polling.
-When work is still running, the reply finishes its answer and its message waits for that work: it shows "⏳ Waiting for background work…" below the answer and keeps its **Stop** button, while the conversation's other messages are answered as usual.
-When the work finishes, the same message continues below its answer: the agent retrieves the results with the native result-retrieval tool and answers with them.
-When a newer reply of the agent, with the same participants, ends with that work still running, it takes the work over, and the older message drops its waiting notice.
-A reply that resumes an approved tool does not wait; a waiting message of the agent, or its next reply, takes the work it leaves.
-Tool calls made through `mindroom-agent` inside a shell command or during a voice call never become jobs, and a [minimal-mode](agent-cli.md) reply leaves earlier background results to the agent's next standard reply.
-A message continues with ready results at most 20 times; the requester's next answered message then takes the remaining work.
-A result that finishes while the reply is still streaming is picked up when the reply's current step ends; it does not start a competing response.
-No job completion starts a new reply by itself.
-Waiting messages survive a restart, and an interruption the restart causes reaches the waiting message as that job's outcome.
-A message waits only for work its reply may retrieve: jobs of its requester, and of its own agent or its team's members, so another requester's or an absent member's results wait for a later reply that can retrieve them.
-Turning background jobs off ends waiting messages at the next start, keeping their answers.
-Silent scheduled work never makes a message wait; it retains its quiet delivery policy and run receipts across later replies and restarts.
-Automatic joins keep quiet and ordinary results separate.
-As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
+### Retention and limits
 
 Listing jobs does not count as reading their results.
-If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
 Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
-A reply that a crash or shutdown cuts short is answered again in place and told which calls its stopped attempt already finished, including detached job starts with their job IDs; interrupted jobs' outcomes reach it at its response boundary.
+A reply that a crash or shutdown cuts short is answered again in place and told which calls its stopped attempt already finished, including detached job starts with their job IDs.
 Reading a result again returns its original output and does not repeat its effects.
 A result remains available for 30 days after it was last read; the job is then deleted once its turn has finished and no approval is pending in the conversation.
 Active jobs and unread results are never deleted.
