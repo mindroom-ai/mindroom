@@ -7297,6 +7297,7 @@ visibility = [
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.delegation.direct",
     "mindroom.delegation.execution",
+    "mindroom.delegation.job_approvals",
     "mindroom.delegation.recovery",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.orchestration.tool_job_runtime",
@@ -8238,6 +8239,7 @@ visibility = [
 path = "mindroom.delegation.job_approvals"
 depends_on = [
     "mindroom.approval_response",
+    "mindroom.delegation.lifecycle",
     "mindroom.response_turn",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.runtime",

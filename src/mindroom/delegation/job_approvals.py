@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.approval_response import identify_approval_tools, plan_approval_calls
+from mindroom.delegation.lifecycle import live_delegation_config
 from mindroom.tool_jobs.approvals import STOPPED_BEFORE_APPROVED_CALL, ask_job_approvals
 from mindroom.tool_jobs.runtime import get_background_runtime
 
@@ -42,6 +43,9 @@ async def request_child_approvals(
     if paused is None or owner.requester_id is None:
         msg = "Delegated child paused without supported exact approval requirements"
         raise RuntimeError(msg)
+    # A child can pause long after its job started: the policy and approver current when it asks decide, as for a
+    # paused reply.
+    config = live_delegation_config(config)
     plan = await plan_approval_calls(
         identify_approval_tools(paused, default_agent_name=child.child_agent_name),
         config=config,

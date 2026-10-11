@@ -23,6 +23,7 @@ from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
@@ -37,6 +38,7 @@ from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_r
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
+from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
@@ -557,25 +559,38 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
 
 
 @pytest.mark.asyncio
-async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_call_would(
+@pytest.mark.parametrize("policy", ["authored", "reloaded"])
+async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_call_would(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    policy: str,
 ) -> None:
-    """With the decision still out after the approval wait, the parent's call returns the child's handle and goes on."""
+    """With the decision still out after the approval wait, the parent's call returns the child's handle and goes on.
+
+    A child asks under the approval policy current when it pauses: a reload that made its call need approval, after
+    the child started under a policy that approved it, still asks.
+    """
     paths = _runtime_paths(tmp_path)
-    config = with_responder_access(
-        Config(
-            agents={
-                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
-                "code": AgentConfig(display_name="Code", tools=["file"]),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            memory={"backend": "none"},
-        ),
-        "code",
-        users=["@alice:example.org"],
-    )
-    config.background_tool_jobs.approval_wait_timeout = 0.05
+
+    def build_config(action: Literal["auto_approve", "require_approval"]) -> Config:
+        built = with_responder_access(
+            Config(
+                agents={
+                    "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                    "code": AgentConfig(display_name="Code", tools=["file"]),
+                },
+                defaults=DefaultsConfig(tools=[]),
+                memory={"backend": "none"},
+                tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="write_report", action=action)]),
+            ),
+            "code",
+            users=["@alice:example.org"],
+        )
+        built.background_tool_jobs.approval_wait_timeout = 0.05
+        return built
+
+    config = build_config("auto_approve" if policy == "reloaded" else "require_approval")
+    current = build_config("require_approval")
     identity = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "p")
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
@@ -593,10 +608,14 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
         return "Report written"
 
     async def run_child(child: DelegationChild, *, prompt: str, **_kwargs: object) -> str:
+        # The configuration is reloaded while the child runs, after its job was admitted.
+        live[0] = current
         child_identity = replace(identity, agent_name="code", session_id=child.session_id)
         storages.append(create_session_storage("code", config, paths, child_identity))
         function = Function.from_callable(write_report)
         function.requires_confirmation = True
+        # Reloaded: the policy, not the tool, gated the call when the child was built.
+        function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE if policy == "reloaded" else None
         function.owning_toolkit = "file"
         agent = Agent(
             name="code",
@@ -629,8 +648,13 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
     )
     install_tool_job_execution(model)
     parent = Agent(name="leader", db=storages[0], tools=[toolkit], model=model)
+    live = [config]
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=identity),
+        config_provider=lambda: live[0],
+    )
     try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        with tool_runtime_context(context):
             response = await parent.arun("Delegate", session_id="p", user_id=identity.requester_id)
             result = await asyncio.wait_for(
                 drive_delegations(

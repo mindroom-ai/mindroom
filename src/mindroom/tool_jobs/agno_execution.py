@@ -458,13 +458,13 @@ def _job_approval(
 ) -> _JobApproval:
     """Ask for a gated call's approval as its job, on the frozen call the job then runs."""
     return _JobApproval(
-        ask=partial(
-            ask_tool_call_approval,
+        # The policy and approver current when the job asks decide, as for a paused reply.
+        ask=lambda: ask_tool_call_approval(
             runtime,
             job_id,
             owned_call,
             owner=owner,
-            config=context.config,
+            config=context.current_config,
             runtime_paths=context.runtime_paths,
         ),
         stopped=partial(runtime.stop_recorded, job_id),
@@ -513,7 +513,12 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             owner = replace(owner, agent_name=actor.id)
         job_checkpoint()
         with authorized_tool_call(owner, call):
-            check_current_execution_authority()
+            try:
+                check_current_execution_authority()
+            except JobAccessError as error:
+                # Access changed after the call was offered, as a reload that removed its toolkit does: the call
+                # fails, not the reply's run.
+                return _failed_call(call, error)
             if mode != "managed" or call.function.external_execution:
                 return await _execute_inline(original, call, mode=mode)
         return await managed(

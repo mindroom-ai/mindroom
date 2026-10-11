@@ -55,7 +55,7 @@ from mindroom.tool_jobs.results import (
     encode_tool_result,
     read_result_payload,
 )
-from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -1266,8 +1266,17 @@ async def test_a_stop_during_admission_stops_the_job_it_admits(
 
 
 @pytest.mark.asyncio
-async def test_a_refused_job_fails_its_call_not_the_reply(tmp_path: Path) -> None:
-    """A call the job runtime refuses, as while room membership re-resolves, fails as that call; the run goes on."""
+@pytest.mark.parametrize("refusal", ["start", "authority"])
+async def test_a_refused_job_fails_its_call_not_the_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+) -> None:
+    """A call the job runtime refuses fails as that call; the run goes on.
+
+    The runtime refuses the job while room membership re-resolves, or the call's authority before admission, as after
+    a reload removed its toolkit while the model was answering.
+    """
     ran: list[str] = []
 
     async def write_note() -> str:
@@ -1276,9 +1285,16 @@ async def test_a_refused_job_fails_its_call_not_the_reply(tmp_path: Path) -> Non
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: False)
+    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: refusal != "start")
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
+    if refusal == "authority":
+
+        def refuse(*_args: object) -> None:
+            msg = "Tool job is not available in this conversation."
+            raise JobAccessError(msg)
+
+        monkeypatch.setattr(runtime, "authorize_execution", refuse)
     model = DelegationModel(
         id="test",
         responses=[ModelResponse(tool_calls=[_call("write_note", "note-call")]), ModelResponse(content="done")],
