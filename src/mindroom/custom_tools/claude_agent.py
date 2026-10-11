@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ClaudeSDKError,
+    ConversationResetMessage,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
@@ -355,6 +356,19 @@ async def _record_turn_usage(turn: dict[str, _UsageCounts]) -> None:
     )
 
 
+def _response_text(text_parts: list[str], result: ResultMessage | None) -> str:
+    """Return Claude's reply text, falling back to the result summary and marking reported errors."""
+    response_text = "\n".join(part for part in text_parts if part).strip()
+    if not response_text:
+        if result is not None and result.result:
+            response_text = str(result.result).strip()
+        else:
+            response_text = "Claude session completed without text output."
+    if result is not None and result.is_error:
+        return f"Claude reported an error: {response_text}"
+    return response_text
+
+
 class ClaudeAgentTools(Toolkit):
     """Tools that let MindRoom agents run persistent Claude coding sessions."""
 
@@ -640,7 +654,7 @@ class ClaudeAgentTools(Toolkit):
                 await session.client.query(trimmed_prompt)
                 response_text, tool_names, msg_result = await self._collect_response(session)
                 session.last_used_at = monotonic()
-                if msg_result is not None and msg_result.model_usage:
+                if msg_result is not None and msg_result.model_usage is not None:
                     # Claude Code reports running session totals, so count only this turn's increase.
                     totals = {
                         model_id: (
@@ -668,7 +682,11 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        await _record_turn_usage(turn_usage)
+        try:
+            await _record_turn_usage(turn_usage)
+        except Exception as error:
+            # Claude has already done the work, so a usage write failure must not hide its reply.
+            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
         return self._format_response_output(response_text, tool_names, msg_result)
 
     async def _collect_response(
@@ -686,19 +704,14 @@ class ClaudeAgentTools(Toolkit):
                         text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_names.append(block.name)
+            elif isinstance(message, ConversationResetMessage):
+                # /clear zeroes Claude Code's running totals, so the next totals start from nothing.
+                session.usage_totals = {}
             elif isinstance(message, ResultMessage):
                 result = message
                 session.claude_session_id = message.session_id
 
-        response_text = "\n".join(part for part in text_parts if part).strip()
-        if not response_text:
-            if result is not None and result.result:
-                response_text = str(result.result).strip()
-            else:
-                response_text = "Claude session completed without text output."
-        if result is not None and result.is_error:
-            return f"Claude reported an error: {response_text}", tool_names, result
-        return response_text, tool_names, result
+        return _response_text(text_parts, result), tool_names, result
 
     def _format_response_output(
         self,
