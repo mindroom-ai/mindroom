@@ -154,8 +154,9 @@ from .scheduling.tasks import (
     set_scheduled_task_runner_owner,
 )
 from .startup_errors import PermanentStartupError
+from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
 from .tool_jobs.disabled import event_is_parked
-from .tool_jobs.runtime import notify_job_stops
+from .tool_jobs.runtime import get_background_runtime, notify_job_stops
 from .tool_jobs.wakes import wake_event
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
@@ -712,6 +713,7 @@ class AgentBot:
                 on_media=self._on_media_message,
                 on_reaction=self._on_reaction,
                 on_approval=self._on_unknown_event,
+                on_job_cancel=self._on_job_cancel,
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
@@ -1720,6 +1722,9 @@ class AgentBot:
                 self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
+            if (runtime := get_background_runtime(self.runtime_paths)) is not None:
+                # Nobody here can see or cancel the work this entity leaves behind.
+                await cancel_room_jobs(runtime, agent_name=self.agent_name, room_id=room_id)
             # The departure ended the room's approvals without their settlement.
             self._response_runner.release_approval_holds_in_room(room_id)
             await self._room_lifecycle.forget_invited_room(room_id)
@@ -2829,6 +2834,25 @@ class AgentBot:
         """
         record = self._turn_store.get_turn_record(turn_id)
         return record.indexed_event_ids if record is not None else (turn_id,)
+
+    async def _on_job_cancel(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Cancel this entity's background jobs a person asked to stop from their client."""
+        runtime = get_background_runtime(self.runtime_paths)
+        sender = event.source.get("sender")
+        if runtime is None or not isinstance(sender, str):
+            return
+        await handle_job_cancel_event(
+            runtime,
+            agent_name=self.agent_name,
+            room_id=room.room_id,
+            content=event.source.get("content") or {},
+            sender_may_cancel=person_may_cancel(
+                sender,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                may_talk=lambda sender_id: self._turn_policy.can_reply_to_sender_in_room(sender_id, room.room_id),
+            ),
+        )
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

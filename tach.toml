@@ -569,6 +569,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.journal_ingress"
 depends_on = [
+    "mindroom.tool_jobs.client_cancel",
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.logging_config",
@@ -4277,6 +4278,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
     "mindroom.tool_jobs.wakes",
     "mindroom.reply_scope",
@@ -4659,6 +4661,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.handler"
 depends_on = [
+    "mindroom.tool_jobs.client_cancel",
+    "mindroom.tool_jobs.runtime",
     "mindroom.commands.mode_commands",
     "mindroom.model_selection",
     "mindroom.matrix.room_membership",
@@ -7876,6 +7880,8 @@ depends_on = [
 ]
 visibility = [
     "mindroom.tool_jobs.publication",
+    "mindroom.commands.handler",
+    "mindroom.tool_jobs.client_cancel",
     "mindroom.approval.response",
     # The bot lets the job runtime apply a Stop its replies recorded at once.
     "mindroom.bot",
@@ -8241,6 +8247,18 @@ visibility = [
     "mindroom.delegation.job_approvals",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.agno_execution",
+]
+
+[[modules]]
+path = "mindroom.tool_jobs.client_cancel"
+depends_on = [
+    "mindroom.requester_identity",
+    "mindroom.tool_jobs.runtime",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.commands.handler",
+    "mindroom.matrix.journal_ingress",
 ]
 
 [[modules]]

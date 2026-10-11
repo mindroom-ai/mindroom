@@ -68,6 +68,8 @@ class EventKind(StrEnum):
     OPAQUE_HISTORY = "opaque_history"
     # A runtime source, not a Matrix event: a waiting reply's background work is ready, or none is left.
     JOB_WAKE = "job_wake"
+    # A person asks from their client to cancel background jobs.
+    JOB_CANCEL = "job_cancel"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a

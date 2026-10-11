@@ -28,6 +28,7 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.transport_progress import is_transport_progress_revision
+from mindroom.tool_jobs.client_cancel import BACKGROUND_JOB_CANCEL_EVENT_TYPE
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -70,6 +71,11 @@ def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
 
 
+def _is_background_job_cancel(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
+    """Return whether one event asks to cancel background jobs."""
+    return isinstance(event, nio.UnknownEvent) and event.type == BACKGROUND_JOB_CANCEL_EVENT_TYPE
+
+
 def _is_silent_schedule_trigger(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     """Return whether one event is an internal silent schedule trigger."""
     return isinstance(event, nio.UnknownEvent) and event.type == SILENT_SCHEDULE_EVENT_TYPE
@@ -105,6 +111,7 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     (_is_silent_schedule_trigger, EventKind.SCHEDULE_TRIGGER),
     (_is_rtc_event, EventKind.RTC),
     (_is_tool_approval_response, EventKind.APPROVAL),
+    (_is_background_job_cancel, EventKind.JOB_CANCEL),
     (lambda event: isinstance(event, nio.MegolmEvent), EventKind.OPAQUE_HISTORY),
 )
 

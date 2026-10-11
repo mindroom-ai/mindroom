@@ -677,6 +677,14 @@ class ToolJobRuntime:
             )
             entry.claim = None
 
+    async def request_cancel(self, job_id: str) -> None:
+        """Ask a live job to stop without waiting for it to settle, for a cancel its caller already authorized."""
+        async with self._lock:
+            self._ensure_open()
+            entry = self._entries.get(job_id)
+            if entry is not None and entry.job.status not in TERMINAL_STATUSES:
+                await self._request_cancel(entry)
+
     async def cancel(self, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
         """Cancel execution and return the job once its execution and cleanup have settled."""
         async with self._lock:

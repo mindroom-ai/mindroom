@@ -14,6 +14,8 @@ This page lists every command and fully covers `!help`, `!hi`, and `!config`; th
 | `!list_schedules` | List pending scheduled tasks | [Scheduling](https://docs.mindroom.chat/scheduling/#list_schedules) |
 | `!cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#cancel_schedule) |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#edit_schedule) |
+| `!jobs` | List the background jobs running in this conversation | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
+| `!cancel_job <id\|all>` | Cancel a background job, or all of them in this conversation | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
 | `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |

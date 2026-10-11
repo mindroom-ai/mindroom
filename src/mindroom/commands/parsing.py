@@ -22,6 +22,8 @@ class CommandType(Enum):
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
     EDIT_SCHEDULE = "edit_schedule"
+    JOBS = "jobs"  # List the conversation's background jobs
+    CANCEL_JOB = "cancel_job"  # Cancel background jobs
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODE = "mode"
@@ -44,6 +46,8 @@ _COMMAND_DOCS = {
     CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.EDIT_SCHEDULE: ("!edit_schedule <id> <task>", "Edit an existing scheduled task"),
+    CommandType.JOBS: ("!jobs", "List the background jobs running here"),
+    CommandType.CANCEL_JOB: ("!cancel_job <id|all>", "Cancel a background job, or all of them here"),
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
@@ -128,6 +132,8 @@ class _CommandParser:
     LIST_SCHEDULES_PATTERN = re.compile(r"^!(?:list|inspect)[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+    JOBS_PATTERN = re.compile(r"^!jobs$", re.IGNORECASE)
+    CANCEL_JOB_PATTERN = re.compile(r"^!cancel[_-]?job\s+(\S+)$", re.IGNORECASE)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
     MODE_PATTERN = re.compile(r"^!mode(?:\s+(.+))?$", re.IGNORECASE)
@@ -196,6 +202,19 @@ class _CommandParser:
             return Command(
                 type=CommandType.CANCEL_SCHEDULE,
                 args={"task_id": task_id, "cancel_all": cancel_all},
+                raw_text=message,
+            )
+
+        if self.JOBS_PATTERN.match(message):
+            return Command(type=CommandType.JOBS, args={}, raw_text=message)
+
+        match = self.CANCEL_JOB_PATTERN.match(message)
+        if match:
+            target = match.group(1).strip()
+            cancel_all = target.lower() == "all"
+            return Command(
+                type=CommandType.CANCEL_JOB,
+                args={"job_id": None if cancel_all else target, "cancel_all": cancel_all},
                 raw_text=message,
             )
 

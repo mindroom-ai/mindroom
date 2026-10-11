@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.authorization import (
     is_platform_administrator,
+    is_sender_allowed_for_entity_replies_in_room,
     responder_candidate_entities_with_membership_refresh,
 )
 from mindroom.commands import config_confirmation
@@ -44,6 +45,13 @@ from mindroom.scheduling.tasks import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned
+from mindroom.tool_jobs.client_cancel import (
+    JobCancelRequest,
+    cancel_jobs_command,
+    conversation_jobs,
+    jobs_listing,
+)
+from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -59,6 +67,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.model_selection import CommandResultContent
+    from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
@@ -69,6 +78,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.SCHEDULE,
         CommandType.CANCEL_SCHEDULE,
         CommandType.EDIT_SCHEDULE,
+        CommandType.CANCEL_JOB,
         CommandType.DESKTOP,
         CommandType.MODEL,
         CommandType.MODE,
@@ -90,6 +100,45 @@ _COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN = frozenset(
         CommandType.UNKNOWN,
     },
 )
+
+
+async def _background_jobs_command(
+    context: CommandHandlerContext,
+    room: nio.MatrixRoom,
+    command: Command,
+    requester_user_id: str,
+    thread_id: str | None,
+) -> str:
+    """List or cancel the background jobs of this conversation, for clients without the jobs bar."""
+    runtime = get_background_runtime(context.runtime_paths)
+    if runtime is None:
+        return "Background jobs are not enabled."
+    if command.type == CommandType.JOBS:
+        return jobs_listing(conversation_jobs(runtime, room_id=room.room_id, thread_id=thread_id))
+
+    def may_cancel(job: BackgroundJob) -> bool:
+        # Whoever may talk to the job's entity here may stop its work, as with 🛑.
+        return is_sender_allowed_for_entity_replies_in_room(
+            requester_user_id,
+            [job.owner.recipient],
+            context.config,
+            room.room_id,
+            context.runtime_paths,
+            context.agent_reply_memberships,
+        )
+
+    request = JobCancelRequest(
+        job_id=command.args["job_id"],
+        cancel_all=command.args["cancel_all"],
+        thread_id=thread_id,
+    )
+    return await cancel_jobs_command(
+        runtime,
+        room_id=room.room_id,
+        thread_id=thread_id,
+        request=request,
+        may_cancel=may_cancel,
+    )
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -471,6 +520,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 runtime_paths=context.runtime_paths,
                 matrix_admin=context.matrix_admin,
             )
+
+    elif command.type in {CommandType.JOBS, CommandType.CANCEL_JOB}:
+        response_text = await _background_jobs_command(context, room, command, requester_user_id, effective_thread_id)
 
     elif command.type == CommandType.EDIT_SCHEDULE:
         task_id = command.args["task_id"]

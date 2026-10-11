@@ -75,6 +75,11 @@ type _RtcCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]
 type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 type _ApprovalContinuationCallback = Callable[[str], Awaitable[bool | None]]
+type _JobCancelCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
+
+
+async def _ignore_job_cancel(_room: nio.MatrixRoom, _event: nio.UnknownEvent) -> None:
+    """Leave a job cancel to the bots that run background jobs."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +101,7 @@ class JournalCallbacks:
     on_job_wake: Callable[[JournalEvent], Awaitable[bool]]
     on_rtc: _RtcCallback | None = None
     event_is_parked: Callable[[JournalEvent], bool] = lambda _event: False
+    on_job_cancel: _JobCancelCallback = _ignore_job_cancel
 
 
 @dataclass
@@ -527,6 +533,7 @@ _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.SCHEDULE_TRIGGER: _Binding(nio.UnknownEvent, _run_scheduled_trigger),
     EventKind.REACTION: _Binding(nio.ReactionEvent, _turn_backed(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
+    EventKind.JOB_CANCEL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_job_cancel)),
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
     EventKind.RTC: _Binding(nio.UnknownEvent, _run_rtc_event),
     EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),
