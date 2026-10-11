@@ -218,9 +218,11 @@ def _record_job_stop(transaction: Transaction, principal_id: str, reply: Reply) 
             for source in span.sources.pending_event_ids
         ),
     )
-    # A wake is not a message: work a newer message started stays that message's even when a wake came after it.
+    # A follow-up is not a message: work a newer message started stays that message's even after a follow-up.
     messages = (journal.load(transaction, principal_id, source) for source in sources)
-    orders = [event.receipt_order for event in messages if event is not None and event.kind is not EventKind.JOB_WAKE]
+    orders = [
+        event.receipt_order for event in messages if event is not None and event.kind is not EventKind.JOB_FOLLOW_UP
+    ]
     reply_messages.record_job_stop(
         transaction,
         reply_messages.JobStop(

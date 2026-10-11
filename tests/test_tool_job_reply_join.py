@@ -19,8 +19,8 @@ from mindroom.response_turn import (
 )
 from mindroom.tool_jobs.completion import (
     _JOB_JOIN_LIMIT,
+    _completion_prompt,
     _JobJoin,
-    completion_prompt,
     delegated_child_context,
     join_approval_jobs,
     join_conversation_jobs,
@@ -327,8 +327,8 @@ async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
             )
         assert len(continued) == _JOB_JOIN_LIMIT
         with tool_runtime_context(context):
-            # Past the limit the message holds nothing; the next reply in the conversation takes the work.
-            assert not (await join_conversation_jobs(set(), joins=_JOB_JOIN_LIMIT)).holds
+            # Past the limit the reply continues no more; the work's follow-up reports it.
+            assert (await join_conversation_jobs(set(), joins=_JOB_JOIN_LIMIT)).prompt is None
     finally:
         await runtime.shutdown()
 
@@ -337,7 +337,7 @@ def test_join_prompt_retrieves_each_finished_outcome_without_waiting() -> None:
     """Every joined job has finished, so each retrieval call reads its outcome without a wait budget."""
     done = completed_delegation_job()
     failed = replace(done, job_id="other", status="failed")
-    prompt = completion_prompt([done, failed])
+    prompt = _completion_prompt([done, failed])
     assert f'job(action="wait", job_id="{done.job_id}", wait_timeout=0)' in prompt
     assert 'job(action="wait", job_id="other", wait_timeout=0)' in prompt
 
@@ -347,7 +347,7 @@ def test_join_prompt_names_the_member_only_for_a_team_members_job() -> None:
     own = completed_delegation_job()
     own = replace(own, owner=replace(own.owner, transport_agent_name=own.owner.agent_name))
     member = replace(own, job_id="member", owner=replace(own.owner, transport_agent_name="squad"))
-    prompt = completion_prompt([own, member])
+    prompt = _completion_prompt([own, member])
     assert f'job(action="wait", job_id="{own.job_id}", wait_timeout=0);' in prompt
     assert f'job(action="wait", job_id="member", wait_timeout=0) through member {own.owner.agent_name}' in prompt
 
@@ -362,8 +362,8 @@ def _job_context(tmp_path: Path, owner: ToolExecutionIdentity) -> ToolRuntimeCon
 
 
 @pytest.mark.asyncio
-async def test_boundary_records_outstanding_work_for_the_message_to_hold(tmp_path: Path) -> None:
-    """With nothing ready, the reply ends and records the work its message holds, which keeps running."""
+async def test_boundary_leaves_running_work_to_its_follow_up(tmp_path: Path) -> None:
+    """With nothing ready, the reply ends and its running work keeps running for its follow-up."""
     owner = completed_delegation_job().owner
     runtime = await tool_job_runtime(tmp_path)
     context = _job_context(tmp_path, owner)
@@ -379,8 +379,6 @@ async def test_boundary_records_outstanding_work_for_the_message_to_hold(tmp_pat
         await start_job(runtime, "work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context):
             outstanding = await join_conversation_jobs(set(), joins=0)
-        # The key the span leaves is covered with the span in tests/test_tool_job_waits.py.
-        assert outstanding.holds
         assert outstanding.prompt is None
         assert (await lookup(runtime, "work", owner=owner, depth=0)).status == "running"
         finish.set()
@@ -398,53 +396,27 @@ async def test_boundary_records_outstanding_work_for_the_message_to_hold(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reply", ["agent", "team", "delegated_child"])
-async def test_boundary_holds_only_its_participants_work(tmp_path: Path, reply: str) -> None:
-    """A reply holds the work of the agents it speaks for; a delegated child inside its caller holds nothing."""
+async def test_boundary_retrieves_only_its_participants_work(tmp_path: Path, reply: str) -> None:
+    """A reply retrieves the work of the agents it speaks for; a delegated child inside its caller retrieves none."""
     owner = replace(completed_delegation_job().owner, agent_name="worker", transport_agent_name="lead")
     runtime = await tool_job_runtime(tmp_path)
     context = replace(_job_context(tmp_path, owner), agent_name="lead")
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
-    finish = asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
-        await finish.wait()
         return BackgroundOutcome("completed", "done")
 
     try:
         await start_job(runtime, "member", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await wait_for_status(runtime, "member", "completed")
         with tool_runtime_context(context):
             if reply == "delegated_child":
                 with delegated_child_context():
                     assert await join_conversation_jobs(set(), joins=0) == _JobJoin()
                 return
             joined = await join_conversation_jobs(set(), joins=0, agent_names=("worker",) if reply == "team" else None)
-        # Only a team reply speaks for the member whose work is outstanding.
-        assert joined.holds is (reply == "team")
-    finally:
-        finish.set()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_boundary_does_not_hold_revoked_work(tmp_path: Path) -> None:
-    """Work the requester may no longer access is gone for the reply, so its message holds nothing."""
-    owner = completed_delegation_job().owner
-    allowed = True
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
-    context = _job_context(tmp_path, owner)
-    pin_background_tool_jobs(context.config, context.runtime_paths)
-    register_background_runtime(context.runtime_paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        await asyncio.Event().wait()
-        raise AssertionError
-
-    try:
-        await start_job(runtime, "revoked", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-        allowed = False
-        await runtime.cancel_revoked(denied=lambda _job: True)
-        with tool_runtime_context(context):
-            assert not (await join_conversation_jobs(set(), joins=0)).holds
+        # Only a team reply speaks for the member whose work is ready.
+        assert (joined.prompt is not None) is (reply == "team")
     finally:
         await runtime.shutdown()

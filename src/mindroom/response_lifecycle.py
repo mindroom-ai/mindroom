@@ -436,8 +436,8 @@ class ResponseLifecycleCoordinator:
         existing_turn = queued_signal.begin_response_turn()
         if not (existing_turn or lifecycle_lock.locked()):
             return None
-        if response_envelope.origin.intent is TurnIntent.JOB_WAKE:
-            # The running reply takes over the work this wake would continue, so the wake must not end its waits.
+        if response_envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP:
+            # Only a human message ends a running reply's waits; a follow-up runs after the reply instead.
             return None
         source_event_id = response_envelope.source_event_id
         if signal_queued_message and self._should_signal_queued_message(response_envelope):

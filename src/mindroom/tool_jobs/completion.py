@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.reply_scope import current_span
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -28,7 +27,7 @@ _DELEGATED_CHILD: ContextVar[bool] = ContextVar("delegated_child_reply", default
 
 @contextmanager
 def delegated_child_context() -> Iterator[None]:
-    """Run a delegated child's reply inside its caller: it has no message of its own, so it never holds work."""
+    """Run a delegated child's reply inside its caller: it has no message of its own, so it reports no jobs."""
     token = _DELEGATED_CHILD.set(True)
     try:
         yield
@@ -38,10 +37,9 @@ def delegated_child_context() -> Iterator[None]:
 
 @dataclass(frozen=True)
 class _JobJoin:
-    """A reply's response boundary: ready results to continue with, or whether its message holds outstanding work."""
+    """A reply's response boundary: the ready results it continues with, if any."""
 
     prompt: str | None = None
-    holds: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,7 +74,7 @@ class ConversationKey:
 
 
 @dataclass(frozen=True)
-class ConversationWork:
+class _ConversationWork:
     """The outstanding work of one key, and the ready outcomes of it a turn may retrieve now."""
 
     jobs: tuple[BackgroundJob, ...]
@@ -88,7 +86,7 @@ async def conversation_work(
     key: ConversationKey,
     *,
     attempted: Collection[str] = (),
-) -> ConversationWork:
+) -> _ConversationWork:
     """Return the outstanding work of ``key``, apart from outcomes a reply already asked for."""
     held = [
         (job, readable)
@@ -101,7 +99,7 @@ async def conversation_work(
         )
         if job.owner.agent_name in key.participants and job.job_id not in attempted
     ]
-    return ConversationWork(
+    return _ConversationWork(
         jobs=tuple(job for job, _readable in held),
         ready=tuple(job for job, readable in held if readable and job.status in TERMINAL_STATUSES),
     )
@@ -146,7 +144,7 @@ def _retrieval_calls(jobs: Sequence[BackgroundJob]) -> str:
     return "; ".join(calls)
 
 
-def completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
+def _completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
     """Ask once for rich native result retrieval of work that is ready."""
     return (
         "Internal runtime update, not a new human request. Background work has finished. "
@@ -162,11 +160,10 @@ async def join_conversation_jobs(
     agent_names: Sequence[str] | None = None,
     can_retrieve: bool = True,
 ) -> _JobJoin:
-    """Continue this reply with ready results, or report what it leaves outstanding.
+    """Continue this reply with ready results.
 
     The reply retrieves its conversation's work, including work earlier replies started. Work it already asked to
-    retrieve is not asked for again. With nothing ready and work outstanding, the span's answer waits for that work,
-    unless the span runs for an approval or reached the join limit; the conversation's next reply then takes it.
+    retrieve is not asked for again. Work still running is left to its follow-up.
     A reply that cannot retrieve results as an exact call of its own takes none: a minimal reply, whose CLI saves no
     such call, and a voice turn, whose call session owns no conversation's results.
     """
@@ -174,16 +171,11 @@ async def join_conversation_jobs(
         return _JobJoin()
     runtime, key = current
     work = await conversation_work(runtime, key, attempted=attempted)
-    ready = bool(work.ready) and joins < _JOB_JOIN_LIMIT
-    # At the join limit the message stops holding, and the next reply in the conversation takes the work; a silent
-    # schedule never holds, so its work waits for the next silent run.
-    holds = not ready and not key.silent and bool(work.jobs) and joins < _JOB_JOIN_LIMIT
-    if (handle := current_span()) is not None:
-        handle.leaves_work = key.encode() if holds else None
-    if ready:
+    if work.ready and joins < _JOB_JOIN_LIMIT:
         attempted.update(job.job_id for job in work.ready)
-        return _JobJoin(prompt=completion_prompt(work.ready))
-    return _JobJoin(holds=holds)
+        return _JobJoin(prompt=_completion_prompt(work.ready))
+    # Work still running is reported by its follow-up once it ends; the reply never waits for it.
+    return _JobJoin()
 
 
 async def join_approval_jobs[RunT](

@@ -183,8 +183,8 @@ def continuation_target(
     reply_to_event_id: str | None = None,
 ) -> MessageTarget:
     """Return the canonical Matrix conversation target for one continuation."""
-    if continuation.origin.intent is TurnIntent.JOB_WAKE and reply_to_event_id in continuation.source_event_ids:
-        # A wake is a runtime source, not a Matrix event to reply to.
+    if continuation.origin.intent is TurnIntent.JOB_FOLLOW_UP and reply_to_event_id in continuation.source_event_ids:
+        # A follow-up is a runtime source, not a Matrix event to reply to.
         reply_to_event_id = None
     return MessageTarget(
         room_id=continuation.room_id,

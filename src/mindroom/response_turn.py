@@ -1537,8 +1537,8 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             agent_names=ctx.tool_job_agent_names,
                             can_retrieve=not ctx.inline_tools and ctx.agent_mode != "minimal",
                         )
-                        if join_document is not None and (join.prompt is not None or join.holds):
-                            # A continued or held reply keeps its live document, which later turns extend.
+                        if join_document is not None and join.prompt is not None:
+                            # A continued reply keeps its live document, which later turns extend.
                             yield join_document
                             join_document = None
                             # The published document already holds this attempt's text.

@@ -18,11 +18,11 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.notices import (
     JobNotices,
-    _job_notice_text,
     _turn_start_job_note,
     append_turn_start_job_note,
     install_job_notice_hook,
     job_notice_context,
+    job_notice_text,
 )
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -156,7 +156,7 @@ async def test_the_notice_names_each_job_and_how_it_ended(tmp_path: Path) -> Non
         await conversation.start("job_a")
         await conversation.end("job_a")
         job = await lookup(conversation.runtime, "job_a", owner=conversation.owner, depth=0)
-        assert _job_notice_text([job], "Collect.") == "`job_a` (tool_job_a) completed\nCollect."
+        assert job_notice_text([job], "Collect.") == "`job_a` (tool_job_a) completed\nCollect."
     finally:
         await conversation.runtime.shutdown()
 
@@ -197,6 +197,19 @@ async def test_a_turn_starts_with_a_note_for_jobs_that_ended_before_it(tmp_path:
             # Every attempt of the reply opens with the same note, which its tool results then do not repeat.
             assert await _turn_start_job_note() == note
         assert notices.noticed == {"finished", "cancelled"}
+    finally:
+        await conversation.runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_follow_ups_note_leaves_out_what_its_prompt_asks_about(tmp_path: Path) -> None:
+    """A follow-up's prompt already lists its jobs, so its turn opens with no note repeating them."""
+    conversation = await _conversation(tmp_path)
+    try:
+        await conversation.start("finished")
+        await conversation.end("finished")
+        with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
+            assert await _turn_start_job_note(asked=("finished",)) is None
     finally:
         await conversation.runtime.shutdown()
 

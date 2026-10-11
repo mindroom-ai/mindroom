@@ -89,12 +89,12 @@ async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("wait_timeout", [0, 0.001])
-async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # noqa: PLR0915
+async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PLR0915
     tmp_path: Path,
     team: bool,
     wait_timeout: float,
 ) -> None:
-    """A resumed approval finishes while its approved work runs on, and its message holds that work."""
+    """A resumed approval finishes while its approved work runs on, leaving that work to its follow-up."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
         agents={"leader": AgentConfig(display_name="Leader", tools=["calculator"])},
@@ -297,12 +297,11 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
             jobs = await runtime.list_jobs(owner=owner, depth=0)
             assert len(jobs) == 1
             assert (await lookup(runtime, jobs[0].job_id, owner=owner, depth=0)).status == "running"
-            outstanding = await join_conversation_jobs(set(), joins=0)
-            assert outstanding.holds
+            assert (await join_conversation_jobs(set(), joins=0)).prompt is None
             release.set()
             ready = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
             await runtime.release_wait(jobs[0].job_id, ready.claim)
-            # Nothing retrieved the outcome; it waits for the turn continuing the held message.
+            # Nothing retrieved the outcome; its follow-up reports it.
             assert [job.job_id for job in pending_outcomes(runtime)] == [jobs[0].job_id]
             assert executions == 1
     finally:

@@ -16,23 +16,25 @@ from mindroom.delegation.background import delegation_child, reconcile_delegatio
 from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants_child, delegation_grant
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
-from mindroom.tool_jobs.completion import ConversationKey, conversation_work
+from mindroom.tool_jobs.completion import ConversationKey, conversation_work, ended_jobs
 from mindroom.tool_jobs.disabled import index_parked_work
+from mindroom.tool_jobs.follow_ups import FOLLOW_UP_LIMIT, follow_up_event_id, follow_up_jobs, follow_up_streak
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.publication import JobStatePublisher
 from mindroom.tool_jobs.runtime import (
     CONSUMED_RESULT_RETENTION,
+    TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
     ToolJobRuntime,
     register_background_runtime,
 )
-from mindroom.tool_jobs.wakes import is_wake, wake_event_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -43,7 +45,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.event_journal.reply_messages import JobStop
     from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -64,18 +66,35 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
     return recipient in config.agents and actor in config.agents
 
 
-async def _message_order(principal: PrincipalStore, started: JournalEvent) -> int:
-    """Return when the message a job's work answers arrived; a wake continues its reply's own messages."""
-    reply = await principal.replies.for_sources((started.event_id,)) if is_wake(started) else None
-    if reply is None:
-        return started.receipt_order
-    orders = []
-    for span in await principal.replies.spans(reply.reply_id):
-        for source in span.sources.logical_source_event_ids:
-            message = await principal.load_event(source)
-            if message is not None and not is_wake(message):
-                orders.append(message.receipt_order)
-    return max(orders, default=started.receipt_order)
+def _follow_up_keys(jobs: Iterable[BackgroundJob]) -> list[ConversationKey]:
+    """Return each conversation whose ended jobs may need a follow-up: one per entity, room, thread, and requester.
+
+    A silent schedule's work waits for its next silent run, which opens with the note instead.
+    """
+    participants: dict[tuple[str, str, str | None, str], set[str]] = {}
+    for job in jobs:
+        owner = job.owner
+        if (
+            job.status not in TERMINAL_STATUSES
+            or job.consumed
+            or owner.room_id is None
+            or owner.requester_id is None
+            or job.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+        ):
+            continue
+        conversation = (owner.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id)
+        participants.setdefault(conversation, set()).add(owner.agent_name)
+    return [
+        ConversationKey(
+            recipient=recipient,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            silent=False,
+            participants=tuple(sorted(agents)),
+        )
+        for (recipient, room_id, thread_id, requester_id), agents in participants.items()
+    ]
 
 
 def _accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:
@@ -282,8 +301,6 @@ class ToolJobRuntimeCoordinator:
             return
         runtime = self._runtime
         if runtime is None:
-            # With the feature off, a reply that waited for background work ends its wait, keeping its answer.
-            await self._admit_wakes(None)
             return
         if self._task is None or self._task.done():
             if self._task is not None and not self._task.cancelled():
@@ -333,13 +350,13 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked and stopped work, publish live jobs, deny interrupted jobs' cards, and wake waiting replies."""
+        """Stop revoked and stopped work, publish live jobs, deny interrupted jobs' cards, and admit follow-ups."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._publisher.publish(self.bot_provider, self.runtime.retained_jobs())
         for job_id in tuple(self.runtime.unsettled_approvals):
             await settle_job_approvals(self.runtime, job_id)
         await self._apply_job_stops()
-        await self._admit_wakes(self.runtime)
+        await self._admit_follow_ups(self.runtime)
 
     async def _apply_job_stops(self) -> None:
         """Cancel the work each recorded Stop names, then forget the Stop; one that fails is retried next pass."""
@@ -392,27 +409,30 @@ class ToolJobRuntimeCoordinator:
                 return False
             started = None if job.source_event_id is None else await principal.load_event(job.source_event_id)
             cutoff = stop.cutoff_receipt_order
-            return started is None or cutoff is None or await _message_order(principal, started) <= cutoff
+            return started is None or cutoff is None or started.receipt_order <= cutoff
 
         return matches
 
-    async def _admit_wakes(self, runtime: ToolJobRuntime | None) -> None:
-        """Wake each waiting reply whose work is ready, and end the wait of one no work is left for.
+    async def _admit_follow_ups(self, runtime: ToolJobRuntime) -> None:
+        """Admit one follow-up per conversation whose ended jobs no reply collected, at most the limit in a row.
 
-        Without a runtime no work is left for any of them.
+        A job a follow-up turn started counts that follow-up, so work that keeps starting work stops at the limit;
+        a job a human message started counts none.
         """
-        journal = self._journal
-        if journal is None:
-            return
-        for _principal_id, reply in await journal.waiting_replies():
-            bot = self.bot_provider(reply.entity_name)
-            if bot is None or reply.hold_key is None:
-                # Entity removal ends a removed entity's waiting reply; a reply with no key waits for nothing here.
+        for key in _follow_up_keys(runtime.retained_jobs()):
+            jobs = follow_up_jobs(await ended_jobs(runtime, key))
+            bot = self.bot_provider(key.recipient)
+            if not jobs or bot is None:
                 continue
-            work = None if runtime is None else await conversation_work(runtime, ConversationKey.decode(reply.hold_key))
-            if work is None or work.ready or not work.jobs:
-                ready = () if work is None else work.ready
-                await bot.admit_job_wake(reply, wake_event_id(reply, ready))
+            principal = bot.journal_principal()
+            streaks = [
+                follow_up_streak(await principal.load_event(job.source_event_id))
+                for job in jobs
+                if job.source_event_id is not None
+            ]
+            streak = 1 + max(streaks, default=0)
+            if streak <= FOLLOW_UP_LIMIT:
+                await bot.admit_job_follow_up(key, follow_up_event_id(key, jobs), streak)
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""

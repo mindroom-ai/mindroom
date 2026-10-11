@@ -156,8 +156,8 @@ from .scheduling.tasks import (
 from .startup_errors import PermanentStartupError
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
 from .tool_jobs.disabled import event_is_parked
+from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime, notify_job_stops
-from .tool_jobs.wakes import wake_event
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -188,6 +188,7 @@ if TYPE_CHECKING:
     from mindroom.reply_lifecycle import Reply
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.tool_jobs.completion import ConversationKey
 
 
 class _ProcessShutdownMatrixClient(Protocol):
@@ -725,7 +726,7 @@ class AgentBot:
                 ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
                 replies_ended=self._replies_ended,
-                on_job_wake=lambda event: self._response_runner.handoff_job_wake(event),
+                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
             ),
             room_for_id=self._room_for_journal_event,
             schedule_trigger_sender_is_managed=lambda sender: (
@@ -1135,10 +1136,11 @@ class AgentBot:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
 
-    async def admit_job_wake(self, reply: Reply, wake_id: str) -> None:
-        """Admit a wake for one of this bot's waiting replies, and wake the journal worker that runs it."""
+    async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str, streak: int) -> None:
+        """Admit a follow-up for jobs that ended in one of this bot's conversations, and wake the journal worker."""
+        now_ms = int(time.time() * 1000)
         await self.journal_principal().admit(
-            wake_event(reply, wake_id, sender_id=self.matrix_id.full_id, now_ms=int(time.time() * 1000)),
+            follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms, streak=streak),
         )
         self._journal_dispatcher.wake()
 

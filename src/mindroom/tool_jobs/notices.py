@@ -13,7 +13,7 @@ from mindroom.tool_jobs.completion import current_conversation, ended_jobs
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Collection, Iterator, Sequence
 
     from agno.models.base import Model
     from agno.models.message import Message
@@ -47,8 +47,8 @@ def job_notice_context(notices: JobNotices) -> Iterator[None]:
         _NOTICES.reset(token)
 
 
-def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
-    """List each ended job on its own line, followed by the request to collect them."""
+def job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
+    """List each ended job on its own line, followed by what to do about them."""
     lines = []
     for job in jobs:
         member = (
@@ -56,7 +56,9 @@ def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
             if job.owner.transport_agent_name not in {None, job.owner.agent_name}
             else ""
         )
-        lines.append(f"`{job.job_id}` ({job.tool_name}) {job.status}{member}")
+        # A restart stopped an interrupted job at an unknown point, and it is never run again on its own.
+        partly = "; it may have partly run" if job.status == "interrupted" else ""
+        lines.append(f"`{job.job_id}` ({job.tool_name}) {job.status}{member}{partly}")
     return "\n".join([*lines, notice])
 
 
@@ -82,19 +84,21 @@ async def _unnoticed_notice(notices: JobNotices, agent_names: Sequence[str]) -> 
         return None
     notices.noticed.update(job.job_id for job in jobs)
     await _acknowledge_cancellations(runtime, jobs)
-    return _job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
+    return job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
 
 
-async def _turn_start_job_note(agent_names: Sequence[str] = ()) -> str | None:
+async def _turn_start_job_note(agent_names: Sequence[str] = (), asked: Collection[str] = ()) -> str | None:
     """Describe the conversation's jobs that ended before this reply, cancelled ones included, once per reply.
 
-    Every attempt of the reply asks again and gets the same note, since an attempt's prompt is not saved.
+    Jobs the turn's prompt already ``asked`` about, as a follow-up's does, are left out. Every attempt of the reply
+    asks again and gets the same note, since an attempt's prompt is not saved.
     """
     notices = _NOTICES.get()
     if notices is None:
         return None
     if not notices.started:
         notices.started = True
+        notices.noticed.update(asked)
         notices.start_note = await _unnoticed_notice(notices, agent_names)
     return notices.start_note
 
@@ -102,9 +106,10 @@ async def _turn_start_job_note(agent_names: Sequence[str] = ()) -> str | None:
 async def append_turn_start_job_note(
     items: Sequence[EnrichmentItem],
     agent_names: Sequence[str] = (),
+    asked: Collection[str] = (),
 ) -> tuple[EnrichmentItem, ...]:
     """Open the reply's prompt with its turn-start job note, when jobs ended before it."""
-    note = await _turn_start_job_note(agent_names)
+    note = await _turn_start_job_note(agent_names, asked)
     if note is None:
         return tuple(items)
     return (*items, EnrichmentItem(key="background_jobs", text=note, cache_policy="volatile", persist=False))

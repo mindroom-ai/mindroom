@@ -148,7 +148,7 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_p
         waited = await runtime.wait("member", owner=owner, depth=0)
         await runtime.release_wait("member", waited.claim)
         with tool_runtime_context(context):
-            assert not (await join_conversation_jobs(set(), joins=0)).holds
+            assert (await join_conversation_jobs(set(), joins=0)).prompt is None
             joined = await join_conversation_jobs(set(), joins=0, agent_names=("lead", "worker"))
             assert joined.prompt is not None
             assert 'job_id="member"' in joined.prompt
@@ -190,7 +190,7 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         assert pending_outcomes(runtime) == []
         assert pending_outcome(runtime, job.job_id) is None
         with tool_runtime_context(context):
-            assert not (await join_conversation_jobs(set(), joins=0)).holds
+            assert (await join_conversation_jobs(set(), joins=0)).prompt is None
         for control in (runtime.wait, runtime.cancel):
             with pytest.raises(JobAccessError):
                 await control(job.job_id, owner=owner, depth=0)

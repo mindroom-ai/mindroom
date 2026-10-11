@@ -35,8 +35,8 @@ class TurnIntent(StrEnum):
     HOOK_MESSAGE = "hook_message"
     HOOK_DISPATCH = HOOK_DISPATCH_SOURCE_KIND
     TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    # A waiting reply continues with the results of the background work it waits for.
-    JOB_WAKE = "job_wake"
+    # A new reply about background jobs that ended and that no reply collected.
+    JOB_FOLLOW_UP = "job_follow_up"
 
 
 class TurnTrust(StrEnum):

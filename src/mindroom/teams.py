@@ -2995,6 +2995,7 @@ async def prepare_materialized_team_execution(
         transient_enrichment_items=await append_turn_start_job_note(
             ctx.transient_enrichment_items,
             ctx.tool_job_agent_names or (),
+            ctx.asked_job_ids,
         ),
     )
     if ctx.system_enrichment_items:

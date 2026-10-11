@@ -1403,7 +1403,13 @@ async def _prepare_agent_run_context(
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
     prepared_run = await _prepare_agent_and_prompt(
-        replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items)),
+        replace(
+            ctx,
+            transient_enrichment_items=await append_turn_start_job_note(
+                ctx.transient_enrichment_items,
+                asked=ctx.asked_job_ids,
+            ),
+        ),
         prompt=prompt,
         runtime_paths=runtime_paths,
         config=config,

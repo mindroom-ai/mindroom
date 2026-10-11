@@ -2362,14 +2362,12 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("joins", "holds"), [(0, False), (1, False), (0, True)])
-async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_joined_or_held_reply(
+@pytest.mark.parametrize("joins", [0, 1])
+async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_joined_reply(
     monkeypatch: pytest.MonkeyPatch,
     joins: int,
-    *,
-    holds: bool,
 ) -> None:
-    """Without a job join or hold a streamed team publishes its terminal rendering, exactly as a disabled turn does."""
+    """Without a job join a streamed team publishes its terminal rendering, exactly as a disabled turn does."""
     log = _AdapterLog()
     attempts = 0
 
@@ -2392,14 +2390,14 @@ async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_join
         if len(attempted) < joins:
             attempted.add(f"job{len(attempted)}")
             return _JobJoin(prompt="Retrieve the result")
-        return _JobJoin(holds=holds)
+        return _JobJoin()
 
     monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
     chunks = await _collect(
         stream_response_turn(_ctx(), _streaming_adapter(log, attempt), TurnSinks(), continuation=_continuation()),
     )
     published = [chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk for chunk in chunks]
-    expected = ["Document 1", "Document 2"] if joins else ["Document 1"] if holds else ["notice:Terminal 1"]
+    expected = ["Document 1", "Document 2"] if joins else ["notice:Terminal 1"]
     assert published == expected
 
 

@@ -66,8 +66,8 @@ class EventKind(StrEnum):
     RTC = "rtc"
     REDACTION = "redaction"
     OPAQUE_HISTORY = "opaque_history"
-    # A runtime source, not a Matrix event: a waiting reply's background work is ready, or none is left.
-    JOB_WAKE = "job_wake"
+    # A runtime source, not a Matrix event: background jobs ended that no reply collected.
+    JOB_FOLLOW_UP = "job_follow_up"
     # A person asks from their client to cancel background jobs.
     JOB_CANCEL = "job_cancel"
 

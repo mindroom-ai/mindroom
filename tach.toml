@@ -510,7 +510,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.disabled",
-    "mindroom.tool_jobs.wakes",
+    "mindroom.tool_jobs.follow_ups",
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
     "mindroom.agent_cli.cli_approval_waits",
@@ -2845,7 +2845,7 @@ depends_on = [
     "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.runtime",
-    "mindroom.tool_jobs.wakes",
+    "mindroom.tool_jobs.follow_ups",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
     "mindroom.reply_scope",
@@ -4283,7 +4283,7 @@ path = "mindroom.bot"
 depends_on = [
     "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
-    "mindroom.tool_jobs.wakes",
+    "mindroom.tool_jobs.follow_ups",
     "mindroom.reply_scope",
     "mindroom.knowledge.utils",
     "mindroom.matrix.relation_lookup",
@@ -7947,7 +7947,7 @@ depends_on = [
     "mindroom.tool_jobs.instances",
     "mindroom.tool_jobs.provenance",
     "mindroom.tool_jobs.runtime",
-    "mindroom.tool_jobs.wakes",
+    "mindroom.tool_jobs.follow_ups",
 ]
 visibility = [
     "mindroom.orchestrator",
@@ -8288,6 +8288,7 @@ visibility = [
     "mindroom.ai",
     "mindroom.teams",
     "mindroom.tool_jobs.execution_scope",
+    "mindroom.tool_jobs.follow_ups",
 ]
 
 [[modules]]
@@ -8302,12 +8303,14 @@ depends_on = [
 visibility = ["mindroom.delegation.execution"]
 
 [[modules]]
-path = "mindroom.tool_jobs.wakes"
+path = "mindroom.tool_jobs.follow_ups"
 depends_on = [
     "mindroom.dispatch_source",
     "mindroom.event_journal",
     "mindroom.hooks.context",
     "mindroom.message_target",
+    "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.notices",
     "mindroom.turn_origin",
 ]
 visibility = [
@@ -8333,6 +8336,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.response_turn",
     "mindroom.teams",
+    "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.notices",
 ]
 

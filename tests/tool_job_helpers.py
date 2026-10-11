@@ -418,3 +418,19 @@ class SpanRecorder:
     async def admits(self) -> bool:
         """Let tools start until a Stop committed."""
         return not self.stopped
+
+
+def job_coordinator(tmp_path: Path, runtime: ToolJobRuntime, bot: MagicMock) -> ToolJobRuntimeCoordinator:
+    """A coordinator around a test runtime whose grants allow every job, delivering through one bot."""
+    paths = test_runtime_paths(tmp_path)
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: None,
+        bot_provider=lambda _name: bot,
+        agent_reply_memberships=MagicMock(),
+        journal_provider=lambda: tool_job_journal(paths.storage_root),
+    )
+    coordinator._runtime = runtime
+    # The journal the runtime keeps its jobs in, which the replies share.
+    coordinator._journal = tool_job_journal(tmp_path)
+    return coordinator

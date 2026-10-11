@@ -1653,12 +1653,6 @@ class DeliveryGateway:
         await self._after_reply_commit(recorded)
         return True
 
-    async def end_wait(self, reply_id: str) -> None:
-        """End a reply's wait for background work no longer outstanding, and show its answer without the note."""
-        applied = await self.deps.outbox.replies.update(reply_id, lambda reply: rl.unhold(reply, now_ns=time.time_ns()))
-        if applied is not None and applied.transition.applied:
-            await self._after_reply_commit(applied)
-
     async def accepts_reply_stop(self, event_id: str, room_id: str) -> bool:
         """Return whether a Stop reaction on this event reaches a running reply or a pending create."""
         return await self.deps.outbox.replies.accepts_stop(event_id, room_id)
