@@ -255,12 +255,11 @@ function CapInput({
   );
 }
 
+/** Users with spend or their own cap, shown with the caps the runtime applies, not unsaved edits. */
 function UsersCard({
-  budgets,
   status,
   statusError,
 }: {
-  budgets: BudgetsConfig;
   status: EnabledBudgetStatus | undefined;
   statusError: string | undefined;
 }) {
@@ -274,9 +273,9 @@ function UsersCard({
   const spendKnown = status?.generated_at != null;
   const users = status?.users ?? [];
   const defaultLabel =
-    budgets.monthly_limit_usd == null
+    status?.default_limit_usd == null
       ? "Uncapped"
-      : `Default (${formatUsd(budgets.monthly_limit_usd)})`;
+      : `Default (${formatUsd(status.default_limit_usd)})`;
 
   // Caps are saved right away, apart from the page's Save button, and the server
   // files a bridge alias's cap under its canonical user.
@@ -371,9 +370,8 @@ function UsersCard({
               )}
               {users.map((user) => {
                 const override = user.override_usd ?? undefined;
-                const limit = override ?? budgets.monthly_limit_usd;
-                const over =
-                  spendKnown && limit != null && user.spend_usd >= limit;
+                const limit = user.limit_usd;
+                const over = spendKnown && user.over_budget;
                 const fraction =
                   limit == null
                     ? 0
@@ -422,7 +420,7 @@ function UsersCard({
                     <td className="sm:py-2">
                       {over ? (
                         <Badge variant="destructive">
-                          Over budget, using {budgets.fallback_model}
+                          Over budget, using {status?.fallback_model}
                         </Badge>
                       ) : (
                         <Badge variant="secondary">
@@ -650,7 +648,6 @@ export function Budgets() {
               </Card>
             ) : (
               <UsersCard
-                budgets={budgets}
                 status={status}
                 statusError={query.isError ? query.error.message : undefined}
               />

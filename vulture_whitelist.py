@@ -2,7 +2,6 @@
 # Names vulture would otherwise report as unused; each line names the files where vulture reports it.
 _.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_budgets  # Pydantic model validator (src/mindroom/config/main.py)
-_._validate_user_ids  # Pydantic field validator (src/mindroom/config/budgets.py)
 _.validate_template  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_cron  # Pydantic field validator (src/mindroom/config/automations.py)

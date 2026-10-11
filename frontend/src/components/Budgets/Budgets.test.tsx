@@ -169,6 +169,28 @@ describe("Budgets", () => {
     );
   });
 
+  it("shows the caps the runtime applies, not unsaved default edits", async () => {
+    setStore(
+      budgetConfig({
+        budgets: { monthly_limit_usd: 100, fallback_model: "astra" },
+      }),
+    );
+    vi.mocked(fetch).mockResolvedValue(respond(status));
+    renderBudgets();
+
+    const alice = await screen.findByRole("row", {
+      name: /@alice:example.org/,
+    });
+    expect(
+      within(alice).getByText("Over budget, using luna"),
+    ).toBeInTheDocument();
+    expect(
+      within(alice).getByRole("textbox", {
+        name: "Monthly cap for @alice:example.org",
+      }),
+    ).toHaveAttribute("placeholder", "Default ($20.00)");
+  });
+
   it("keeps cents of a cent visible for small spend and caps", async () => {
     setStore(
       budgetConfig({
