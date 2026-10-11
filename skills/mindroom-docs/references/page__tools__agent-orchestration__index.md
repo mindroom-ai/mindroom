@@ -267,7 +267,7 @@ The reply waits for the decision for `background_tool_jobs.approval_wait_timeout
 The setting is a non-negative number of seconds, defaulting to `300`; `0` continues at once, and `null` waits until the decision or a newer human message.
 A call's own `wait_timeout`, or a newer human message, releases the reply the same way.
 Pressing **Stop** before the decision cancels the call, even when it is approved afterwards.
-Calls that must finish inside the run keep pausing it for their approval: tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
+Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 A job's cards show that it waits for approval; pressing **Stop** on the waiting message or cancelling the job denies its open cards.

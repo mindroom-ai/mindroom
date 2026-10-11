@@ -33,7 +33,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   A gated call of a top-level agent that can become a managed job asks the same way, as its job's first phase: it is marked `mindroom_job` instead of pausing the run, the reply waits up to `approval_wait_timeout` for the decision and then goes on, and the call runs only once approved.
   A Stop recorded for its reply before the approval lands wins over that approval.
   Such a call never runs inline: one that cannot become a job fails, and the agent CLI never offers it.
-  Calls that must finish inside their run, excluded toolkits, subagents, and minimal mode keep the paused-run approval.
+  Calls that must finish inside their run, tools whose own definition requires confirmation, excluded toolkits, subagents, and minimal mode keep the paused-run approval.
   Turning the feature off parks saved work.
 
 ## Ownership
