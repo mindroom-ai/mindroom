@@ -809,6 +809,7 @@ class ResponseLifecycle:
                         response_text=final_delivery_outcome.final_visible_body,
                         response_event_id=response_event_id,
                         delivery_kind=final_delivery_outcome.delivery_kind,
+                        tool_trace=final_delivery_outcome.tool_trace,
                         continue_on_cancelled=True,
                     )
             else:
