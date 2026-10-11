@@ -352,9 +352,12 @@ async def test_persona_inherits_its_callers_skills_without_the_authoring_note(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("skills", "listed"), [(["scripted"], {"scripted"}), ([], set())])
+@pytest.mark.parametrize(
+    ("skills", "listed"),
+    [(["scripted"], {"scripted"}), ([], set()), (["scripted", "removed"], {"scripted"})],
+)
 async def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str], listed: set[str]) -> None:
-    """A skill list narrows the caller's skills, and an empty list leaves none."""
+    """A skill list narrows the caller's skills, an empty list leaves none, and a skill the caller lost is skipped."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
     identity = build_execution_identity_from_runtime_context(runtime)
     _write_skills(runtime, "scripted", "other")

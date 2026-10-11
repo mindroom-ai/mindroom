@@ -442,7 +442,7 @@ def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path)
     assert isinstance(at_max_depth, PersonaRequest)
     assert at_max_depth.persona is not None
     assert at_max_depth.persona.tools == ("file",)
-    assert lost_file == "Cannot delegate: unknown tool 'file'. Your tools: delegate, file."
+    assert lost_file == "Cannot delegate: unknown tool 'file'. Your tools: delegate."
 
 
 def test_inline_persona_reads_skills() -> None:
@@ -536,4 +536,4 @@ def test_inherited_skills_keep_only_those_the_caller_still_has(tmp_path: Path) -
     assert isinstance(inherited, PersonaRequest)
     assert inherited.persona is not None
     assert inherited.persona.skills == ("research",)
-    assert named == "Cannot delegate: unknown skill 'retired'. Your skills: research, retired."
+    assert named == "Cannot delegate: unknown skill 'retired'. Your skills: research."

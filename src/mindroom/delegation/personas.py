@@ -333,7 +333,12 @@ def validate_persona_tools(
     """Require every entry to name one of the caller's toolkits, or a known function of one, within ``cap``."""
     entry = missing_persona_tool(tools, available_toolkits, cap)
     if entry is not None:
-        yours = cap if cap is not None else sorted(set(available_toolkits))
+        # A cap entry the caller has since lost is no longer theirs to offer.
+        yours = (
+            [entry for entry in cap if entry.partition(".")[0] in available_toolkits]
+            if cap is not None
+            else sorted(set(available_toolkits))
+        )
         msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours) or 'none'}."
         raise PersonaError(msg)
 
@@ -482,25 +487,27 @@ def _capped_persona(
 def capped_persona_skills(
     persona: SubagentPersona,
     available_skills: Callable[[], Sequence[str]],
-    cap: tuple[str, ...] | None,
+    skill_cap: tuple[str, ...] | None,
 ) -> SubagentPersona:
-    """Require a persona's skills to be caller skills within ``cap``, resolving a persona that names none.
+    """Require a persona's skills to be caller skills within ``skill_cap``, resolving a persona that names none.
 
     Like knowledge search, skills follow an explicit tool list: a persona that names tools but no
-    skills gets none, and one that names neither inherits the ``cap`` skills its caller still has, as
-    a follow-up loads them, or every caller skill without a cap. The caller's skills are read only
-    when the persona names or inherits some.
+    skills gets none, and one that names neither inherits the ``skill_cap`` skills its caller still
+    has, as a follow-up loads them, or every caller skill without a cap. The caller's skills are read
+    only when the persona names or inherits some.
     """
-    if persona.skills is None and persona.tools is None and cap:
+    if persona.skills is None and persona.tools is None and skill_cap:
         available = set(available_skills())
-        return replace(persona, skills=tuple(skill for skill in cap if skill in available))
+        return replace(persona, skills=tuple(skill for skill in skill_cap if skill in available))
     if persona.skills is None:
-        persona = replace(persona, skills=() if persona.tools is not None else cap)
+        persona = replace(persona, skills=() if persona.tools is not None else skill_cap)
     if persona.skills:
         available = set(available_skills())
         for skill in persona.skills:
-            if skill not in available or (cap is not None and skill not in cap):
-                yours = cap if cap is not None else sorted(available)
+            if skill not in available or (skill_cap is not None and skill not in skill_cap):
+                yours = (
+                    [name for name in skill_cap if name in available] if skill_cap is not None else sorted(available)
+                )
                 msg = f"Cannot delegate: unknown skill '{skill}'. Your skills: {', '.join(yours) or 'none'}."
                 raise PersonaError(msg)
     return persona
