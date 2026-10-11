@@ -28,7 +28,6 @@ import math
 import os
 import re
 import secrets
-import shutil
 import sys
 import tempfile
 import time
@@ -161,10 +160,6 @@ class Mic:
         self._speech.extend(pcm)
         self._done.clear()
 
-    def interrupt(self) -> None:
-        """Drop queued speech."""
-        self._speech.clear()
-
     async def wait_done(self) -> None:
         """Wait until queued speech has been sent."""
         await self._done.wait()
@@ -202,8 +197,6 @@ class Listener:
         self.track: rtc.RemoteAudioTrack | None = None
         self.voiced_ms = 0.0
         self.last_voiced_ns = 0
-        self.onsets: list[int] = []
-        self._in_speech = False
 
     def quiet_for(self) -> float:
         """Seconds since the agent was last voiced (inf if never)."""
@@ -226,12 +219,7 @@ class Listener:
                 )
                 if level > VOICED_RMS:
                     self.voiced_ms += event.frame.samples_per_channel * 1000 / SAMPLE_RATE
-                    if not self._in_speech and self.quiet_for() > 0.7:
-                        self.onsets.append(now)
-                    self._in_speech = True
                     self.last_voiced_ns = now
-                elif self.quiet_for() > 0.7:
-                    self._in_speech = False
         finally:
             await stream.aclose()
 
@@ -422,15 +410,14 @@ class Scenario:
         assert self.caller.listener is not None
         return self.caller.listener
 
-    async def say(self, label: str, parts: list[str | int], *, wait: bool = True) -> None:
-        """Speak an utterance; mark its first and last voiced frame times."""
+    async def say(self, label: str, parts: list[str | int]) -> None:
+        """Speak an utterance and mark when it starts and finishes."""
         assert self.caller.mic is not None
         pcm = await utterance_pcm(parts, self.openai_key)
         self.recorder.mark("say_start", label=label, audio_ms=len(pcm) // 2 * 1000 // SAMPLE_RATE)
         self.caller.mic.say(pcm)
-        if wait:
-            await self.caller.mic.wait_done()
-            self.recorder.mark("say_end", label=label)
+        await self.caller.mic.wait_done()
+        self.recorder.mark("say_end", label=label)
 
     async def wait_speaking(self, label: str, timeout_s: float = 60.0) -> bool:
         """Wait until the agent produces voiced audio after this call."""
@@ -662,11 +649,6 @@ def copy_instance_artifacts(out: Path, started: float) -> None:
             if stamp >= start_iso:
                 rows.append(line)
         (out / "instance.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
-    capture_root = os.environ.get("MINDROOM_CALL_AUDIO_CAPTURE_DIR")
-    if capture_root and Path(capture_root).exists():
-        fresh = [path for path in Path(capture_root).iterdir() if path.stat().st_mtime >= started]
-        for path in fresh:
-            shutil.copytree(path, out / "agent_capture" / path.name, dirs_exist_ok=True)
 
 
 async def main() -> int:

@@ -232,6 +232,7 @@ def main() -> int:
     markers = read_jsonl(run / "markers.jsonl")
     mic = read_jsonl(run / "mic.jsonl")
     rx = read_jsonl(run / "rx.jsonl")
+    stats = read_jsonl(run / "stats.jsonl")
     bursts = rx_bursts(rx)
     spoken = utterances(markers, mic)
     replies, barge_ins, delegated = [], [], []
@@ -253,13 +254,11 @@ def main() -> int:
         "barge_ins": barge_ins,
         "delegations": delegated,
         "rx_bursts": [asdict(b) | {"ms": round(b.ms)} for b in bursts],
-        "webrtc_inbound": stats_summary(read_jsonl(run / "stats.jsonl")),
+        "webrtc_inbound": stats_summary(stats),
         "rx_cadence": rx_cadence(rx),
         "transcript": transcript_summary(run / "transcript.md"),
         "timeouts": [m for m in markers if m["step"].startswith("timeout")],
-        "stalls": [
-            stall_impact(m, rx, read_jsonl(run / "stats.jsonl")) for m in markers if m["step"] == "stall_injected"
-        ],
+        "stalls": [stall_impact(m, rx, stats) for m in markers if m["step"] == "stall_injected"],
         "silent_watch_bursts_ms": [
             round(b.ms)
             for start in [m["t_ns"] for m in markers if m["step"] == "silent_watch_start"]
