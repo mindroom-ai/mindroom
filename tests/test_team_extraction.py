@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 
 from mindroom.teams import _get_response_content, format_team_response
@@ -169,6 +170,13 @@ class TestExtractTeamMemberContributions:
         team.messages = []
 
         assert format_team_response(team)[0] == f"**scout**: {content}"
+
+    def test_failed_member_is_left_out_of_the_reply(self) -> None:
+        """A failed member's content is its raw provider error, and the leader's answer already reports the failure."""
+        failed = RunOutput(agent_name="worker", content="Error code: 529 - overloaded", status=RunStatus.error)
+        team = TeamRunOutput(team_name="Team", content="The worker was unavailable.", member_responses=[failed])
+
+        assert format_team_response(team) == ["\n**Team Consensus**:", "The worker was unavailable."]
 
     def test_team_without_consensus(self) -> None:
         """Test team that only has member responses, no consensus."""

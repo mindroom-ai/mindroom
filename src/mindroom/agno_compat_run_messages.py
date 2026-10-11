@@ -130,7 +130,8 @@ def _with_current_messages(original: Callable[..., Any]) -> Callable[..., Any]:
 # hard-cancelled team run also leaves its members' delegation tasks running, so they
 # finish, still spending, after the team run is saved; stopping them reads Agno's
 # private per-run task set. MindRoom runs teams only asynchronously, so the
-# synchronous delegation path is left alone.
+# synchronous delegation path is left alone. The hold runs from the terminal-snapshot
+# and cancellation hooks in this module, so removing those must keep calling it.
 # Upstream issue: No matching issue identified; member-run attachment on cancellation
 # and streaming errors, and stopping member tasks of a cancelled team run, are untracked.
 # Upstream PR: None identified.

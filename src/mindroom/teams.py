@@ -903,6 +903,9 @@ def _format_contributions_recursive(  # noqa: C901
     if isinstance(response, TeamRunOutput):
         if response.member_responses:
             for member_resp in response.member_responses:
+                if member_resp.status == RunStatus.error:
+                    # A failed member's content is its raw error; the leader's answer reports the failure.
+                    continue
                 if isinstance(member_resp, TeamRunOutput):
                     team_name = member_resp.team_name or "Nested Team"
                     parts.append(f"{indent_str}**{team_name}** (Team):")

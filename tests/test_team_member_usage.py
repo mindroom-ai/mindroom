@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from agno.agent import Agent
 from agno.agent import _run as agent_run
+from agno.db.base import BaseDb, SessionType
 from agno.exceptions import ModelProviderError
 from agno.metrics import MessageMetrics
 from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.run.cancel import acancel_run
+from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team
 from agno.team import _run as team_run
@@ -86,7 +88,9 @@ def _answer(input_tokens: int) -> ModelResponse:
     )
 
 
-def _delegation() -> ModelResponse:
+def _delegation(*, collaborate: bool = False) -> ModelResponse:
+    if collaborate:
+        return _calling("delegate_task_to_members", '{"task": "Do the work"}', 10)
     return _calling("delegate_task_to_member", '{"member_id": "worker", "task": "Do the work"}', 10)
 
 
@@ -117,6 +121,7 @@ def _squad(
     *,
     leader: list[ModelResponse | Exception | str],
     member: list[ModelResponse | Exception | str],
+    collaborate: bool = False,
 ) -> _Squad:
     config = Config(
         agents={"worker": AgentConfig(display_name="Worker")},
@@ -141,7 +146,15 @@ def _squad(
             Function(name="publish", entrypoint=_lookup, requires_confirmation=True),
         ],
     )
-    team = Team(id="squad", name="Squad", members=[worker], model=leader_model, db=storage, telemetry=False)
+    team = Team(
+        id="squad",
+        name="Squad",
+        members=[worker],
+        model=leader_model,
+        db=storage,
+        telemetry=False,
+        delegate_to_all_members=collaborate,
+    )
     return _Squad(team=team, leader=leader_model, member=member_model, config=config, tmp_path=tmp_path)
 
 
@@ -170,12 +183,19 @@ async def _finish_detached_saves() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
 @pytest.mark.parametrize("asks_agno_to_cancel", [False, True], ids=["task-cancel", "task-and-agno-cancel"])
-async def test_stopped_team_member_keeps_its_usage(tmp_path: Path, stream: bool, asks_agno_to_cancel: bool) -> None:
+@pytest.mark.parametrize("collaborate", [False, True], ids=["coordinate", "collaborate"])
+async def test_stopped_team_member_keeps_its_usage(
+    tmp_path: Path,
+    stream: bool,
+    asks_agno_to_cancel: bool,
+    collaborate: bool,
+) -> None:
     """A Stop while a member works keeps every request the member already made, and stops the member."""
     squad = _squad(
         tmp_path,
-        leader=[_delegation(), _answer(1)],
+        leader=[_delegation(collaborate=collaborate), _answer(1)],
         member=[_calling("lookup", "{}", 100), _calling("lookup", "{}", 1000), _HANG],
+        collaborate=collaborate,
     )
     reply = asyncio.create_task(_run(squad, stream=stream))
     await squad.member.hanging.wait()
@@ -226,7 +246,8 @@ async def test_finished_team_member_counts_once(tmp_path: Path, stream: bool) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
-async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path, stream: bool) -> None:
+@pytest.mark.parametrize("stored_run", [False, True], ids=["by-run-id", "stored-run"])
+async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path, stream: bool, stored_run: bool) -> None:
     """A member resumed after an approval keeps the requests it makes before a Stop, as well as those before it paused."""
     squad = _squad(
         tmp_path,
@@ -235,15 +256,22 @@ async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path, str
     )
     paused = await squad.team.arun("Go", session_id="session", user_id="@alice:localhost", run_id="team-run")
     assert paused.is_paused
-    for requirement in paused.requirements or ():
+    # MindRoom resumes the paused run it reads back from storage; Agno can also look it up by id.
+    database = cast("BaseDb", squad.team.db)
+    session = database.get_session("session", session_type=SessionType.TEAM)
+    assert isinstance(session, TeamSession)
+    stored = session.get_run("team-run")
+    assert isinstance(stored, TeamRunOutput)
+    requirements = (stored if stored_run else paused).requirements or []
+    for requirement in requirements:
         requirement.confirm()
+    resume_from = {"run_response": stored} if stored_run else {"run_id": "team-run"}
 
     async def resume() -> None:
-        # Resume from storage, as the reply to an approval does.
         if stream:
             async for _ in squad.team.acontinue_run(
-                run_id="team-run",
-                requirements=paused.requirements,
+                **resume_from,
+                requirements=requirements,
                 session_id="session",
                 user_id="@alice:localhost",
                 stream=True,
@@ -251,8 +279,8 @@ async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path, str
                 pass
         else:
             await squad.team.acontinue_run(
-                run_id="team-run",
-                requirements=paused.requirements,
+                **resume_from,
+                requirements=requirements,
                 session_id="session",
                 user_id="@alice:localhost",
             )
