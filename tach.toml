@@ -470,6 +470,7 @@ expose = [
 path = "mindroom.event_journal"
 depends_on = [
     "mindroom.constants",
+    "mindroom.event_journal.history_recovery",
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.response_sources",
     "mindroom.history.types",
@@ -7224,6 +7225,10 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.delegation.execution",
 ]
+
+[[modules]]
+path = "mindroom.event_journal.history_recovery"
+depends_on = []
 
 [[modules]]
 path = "mindroom.event_journal.legacy_response_attempts"

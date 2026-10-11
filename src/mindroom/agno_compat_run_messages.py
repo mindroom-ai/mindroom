@@ -87,7 +87,7 @@ def _settle_abandoned_request(run_response: RunOutput | TeamRunOutput) -> None:
     )
 
 
-# Claude start usage: see the AGNO_COMPAT marker for Claude stream usage in agno_compat_claude.py.
+# Claude start usage: see the AGNO_COMPAT marker for Claude stream usage in providers/agno_compat_claude.py.
 def _claude_start_usage(request: _ModelRequest, received: MessageMetrics | None) -> MessageMetrics | None:
     """Return an interrupted Claude request's start usage when it received no other usage."""
     if not isinstance(request.model, ClaudeProviderSDKCompat):
