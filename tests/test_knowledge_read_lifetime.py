@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 from agno.knowledge.embedder.base import Embedder
 
-from mindroom.knowledge import collections, registry
+from mindroom.knowledge import collections, read_process, registry
 from mindroom.knowledge.collections import (
     CollectionSpace,
     build_vector_db,
@@ -192,11 +192,16 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
     """Selection is leased across publication, native query, and cancellation/reaping."""
     space, key, proxy = publication
     selected = tmp_path / "selected"
-    processes: list[asyncio.subprocess.Process] = []
-    spawn = asyncio.create_subprocess_exec
+    processes: list[subprocess.Popen[bytes]] = []
+    spawn_reader = read_process._spawn_reader
 
-    async def gated_spawn(*args: str, stdin: int, stdout: int, env: dict[str, str]) -> asyncio.subprocess.Process:
-        process = await spawn(args[0], "-c", _GATED_READER, str(selected), stdin=stdin, stdout=stdout, env=env)
+    def gated_spawn() -> subprocess.Popen[bytes]:
+        process = subprocess.Popen(
+            [sys.executable, "-c", _GATED_READER, str(selected)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=read_process._child_environment(),
+        )
         processes.append(process)
         return process
 
@@ -209,7 +214,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         with original_lock(path, exclusive=exclusive):
             yield
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", gated_spawn)
+    monkeypatch.setattr(read_process, "_spawn_reader", gated_spawn)
     monkeypatch.setattr(collections, "collection_lifetime_lock", observed_lock)
     read_task = asyncio.create_task(proxy.async_search("alpha"))
     refresh_task = None
@@ -218,6 +223,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
             while not selected.exists():  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
                 await asyncio.sleep(0.01)
         assert selected.read_text() == proxy.collection_name
+        [reader] = [process for process in processes if process is not read_process._warm_reader]
         refresh_task = asyncio.create_task(
             asyncio.to_thread(collections._delete_collection_sync, space, proxy.collection_name)
             if direct_delete
@@ -231,13 +237,16 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
             with pytest.raises(asyncio.CancelledError):
                 await read_task
         else:
-            processes[0].send_signal(signal.SIGUSR1)
+            reader.send_signal(signal.SIGUSR1)
             assert [document.content for document in await read_task] == ["original"]
         await asyncio.wait_for(refresh_task, 10)
-        assert processes[0].returncode is not None
+        assert reader.returncode is not None
         assert not collection_exists(str(space.storage_path), proxy.collection_name)
         if direct_delete:
             await asyncio.to_thread(_publish, space, key, "replacement")
+        # The warm replacement runs the gated reader; serve the follow-up read from a real one.
+        monkeypatch.setattr(read_process, "_spawn_reader", spawn_reader)
+        read_process._discard_warm_reader()
         assert [document.content for document in await asyncio.to_thread(proxy.search, "alpha")] == ["replacement"]
     finally:
         read_task.cancel()
@@ -296,7 +305,10 @@ def test_registry_initialization_accepts_superseded_state_snapshot(
 
 @pytest.mark.parametrize("orphan", [False, True])
 def test_native_reader_deadline_releases_lock_after_parent_death(tmp_path: Path, orphan: bool) -> None:
-    """A kernel deadline releases the lease even when native code holds the GIL."""
+    """A kernel deadline releases the lease even when native code holds the GIL.
+
+    The deadline starts with the request, so a reader that idled past it first still serves the read.
+    """
     if sys.platform != "linux":
         pytest.skip("The isolated orphan supervisor uses Linux child adoption")
     probe = tmp_path / "reader_probe.py"
@@ -314,14 +326,15 @@ if len(sys.argv) > 1 and sys.argv[1] == "worker":
             pid_path.write_text(str(os.getpid()))
             ctypes.PyDLL(None).pause()
     read_worker._PublishedChromaDb = BlockedNative
-    read_worker._main(timeout=float(sys.argv[2]))
+    read_worker._main()
 elif len(sys.argv) > 1 and sys.argv[1] == "parent":
     from mindroom.knowledge import read_process
     from mindroom.knowledge.read_protocol import ReadRequest
-    original = subprocess.run
-    def launch(command, **kwargs):
-        return original([sys.executable, __file__, "worker", command[-1]], **kwargs)
-    read_process.subprocess.run = launch
+    def launch():
+        return subprocess.Popen(
+            [sys.executable, __file__, "worker"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        )
+    read_process._spawn_reader = launch
     read_process.read_chroma(ReadRequest(str(root), "published", "query", [1.0]), timeout=2)
 else:
     assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
@@ -329,12 +342,14 @@ else:
     child = None
     process = subprocess.Popen(
         [sys.executable, __file__, "parent"] if orphan else
-        [sys.executable, __file__, "worker", "0.3"],
+        [sys.executable, __file__, "worker"],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     try:
         if not orphan:
-            process.stdin.write(('{"path":' + __import__('json').dumps(str(root)) +
+            time.sleep(0.6)
+            assert process.poll() is None, "an idle reader spent its deadline"
+            process.stdin.write(('0.3\\n{"path":' + __import__('json').dumps(str(root)) +
                 ',"collection":"published","query":"query","embedding":[1.0]}').encode())
             process.stdin.close()
         deadline = time.monotonic() + 15
