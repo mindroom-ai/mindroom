@@ -37,7 +37,7 @@ def computer_origins(paths: RuntimePaths) -> tuple[str, ...]:
         # The bundled iOS app has a fixed custom-scheme origin. Accept only
         # this literal, never arbitrary capacitor origins or opaque "null".
         return tuple(origin if origin == _CAPACITOR_ORIGIN else parse_browser_origin(origin) for origin in origins)
-    except (ValueError, TypeError):
+    except ValueError:
         return ()
 
 

@@ -42,6 +42,7 @@ MINDROOM_MCP_GATEWAY_ENABLED=true
 
 The gateway is disabled by default and stays disabled unless all of these settings are present.
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment; loopback HTTP origins are accepted for local development.
+Internationalized hostnames must be written in their ASCII `xn--` form, and an invalid value disables the gateway.
 Restart the API after changing any gateway environment variable.
 Until then, gateway routes return `404 MCP gateway is disabled`.
 If a gateway setting is invalid, the API logs `MCP gateway disabled: check public origin, limits, authentication, and account provisioning` and starts without the gateway.
@@ -108,6 +109,7 @@ MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS=https://client.example.org,http://localhost
 
 The gateway's public origin is allowed automatically.
 Additional origins must be HTTPS or loopback HTTP; wildcards are rejected.
+Internationalized hostnames in `MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS` must be written in their ASCII `xn--` form, and an invalid entry disables the gateway.
 Cross-origin MCP requests never carry browser cookies and do not grant access to dashboard APIs.
 The public registration, token, revocation, and discovery endpoints accept noncredentialed cross-origin requests.
 

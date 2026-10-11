@@ -13448,6 +13448,7 @@ Browser changes made with a dashboard sign-in or trusted upstream identity must 
 ### Unauthenticated dashboard host names
 
 Without a credential, the dashboard and the `/v1` API answer only requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, or `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+Internationalized hostnames in `MINDROOM_PUBLIC_URL` must be written in their ASCII `xn--` form, as described in [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/).
 This blocks DNS-rebinding attacks from other web pages.
 Any other name, such as `myserver.local`, fails with `Host '<host>' is not allowed without a credential; add it to MINDROOM_DASHBOARD_ALLOWED_HOSTS or configure authentication`.
 Browser pages may call it only when served from the same host, from a `localhost` name or loopback address, or from a host set through the URL settings above or `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
@@ -16136,6 +16137,7 @@ MINDROOM_MCP_GATEWAY_ENABLED=true
 
 The gateway is disabled by default and stays disabled unless all of these settings are present.
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment; loopback HTTP origins are accepted for local development.
+Internationalized hostnames must be written in their ASCII `xn--` form, and an invalid value disables the gateway.
 Restart the API after changing any gateway environment variable.
 Until then, gateway routes return `404 MCP gateway is disabled`.
 If a gateway setting is invalid, the API logs `MCP gateway disabled: check public origin, limits, authentication, and account provisioning` and starts without the gateway.
@@ -16202,6 +16204,7 @@ MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS=https://client.example.org,http://localhost
 
 The gateway's public origin is allowed automatically.
 Additional origins must be HTTPS or loopback HTTP; wildcards are rejected.
+Internationalized hostnames in `MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS` must be written in their ASCII `xn--` form, and an invalid entry disables the gateway.
 Cross-origin MCP requests never carry browser cookies and do not grant access to dashboard APIs.
 The public registration, token, revocation, and discovery endpoints accept noncredentialed cross-origin requests.
 

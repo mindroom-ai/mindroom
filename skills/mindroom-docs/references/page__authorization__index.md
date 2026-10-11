@@ -167,6 +167,7 @@ Browser changes made with a dashboard sign-in or trusted upstream identity must 
 ### Unauthenticated dashboard host names
 
 Without a credential, the dashboard and the `/v1` API answer only requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, or `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+Internationalized hostnames in `MINDROOM_PUBLIC_URL` must be written in their ASCII `xn--` form, as described in [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/).
 This blocks DNS-rebinding attacks from other web pages.
 Any other name, such as `myserver.local`, fails with `Host '<host>' is not allowed without a credential; add it to MINDROOM_DASHBOARD_ALLOWED_HOSTS or configure authentication`.
 Browser pages may call it only when served from the same host, from a `localhost` name or loopback address, or from a host set through the URL settings above or `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
