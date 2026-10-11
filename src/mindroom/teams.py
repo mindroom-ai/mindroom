@@ -3306,12 +3306,9 @@ async def team_response(  # noqa: C901, PLR0915
                 toolkit_owners=toolkit_owners_for_agents(attempt_agents),
             )
             if paused_attempt is not None:
-                # A pause after a job join keeps the output the reply already published.
-                joined_output = (
-                    StreamingPresentation(response_text=run.prior_response_text, tool_trace=run.prior_response_tools)
-                    if run.job_joins
-                    else None
-                )
+                # A pause after a job join keeps the text the reply already published; a blocking team's text shows
+                # no tool markers, so its earlier tools stay out of the pause's ordered presentation.
+                joined_output = StreamingPresentation(response_text=run.prior_response_text) if run.job_joins else None
                 return replace(
                     _attach_team_pause_presentation(
                         paused_attempt,
@@ -3944,6 +3941,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 response_text = _format_terminal_team_response(
                     event,
                     team_display_names=team_members.display_names,
+                    # A joined attempt continues the text its reply already headed.
+                    include_header=not run.job_joins,
                 )
                 event_has_visible = _has_visible_team_output(event)
                 if isinstance(event, RunOutput):

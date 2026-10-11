@@ -20,6 +20,7 @@ from agno.tools.function import Function
 from mindroom import response_turn as response_turn_module
 from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
 from mindroom.approval_execution import _continue_persisted_agent
+from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
@@ -452,6 +453,124 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+async def test_blocking_team_join_still_asks_for_an_approval_that_pauses(
+    tmp_path: Path,
+    show_tool_calls: bool,
+) -> None:
+    """A blocking team's pause after a job join keeps its earlier text and an ordered presentation for its card."""
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def slow_tool() -> str:
+        return "actual result"
+
+    async def approved_tool() -> str:
+        return "approved action"
+
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("slow_tool", "ordinary-call", wait_timeout=0)]),
+            ModelResponse(content="Independent work done."),
+        ],
+    )
+    install_tool_job_execution(model)
+    gated = assembled_function(approved_tool)
+    gated.requires_confirmation = True
+    storage_file = str(tmp_path / "team.db")
+    storage = SqliteDb(db_file=storage_file)
+    member = Agent(id="leader", name="Leader", model=model, telemetry=False)
+    team = Team(
+        id="leader",
+        model=model,
+        members=[member],
+        tools=[assembled_function(slow_tool), gated, JobTools(paths, owner)],
+        db=storage,
+        telemetry=False,
+    )
+    members = ResolvedExactTeamMembers(["leader"], [member], ["Leader"], {"leader"}, [])
+    scope = ScopeSessionContext(
+        HistoryScope(kind="team", scope_id="leader"),
+        storage,
+        None,
+        session_id=context.session_id,
+        storage_factory=lambda: SqliteDb(db_file=storage_file),
+    )
+    ctx = make_turn_context(
+        entity_label="leader",
+        session_id=context.session_id,
+        room_id=owner.room_id,
+        thread_id=owner.resolved_thread_id,
+        requester_id=owner.requester_id,
+    )
+
+    async def prepare(*_args: object, **kwargs: object) -> _PreparedMaterializedTeamExecution:
+        return _PreparedMaterializedTeamExecution(
+            messages=(Message(role="user", content=str(kwargs["message"])),),
+            run_metadata={},
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+            runtime_model_name="default",
+        )
+
+    original_join = response_turn_module.join_conversation_jobs
+
+    async def join_once_ready(attempted: set[str], **kwargs: object) -> _JobJoin:
+        jobs = await runtime.list_jobs(owner=owner, depth=0)
+        if not attempted:
+            # The join continues only with work that is ready, so let the job finish first.
+            await wait_for_status(runtime, jobs[0].job_id, "completed")
+            model.responses.extend(
+                [
+                    ModelResponse(tool_calls=[_call("job", "retrieve", action="wait", job_id=jobs[0].job_id)]),
+                    ModelResponse(content="Need approval.", tool_calls=[_call("approved_tool", "approval")]),
+                ],
+            )
+        return await original_join(attempted, **kwargs)
+
+    try:
+        with (
+            tool_runtime_context(context),
+            patch("mindroom.teams._materialize_team_members", return_value=members),
+            patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+            patch("mindroom.teams.open_bound_scope_session_context", return_value=nullcontext(scope)),
+            patch("mindroom.teams.prepare_materialized_team_execution", new=prepare),
+            patch.object(response_turn_module, "join_conversation_jobs", new=join_once_ready),
+            pytest.raises(ResponsePausedForApproval) as raised,
+        ):
+            await asyncio.wait_for(
+                team_response(
+                    agent_names=["leader"],
+                    mode=TeamMode.COORDINATE,
+                    message="Start",
+                    orchestrator=MagicMock(config=config, runtime_paths=paths),
+                    execution_identity=owner,
+                    ctx=ctx,
+                    user_id=owner.requester_id,
+                    turn_recorder=TurnRecorder(user_message="Start"),
+                    show_tool_calls=show_tool_calls,
+                ),
+                JOB_TEST_TIMEOUT,
+            )
+        paused = raised.value.paused
+        # The card can be posted: every pending tool has its place in the presentation.
+        require_ordered_pause_presentation(paused, show_tool_calls=show_tool_calls)
+        assert "Independent work done." in paused.response_text
+        assert [tool.tool_call_id for tool in paused.tools] == ["approval"]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("repeat_join", [False, True])
 async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C901, PLR0915 - One native job lifecycle across delivery modes.
@@ -607,6 +726,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
             answer = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
             assert "Final result received." in answer
             assert answer.count("**Team Response**") == 1
+            assert recorder.assistant_text.count("**Team Response**") == 1
             assert answer.count("Independent work done.") == 1
             assert recorder.assistant_text.count("Independent work done.") == 1
             assert "Final result received." in recorder.assistant_text
