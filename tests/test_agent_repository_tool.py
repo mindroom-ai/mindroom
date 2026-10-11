@@ -29,6 +29,7 @@ from mindroom.agent_repositories import (
 )
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.agent_repository import AgentRepositoryTools
+from mindroom.git_invocation import hardened_git_command
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.sandbox_proxy import ensure_worker_target_ready
@@ -309,7 +310,8 @@ async def test_ensure_runs_no_git_network_or_push_command(
 
     assert payload["status"] == "ok"
     assert commands
-    assert all(command[:2] == ("git", "config") for command in commands)
+    git_config_list = tuple(hardened_git_command(["config", "--no-includes", "--file", "-", "--null", "--list"]))
+    assert all(command == git_config_list for command in commands)
 
 
 @pytest.mark.asyncio

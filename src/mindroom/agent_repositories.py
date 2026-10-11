@@ -22,6 +22,7 @@ import httpx
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.runtime_env_policy import (
     AGENT_REPOSITORY_ENV_BY_KEY,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -716,11 +717,12 @@ def _parse_git_config_entries(payload: bytes) -> tuple[tuple[str, str], ...]:
     try:
         config_text = payload.decode("utf-8")
         result = subprocess.run(
-            ["git", "config", "--no-includes", "--file", "-", "--null", "--list"],
+            hardened_git_command(["config", "--no-includes", "--file", "-", "--null", "--list"]),
             input=config_text,
             check=False,
             capture_output=True,
             text=True,
+            env=hardened_git_env(),
             timeout=_GIT_CONFIG_PARSE_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
