@@ -34,6 +34,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.event_journal.matrix_delivery import RecoveryOutcome
 from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
@@ -46,7 +47,6 @@ from mindroom.matrix.health import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.matrix_delivery import RecoveryOutcome
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.runtime import (

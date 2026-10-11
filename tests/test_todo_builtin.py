@@ -22,9 +22,9 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.todo_state import todos_path
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
-from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )

@@ -12,8 +12,13 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 
-from mindroom import approval_manager
 from mindroom.access_policy import resolve_responder_access
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.tool_approval import (
+    BackgroundScriptToolOrigin,
+    ToolApprovalDecision,
+    resolve_tool_approval_approver,
+)
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.custom_tools.script import bind_script_run_manager
@@ -44,11 +49,6 @@ from mindroom.script_runs.reasons import (
 from mindroom.script_runs.recovery import script_process_authority, verified_script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
-from mindroom.tool_approval import (
-    BackgroundScriptToolOrigin,
-    ToolApprovalDecision,
-    resolve_tool_approval_approver,
-)
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,

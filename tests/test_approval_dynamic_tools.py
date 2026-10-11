@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
@@ -27,7 +27,7 @@ from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_lo
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -607,7 +607,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             "resolve_for_agent_async",
             AsyncMock(return_value=SimpleNamespace(knowledge=None)),
         )
-        monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
+        monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
 
         async def continue_saved_run() -> CompletedApprovalRun | PausedAttempt:
             return await execution.continue_run(

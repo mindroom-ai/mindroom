@@ -18,10 +18,11 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
-from mindroom.embedding_errors import EmbedderRequestError
-from mindroom.embedding_factory import create_configured_embedder, resolve_embedder_settings
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.factory import create_configured_embedder, resolve_embedder_settings
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.memory.config import (
     _get_memory_config,
     _Mem0StrictOpenAIEmbedder,
@@ -37,7 +38,6 @@ from mindroom.model_defaults import (
     OPENROUTER_OPENAI_EMBEDDING_SMALL,
     OPENROUTER_OPENAI_LUNA,
 )
-from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
 from tests.conftest import orchestrator_runtime_paths
@@ -786,7 +786,7 @@ class TestMemoryConfig:
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),
-            patch("mindroom.embedding_factory.create_configured_embedder", return_value=strict_embedder),
+            patch("mindroom.embeddings.factory.create_configured_embedder", return_value=strict_embedder),
         ):
             result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 

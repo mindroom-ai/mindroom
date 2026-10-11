@@ -17,7 +17,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from mindroom import shell_supervisor as shell_supervisor_module
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api import sandbox_runner_scripts as sandbox_runner_scripts_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
@@ -28,7 +27,8 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.script_runs.models import script_worker_key_for_run
-from mindroom.shell_supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
+from mindroom.shell import supervisor as shell_supervisor_module
+from mindroom.shell.supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 from mindroom.workers.backends import local as local_workers_module

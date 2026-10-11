@@ -3365,7 +3365,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         )
         if action == "decision_failure":
             judge.decision = RuntimeError("Decision provider unavailable")
-        monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_: judge)
+        monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_: judge)
         if backend != "model" and action != "decision_failure":
             model.decision = ModelResponse(content="Useful answer")
         model.cache_response = True

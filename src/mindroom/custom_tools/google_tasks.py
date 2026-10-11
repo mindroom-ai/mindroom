@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from googleapiclient.errors import HttpError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import GoogleApiToolkit, google_http_error_result
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider
 

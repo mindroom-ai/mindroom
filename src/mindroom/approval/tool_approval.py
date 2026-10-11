@@ -1,0 +1,403 @@
+"""Tool-call approval rule evaluation and public approval API."""
+
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import json
+import threading
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
+from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import uuid4
+
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.manager import (
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    ApprovalActionResult,
+    ToolApprovalTransportError,
+)
+from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.logging_config import get_logger
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
+    from types import ModuleType
+
+    from mindroom.config.approval import ApprovalRuleConfig
+    from mindroom.config.main import Config
+    from mindroom.event_journal import (
+        ScheduledApprovalArmState,
+        ScheduledCall,
+        ScheduledCallBinding,
+        ScheduledCallClaim,
+        ScheduledCallOutcome,
+        ScheduledCallRefusal,
+    )
+
+__all__ = [
+    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "POLICY_CONFIRMATION_APPROVAL_TYPE",
+    "ApprovalActionResult",
+    "BackgroundScriptToolOrigin",
+    "MatrixApprovalAction",
+    "ToolApprovalDecision",
+    "ToolApprovalScriptError",
+    "ToolApprovalTransportError",
+    "arm_scheduled_call_approval",
+    "claim_scheduled_call",
+    "evaluate_tool_approval",
+    "handle_matrix_approval_action",
+    "is_process_active_approval_card",
+    "record_scheduled_call_outcome",
+    "request_scheduled_call_approval",
+    "resolve_tool_approval_approver",
+    "scheduled_call",
+    "scheduled_call_offers_any_arguments",
+    "shutdown_approval_runtime",
+    "tool_may_require_approval",
+    "withdraw_scheduled_call_approval",
+]
+
+# Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
+POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
+# The terminal card edit carries the reason twice, and nio encrypts it as ASCII-escaped JSON that base64 grows by 4/3.
+# Escaping turns one emoji into 12 bytes, so the reply is bounded by escaped size to keep the edit below the event limit.
+_MAX_RESOLUTION_REASON_JSON_BYTES = 2000
+_SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
+_SCRIPT_CACHE_LOCK = threading.Lock()
+logger = get_logger(__name__)
+
+
+class ToolApprovalScriptError(RuntimeError):
+    """One approval-script load or execution failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundScriptToolOrigin:
+    """Durable identity for one background-script tool call."""
+
+    run_id: str
+    call_id: str
+    requester_id: str
+    toolkit_name: str
+    function_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolApprovalDecision:
+    """One terminal automation approval decision."""
+
+    approved: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixApprovalAction:
+    """One Matrix approval action emitted by a reaction, reply, or custom event."""
+
+    room_id: str
+    sender_id: str
+    card_event_id: str | None
+    status: Literal["approved", "denied"] | None
+    reason: str | None
+    auto_approve_seconds: int | None = None
+    action: Literal["revoke_auto_approval"] | None = None
+    grant_id: str | None = None
+    current_binding: str | None = None
+    scheduled_scope: str | None = None
+
+
+def _check_callable_from_module(
+    module: ModuleType,
+    resolved_path: Path,
+) -> Callable[[str, dict[str, Any], str], bool] | Callable[[str, dict[str, Any], str], Awaitable[bool]]:
+    check = getattr(module, "check", None)
+    if not callable(check):
+        msg = f"Approval script '{resolved_path}' must define callable check(tool_name, arguments, agent_name)."
+        raise ToolApprovalScriptError(msg)
+    return cast(
+        "Callable[[str, dict[str, Any], str], bool] | Callable[[str, dict[str, Any], str], Awaitable[bool]]",
+        check,
+    )
+
+
+def _load_script_module(
+    script: str,
+    runtime_paths: RuntimePaths,
+) -> tuple[ModuleType, Path]:
+    resolved_path = resolve_config_relative_path(script, runtime_paths)
+    if not resolved_path.is_file():
+        msg = f"Approval script '{resolved_path}' was not found."
+        raise ToolApprovalScriptError(msg)
+
+    mtime_ns = resolved_path.stat().st_mtime_ns
+    cache_key = (str(resolved_path), mtime_ns)
+    with _SCRIPT_CACHE_LOCK:
+        cached_module = _SCRIPT_CACHE.get(cache_key)
+    if cached_module is not None:
+        return cached_module, resolved_path
+
+    spec = importlib.util.spec_from_file_location(f"mindroom_tool_approval_{uuid4().hex}", resolved_path)
+    if spec is None or spec.loader is None:
+        msg = f"Approval script '{resolved_path}' could not be loaded."
+        raise ToolApprovalScriptError(msg)
+
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        msg = f"Approval script '{resolved_path}' failed to import with {type(exc).__name__}"
+        raise ToolApprovalScriptError(msg) from exc
+
+    with _SCRIPT_CACHE_LOCK:
+        cached_module = _SCRIPT_CACHE.get(cache_key)
+        if cached_module is not None:
+            return cached_module, resolved_path
+        stale_keys = [key for key in _SCRIPT_CACHE if key[0] == str(resolved_path) and key != cache_key]
+        for stale_key in stale_keys:
+            _SCRIPT_CACHE.pop(stale_key, None)
+        _SCRIPT_CACHE[cache_key] = module
+    return module, resolved_path
+
+
+def _clear_script_cache() -> None:
+    """Clear the shared approval-script cache under the cache lock."""
+    with _SCRIPT_CACHE_LOCK:
+        _SCRIPT_CACHE.clear()
+
+
+def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
+    return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+
+
+def tool_may_require_approval(config: Config, tool_name: str) -> bool:
+    """Return whether one tool must use Agno's persisted confirmation boundary."""
+    rule = _matching_tool_approval_rule(config, tool_name)
+    if rule is None:
+        return config.tool_approval.default == "require_approval"
+    return rule.action != "auto_approve"
+
+
+def resolve_tool_approval_approver(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str | None,
+) -> str | None:
+    """Return the human requester allowed to resolve one approval request."""
+    if requester_id is None or not requester_id.startswith("@") or ":" not in requester_id:
+        return None
+    canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    if not is_human_requester_id(canonical_requester_id, config, runtime_paths):
+        return None
+    return canonical_requester_id
+
+
+async def evaluate_tool_approval(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_name: str,
+    arguments: dict[str, Any],
+    agent_name: str,
+) -> tuple[bool, float]:
+    """Return the approval decision for one tool call."""
+    approval_config = config.tool_approval
+    require_approval = approval_config.default == "require_approval"
+    timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
+
+    if tool_call_is_approval_exempt(tool_name, arguments):
+        return False, timeout_seconds
+
+    rule = _matching_tool_approval_rule(config, tool_name)
+    if rule is None:
+        return require_approval, timeout_seconds
+    if rule.timeout_days is not None:
+        timeout_seconds = rule.timeout_days * 24 * 60 * 60
+    if rule.action is not None:
+        return rule.action == "require_approval", timeout_seconds
+
+    assert rule.script is not None
+    module, resolved_path = _load_script_module(rule.script, runtime_paths)
+    check = _check_callable_from_module(module, resolved_path)
+    try:
+        result = check(tool_name, arguments, agent_name)
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception as exc:
+        logger.warning("Approval script raised", script_path=str(resolved_path), exc_info=True)
+        msg = f"Approval script '{resolved_path}' failed with {type(exc).__name__}"
+        raise ToolApprovalScriptError(msg) from exc
+    if not isinstance(result, bool):
+        msg = f"Approval script '{resolved_path}' returned a non-bool result."
+        raise ToolApprovalScriptError(msg)
+    return result, timeout_seconds
+
+
+def _bounded_resolution_reason(reason: str) -> str:
+    """Return the longest prefix whose ASCII-escaped JSON string body fits the reason budget."""
+    escaped_bytes = 0
+    for index, character in enumerate(reason):
+        escaped_bytes += len(json.dumps(character)) - 2
+        if escaped_bytes > _MAX_RESOLUTION_REASON_JSON_BYTES:
+            return reason[:index]
+    return reason
+
+
+async def handle_matrix_approval_action(
+    action: MatrixApprovalAction,
+    *,
+    authorize_responder: Callable[[str], bool],
+    before_consume: Callable[[], Awaitable[None]] | None = None,
+) -> ApprovalActionResult:
+    """Resolve a durable continuation card anchored to its Matrix event."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return ApprovalActionResult(consumed=False)
+    sanitized_reason = (
+        _bounded_resolution_reason(action.reason.strip())
+        if isinstance(action.reason, str) and action.reason.strip()
+        else None
+    )
+    if action.card_event_id is None:
+        return ApprovalActionResult(consumed=False)
+    if (
+        action.action == "revoke_auto_approval"
+        and action.grant_id is not None
+        and action.status is None
+        and action.auto_approve_seconds is None
+        and action.scheduled_scope is None
+    ):
+        return await manager.handle_grant_revocation(
+            room_id=action.room_id,
+            sender_id=action.sender_id,
+            card_event_id=action.card_event_id,
+            grant_id=action.grant_id,
+            authorize_responder=authorize_responder,
+            before_consume=before_consume,
+        )
+    if (
+        action.status is None
+        or action.action is not None
+        or action.grant_id is not None
+        or (action.scheduled_scope is not None and action.auto_approve_seconds is not None)
+    ):
+        return ApprovalActionResult(consumed=False)
+    return await manager.handle_card_response(
+        room_id=action.room_id,
+        sender_id=action.sender_id,
+        card_event_id=action.card_event_id,
+        status=action.status,
+        reason=sanitized_reason,
+        before_consume=before_consume,
+        authorize_responder=authorize_responder,
+        auto_approve_seconds=action.auto_approve_seconds,
+        current_binding=action.current_binding,
+        scheduled_scope=action.scheduled_scope,
+    )
+
+
+def scheduled_call_offers_any_arguments(
+    config: Config,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    requester_id: str,
+    approver_id: str,
+    authored_confirmation: bool,
+) -> bool:
+    """Return whether a scheduled call's card may offer approving any arguments.
+
+    Like a timed approval, the broader scope needs requesters who approve their own
+    calls. A tool that asks for its own confirmation is approved only for the exact
+    call shown. Generic MCP dispatch names its remote tool in the arguments, so
+    approving any arguments there would approve every tool on the server.
+    """
+    if not config.tool_approval.scheduled_any_arguments or approver_id != requester_id or authored_confirmation:
+        return False
+    operation = grant_operation(config, tool_name, arguments)
+    return operation is not None and operation.mcp_server_id is None
+
+
+async def request_scheduled_call_approval(
+    binding: ScheduledCallBinding,
+    *,
+    approver_user_id: str,
+    scheduled_for_text: str,
+    any_arguments_offered: bool,
+) -> bool:
+    """Publish the card that pre-approves the call a scheduled task stores."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.request_scheduled_call_approval(
+        binding,
+        approver_user_id=approver_user_id,
+        scheduled_for_text=scheduled_for_text,
+        any_arguments_offered=any_arguments_offered,
+    )
+
+
+async def scheduled_call(task_id: str) -> ScheduledCall | None:
+    """Read the call one scheduled task stored; none without a store."""
+    manager = approval_manager.get_approval_store()
+    return None if manager is None else await manager.scheduled_call(task_id)
+
+
+async def claim_scheduled_call(
+    call: ScheduledCall,
+    *,
+    arguments_json: str,
+    approver_user_id: str,
+) -> ScheduledCallClaim | ScheduledCallRefusal | None:
+    """Spend a scheduled approval for the arguments about to run; none without a store."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return None
+    return await manager.claim_scheduled_call(call, arguments_json=arguments_json, approver_user_id=approver_user_id)
+
+
+async def record_scheduled_call_outcome(task_id: str, outcome: ScheduledCallOutcome) -> None:
+    """Record how one claimed scheduled call ended."""
+    manager = approval_manager.get_approval_store()
+    if manager is not None:
+        await manager.record_scheduled_call_outcome(task_id, outcome)
+
+
+async def arm_scheduled_call_approval(
+    task_id: str,
+    workflow_digest: str,
+    *,
+    any_arguments_allowed: bool,
+) -> ScheduledApprovalArmState:
+    """Arm a scheduled call's approval as its unchanged task fires; unknown without a store."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return "none"
+    return await manager.arm_scheduled_call_approval(
+        task_id,
+        workflow_digest,
+        any_arguments_allowed=any_arguments_allowed,
+    )
+
+
+async def withdraw_scheduled_call_approval(task_id: str, *, reason: str) -> None:
+    """Withdraw a cancelled task's approval and deny its card if it is still pending."""
+    manager = approval_manager.get_approval_store()
+    if manager is not None:
+        await manager.withdraw_scheduled_call_approval(task_id, reason=reason)
+
+
+def is_process_active_approval_card(card_event_id: str) -> bool:
+    """Return whether one approval card is being settled in this process."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
+
+
+async def shutdown_approval_runtime() -> None:
+    """Stop approval transport work, drop runtime state, and clear script state."""
+    try:
+        await approval_manager.shutdown_approval_manager()
+    finally:
+        _clear_script_cache()

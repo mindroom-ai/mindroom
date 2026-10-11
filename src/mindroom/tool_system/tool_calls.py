@@ -19,8 +19,8 @@ from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)

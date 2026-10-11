@@ -30,7 +30,7 @@ from mindroom.tool_system.runtime_context import (
     detached_requester_context,
     tool_runtime_context,
 )
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
 from tests.history_helpers import _forced_compaction_context, _session
 
 if TYPE_CHECKING:

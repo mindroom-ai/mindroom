@@ -1,0 +1,521 @@
+"""Shared model-loading helpers used across AI and agent construction."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any, cast
+
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host, get_secret_from_env
+from mindroom.llm_request_logging import install_llm_request_logging
+from mindroom.logging_config import get_logger
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
+from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
+from mindroom.providers.google_adc import load_google_application_credentials
+from mindroom.providers.media_fallback import install_provider_media_fallback
+from mindroom.providers.prompt_cache_key import derive_agent_prompt_cache_key, derive_session_routing_key
+from mindroom.providers.stream_retry import install_provider_stream_retry_hook
+from mindroom.runtime_env_policy import (
+    AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
+    AZURE_OPENAI_ENV_BY_KEY,
+    VERTEXAI_CLAUDE_ENV_BY_KEY,
+)
+from mindroom.tool_system.dependencies import ensure_optional_deps
+
+if TYPE_CHECKING:
+    from agno.models.base import Model
+
+    from mindroom.config.main import Config
+    from mindroom.config.models import ModelConfig
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+logger = get_logger(__name__)
+
+__all__ = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
+
+_BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
+# The anthropic SDK rejects non-streaming requests whose max_tokens project past
+# 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
+# ceiling for non-streaming operations.
+_CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
+# A hosted API that sends no stream event for this long has stalled.
+_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
+# Local servers can stay silent for minutes while a request queues or a model
+# loads, so they and custom endpoints get an idle limit only when configured.
+_LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
+
+
+def canonical_provider(provider: str) -> str:
+    """Return the normalized provider key used for model dispatch and identity checks."""
+    return provider.strip().lower().replace("-", "_")
+
+
+def _populate_azure_openai_runtime_kwargs(
+    extra_kwargs: dict[str, Any],
+    runtime_paths: RuntimePaths,
+    *,
+    shared_api_key: bool,
+) -> None:
+    """Populate Azure OpenAI client settings from the active runtime env."""
+    if shared_api_key and "api_key" not in extra_kwargs:
+        api_key = get_secret_from_env(AZURE_OPENAI_ENV_BY_KEY["api_key"], runtime_paths=runtime_paths)
+        if api_key:
+            extra_kwargs["api_key"] = api_key
+    if "azure_endpoint" not in extra_kwargs:
+        azure_endpoint = get_secret_from_env(AZURE_OPENAI_ENV_BY_KEY["endpoint"], runtime_paths=runtime_paths)
+        if azure_endpoint:
+            extra_kwargs["azure_endpoint"] = azure_endpoint
+    if "api_version" not in extra_kwargs:
+        api_version = runtime_paths.env_value(AZURE_OPENAI_ENV_BY_KEY["api_version"])
+        if api_version:
+            extra_kwargs["api_version"] = api_version
+    if "azure_deployment" not in extra_kwargs:
+        azure_deployment = runtime_paths.env_value(AZURE_OPENAI_ENV_BY_KEY["deployment"])
+        if azure_deployment:
+            extra_kwargs["azure_deployment"] = azure_deployment
+
+
+def _populate_bedrock_claude_runtime_kwargs(
+    extra_kwargs: dict[str, Any],
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Populate AWS Bedrock Claude client settings from the active runtime env."""
+    explicit_profile = extra_kwargs.pop("aws_profile", None)
+    if "session" in extra_kwargs:
+        return
+
+    if "aws_region" not in extra_kwargs:
+        aws_region = get_secret_from_env(
+            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
+            runtime_paths=runtime_paths,
+        ) or get_secret_from_env(
+            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
+            runtime_paths=runtime_paths,
+        )
+        if aws_region:
+            extra_kwargs["aws_region"] = aws_region
+
+    has_explicit_static_credentials = "aws_access_key" in extra_kwargs or "aws_secret_key" in extra_kwargs
+    if has_explicit_static_credentials:
+        _populate_bedrock_claude_static_credentials(extra_kwargs, runtime_paths)
+        if explicit_profile:
+            logger.debug("bedrock_claude_profile_ignored_with_static_credentials")
+        return
+
+    if explicit_profile:
+        _set_bedrock_claude_session(extra_kwargs, str(explicit_profile))
+        return
+
+    _populate_bedrock_claude_static_credentials(extra_kwargs, runtime_paths)
+    if extra_kwargs.get("aws_access_key") or extra_kwargs.get("aws_secret_key"):
+        return
+
+    env_profile = get_secret_from_env(
+        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+        runtime_paths=runtime_paths,
+    )
+    _set_bedrock_claude_session(extra_kwargs, env_profile)
+
+
+def _populate_bedrock_claude_static_credentials(
+    extra_kwargs: dict[str, Any],
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Populate Bedrock static credentials from standard AWS env names."""
+    for config_key, env_key in (
+        ("aws_access_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"]),
+        ("aws_secret_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"]),
+        ("aws_session_token", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"]),
+    ):
+        if config_key in extra_kwargs:
+            continue
+        value = get_secret_from_env(env_key, runtime_paths=runtime_paths)
+        if value:
+            extra_kwargs[config_key] = value
+
+
+def _set_bedrock_claude_session(extra_kwargs: dict[str, Any], aws_profile: str | None) -> None:
+    """Create a boto3 session for profile or ambient IAM-role credential resolution."""
+    session_kwargs: dict[str, str] = {}
+    if aws_profile:
+        session_kwargs["profile_name"] = str(aws_profile)
+    if aws_region := extra_kwargs.get("aws_region"):
+        session_kwargs["region_name"] = str(aws_region)
+    import boto3.session  # noqa: PLC0415
+
+    extra_kwargs["session"] = boto3.session.Session(**session_kwargs)
+
+
+def _set_agent_prompt_cache_key(
+    extra_kwargs: dict[str, Any],
+    execution_identity: ToolExecutionIdentity | None,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Share cache accounting across an agent's threads unless explicitly overridden."""
+    if "prompt_cache_key" in extra_kwargs or execution_identity is None:
+        return
+    extra_kwargs["prompt_cache_key"] = derive_agent_prompt_cache_key(
+        execution_identity,
+        storage_root=runtime_paths.storage_root,
+    )
+
+
+def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    provider: str,
+    model_id: str,
+    model_config: ModelConfig,
+    extra_kwargs: dict[str, Any],
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Model:
+    """Create a model instance for one provider.
+
+    Model classes import inside their provider branches so importing this
+    module never imports a provider SDK; only the configured provider's SDK
+    loads at first model construction (#1436).
+    """
+    canonical_provider_key = canonical_provider(provider)
+    # A model that authenticates another way (for example Anthropic's auth_token) never gets the shared key.
+    shared_api_key = not _uses_alternative_auth(model_config)
+
+    if (
+        shared_api_key
+        and canonical_provider_key
+        not in {
+            "ollama",
+            "llama_cpp",
+            "vertexai_claude",
+            "codex",
+            "openai_codex",
+            "synthetic",
+            "kimi",
+            "kimi_code",
+            _BEDROCK_CLAUDE_PROVIDER,
+        }
+        and "api_key" not in extra_kwargs
+    ):
+        api_key = get_api_key_for_provider(canonical_provider_key, runtime_paths=runtime_paths)
+        if api_key:
+            extra_kwargs["api_key"] = api_key
+
+    if canonical_provider_key == "vertexai_claude":
+        # Vertex authenticates with Google credentials and never sends an API key.
+        extra_kwargs.pop("api_key", None)
+        if "project_id" not in extra_kwargs:
+            project_id = get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
+            if project_id:
+                extra_kwargs["project_id"] = project_id
+        if "region" not in extra_kwargs:
+            region = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
+            if region:
+                extra_kwargs["region"] = region
+        if "base_url" not in extra_kwargs:
+            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
+            if base_url:
+                extra_kwargs["base_url"] = base_url
+        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
+        if "credentials" not in client_params and (
+            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        ):
+            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
+        if client_params:
+            extra_kwargs["client_params"] = client_params
+
+    if canonical_provider_key == "azure":
+        _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths, shared_api_key=shared_api_key)
+
+    if canonical_provider_key in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
+        extra_kwargs.setdefault("cache_system_prompt", True)
+        extra_kwargs.setdefault("extended_cache_time", True)
+        extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
+
+    if canonical_provider_key == "ollama":
+        from mindroom.providers.ollama_model import MindRoomOllama  # noqa: PLC0415
+
+        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
+        logger.debug("using_ollama_host", host=host)
+        return MindRoomOllama(id=model_id, host=host, **extra_kwargs)
+
+    if canonical_provider_key == "synthetic":
+        from mindroom.providers.synthetic_model import SyntheticModel  # noqa: PLC0415
+
+        extra_kwargs.pop("api_key", None)
+        return SyntheticModel(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "openrouter":
+        from mindroom.providers.openai_models import MindRoomOpenRouter  # noqa: PLC0415
+
+        api_key = extra_kwargs.pop("api_key", None)
+        if not api_key:
+            api_key = get_api_key_for_provider(canonical_provider_key, runtime_paths=runtime_paths)
+        if not api_key:
+            logger.warning("No OpenRouter API key found in environment or CredentialsManager")
+        # Agno's OpenRouter dataclass defaults max_tokens to 1024, which silently
+        # truncates long replies mid-sentence; None keeps the cap out of the
+        # request so the provider's own model limit applies.
+        extra_kwargs.setdefault("max_tokens", None)
+        return MindRoomOpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
+
+    if canonical_provider_key == "zai":
+        # OpenAILike neither reads a provider env var nor rejects a missing key,
+        # so resolve the env fallback here and keep falsy keys out of the kwargs
+        # (a falsy api_key would make agno's OpenAI client fall back to
+        # OPENAI_API_KEY and send it to Z.ai).
+        if not extra_kwargs.get("api_key"):
+            extra_kwargs.pop("api_key", None)
+            env_api_key = get_secret_from_env(PROVIDER_ENV_KEYS["zai"], runtime_paths=runtime_paths)
+            if env_api_key:
+                extra_kwargs["api_key"] = env_api_key
+            else:
+                logger.warning("No Z.ai API key found in environment or CredentialsManager")
+        extra_kwargs.setdefault("name", "ZAI")
+        extra_kwargs.setdefault("provider", "ZAI")
+        from mindroom.providers.openai_models import MindRoomOpenAILike  # noqa: PLC0415
+
+        # The built-in endpoint stays out of extra_kwargs, which only carry configured endpoints.
+        zai_kwargs: dict[str, Any] = {"base_url": ZAI_BASE_URL_DEFAULT, **extra_kwargs}
+        return MindRoomOpenAILike(id=model_id, **zai_kwargs)
+
+    if canonical_provider_key in {"codex", "openai_codex"}:
+        from mindroom.providers.codex_model import (  # noqa: PLC0415
+            CodexResponses,
+            normalize_codex_model_id,
+        )
+
+        extra_kwargs.pop("api_key", None)
+        _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
+        if execution_identity is not None:
+            extra_kwargs["session_id"] = derive_session_routing_key(
+                execution_identity,
+                storage_root=runtime_paths.storage_root,
+            )
+        return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
+
+    if canonical_provider_key in {"kimi", "kimi_code"}:
+        from mindroom.providers.kimi_model import KimiChat, normalize_kimi_model_id  # noqa: PLC0415
+
+        extra_kwargs.pop("api_key", None)
+        _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
+        return KimiChat(id=normalize_kimi_model_id(model_id), **extra_kwargs)
+
+    if canonical_provider_key == _BEDROCK_CLAUDE_PROVIDER:
+        extra_kwargs.pop("api_key", None)
+        ensure_optional_deps(
+            ["boto3"],
+            "aws_bedrock",
+            runtime_paths,
+            missing_message="Missing AWS Bedrock dependencies. Install with: pip install 'mindroom[aws_bedrock]'",
+        )
+        _populate_bedrock_claude_runtime_kwargs(extra_kwargs, runtime_paths)
+        from mindroom.providers.bedrock_claude import MindRoomBedrockClaude  # noqa: PLC0415
+
+        return MindRoomBedrockClaude(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "openai":
+        from mindroom.providers.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
+
+        base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
+        if base_url:
+            extra_kwargs["base_url"] = base_url
+        if model_config.api == "responses" or (
+            model_config.api is None
+            and openai_native_tool_search_supported(canonical_provider_key, model_id, base_url=base_url)
+        ):
+            from mindroom.providers.openai_models import MindRoomOpenAIResponses  # noqa: PLC0415
+
+            return MindRoomOpenAIResponses(id=model_id, **extra_kwargs)
+
+        from mindroom.providers.openai_models import MindRoomOpenAIChat  # noqa: PLC0415
+
+        return MindRoomOpenAIChat(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "azure":
+        from mindroom.providers.azure_openai_model import MindRoomAzureOpenAI  # noqa: PLC0415
+
+        return MindRoomAzureOpenAI(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "anthropic":
+        from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude  # noqa: PLC0415
+
+        return MindRoomAnthropicClaude(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key in {"gemini", "google"}:
+        from mindroom.providers.google_gemini import MindRoomGoogleGemini  # noqa: PLC0415
+
+        return MindRoomGoogleGemini(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "vertexai_claude":
+        from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude  # noqa: PLC0415
+
+        return MindroomVertexAIClaude(
+            id=model_id,
+            context_window=model_config.context_window,
+            **extra_kwargs,
+        )
+
+    if canonical_provider_key == "llama_cpp":
+        from mindroom.providers.openai_models import MindRoomLlamaCpp  # noqa: PLC0415
+
+        return MindRoomLlamaCpp(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "cerebras":
+        from mindroom.providers.cerebras_model import MindRoomCerebras  # noqa: PLC0415
+
+        return MindRoomCerebras(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "groq":
+        from mindroom.providers.groq_model import MindRoomGroq  # noqa: PLC0415
+
+        return MindRoomGroq(id=model_id, **extra_kwargs)
+
+    if canonical_provider_key == "deepseek":
+        from mindroom.providers.openai_models import MindRoomDeepSeek  # noqa: PLC0415
+
+        return MindRoomDeepSeek(id=model_id, **extra_kwargs)
+
+    msg = f"Unsupported AI provider: {provider}"
+    raise ValueError(msg)
+
+
+def _sets_base_url(kwargs: object) -> bool:
+    """Return whether provider kwargs, at any depth, point the client at an explicit endpoint."""
+    return isinstance(kwargs, dict) and any(
+        (key == "base_url" and bool(value)) or _sets_base_url(value) for key, value in kwargs.items()
+    )
+
+
+def _stream_idle_timeout_seconds(model_config: ModelConfig, model_kwargs: dict[str, Any]) -> float | None:
+    """Return the silence limit for streamed provider requests, or None for no limit.
+
+    ``model_kwargs`` are the kwargs the model was built with, so endpoints resolved
+    from the runtime env, such as ``OPENAI_BASE_URL``, count as configured too.
+    """
+    if model_config.stream_idle_timeout_seconds is not None:
+        return model_config.stream_idle_timeout_seconds or None
+    if canonical_provider(model_config.provider) in _LOCAL_STREAM_PROVIDERS or _sets_base_url(model_kwargs):
+        return None
+    return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+
+
+def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return the dashboard key saved for one model config (``model:<name>``), if any."""
+    model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
+    return model_creds.get("api_key") if model_creds else None
+
+
+# Settings the provider model classes accept in place of ``api_key``; Gemini with
+# ``vertexai: true`` authenticates with Google Cloud credentials instead.
+_ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("auth_token",),
+    "azure": ("azure_ad_token", "azure_ad_token_provider"),
+    "google": ("vertexai",),
+}
+
+
+def _uses_alternative_auth(model_config: ModelConfig) -> bool:
+    """Return whether a model authenticates with a provider credential other than ``api_key``."""
+    provider = canonical_provider(model_config.provider)
+    extra_kwargs = model_config.extra_kwargs or {}
+    alternative_kwargs = _ALTERNATIVE_AUTH_KWARGS.get("google" if provider == "gemini" else provider, ())
+    return any(extra_kwargs.get(name) for name in alternative_kwargs)
+
+
+def model_uses_own_credential(model_name: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
+    """Return whether ``get_model_instance`` authenticates a model without the provider's shared key.
+
+    Its own credential is a key in config (``api_key`` or ``extra_kwargs.api_key``), a
+    provider's alternative credential such as Anthropic's ``auth_token``, or the key saved
+    for the model in the dashboard (``model:<name>``). Reading the dashboard key raises
+    ``OSError`` or ``ValueError`` when the credential store cannot be opened.
+    """
+    return bool(
+        model_config.configured_api_key()
+        or _uses_alternative_auth(model_config)
+        or _model_credential_api_key(model_name, runtime_paths),
+    )
+
+
+def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> str | None:
+    """Return the provider service a configured model needs a key for when none resolves, else None.
+
+    A model needs no shared key when ``model_uses_own_credential`` holds; otherwise the shared
+    provider key (including its env-var-named twin) must resolve. Only providers that
+    authenticate with one API key are checked, and unknown model names are left to config
+    validation.
+    """
+    model_config = config.models.get(model_name)
+    if model_config is None:
+        return None
+    provider = canonical_provider(model_config.provider)
+    if provider == "gemini":
+        provider = "google"
+    if provider == "ollama" or provider not in PROVIDER_ENV_KEYS:
+        return None
+    if model_uses_own_credential(model_name, model_config, runtime_paths):
+        return None
+    if get_api_key_for_provider(provider, runtime_paths=runtime_paths):
+        return None
+    return provider
+
+
+def get_model_instance(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str = "default",
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Model:
+    """Get a model instance from config.yaml."""
+    if model_name not in config.models:
+        available = ", ".join(sorted(config.models.keys()))
+        msg = f"Unknown model: {model_name}. Available models: {available}"
+        raise ValueError(msg)
+
+    model_config = config.models[model_name]
+    provider = model_config.provider
+    model_id = model_config.id
+
+    # Providers may write into authored nested values, such as an Agno Gemini generation_config dict.
+    extra_kwargs = deepcopy(model_config.extra_kwargs or {})
+    if configured_api_key := model_config.configured_api_key():
+        extra_kwargs["api_key"] = configured_api_key
+
+    model_api_key = _model_credential_api_key(model_name, runtime_paths)
+    if model_api_key:
+        extra_kwargs["api_key"] = model_api_key
+
+    if canonical_provider(provider) in {"codex", "openai_codex"}:
+        extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))
+
+    model = _create_model_for_provider(
+        provider,
+        model_id,
+        model_config,
+        extra_kwargs,
+        runtime_paths,
+        execution_identity,
+    )
+    logger.info(
+        "Using AI model",
+        model=model_name,
+        provider=provider,
+        configured_id=model_id,
+        effective_id=model.id,
+    )
+    install_llm_request_logging(
+        model,
+        agent_name=model_name,
+        debug_config=config.debug,
+        default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
+        configured_provider=provider,
+    )
+    install_claude_prompt_cache_hook(model)
+    install_provider_stream_retry_hook(
+        model,
+        idle_timeout_seconds=_stream_idle_timeout_seconds(model_config, extra_kwargs),
+    )
+    install_provider_media_fallback(
+        model,
+        fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
+    )
+    return model

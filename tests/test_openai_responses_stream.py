@@ -26,16 +26,16 @@ from openai import AsyncOpenAI, OpenAI
 
 from mindroom.agent_storage import create_state_storage
 from mindroom.agno_compat_session_persistence import drain_agent_cancellation
-from mindroom.codex_model import CodexResponses
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import IncompleteResponsesStreamError
-from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
-from mindroom.provider_media_fallback import install_provider_media_fallback
+from mindroom.providers.codex_model import CodexResponses
+from mindroom.providers.media_fallback import install_provider_media_fallback
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.system_prompt import render_session_context
-from mindroom.usage_stats import collect_admin_usage
+from mindroom.usage.stats import collect_admin_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator

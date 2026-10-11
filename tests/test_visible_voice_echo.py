@@ -20,7 +20,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.visible_voice_echo import (
+from mindroom.voice.visible_voice_echo import (
     VisibleVoiceEchoDeps,
     VisibleVoiceEchoLifecycle,
     VisibleVoiceEchoRequest,
@@ -271,7 +271,7 @@ async def test_recovery_adopts_untracked_marked_echo_before_sending(tmp_path: Pa
     with (
         turn_dispatch_recovery_scope(active=True),
         patch(
-            "mindroom.visible_voice_echo.find_response_event_ids_via_room_messages",
+            "mindroom.voice.visible_voice_echo.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
             return_value=frozenset({"$orphaned-echo"}),
         ) as find_echo,

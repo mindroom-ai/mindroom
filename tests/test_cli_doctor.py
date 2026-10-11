@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.credentials_sync import get_embedder_api_key
+from mindroom.credentials.sync import get_embedder_api_key
 
 if TYPE_CHECKING:
     from pathlib import Path

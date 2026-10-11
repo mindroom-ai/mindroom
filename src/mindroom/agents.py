@@ -12,13 +12,19 @@ from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 
 import mindroom.tools  # noqa: F401
-from mindroom import agent_storage, constants, model_loading
+from mindroom import agent_storage, constants
+from mindroom.agent_cli.cli_shell_agent import (
+    STANDARD_CLI_NOTE,
+    CliShellAgent,
+    standard_cli_eligible,
+    wrap_native_shell_window,
+)
+from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
-from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
-from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
 from mindroom.delegation.personas import (
     caller_toolkit_names,
@@ -33,17 +39,20 @@ from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import hide_mcp_function_collisions
-from mindroom.minimal_agent import MinimalAgent
-from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
+from mindroom.providers import model_loading
+from mindroom.providers.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
+from mindroom.providers.openai_tool_search import (
+    install_openai_deferred_tool_search,
+    openai_native_tool_search_supported,
+)
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
 )
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
@@ -96,7 +105,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
