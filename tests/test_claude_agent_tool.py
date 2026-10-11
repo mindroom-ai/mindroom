@@ -113,17 +113,23 @@ class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
 
     usage_totals: ClassVar[list[dict[str, Any]]] = []
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # A resumed session continues its Claude session ID; others share one fresh conversation ID.
+        self.claude_session_id = self.options.resume or "claude-session-123"
+
     async def receive_response(
         self,
     ) -> AsyncGenerator[AssistantMessage | ConversationResetMessage | ResultMessage, None]:
         usage = type(self).usage_totals.pop(0)
         if usage in (_CLEARED, _CLEARED_WITHOUT_USAGE):
-            # /clear discards the transcript and zeroes the running totals.
+            # /clear discards the transcript, zeroes the running totals, and continues under a new session ID.
             yield ConversationResetMessage(
                 new_conversation_id="conversation-2",
                 uuid="reset-1",
-                session_id="claude-session-123",
+                session_id=self.claude_session_id,
             )
+            self.claude_session_id = "claude-session-456"
             usage = {} if usage == _CLEARED else None
         yield AssistantMessage(content=[TextBlock(text="Fixed it")], model="claude-sonnet-5-5")
         yield ResultMessage(
@@ -132,7 +138,7 @@ class _MeteredFakeClaudeSDKClient(_FakeClaudeSDKClient):
             duration_api_ms=1,
             is_error=False,
             num_turns=3,
-            session_id="claude-session-123",
+            session_id=self.claude_session_id,
             total_cost_usd=0.02,
             model_usage=usage,
         )
@@ -1369,12 +1375,12 @@ async def test_continued_claude_conversation_counts_only_new_usage(
 
 
 @pytest.mark.asyncio
-async def test_claude_turn_whose_usage_write_failed_is_counted_by_the_next_turn(
+async def test_failed_claude_usage_write_is_not_charged_to_the_next_requester(
     tmp_path: Path,
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed write leaves the running totals uncounted, so the next saved turn includes them."""
+    """A turn whose write failed stays uncounted rather than moving to whoever sends the next prompt."""
     record = claude_agent_module.record_helper_usage
     failures = 1
 
@@ -1401,7 +1407,34 @@ async def test_claude_turn_whose_usage_write_failed_is_counted_by_the_next_turn(
             {"claude-sonnet-5-5": _model_usage(1000, 200, 5000, 0)},
             {"claude-sonnet-5-5": _model_usage(1500, 260, 9000, 0)},
         ],
-        [("@alice:localhost", None, None), ("@alice:localhost", None, None)],
+        [("@alice:localhost", None, None), ("@bob:localhost", None, None)],
     )
 
-    assert rows == [("@alice:localhost", 1500, 260, 9000)]
+    assert rows == [("@bob:localhost", 500, 60, 4000)]
+
+
+@pytest.mark.asyncio
+async def test_claude_session_resumed_after_a_clear_counts_only_new_usage(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleared conversation moves to a new session ID, and resuming the old one still subtracts its totals."""
+    rows = await _send_metered_turns(
+        tmp_path,
+        monkeypatch,
+        [
+            {"claude-sonnet-5-5": _model_usage(1000, 200, 0, 0)},
+            _CLEARED,
+            {"claude-sonnet-5-5": _model_usage(300, 50, 0, 0)},
+            {"claude-sonnet-5-5": _model_usage(1500, 260, 0, 0)},
+        ],
+        [
+            ("@alice:localhost", "first", None),
+            ("@alice:localhost", "first", None),
+            ("@alice:localhost", "first", None),
+            ("@alice:localhost", "second", "claude-session-123"),
+        ],
+    )
+
+    assert rows == [("@alice:localhost", 1800, 310, 0)]

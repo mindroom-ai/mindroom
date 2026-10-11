@@ -672,7 +672,7 @@ class ClaudeAgentTools(Toolkit):
         return self._format_response_output(response_text, tool_names, msg_result)
 
     async def _count_turn_usage(self, session: _ClaudeSessionState, result: ResultMessage) -> None:
-        """Record a turn's increase in Claude Code's running totals, counting the totals only once they are saved."""
+        """Record a turn's increase in Claude Code's running totals for the requester who ran it."""
         if result.model_usage is None:
             return
         totals = {
@@ -687,14 +687,14 @@ class ClaudeAgentTools(Toolkit):
         # A new session that continues a conversation keeps its Claude session ID, whose totals the manager
         # already counted; a cleared or brand-new conversation starts empty.
         previous = session.usage_totals or self._session_manager.usage_totals.get(result.session_id, {})
+        session.usage_totals = totals
+        self._session_manager.usage_totals[result.session_id] = totals
         try:
             await _record_turn_usage(_turn_usage(previous, totals))
         except Exception as error:
-            # Claude has already done the work, so a failed write must not hide its reply; the next turn counts it.
+            # Claude has already done the work, so a failed write must not hide its reply. The turn's usage is not
+            # carried into the next turn, which may belong to another requester.
             logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-            return
-        session.usage_totals = totals
-        self._session_manager.usage_totals[result.session_id] = totals
 
     async def _collect_response(
         self,
@@ -713,9 +713,8 @@ class ClaudeAgentTools(Toolkit):
                         tool_names.append(block.name)
             elif isinstance(message, ConversationResetMessage):
                 # /clear zeroes Claude Code's running totals, so the next totals start from nothing.
+                # The cleared conversation continues under a new session ID; the old ID keeps its counted totals.
                 session.usage_totals = {}
-                if session.claude_session_id is not None:
-                    self._session_manager.usage_totals.pop(session.claude_session_id, None)
             elif isinstance(message, ResultMessage):
                 result = message
                 session.claude_session_id = message.session_id
