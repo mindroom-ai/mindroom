@@ -330,3 +330,33 @@ async def test_claude_stream_that_fails_after_starting_counts_nothing(tmp_path: 
         assert not session.session_data["session_metrics"].get("input_tokens")
     finally:
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_stalled_claude_stream_counts_nothing(tmp_path: Path) -> None:
+    """A stream that starts and then goes silent fails as a stall; a failed attempt keeps no start usage."""
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    held = _HeldStream()
+    client = AsyncAnthropic(
+        api_key="test-key",
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
+            ),
+        ),
+    )
+    model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", async_client=client, max_tokens=1024)
+    # The stream already sent text, so the stall is not retried and ends the run as an error.
+    install_provider_stream_retry_hook(model, idle_timeout_seconds=0.2)
+    try:
+        agent = Agent(id="status", model=model, db=storage, telemetry=False)
+        async with asyncio.timeout(10):
+            async for _ in agent.arun("Check status", session_id="session", stream=True):
+                pass
+
+        session = storage.get_session("session", session_type=SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        assert not session.session_data["session_metrics"].get("input_tokens")
+    finally:
+        storage.close()

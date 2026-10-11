@@ -58,7 +58,8 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # tests/test_claude_stream_usage.py::test_hard_stopped_claude_reply_keeps_the_usage_reported_at_stream_start;
 # tests/test_claude_stream_usage.py::test_claude_reply_closed_from_another_task_keeps_its_start_usage;
 # tests/test_claude_stream_usage.py::test_completed_claude_stream_counts_its_usage_once;
-# tests/test_claude_stream_usage.py::test_claude_stream_that_fails_after_starting_counts_nothing.
+# tests/test_claude_stream_usage.py::test_claude_stream_that_fails_after_starting_counts_nothing;
+# tests/test_claude_stream_usage.py::test_stalled_claude_stream_counts_nothing.
 
 
 class ClaudeProviderSDKCompat:
@@ -84,7 +85,9 @@ class ClaudeProviderSDKCompat:
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> Iterator[ModelResponse]:
-        """Stream one attempt, forgetting its start usage if it fails rather than stops."""
+        """Stream one attempt, keeping its start usage only while it runs or after it stops."""
+        # A new attempt starts without any earlier attempt's start usage.
+        self._stream_start_usage = None
         try:
             yield from super().invoke_stream(  # ty: ignore[unresolved-attribute]
                 messages,
@@ -110,7 +113,9 @@ class ClaudeProviderSDKCompat:
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> AsyncIterator[ModelResponse]:
-        """Stream one attempt asynchronously, forgetting its start usage if it fails rather than stops."""
+        """Stream one attempt asynchronously, keeping its start usage only while it runs or after it stops."""
+        # A new attempt starts without any earlier attempt's start usage.
+        self._stream_start_usage = None
         try:
             async for chunk in super().ainvoke_stream(  # ty: ignore[unresolved-attribute]
                 messages,

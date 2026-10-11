@@ -221,9 +221,11 @@ def _with_metered_messages(
                 run_response=run_response,
                 compress_tool_results=compress_tool_results,
             )
-        except BaseException:
+        except BaseException as error:
             if _finish_request(request):
-                _settle_claude_start_usage(request)
+                if not isinstance(error, Exception):
+                    # Only a stopped or closed stream keeps Claude's start usage; a failed attempt counts none.
+                    _settle_claude_start_usage(request)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
@@ -261,9 +263,11 @@ def _with_metered_messages_async(
                 compress_tool_results=compress_tool_results,
             ):
                 yield response
-        except BaseException:
+        except BaseException as error:
             if _finish_request(request):
-                _settle_claude_start_usage(request)
+                if not isinstance(error, Exception):
+                    # Only a stopped or closed stream keeps Claude's start usage; a failed attempt counts none.
+                    _settle_claude_start_usage(request)
                 _retain_metered_message(messages, assistant_message)
             raise
         _finish_request(request)
