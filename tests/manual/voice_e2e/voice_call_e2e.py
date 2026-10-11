@@ -606,7 +606,35 @@ async def scenario_latency(s: Scenario) -> None:
     await s.reply("closing", timeout_s=30)
 
 
+async def scenario_probe(s: Scenario) -> None:
+    """One delegated memory question, for profiling a single delegate turn."""
+    await s.reply("greeting", timeout_s=45)
+    await s.say("memory_probe", ["Check your memory notes for what my favorite programming language is. One sentence."])
+    await s.reply("memory_probe", timeout_s=120)
+    await s.wait_quiet("memory_probe_settled", quiet_s=4.0, timeout_s=120)
+    await s.say("closing", ["Thanks, bye."])
+    await s.reply("closing", timeout_s=30)
+
+
+async def scenario_stale_queue(s: Scenario) -> None:
+    """Queue two delegations, cancel both by voice, and watch for stale answers."""
+    await s.reply("greeting", timeout_s=45)
+    await s.say("stale_first", ["Use your web search tool to look up the history of the Eiffel Tower in detail."])
+    await asyncio.sleep(1.0)
+    await s.say("stale_second", ["And also use your calculator tool to multiply seven hundred seventy seven by three."])
+    await asyncio.sleep(2.0)
+    await s.say("barge_in_cancel", ["Stop. Never mind, forget both of those. I don't need them anymore."])
+    await s.wait_quiet("after_cancel", quiet_s=2.0, timeout_s=60)
+    s.recorder.mark("silent_watch_start")
+    await asyncio.sleep(30)
+    s.recorder.mark("silent_watch_end", agent_voiced_ms=round(s.listener.voiced_ms))
+    await s.say("closing", ["Okay, bye."])
+    await s.reply("closing", timeout_s=30)
+
+
 SCENARIOS = {
+    "stale_queue": scenario_stale_queue,
+    "probe": scenario_probe,
     "latency": scenario_latency,
     "baseline": scenario_baseline,
     "delegated_barge": scenario_delegated_barge,
