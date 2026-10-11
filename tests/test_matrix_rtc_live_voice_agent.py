@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from livekit.agents.llm import ChatContext
@@ -12,7 +12,7 @@ from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 from structlog.testing import capture_logs
 
 from mindroom.matrix_rtc.call_tools import CallAgentResponse
-from mindroom.matrix_rtc.live_voice_agent import _LiveDelegationRunner
+from mindroom.matrix_rtc.live_voice_agent import _greet_when_subscribed, _LiveDelegationRunner
 from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions
 
 if TYPE_CHECKING:
@@ -248,3 +248,32 @@ async def test_live_delegation_failure_returns_safe_notice_and_next_turn_works()
     assert any("live_voice_agent.py:" in frame for frame in failure["traceback_frames"])
     assert sink.results[-1] == ("Done.", "two")
     await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_greeting_waits_until_the_caller_subscribes() -> None:
+    """RoomIO holds audio until subscription, so an earlier greeting would arrive late and be trimmed."""
+    subscribed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    session = MagicMock()
+    session.room_io.subscribed_fut = subscribed
+
+    _greet_when_subscribed(session, "Say hello.")
+    await asyncio.sleep(0)
+    session.generate_reply.assert_not_called()
+
+    subscribed.set_result(None)
+    await asyncio.sleep(0)
+    session.generate_reply.assert_called_once_with(instructions="Say hello.")
+
+
+@pytest.mark.asyncio
+async def test_live_greeting_is_skipped_when_the_session_closes_before_subscription() -> None:
+    """A caller who never subscribed gets no greeting from a closed session."""
+    subscribed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    session = MagicMock()
+    session.room_io.subscribed_fut = subscribed
+
+    _greet_when_subscribed(session, "Say hello.")
+    subscribed.cancel()
+    await asyncio.sleep(0)
+    session.generate_reply.assert_not_called()
