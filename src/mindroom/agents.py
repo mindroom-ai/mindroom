@@ -1993,7 +1993,7 @@ def create_agent(
     # An authored persona's prompt replaces the agent's identity; it gets no learning of its own and only the caller
     # skills its persona keeps.
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
-    # up front; it also hides functions Agno generates without an owning toolkit, such as knowledge search.
+    # up front; it also hides functions Agno generates without an owning toolkit, other than kept skills and knowledge.
     persona_prompt = persona.system_prompt if persona is not None else None
     persona_tools = persona.tools if persona is not None else None
     eager_deferred_tools = eager_deferred_tools or persona_tools is not None
@@ -2147,7 +2147,7 @@ def create_agent(
     knowledge_enabled = (
         not disable_runtime_capabilities
         and knowledge is not None
-        and persona_tools is None
+        and (persona is None or persona.kept_knowledge != ())
         and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
     )
     knowledge_sources = (

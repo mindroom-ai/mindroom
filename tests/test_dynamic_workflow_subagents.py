@@ -208,6 +208,18 @@ async def test_profile_participant_runs_workspace_profile(tmp_path: Path, monkey
     assert workflow.model.authored_prompts == ["You criticize."]
 
 
+def test_profile_participant_searches_no_knowledge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant runs without knowledge search even when its profile names knowledge bases."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    workflow.profile("critic", "---\ndescription: Critic.\ntools: []\nknowledge: [docs]\n---\nYou criticize.\n")
+    context = _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity())
+
+    request = workflow_module._participant_request(context, {"id": "critic", "profile": "critic"}, workflow_id="w")
+
+    assert request.persona is not None
+    assert request.persona.knowledge == ()
+
+
 @pytest.mark.asyncio
 async def test_preapproved_participant_tool_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A tool listed in the caller's dynamic_workflow allowed_tools runs without approval, even under a gated default."""
@@ -528,7 +540,7 @@ def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) 
     entity_ids(config, paths)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=_identity()),
-        persona=inline_persona("P", ["file"], None),
+        persona=inline_persona("P", ["file"], None, None),
     )
 
     request = workflow_module._participant_request(
@@ -615,7 +627,7 @@ def test_participant_from_authored_child_stays_within_its_skills(tmp_path: Path)
         (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: D\n---\n\nBody\n")
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=_identity()),
-        persona=inline_persona("P", None, ["research"]),
+        persona=inline_persona("P", None, ["research"], None),
     )
 
     unnamed = workflow_module._participant_request(context, {"id": "p", "system_prompt": "P"}, workflow_id="w")

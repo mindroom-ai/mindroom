@@ -48,6 +48,7 @@ from mindroom.delegation.lifecycle import (
     start_child_turn,
 )
 from mindroom.delegation.personas import (
+    caller_knowledge_names,
     caller_skill_names,
     caller_toolkit_names,
     follow_up_refusal,
@@ -274,6 +275,7 @@ async def _execute_child(
         runtime_paths,
         refresh_scheduler=refresh_scheduler,
         execution_identity=identity,
+        only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     storage = await asyncio.to_thread(
         create_session_storage,
@@ -729,6 +731,7 @@ def _resolve_fresh_target(
         system_prompt=args.get("system_prompt"),
         tools=args.get("tools"),
         skills=args.get("skills"),
+        knowledge=args.get("knowledge"),
         profile=args.get("profile"),
         model=model,
         minimal=bool(minimal),
@@ -745,6 +748,7 @@ def _resolve_fresh_target(
             runtime_paths,
             caller_workspace_root(),
         ),
+        available_knowledge=lambda: caller_knowledge_names(caller_identity.agent_name, live_delegation_config(config)),
         cap=context.persona if (context := get_tool_runtime_context()) is not None else None,
     )
     if isinstance(request, str):

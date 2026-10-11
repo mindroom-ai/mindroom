@@ -199,6 +199,27 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_persona_snapshot_without_knowledge_follows_its_tool_list(tmp_path: Path) -> None:
+    """A persona saved before authored knowledge existed keeps the knowledge it had: none beside a tool list."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+    child = _self_child(config, owner, persona)
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
+    payload = json.loads(record.read_text())
+    del payload["child"]["persona"]["knowledge"]
+    record.write_text(json.dumps(payload))
+
+    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+
+    assert restored.persona is not None
+    assert restored.persona.knowledge is None
+    assert restored.persona.kept_knowledge == ()
+
+
+@pytest.mark.asyncio
 async def test_persona_snapshot_without_skills_reads_as_skill_less(tmp_path: Path) -> None:
     """A persona saved before authored skills existed keeps running without skills, as it did then."""
     paths = _runtime_paths(tmp_path)

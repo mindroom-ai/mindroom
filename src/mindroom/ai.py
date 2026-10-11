@@ -1417,6 +1417,7 @@ async def run_delegated_child_response(
         runtime_paths,
         refresh_scheduler=refresh_scheduler,
         execution_identity=identity,
+        only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     context = get_tool_runtime_context()
     child_context = child_tool_runtime_context(context, child) if context is not None else None

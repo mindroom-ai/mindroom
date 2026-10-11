@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from agno.agent import Agent
@@ -13,6 +13,7 @@ from agno.models.response import ModelResponse, ToolExecution
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
+from mindroom import ai as ai_module
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
@@ -164,6 +165,7 @@ async def test_inline_persona_starts_self_child(tmp_path: Path, monkeypatch: pyt
         "system_prompt": "Inline {x} prompt",
         "tools": ["file"],
         "skills": [],
+        "knowledge": [],
     }
 
 
@@ -187,15 +189,15 @@ async def test_profile_persona_uses_profile_prompt_and_model(tmp_path: Path, mon
         ({"profile": "absent"}, "Cannot delegate: subagent profile 'absent' was not found in subagents/."),
         (
             {"agent_name": "child", "system_prompt": "P"},
-            "Cannot author a subagent for 'child': system_prompt, tools, skills, and profile apply only to yourself.",
+            "Cannot author a subagent for 'child': system_prompt, tools, skills, knowledge, and profile apply only to yourself.",
         ),
         (
             {"profile": "critic", "system_prompt": "P"},
-            "Cannot delegate: pass either profile or system_prompt, tools, and skills",
+            "Cannot delegate: pass either profile or system_prompt, tools, skills, and knowledge",
         ),
         (
             {"profile": "critic", "tools": ["file"]},
-            "Cannot delegate: pass either profile or system_prompt, tools, and skills",
+            "Cannot delegate: pass either profile or system_prompt, tools, skills, and knowledge",
         ),
         (
             {"system_prompt": "P", "tools": ["shell"]},
@@ -338,7 +340,7 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
     assert target.persona == SubagentPersona(source_kind="inline", source_name="", system_prompt="Member prompt")
     assert (
         refused
-        == "Cannot author a subagent for 'leader': system_prompt, tools, skills, and profile apply only to yourself."
+        == "Cannot author a subagent for 'leader': system_prompt, tools, skills, knowledge, and profile apply only to yourself."
     )
 
 
@@ -407,6 +409,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
         system_prompt="You add numbers.",
         tools=("calculator",),
         skills=(),
+        knowledge=(),
     )
 
 
@@ -706,9 +709,44 @@ async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> No
             )
 
     refused = await resolve(base, skills=["absent"])
-    inherited = await resolve(replace(base, persona=inline_persona("P", None, ["writing"])))
+    inherited = await resolve(replace(base, persona=inline_persona("P", None, ["writing"], None)))
 
     assert refused == "Cannot delegate: unknown skill 'absent'. Your skills: research, writing."
     assert not isinstance(inherited, str)
     assert inherited.persona is not None
     assert inherited.persona.skills == ("writing",)
+
+
+@pytest.mark.asyncio
+async def test_authored_knowledge_narrows_the_childs_knowledge_bases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A named knowledge base must be one of the caller's, and the child resolves only the bases it keeps."""
+    base = _config()
+    config = base.model_copy(
+        update={
+            "agents": {
+                **base.agents,
+                "leader": base.agents["leader"].model_copy(update={"knowledge_bases": ["docs", "faq"]}),
+            },
+            "knowledge_bases": {"docs": {"path": "./docs"}, "faq": {"path": "./faq"}},
+        },
+    )
+    config = Config.model_validate(config.model_dump())
+    harness = _Harness(tmp_path, monkeypatch, config)
+    requested: list[tuple[str, ...] | None] = []
+    resolve = ai_module.resolve_agent_knowledge_access_async
+
+    async def recording_resolve(*args: object, **kwargs: object) -> object:
+        requested.append(cast("tuple[str, ...] | None", kwargs.get("only")))
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(ai_module, "resolve_agent_knowledge_access_async", recording_resolve)
+
+    refused = await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", knowledge=["wiki"]))
+    await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["file"], knowledge=["faq"]))
+
+    assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
+    assert requested == [("faq",)]
+    assert harness.session_child()["persona"]["knowledge"] == ["faq"]

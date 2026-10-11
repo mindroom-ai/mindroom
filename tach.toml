@@ -900,6 +900,7 @@ visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agents",
     "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.delegation.personas",
 ]
 
 [[modules]]
@@ -5780,6 +5781,7 @@ expose = [
     "resolve_agent_knowledge_access_async",
     "resolve_knowledge_base_access",
     "resolve_knowledge_base_access_async",
+    "semantic_agent_knowledge_base_ids",
     "StandaloneKnowledgeRefreshScheduler",
 ]
 from = ["mindroom.knowledge"]
@@ -7015,6 +7017,8 @@ depends_on = [
 path = "mindroom.delegation.personas"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
+    "mindroom.agent_knowledge_descriptions",
+    "mindroom.knowledge.utils",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.delegation.state",
