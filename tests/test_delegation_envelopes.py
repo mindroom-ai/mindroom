@@ -44,12 +44,12 @@ class _InstructionRecordingModel(DelegationModel):
 
     system_prompts: list[str] = field(default_factory=list)
 
+    offered: list[list[str]] = field(default_factory=list)
+
     @property
     def authored_prompts(self) -> list[str]:
         """Each request's system message before the runtime sections that follow an authored subagent's prompt."""
         return [prompt.split("\n\n<your_role>", 1)[0] for prompt in self.system_prompts]
-
-    offered: list[list[str]] = field(default_factory=list)
 
     async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         tools = cast("list[dict[str, Any]]", kwargs.get("tools") or [])

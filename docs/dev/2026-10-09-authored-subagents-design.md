@@ -120,7 +120,7 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 
 ## Child construction
 
-`create_agent` accepts an optional persona and applies it in one private helper beside it:
+`create_agent` accepts an optional persona and builds the child's prompt from it:
 
 - The child's system message is built by Agno's normal prompt builder, like every agent's: the persona's `system_prompt` is Agno's `description`, so it leads, and `resolve_in_context` is off so braces in the prompt are never treated as session-state variables.
 - The prompt replaces the agent's identity: MindRoom's identity block, the configured role and instructions, personality and context files, and the skills listing are left out.
@@ -135,8 +135,7 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 
 A minimal persona uses `MinimalAgent` with the persona's `system_prompt` in place of the minimal bootstrap's identity line; the bootstrap's workspace, memory, and `mindroom-agent` lines stay, and its toolkit list names only the persona's toolkits.
 Its tool catalog behind `mindroom-agent` is the persona's tool subset.
-Because the prompt no longer mentions `mindroom-agent`, the Bash function description of a minimal persona adds one sentence saying that MindRoom tools are callable through `mindroom-agent` and that `mindroom-agent --help` lists them.
-Normal minimal agents keep their current prompt and Bash description, so their wording needs no new A/B evaluation.
+Normal minimal agents keep their current prompt.
 Minimal personas keep minimal mode's existing rules: they need the caller's shell permissions and deployment requirements, and approval-gated tools are hidden from them.
 
 ## Durability and state

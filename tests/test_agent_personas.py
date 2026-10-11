@@ -97,8 +97,13 @@ async def _prepare(runtime: ToolRuntimeContext, persona: SubagentPersona, prompt
 @pytest.mark.asyncio
 async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_path: Path) -> None:
     """The authored prompt leads in place of the agent's identity, and runtime sections stay as for every agent."""
-    runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="none", context_files=["SOUL.md"])
+    workspace = runtime.runtime_paths.storage_root / "agents" / "helper" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "SOUL.md").write_text("Configured personality")
     prompt = "Plain {not_a_var} text"
+    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
+    assert "Configured personality" in str(configured.role)
     prepared = await _prepare(runtime, inline_persona(prompt, None), "task")
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
@@ -106,8 +111,8 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_p
     assert message is not None
     content = str(message.content)
     assert content.startswith(f"{prompt}\n")
-    assert "Configured role" not in content
-    assert "Configured rule" not in content
+    for identity in ("Configured role", "Configured rule", "Configured personality", "Helper"):
+        assert identity not in content
     assert "## Tool Execution Environment" in content
 
 
@@ -243,6 +248,41 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path, monkeypatch: pyte
     # Only the configured agent defers its toolkit; the persona's build installs no tool search.
     [configured] = deferred
     assert "read_file" in configured
+
+
+def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path) -> None:
+    """A minimal copy that keeps delegate sees itself listed as a target without its configured role."""
+    runtime = _runtime(tmp_path, tools=["shell", "delegate"], delegate_to=["helper"])
+
+    agent = _child(runtime, ["shell", "delegate"], agent_mode="minimal")
+
+    assert isinstance(agent, MinimalAgent)
+    documents = "\n".join(agent.context_documents.values())
+    assert "Configured role" not in documents
+    assert "Yourself, run as a fresh copy." in documents
+
+
+def test_persona_with_tools_gets_no_deferred_loading_guidance(tmp_path: Path) -> None:
+    """An explicit tool list loads its toolkits up front, so the prompt never points at load_tool."""
+    runtime = _runtime(tmp_path, tools=["file", {"calculator": {"defer": True}}])
+
+    agent = _child(runtime, ["file"], session_id="session-1")
+
+    instructions = "\n".join(str(item) for item in agent.instructions or [])
+    assert "load_tool" not in instructions
+    assert "calculator" not in instructions
+
+
+def test_minimal_persona_roster_lists_the_toolkits_it_built(tmp_path: Path) -> None:
+    """A minimal persona's bootstrap lists the toolkits it can call, deferred ones it named included."""
+    runtime = _runtime(tmp_path, tools=["shell", "file", {"calculator": {"defer": True}}])
+
+    agent = _child(runtime, ["shell", "calculator"], session_id="session-1", agent_mode="minimal")
+
+    assert isinstance(agent, MinimalAgent)
+    [roster] = [line for line in agent.system_message.splitlines() if line.startswith("Toolkits callable")]
+    assert "calculator" in roster
+    assert "file" not in roster
 
 
 def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:

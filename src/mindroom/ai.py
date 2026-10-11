@@ -1055,7 +1055,7 @@ async def _prepare_turn_memory(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> MemoryPromptParts:
-    """Recall memories for a configured agent turn; an authored persona sees only its own prompt and task."""
+    """Recall memories for a configured agent turn; an authored persona recalls none."""
     if ctx.persona is not None:
         return MemoryPromptParts()
     return await build_memory_prompt_parts(

@@ -1936,7 +1936,7 @@ def create_agent(
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
-        persona: Authored subagent presentation: its whole system prompt and optional tool subset.
+        persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool subset.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -2098,7 +2098,8 @@ def create_agent(
         hidden_toolkits=tool_assembly.hidden_toolkits,
         loaded_tools=tool_assembly.loaded_tools,
         native_deferred_tool_names=tool_assembly.deferred_tool_names,
-        all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools,
+        # An explicit persona tool list loads every toolkit it names, so no deferred-loading guidance applies.
+        all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools or persona_tools is not None,
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
@@ -2182,11 +2183,10 @@ def create_agent(
             else "",
             context_documents=[document.body for document in role_context.context_documents],
             deferred_toolkits=tool_assembly.cli_deferred,
-            toolkit_names=[
-                name
-                for name in get_agent_toolkit_names(agent_name, config)
-                if persona_tools is None or name in {entry.partition(".")[0] for entry in persona_tools}
-            ],
+            # A persona's roster names the toolkits it actually built, deferred ones it named included.
+            toolkit_names=get_agent_toolkit_names(agent_name, config)
+            if persona_tools is None
+            else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names],
             identity=persona.system_prompt if persona is not None else None,
             minimal_instructions=agent_config.minimal_instructions if persona is None else (),
             context_files=role_context.workspace_context_files(agent_runtime.tool_base_dir),
