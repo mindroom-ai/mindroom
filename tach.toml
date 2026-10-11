@@ -2347,7 +2347,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.agno_compat_message_builder"
-depends_on = ["mindroom.history.message_content"]
+depends_on = ["mindroom.history.message_content", "mindroom.history.replay"]
 visibility = ["mindroom.agents", "mindroom.teams"]
 
 [[modules]]
@@ -7076,6 +7076,7 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.execution_preparation",
+    "mindroom.history.agno_compat_message_builder",
     "mindroom.history.compaction",
     "mindroom.history.runtime",
     "mindroom.history.summary_input",

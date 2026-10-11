@@ -2325,7 +2325,8 @@ def _create_team_instance(
         db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
-        add_session_summary_to_context=True,
+        # The summary replays as the first history message instead (history/agno_compat_message_builder.py).
+        add_session_summary_to_context=False,
         num_history_runs=history_settings.policy.num_history_runs,
         num_history_messages=history_settings.policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,

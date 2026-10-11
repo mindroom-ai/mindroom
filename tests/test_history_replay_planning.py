@@ -1628,6 +1628,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
     apply_replay_plan(target=agent, replay_plan=replay_plan)
 
     assert replay_plan.mode == "disabled"
-    assert agent.add_history_to_context is False
-    assert agent.num_history_runs is None
+    # History stays on with zero raw runs so the saved summary still replays first.
+    assert agent.add_history_to_context is True
+    assert agent.num_history_runs == 0
     assert agent.num_history_messages is None

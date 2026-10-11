@@ -21,6 +21,7 @@ from agno.run.base import RunContext, RunStatus
 from agno.run.messages import RunMessages
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.team import Team, _messages
 from agno.team import _run as team_run
@@ -388,15 +389,18 @@ async def _paused_and_resumed_requests(
     *,
     stream: bool,
     media_storage: LocalMediaStorage | None = None,
+    summary: str | None = None,
 ) -> tuple[list[Message], list[Message]]:
     """Run a media turn, pause the next turn for approval, resume it, and return both requests."""
     model = _ApprovalScriptedModel(id="scripted")
+    db = InMemoryDb()
     entity_kwargs: dict[str, Any] = {
         "model": model,
-        "db": InMemoryDb(),
+        "db": db,
         "media_storage": media_storage,
         "tools": [Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)],
         "add_history_to_context": True,
+        "add_session_summary_to_context": False,
         "store_history_messages": False,
         "telemetry": False,
     }
@@ -408,6 +412,10 @@ async def _paused_and_resumed_requests(
         images=[Image(id="mindroom_viewed_1", content=b"viewed-image", mime_type="image/png")],
         session_id="session",
     )
+    if summary is not None:
+        stored = entity.get_session(session_id="session")
+        stored.summary = SessionSummary(summary=summary)
+        db.upsert_session(stored)
     paused = await entity.arun("canvas response", session_id="session")
     assert paused.status == RunStatus.paused
     requirements = list(paused.requirements or [])

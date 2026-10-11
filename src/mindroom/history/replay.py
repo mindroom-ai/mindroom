@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast
 
+from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.agent import Agent
-    from agno.models.message import Message
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -101,6 +101,29 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
     return message.model_copy(update=updates) if updates else message
 
 
+_COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"
+
+
+def compaction_summary_message(summary: str, *, from_history: bool) -> Message:
+    """Render one compaction summary as the user message that replaces the history it covers."""
+    return Message(
+        role="user",
+        content=(
+            "The earlier part of this conversation was compacted into this summary:\n\n"
+            f"<compacted_history>\n{summary}\n</compacted_history>\n\n"
+            "The conversation continues after this summary. If it records progress on the request that follows, "
+            "continue that work from its next steps instead of starting over."
+        ),
+        provider_data={_COMPACTION_SUMMARY_MARKER: True},
+        from_history=from_history,
+    )
+
+
+def is_compaction_summary(message: Message) -> bool:
+    """Return whether one message is a rendered compaction summary."""
+    return isinstance(message.provider_data, dict) and message.provider_data.get(_COMPACTION_SUMMARY_MARKER) is True
+
+
 def _estimate_session_summary_tokens(summary_text: str | None) -> int:
     """Estimate prompt-visible tokens contributed by one stored session summary."""
     if summary_text is None:
@@ -108,15 +131,7 @@ def _estimate_session_summary_tokens(summary_text: str | None) -> int:
     normalized_summary = summary_text.strip()
     if not normalized_summary:
         return 0
-    wrapper = (
-        "Here is a brief summary of your previous interactions:\n\n"
-        "<summary_of_previous_interactions>\n"
-        f"{normalized_summary}\n"
-        "</summary_of_previous_interactions>\n\n"
-        "Note: this information is from previous interactions and may be outdated. "
-        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
-    )
-    return estimate_text_tokens(wrapper)
+    return estimate_text_tokens(str(compaction_summary_message(normalized_summary, from_history=True).content))
 
 
 def _estimate_history_messages_tokens(messages: list[Message]) -> int:
@@ -301,10 +316,12 @@ def plan_replay_that_fits(
             num_history_messages=num_history_messages,
         )
 
+    # Zero raw runs still replays history, which is what places the summary before the prompt.
     return ResolvedReplayPlan(
         mode="disabled",
         estimated_tokens=_session_summary_replay_tokens(session),
-        add_history_to_context=False,
+        add_history_to_context=True,
+        num_history_runs=0,
     )
 
 
@@ -457,7 +474,7 @@ def has_effective_persisted_replay(
     """Report whether a summary or permitted raw runs will reach the model."""
     if _session_has_summary_replay(session):
         return True
-    if not replay_plan.add_history_to_context:
+    if not replay_plan.add_history_to_context or replay_plan.num_history_runs == 0:
         return False
     return bool(scope_visible_runs(session, scope))
 
