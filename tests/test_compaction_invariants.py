@@ -680,7 +680,15 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
     assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "timeout": httpx.Timeout(600.0)}
     assert [(message.role, message.content) for message in model.seen_messages] == [
-        ("system", "Summarize the conversation."),
+        (
+            "system",
+            "Summarize the conversation.\n\n"
+            "Length limit: keep the summary under 32,000 tokens. "
+            "The response, including any reasoning, is cut off at 64,000 tokens, "
+            "and a cut-off summary is discarded. "
+            "When <previous_summary> is already near or above the target, condense it and drop its least important detail "
+            "instead of restating it in full.",
+        ),
         ("user", "conversation payload"),
     ]
 
@@ -800,6 +808,25 @@ def test_build_summary_request_messages_is_the_single_request_seam() -> None:
     ]
 
 
+def test_summary_request_targets_a_share_of_the_known_output_cap() -> None:
+    """A known output cap bounds the merged summary so restating it can never fill the cap."""
+    first, retry = (
+        build_summary_request_messages(
+            summary_prompt="prompt\n",
+            summary_input="input",
+            output_token_limit=32_768,
+            summary_length_divisor=divisor,
+        )
+        for divisor in (DEFAULT_SUMMARY_RETRY_POLICY.summary_length_divisor, 4)
+    )
+
+    assert first[0].content.startswith("prompt\n\nLength limit: keep the summary under 16,384 tokens.")
+    assert "cut off at 32,768 tokens" in first[0].content
+    assert "condense it" in first[0].content
+    assert "keep the summary under 8,192 tokens." in retry[0].content
+    assert [(message.role, message.content) for message in first[1:]] == [("user", "input")]
+
+
 # --- Invariant 4: deterministic retry on provider failure ----------------------
 
 
@@ -826,6 +853,18 @@ def test_retry_policy_shrinks_on_timeout_and_output_limit() -> None:
         )
         == 8_000
     )
+
+
+def test_retry_policy_keeps_budget_for_output_limit_with_known_cap() -> None:
+    decision = DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
+        attempt=1,
+        budget=16_000,
+        input_tokens=16_000,
+        minimum_progress_input_tokens=0,
+        error=CompactionSummaryOutputLimitError("summary hit the cap", output_token_limit=4_096),
+    )
+
+    assert decision == SummaryRetryDecision(budget=16_000, kind="shorter-summary")
 
 
 def test_retry_policy_halves_budget_for_typed_context_window_error() -> None:
@@ -1303,6 +1342,7 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
         "original request",
         "original request",
     ]
+    assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == [2, 2]
     retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
 
 
@@ -1331,7 +1371,7 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
     assert _chars_per_token_estimator(previous_summary) > initial_tokens // 2
     recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
     generate_summary = AsyncMock(
-        side_effect=[CompactionSummaryOutputLimitError("renamed owned output-limit signal"), recovered_summary],
+        side_effect=[ContextWindowExceededError(message="summary input too large"), recovered_summary],
     )
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
@@ -1362,8 +1402,12 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exists() -> None:
-    """An input at the progress minimum fails after one call without a run-less request."""
+async def test_retry_helper_retries_output_limit_at_progress_minimum_with_shorter_summary() -> None:
+    """An input that cannot shrink still gets a retry asking for a shorter summary.
+
+    Regression: an output-limit failure on a large previous summary plus one run
+    got no retry at all, so the same failing request repeated on every turn.
+    """
     previous_summary = "s" * 24_000
     runs = [_completed_run("run-1", padding=2_000)]
     summary_input_budget = 6_100
@@ -1375,15 +1419,19 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
         token_estimator=_chars_per_token_estimator,
     )
     assert [run.run_id for run in initial_runs] == ["run-1"]
-    original_error = CompactionSummaryOutputLimitError("renamed owned output-limit signal")
-    generate_summary = AsyncMock(side_effect=original_error)
+    recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+    generate_summary = AsyncMock(
+        side_effect=[
+            CompactionSummaryOutputLimitError("renamed owned output-limit signal", output_token_limit=4_096),
+            recovered_summary,
+        ],
+    )
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
         patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
-        pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
-        await _generate_compaction_summary_with_retry(
+        generated = await _generate_compaction_summary_with_retry(
             summary_model=SummaryModel(
                 FakeModel(id="summary-model", provider="fake"),
                 "summary-model",
@@ -1400,9 +1448,104 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
-    assert raised.value is original_error
-    generate_summary.assert_awaited_once()
-    assert "<run " in generate_summary.await_args.kwargs["summary_input"]
+    assert generated.summary is recovered_summary
+    assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [initial_input] * 2
+    assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == [2, 4]
+    assert [run.run_id for run in generated.included_runs] == ["run-1"]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_bounds_shorter_summary_retries_by_max_attempts() -> None:
+    """A second output-limit failure propagates instead of asking for an ever shorter summary."""
+    runs = [_completed_run("run-1", padding=2_000)]
+    initial_input, initial_runs = build_summary_input(
+        previous_summary="prior facts",
+        compacted_runs=runs,
+        history_settings=_HISTORY_SETTINGS,
+        max_input_tokens=10_000,
+        token_estimator=_chars_per_token_estimator,
+    )
+    final_error = CompactionSummaryOutputLimitError("shorter summary still hit the cap", output_token_limit=4_096)
+    generate_summary = AsyncMock(
+        side_effect=[
+            CompactionSummaryOutputLimitError("summary hit the cap", output_token_limit=4_096),
+            final_error,
+        ],
+    )
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
+        pytest.raises(CompactionSummaryOutputLimitError) as raised,
+    ):
+        await _generate_compaction_summary_with_retry(
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 10_000),
+            previous_summary="prior facts",
+            compactable_runs=runs,
+            initial_summary_input=initial_input,
+            initial_included_runs=initial_runs,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        )
+
+    assert raised.value is final_error
+    assert generate_summary.await_count == DEFAULT_SUMMARY_RETRY_POLICY.max_attempts == 2
+    assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == [2, 4]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "same_input", "divisors"),
+    [
+        (CompactionSummaryOutputLimitError("summary hit the cap", output_token_limit=4_096), True, [2, 4]),
+        (ContextWindowExceededError(message="summary input too large"), False, [2, 2]),
+    ],
+    ids=["output-limit", "input-size"],
+)
+async def test_retry_helper_keeps_input_for_output_limit_and_shrinks_for_input_size(
+    error: Exception,
+    *,
+    same_input: bool,
+    divisors: list[int],
+) -> None:
+    """Only an oversized input is shrunk; an overlong summary keeps every run and asks for a shorter summary."""
+    runs = [_completed_run(f"run-{index}", padding=2_000) for index in range(3)]
+    initial_input, initial_runs = build_summary_input(
+        previous_summary="prior facts",
+        compacted_runs=runs,
+        history_settings=_HISTORY_SETTINGS,
+        max_input_tokens=10_000,
+        token_estimator=_chars_per_token_estimator,
+    )
+    assert len(initial_runs) == 3
+    recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+    generate_summary = AsyncMock(side_effect=[error, recovered_summary])
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
+    ):
+        generated = await _generate_compaction_summary_with_retry(
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 10_000),
+            previous_summary="prior facts",
+            compactable_runs=runs,
+            initial_summary_input=initial_input,
+            initial_included_runs=initial_runs,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        )
+
+    assert generated.summary is recovered_summary
+    retry_input = generate_summary.await_args_list[1].kwargs["summary_input"]
+    assert (retry_input == initial_input) is same_input
+    assert [call.kwargs["summary_length_divisor"] for call in generate_summary.await_args_list] == divisors
+    assert (len(generated.included_runs) == len(runs)) is same_input
 
 
 @pytest.mark.asyncio

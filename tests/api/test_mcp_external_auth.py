@@ -75,6 +75,7 @@ def test_external_clients_share_dashboard_agent_selection(
         display_name="Research",
         role="Shared tools",
         tools=["calculator"],
+        mcp_gateway_shared_credentials=True,
         access=ResponderAccessConfig(users=["@alice:example.org"]),
     )
     selection = "/api/connections/mcp/selection"

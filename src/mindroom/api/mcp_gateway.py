@@ -26,6 +26,7 @@ from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot, require_api_state
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
+    SHARED_CREDENTIALS_GATEWAY_MESSAGE,
     resolve_connection_agent,
     resolve_connection_user,
 )
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.mcp_gateway.external_auth import ExternalIdentity
     from mindroom.mcp_gateway.oauth import GatewayAccessToken
-    from mindroom.mcp_gateway.types import GatewayToolResponse, SearchResult
+    from mindroom.mcp_gateway.types import GatewayErrorDetail, GatewayToolResponse, SearchResult
 
 logger = get_logger(__name__)
 _MACHINE_HEADERS = {**CONNECTIONS_HEADERS, "Access-Control-Allow-Origin": "*"}
@@ -316,7 +317,7 @@ class GatewayRuntime:
                         account_id=user.owner.account_id,
                         membership_index=app_state(request.app).agent_reply_memberships,
                     )
-                    if agent_name not in current_user.agent_names:
+                    if agent_name not in current_user.gateway_agent_names:
                         raise GatewayError(GatewayErrorCode.UNAUTHORIZED)
                     self.selections.require_selected(user.owner, agent_name, toolkit)
 
@@ -327,7 +328,7 @@ class GatewayRuntime:
         _, user, require_authority = await self.principal(request)
         defaults = (user.personal_agent_name,) if user.personal_agent_name is not None else ()
         saved = await self.selections.get(user.owner, defaults)
-        selected = {agent: tools for agent, tools in saved.items() if agent in user.agent_names}
+        selected = {agent: tools for agent, tools in saved.items() if agent in user.gateway_agent_names}
         require_current_access = self._access_guard(request, user, require_authority)
 
         agent = arguments.get("agent")
@@ -336,20 +337,23 @@ class GatewayRuntime:
         logger.info(
             "mcp_gateway_agent_selection",
             agent_provided=agent is not None,
-            agent_eligible=agent_name in user.agent_names,
+            agent_eligible=agent_name in user.gateway_agent_names,
             agent_saved=agent_name in saved,
             agent_selected=agent_name in selected,
             agent_case_match=agent_name is not None
-            and any(agent_name.casefold() == candidate.casefold() for candidate in user.agent_names),
-            eligible_agent_count=len(user.agent_names),
+            and any(agent_name.casefold() == candidate.casefold() for candidate in user.gateway_agent_names),
+            eligible_agent_count=len(user.gateway_agent_names),
             selected_agent_count=len(selected),
         )
         if name == "search_tools" and agent is None and "toolkit" not in arguments:
             return await self._search_selection(user, selected, arguments, require_current_access)
         if not isinstance(agent, str) or agent not in selected:
-            return {
-                "error": {"code": GatewayErrorCode.TOOL_NOT_FOUND, "message": "Agent is not selected or available."},
-            }
+            error: GatewayErrorDetail = (
+                {"code": GatewayErrorCode.UNAUTHORIZED, "message": SHARED_CREDENTIALS_GATEWAY_MESSAGE}
+                if agent_name in user.agent_names and agent_name not in user.gateway_agent_names
+                else {"code": GatewayErrorCode.TOOL_NOT_FOUND, "message": "Agent is not selected or available."}
+            )
+            return {"error": error}
         context = resolve_connection_agent(user, agent)
         operation_arguments = {key: value for key, value in arguments.items() if key != "agent"}
         if name == "search_tools" and "toolkit" not in arguments:
@@ -623,7 +627,9 @@ async def _consent(request: Request) -> Response:
             "Consent is invalid, expired, or belongs to another user",
             headers=CONNECTIONS_HEADERS,
         ) from exc
-    agent_names = tuple(context.config.get_agent(agent).display_name for agent in saved if agent in context.agent_names)
+    agent_names = tuple(
+        context.config.get_agent(agent).display_name for agent in saved if agent in context.gateway_agent_names
+    )
     return HTMLResponse(
         render_consent_page(
             client_name=consent.client_name,

@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import MatrixDelivery
+    from mindroom.message_target import MessageTarget
 
 pytestmark = pytest.mark.asyncio
 
@@ -108,17 +109,25 @@ async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterato
         await shutdown_approval_runtime()
 
 
-async def _respond(bot: AgentBot, *, resume: AsyncMock | None = None) -> str | None:
+async def _respond(
+    bot: AgentBot,
+    *,
+    resume: AsyncMock | None = None,
+    target: MessageTarget | None = None,
+) -> str | None:
     runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = target or _target()
     with (
         patch_response_runner_module(
-            ai_response=AsyncMock(side_effect=ResponsePausedForApproval(_paused())),
+            ai_response=AsyncMock(
+                side_effect=ResponsePausedForApproval(replace(_paused(), session_id=target.session_id)),
+            ),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ),
         patch.object(type(runner), "_continue_entity_call", resume or AsyncMock()),
     ):
-        return await runner.generate_response(_plain_request(_target()))
+        return await runner.generate_response(_plain_request(target))
 
 
 @contextmanager
@@ -250,6 +259,55 @@ async def test_a_pending_approval_keeps_its_conversation_busy_until_it_ends(tmp_
         await asyncio.wait_for(idle, timeout=5)
 
 
+async def _send_message(bot: AgentBot, event_id: str, body: str, *, thread_id: str | None = None) -> None:
+    """Hand a message from the requester to the bot, as ingress does once the journal admitted it."""
+    room = nio.MatrixRoom(_target().room_id, bot.matrix_id.full_id)
+    room.add_member("@user:localhost", "User", None)
+    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    message = nio.RoomMessageText.from_dict(
+        {
+            "content": content,
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 3,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+        },
+    )
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id=event_id,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=3,
+            source={},
+        ),
+    )
+    await bot._turn_controller.handle_text_event(room, message)
+    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_controller.deps.runtime)
+
+
+def _reactions(bot: AgentBot) -> list[dict[str, str]]:
+    return [
+        call.kwargs["content"]["m.relates_to"]
+        for call in bot.client.room_send.await_args_list
+        if call.kwargs["message_type"] == "m.reaction"
+    ]
+
+
+async def _wait_until_sent(bot: AgentBot, body: str) -> None:
+    async def sent() -> None:
+        while body not in _sent_bodies(bot):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(sent(), timeout=5)
+
+
 async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_ends(tmp_path: Path) -> None:
     """A follow-up to a conversation an approval holds gets ⏳, starts no turn of its own, and is answered after the decision.
 
@@ -259,62 +317,66 @@ async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_
         # The paused reply answers in room mode, so a later top-level message is part of its conversation.
         bot.config.agents["general"].thread_mode = "room"
         await _respond(bot)
-        room = nio.MatrixRoom(_target().room_id, bot.matrix_id.full_id)
-        room.add_member("@user:localhost", "User", None)
-        follow_up = nio.RoomMessageText.from_dict(
-            {
-                "content": {"body": "thanks", "msgtype": "m.text"},
-                "event_id": "$followup",
-                "sender": "@user:localhost",
-                "origin_server_ts": 3,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-            },
-        )
-        await bot.journal_principal().admit(
-            InboundEvent(
-                event_id="$followup",
-                room_id=room.room_id,
-                thread_id=None,
-                kind=EventKind.MESSAGE,
-                event_class=EventClass.ACTIONABLE,
-                sender="@user:localhost",
-                origin_server_ts=3,
-                source={},
-            ),
-        )
-        model = AsyncMock(return_value="Follow-up answer.")
+
+        async def answer(*_args: object, **_kwargs: object) -> str:
+            # A turn that runs while the approval waits cannot see the paused run, so it repeats the gated call.
+            if await bot.journal_principal().approval_continuation_for_source("$event") is not None:
+                raise ResponsePausedForApproval(_paused("run-2"))
+            return "Follow-up answer."
+
+        model = AsyncMock(side_effect=answer)
         with patch_response_runner_module(
             ai_response=model,
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):
-            await bot._turn_controller.handle_text_event(room, follow_up)
-            await wait_for_background_tasks(timeout=5.0, owner=bot._turn_controller.deps.runtime)
+            await _send_message(bot, "$followup", "thanks")
 
-            reactions = [
-                call.kwargs["content"]["m.relates_to"]
-                for call in bot.client.room_send.await_args_list
-                if call.kwargs["message_type"] == "m.reaction"
-            ]
-            assert reactions == [{"rel_type": "m.annotation", "event_id": "$followup", "key": "⏳"}]
+            assert _reactions(bot) == [{"rel_type": "m.annotation", "event_id": "$followup", "key": "⏳"}]
             # The follow-up waits behind the approval: no second turn runs beside the paused one.
+            runner = unwrap_extracted_collaborator(bot._response_runner)
+            assert runner._lifecycle_coordinator._get_or_create_queued_signal(_target()).has_pending_human_messages()
             model.assert_not_awaited()
-            assert bot._response_runner.is_held_for_approval(_target())
+            assert runner.is_held_for_approval(_target())
 
             with _journal_wakes(bot) as wakes:
                 assert await asyncio.wait_for(await _stop(bot, "$sent1", 5), timeout=5)
             await _run_approval_wakes(bot, wakes)
-
-            async def answered() -> None:
-                while "Follow-up answer." not in _sent_bodies(bot):  # noqa: ASYNC110
-                    await asyncio.sleep(0.01)
-
-            await asyncio.wait_for(answered(), timeout=5)
+            # A follow-up turn that ran beside the paused reply would now show a second card for the same call.
+            assert await bot._journal_store.principal("router@shared").pending_approval_room_ids() == ()
+            await _wait_until_sent(bot, "Follow-up answer.")
 
         model.assert_awaited_once()
         assert await bot.journal_principal().approval_continuation_for_source("$followup") is None
         assert not await bot._reply_runtime.store.is_pending("$followup")
+
+
+async def test_a_message_in_another_conversation_is_answered_while_an_approval_waits(tmp_path: Path) -> None:
+    """A pending approval holds only its own conversation.
+
+    A message that starts another conversation is answered at once, even while a follow-up waits in the held one.
+    """
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        # In thread mode the paused request roots its own thread, and a later top-level message starts another one.
+        paused = _target(thread_id="$event")
+        await _respond(bot, target=paused)
+        model = AsyncMock(return_value="Other answer.")
+        with patch_response_runner_module(
+            ai_response=model,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await _send_message(bot, "$followup", "thanks", thread_id="$event")
+            await _send_message(bot, "$other", "something else")
+            await _wait_until_sent(bot, "Other answer.")
+
+        # Only the other conversation's message ran; the follow-up still waits with ⏳.
+        model.assert_awaited_once()
+        assert _reactions(bot) == [{"rel_type": "m.annotation", "event_id": "$followup", "key": "⏳"}]
+        assert not await bot._reply_runtime.store.is_pending("$other")
+        # The approval still waits and still holds its own conversation.
+        assert bot._response_runner.is_held_for_approval(paused)
+        assert await bot.journal_principal().approval_continuation_for_source("$event") is not None
 
 
 async def test_a_hold_whose_approval_is_gone_does_not_keep_its_conversation_waiting(tmp_path: Path) -> None:

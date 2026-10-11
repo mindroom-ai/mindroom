@@ -1638,6 +1638,7 @@ agents:
 | `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID. Rooms joined this way are kept across restarts. Joining a room never grants its members access; see [Authorization](https://docs.mindroom.chat/authorization/) |
 | `access` | object | `null` | Who may converse with the agent: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the agent's own managed `rooms` have access. See [Responder access](https://docs.mindroom.chat/authorization/#responder-access) |
 | `credential_managers` | list | `[]` | Concrete Matrix user IDs (no wildcards) allowed to manage this agent's credentials and shared OAuth connections; grants no conversation access. See [OAuth](https://docs.mindroom.chat/oauth-framework/) |
+| `mcp_gateway_shared_credentials` | bool | `false` | Let users who may use this agent call its tools through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) even though its worker scope is `shared` or unset. Every caller then runs them with the agent's shared credentials and worker, without its instructions. Agents with `private` or `worker_scope: user` or `user_agent` are available without it |
 | `participation` | object | `null` | Opt into adaptive replies in existing multi-human threads; see [Adaptive Participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) |
 | `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
@@ -2883,6 +2884,7 @@ A `fallback_model` that resolves to the same provider and model ID as the summar
 
 Text compaction needs more than 2,000 tokens of summary input after `reserve_tokens` and prompt overhead are subtracted from the summary model's `context_window`.
 With the default `reserve_tokens`, a summary model with a context window of roughly 10,000 tokens or less cannot compact; lower `reserve_tokens` to make it work.
+On Claude summary models, text compaction asks for each merged summary to stay under half of the model's `max_tokens` output limit, condensing older detail to make room, so raise `max_tokens` in the summary model's `extra_kwargs` to keep a longer summary.
 
 ### Compacted history and redaction
 
@@ -5551,9 +5553,9 @@ agents:
 
 Workspace exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, which agent tools see as `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
 `mindroom threads export` writes the same layout under its output directory.
-Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
+Each thread file holds `version`, `room` metadata, `thread` metadata including the current thread summary as `thread.summary`, and a `messages` list.
 Exported messages match the history agents see in their prompts, including edits, redactions, and long messages.
-Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+Each room directory also holds an `index.json` mapping every thread file to its message count, participants, current summary, and last activity, sorted by most recent activity.
 A thread file is rewritten only when its content changed, so `exported_at` reflects the last content-changing export.
 
 Size limits:
@@ -14135,6 +14137,7 @@ Do not report or "fix" these; they are deliberate.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
+- The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings
 
@@ -16101,10 +16104,19 @@ Restart the API after changing any gateway environment variable.
 Until then, gateway routes return `404 MCP gateway is disabled`.
 If a gateway setting is invalid, the API logs `MCP gateway disabled: check public origin, limits, authentication, and account provisioning` and starts without the gateway.
 
+### Agent eligibility
+
 Agent eligibility follows the agent access rules described for the Connections portal.
 `access.current_room_members` alone does not grant MCP access because MCP requests have no current Matrix room, and credential management alone does not grant tool execution.
 Users can address only agents in their own saved selection and cannot act as another user or credential owner.
 Access changes, including revoked grant-room membership, apply to the next call without a configuration change; calls already running may finish.
+
+By default, the gateway offers only agents that keep OAuth connections, tool settings, and the worker separate for each user: private agents and shared agents with `worker_scope: user` or `user_agent`.
+A shared agent whose worker scope is `shared` or unset, directly or through `defaults.worker_scope`, runs every user's tool calls with the same connected accounts, tool settings, and worker.
+Through the gateway, anyone allowed to use such an agent could call those tools directly, outside the agent's instructions.
+These agents show as **MindRoom only** on the Connections page, cannot be selected, and calls to them return `unauthorized`, even when an earlier selection saved them.
+To expose one anyway, set [`mcp_gateway_shared_credentials: true`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent, and only when every user allowed to use it may use its shared accounts and worker directly.
+Deployment-wide credentials stay shared whatever the agent's scope, such as a configured Google service account (`GOOGLE_SERVICE_ACCOUNT_FILE`), shared credentials listed in `worker_grantable_credentials`, and static headers on MCP servers, so every gateway user of an agent with those tools can use them.
 
 ## Choose exposed agents and tools
 
@@ -16369,7 +16381,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `tool_not_found` | The identifier is not assigned or selected; repeat discovery, and if a shared-agent tool is missing, check the agent and tool selections in Connections |
 | `invalid_arguments` | Arguments do not match the schema or exceed 64 KiB |
 | `approval_required` | The tool needs confirmation or a configured approval and cannot run through the gateway |
-| `unauthorized` | Agent access or selection changed; check Connections |
+| `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
@@ -18493,6 +18505,8 @@ Smaller changes that need operator action:
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
+- **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
+  To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
 
 ### Compaction Archive
 

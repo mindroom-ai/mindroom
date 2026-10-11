@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
@@ -124,6 +125,8 @@ class ThreadExportGroup:
 class ThreadExportSource:
     """Rooms readable through one live Matrix client and projection view.
 
+    ``entity_name`` owns the client, and ``membership_index`` authorizes the
+    thread titles people set, so exported summaries match that entity's thread listings.
     ``target_output_dirs=None`` preserves the all-target fan-out used by
     administrative exports; workspace sources name only their own targets.
     """
@@ -131,4 +134,6 @@ class ThreadExportSource:
     client: nio.AsyncClient
     reader: ProjectedThreadReader
     rooms: tuple[ThreadExportRoom, ...]
+    entity_name: str
+    membership_index: AgentReplyMembershipIndex
     target_output_dirs: tuple[Path, ...] | None = None

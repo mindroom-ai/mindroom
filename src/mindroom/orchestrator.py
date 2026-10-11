@@ -499,6 +499,7 @@ class _MultiAgentOrchestrator:
                 config_provider=lambda: self.config,
                 bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
                 response_admission_gate=self._response_admission_gate,
+                agent_reply_memberships=self.agent_reply_memberships,
             ),
         )
         self._script_runtime = build_script_runtime(

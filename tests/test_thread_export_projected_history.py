@@ -597,7 +597,7 @@ async def test_an_unreadable_sidecar_exports_its_preview_marked_incomplete(
 async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
     router: PrincipalStore,
 ) -> None:
-    """The summary lives in message content, and the export keeps it and nothing it does not write."""
+    """The summary lives in message content, and the export keeps what picks the current summary and nothing else."""
     homeserver = FakeHomeserver()
     serve_thread(
         homeserver,
@@ -612,7 +612,14 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
                 extra_content={
                     "msgtype": "m.notice",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": ROOT, "m.in_reply_to": {"event_id": ROOT}},
-                    THREAD_SUMMARY_KEY: {"version": 1, "summary": "Deploy pipeline fix"},
+                    THREAD_SUMMARY_KEY: {
+                        "version": 1,
+                        "summary": "Deploy pipeline fix",
+                        "message_count": 4,
+                        "generated_at": "2026-01-01T00:00:00+00:00",
+                        "model": "manual",
+                        "pinned": True,
+                    },
                     "formatted_body": "<p>Deploy pipeline fix</p>",
                 },
             ),
@@ -624,7 +631,13 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
     assert messages[1].content == {
         "msgtype": "m.notice",
         "m.relates_to": {"m.in_reply_to": {"event_id": ROOT}},
-        THREAD_SUMMARY_KEY: {"summary": "Deploy pipeline fix"},
+        THREAD_SUMMARY_KEY: {
+            "version": 1,
+            "summary": "Deploy pipeline fix",
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "model": "manual",
+            "pinned": True,
+        },
     }
     assert messages[1].reply_to_event_id == ROOT
 
