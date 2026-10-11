@@ -16,6 +16,7 @@ from mindroom.agent_storage import runs_without
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.error_handling import is_model_safeguard_refusal
+from mindroom.history.archive import snapshot_origin
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
@@ -177,10 +178,18 @@ async def compact_scope_history(
     completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
     replay_model: NativeCompactionModel | None = None,
     before_tokens: int | None = None,
+    in_progress: RunOutput | TeamRunOutput | None = None,
 ) -> CompactionOutcome | None:
-    """Compact one scope by moving its oldest runs into the archive behind a new session.summary."""
-    visible_runs = scope_visible_runs(session, scope)
-    if not visible_runs or (available_history_budget is None and not state.force_compact_before_next_run):
+    """Compact one scope by moving its oldest runs into the archive behind a new session.summary.
+
+    ``in_progress`` is a snapshot of a run that is still running; it is archived last, after every visible run,
+    and the live run it was taken from is never compacted.
+    """
+    live_run_id = snapshot_origin(in_progress.run_id or "") if in_progress is not None else None
+    visible_runs = [run for run in scope_visible_runs(session, scope) if run.run_id != live_run_id]
+    if in_progress is None and (
+        not visible_runs or (available_history_budget is None and not state.force_compact_before_next_run)
+    ):
         await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
         return None
     if before_tokens is None:
@@ -192,12 +201,13 @@ async def compact_scope_history(
             replay_model=replay_model,
         )
     if (
-        not state.force_compact_before_next_run
+        in_progress is None
+        and not state.force_compact_before_next_run
         and available_history_budget is not None
         and before_tokens <= available_history_budget
     ):
         return None
-    compactable_runs = visible_runs
+    compactable_runs = [*visible_runs, in_progress] if in_progress is not None else visible_runs
     selected_run_ids = _stable_compaction_run_ids(
         compactable_runs,
         session_id=session.session_id,
@@ -214,6 +224,8 @@ async def compact_scope_history(
 
     before_run_count = len(visible_runs)
     working_session = deepcopy(session)
+    if in_progress is not None:
+        working_session.runs = [*(working_session.runs or []), in_progress]
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
 
     async def emit_before_persist(included_runs: Sequence[RunOutput | TeamRunOutput]) -> None:

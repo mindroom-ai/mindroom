@@ -59,6 +59,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
+from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle
 from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
 from mindroom.history.replay import apply_replay_plan
 from mindroom.history.runtime import note_prepared_history_timing
@@ -1347,6 +1348,7 @@ async def _prepare_agent_run_context(
             note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
         agent = prepared_run.agent
+        bind_compaction_lifecycle(agent, compaction_lifecycle)
         if agent.model is not None:
             ai_runtime.install_queued_message_notice_hook(
                 agent.model,

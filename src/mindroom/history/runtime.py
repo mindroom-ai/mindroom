@@ -459,6 +459,7 @@ async def _run_scope_compaction_with_lifecycle(
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
     replay_model: NativeCompactionModel | None = None,
+    in_progress: RunOutput | TeamRunOutput | None = None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -525,6 +526,7 @@ async def _run_scope_compaction_with_lifecycle(
             progress_callback=progress_callback,
             completion_callback=_complete,
             replay_model=replay_model,
+            in_progress=in_progress,
         )
     except asyncio.CancelledError as error:
         if not completed_successfully:
@@ -655,6 +657,7 @@ async def _run_scope_compaction(
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
     completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
     replay_model: NativeCompactionModel | None = None,
+    in_progress: RunOutput | TeamRunOutput | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
     summary_model, fallback_model = _load_summary_models(
@@ -682,7 +685,45 @@ async def _run_scope_compaction(
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
         completion_callback=completion_callback,
+        in_progress=in_progress,
     )
+
+
+async def compact_scope_mid_turn(
+    *,
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    resolved_inputs: HistoryPreparationInputs,
+    snapshot: RunOutput | TeamRunOutput,
+    before_tokens: int,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    compaction_lifecycle: CompactionLifecycle | None,
+) -> CompactionOutcome | None:
+    """Fold the scope's visible runs and a snapshot of the running turn into a new generation."""
+    # Replay limits trim history; the running turn's own tool results must all reach the summary.
+    inputs = replace(
+        resolved_inputs,
+        history_settings=replace(resolved_inputs.history_settings, max_tool_calls_from_history=None),
+    )
+    result = await _run_scope_compaction_with_lifecycle(
+        mode="auto",
+        storage=storage,
+        session=session,
+        scope=scope,
+        # A manual request made during the turn still applies before the next reply.
+        state=HistoryScopeState(),
+        resolved_inputs=inputs,
+        history_budget=resolved_inputs.execution_plan.hard_replay_budget_tokens,
+        current_history_tokens=before_tokens,
+        runs_before=len(scope_visible_runs(session, scope)) + 1,
+        config=config,
+        runtime_paths=runtime_paths,
+        compaction_lifecycle=compaction_lifecycle,
+        in_progress=snapshot,
+    )
+    return result.outcome
 
 
 def finalize_history_preparation(

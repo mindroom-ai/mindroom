@@ -72,7 +72,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
-from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
+from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
 from mindroom.history.native import restore_native_history
 from mindroom.history.prompt_tokens import team_tool_definition_payloads_for_logging
 from mindroom.history.runtime import note_prepared_history_timing
@@ -2906,6 +2906,7 @@ async def prepare_materialized_team_execution(
         pipeline_timing=pipeline_timing,
     )
     prepared_history = prepared_execution.prepared_history
+    bind_compaction_lifecycle(team, compaction_lifecycle)
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)

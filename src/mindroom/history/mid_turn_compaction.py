@@ -10,36 +10,46 @@ message of its own run.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from agno.agent import Agent
+from agno.db.base import BaseDb, SessionType
 from agno.models.base import Model
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
+from agno.session.team import TeamSession
+from agno.team import Team
 
 from mindroom.agent_storage import run_session_storage_operation, save_compaction_usage
 from mindroom.agno_compat_model_hooks import install_request_preparation
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.helper_usage import get_helper_usage_owner
+from mindroom.history import archive
+from mindroom.history.agno_compat_message_builder import built_request_session
+from mindroom.history.legacy_summary_system_prompt import without_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
     compaction_summary_message,
     compaction_summary_text,
+    current_summary_text,
     estimate_request_messages_tokens,
     is_compaction_summary,
 )
 from mindroom.history.runtime import (
+    compact_scope_mid_turn,
     resolve_agent_preparation_inputs,
     resolve_entity_preparation_inputs,
     summarize_run_locally,
 )
-from mindroom.history.storage import new_scope_session
+from mindroom.history.session_context import resolve_history_scope
+from mindroom.history.storage import new_scope_session, reconcile_compaction_state
 from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
@@ -52,15 +62,17 @@ if TYPE_CHECKING:
     from typing import Any
 
     from agno.models.response import ModelResponse
-    from agno.team import Team
+    from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.runtime import HistoryPreparationInputs
+    from mindroom.history.types import CompactionLifecycle
 
 logger = get_logger(__name__)
 
 _HOOK_MARKER = "_mindroom_mid_turn_compaction_installed"
+_BINDING_KEY = "_mindroom_mid_turn_compaction"
 _PROMPT_ROLES = frozenset({"system", "developer"})
 
 
@@ -73,6 +85,7 @@ class _MidTurnCompaction:
     runtime_paths: RuntimePaths
     entity_name: str | None
     model_name: str
+    lifecycle: CompactionLifecycle | None = None
     failed_run_id: str | None = None
     # (run id, run identity) of the loop being prepared, and the message ids it started with.
     loop_key: tuple[str, int] | None = None
@@ -141,7 +154,16 @@ def install_mid_turn_compaction(
         entity_name=entity_name,
         model_name=model_name,
     )
+    vars(model)[_BINDING_KEY] = binding
     install_request_preparation(model, marker=_HOOK_MARKER, prepare=partial(_prepare_request, binding))
+
+
+def bind_compaction_lifecycle(target: Agent | Team, lifecycle: CompactionLifecycle | None) -> None:
+    """Show this reply's mid-turn compactions through the same notices as its pre-reply compaction."""
+    model = target.model
+    binding = vars(model).get(_BINDING_KEY) if isinstance(model, Model) else None
+    if isinstance(binding, _MidTurnCompaction):
+        binding.lifecycle = lifecycle
 
 
 @dataclass(frozen=True)
@@ -169,17 +191,115 @@ async def _prepare_request(
     layout = _layout(messages, run_response)
     if not layout.folded:
         return
+    session = _scoped_session(binding, run_response)
     try:
-        summary_message = await _summarize_run_locally(binding, policy.inputs, layout, run_response, messages)
+        if session is None:
+            summary_message = await _summarize_run_locally(binding, policy.inputs, layout, run_response, messages)
+        else:
+            summary_message = await _compact_scope(binding, policy, layout, messages, run_response, session)
     except asyncio.CancelledError:
         raise
     except Exception:
-        binding.failed_run_id = run_response.run_id
+        summary_message = None
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=run_response.run_id)
+    if summary_message is None:
+        binding.failed_run_id = run_response.run_id
         return
+    _finish(messages, layout, summary_message, run_response)
+    _require_fit(policy, messages, tools, summary_message)
+
+
+def _finish(
+    messages: list[Message],
+    layout: _Layout,
+    summary_message: Message,
+    run_response: RunOutput | TeamRunOutput,
+) -> None:
     _rewrite(messages, layout, summary_message)
     _carry_request_usage(run_response, layout.folded)
-    _require_fit(policy, messages, tools, summary_message)
+
+
+def _scoped_session(
+    binding: _MidTurnCompaction,
+    run_response: RunOutput | TeamRunOutput,
+) -> AgentSession | TeamSession | None:
+    """Return the run's own session when the request replays persisted history, else None (run-local)."""
+    target = binding.target
+    if not target.add_history_to_context or not isinstance(target.db, BaseDb):
+        return None
+    session = built_request_session(target)
+    return session if session is not None and session.session_id == run_response.session_id else None
+
+
+async def _compact_scope(
+    binding: _MidTurnCompaction,
+    policy: _Policy,
+    layout: _Layout,
+    messages: list[Message],
+    run_response: RunOutput | TeamRunOutput,
+    session: AgentSession | TeamSession,
+) -> Message | None:
+    """Archive the scope's visible runs and a snapshot of this run behind a new summary, on Agno's own session."""
+    storage = binding.target.db
+    assert isinstance(storage, BaseDb)
+    scope = (
+        HistoryScope(kind="team", scope_id=binding.target.id or "")
+        if isinstance(binding.target, Team)
+        else resolve_history_scope(binding.target)
+    )
+    assert scope is not None
+    await run_blocking_until_complete(partial(_prepare_scope_session, storage, session, scope))
+    snapshot = _snapshot(run_response, layout, messages)
+    snapshot.run_id = archive.snapshot_run_id(run_response.run_id or "")
+    snapshot.metadata = deepcopy(run_response.metadata)
+    snapshot.created_at = run_response.created_at
+    try:
+        await compact_scope_mid_turn(
+            storage=storage,
+            session=session,
+            scope=scope,
+            resolved_inputs=policy.inputs,
+            snapshot=snapshot,
+            before_tokens=estimate_request_messages_tokens(messages, replay_model=policy.replay_model),
+            config=binding.config,
+            runtime_paths=binding.runtime_paths,
+            compaction_lifecycle=binding.lifecycle,
+        )
+    except asyncio.CancelledError:
+        # A snapshot that committed has archived this turn's folded messages; the request must not resend them.
+        if await _archived(storage, session, snapshot):
+            _finish(messages, layout, _scope_summary_message(session), run_response)
+        raise
+    if not await _archived(storage, session, snapshot):
+        return None
+    return _scope_summary_message(session)
+
+
+def _prepare_scope_session(storage: BaseDb, session: AgentSession | TeamSession, scope: HistoryScope) -> None:
+    # A first turn's session row does not exist until Agno writes it when the run ends.
+    if storage.get_session(session_id=session.session_id, session_type=_session_type(session)) is None:
+        storage.upsert_session(
+            new_scope_session(session_id=session.session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
+        )
+    reconcile_compaction_state(storage, session, scope)
+
+
+def _session_type(session: AgentSession | TeamSession) -> SessionType:
+    return SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
+
+
+async def _archived(storage: BaseDb, session: AgentSession | TeamSession, snapshot: RunOutput | TeamRunOutput) -> bool:
+    run_id = snapshot.run_id or ""
+    archived = await run_blocking_until_complete(
+        partial(archive.archived_run_ids, storage, session_id=session.session_id, run_ids=[run_id]),
+    )
+    return run_id in archived
+
+
+def _scope_summary_message(session: AgentSession | TeamSession) -> Message:
+    summary = current_summary_text(session)
+    assert summary is not None
+    return compaction_summary_message(summary, from_history=True)
 
 
 def _policy(binding: _MidTurnCompaction) -> _Policy | None:
@@ -343,7 +463,7 @@ def _summary_usage_recorder(
 ) -> Callable[[Model, ModelResponse], Awaitable[None]] | None:
     """Record each summary response under the reply's usage owner, else in the target's own session storage."""
     owner = get_helper_usage_owner()
-    storage = binding.target.db
+    storage = binding.target.db if isinstance(binding.target.db, BaseDb) else None
     if owner is None and (storage is None or not run_response.session_id):
         logger.warning("Mid-turn summary usage has no storage owner", run_id=run_response.run_id)
         return None
@@ -380,7 +500,8 @@ def _summary_usage_recorder(
 
 
 def _rewrite(messages: list[Message], layout: _Layout, summary_message: Message) -> None:
-    messages[:] = [*messages[: layout.leading], summary_message, *layout.kept]
+    leading = [without_embedded_summary(message) for message in messages[: layout.leading]]
+    messages[:] = [*leading, summary_message, *layout.kept]
 
 
 def _carry_request_usage(run_response: RunOutput | TeamRunOutput, folded: Sequence[Message]) -> None:

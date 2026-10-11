@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,23 +17,34 @@ from agno.media import Image
 from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
+from agno.run.agent import RunInput, RunOutput
 from agno.run.base import RunStatus
 from agno.session.summary import SessionSummary
 from agno.team import Team
 from agno.tools.function import Function
 
+from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
 from mindroom.agno_compat_model_hooks import install_request_preparation
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
-from mindroom.history import agno_compat_message_builder
-from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
-from mindroom.history.replay import is_compaction_summary
+from mindroom.history import agno_compat_message_builder, mid_turn_compaction
+from mindroom.history.agno_compat_message_builder import built_request_session
+from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
+from mindroom.history.replay import compaction_summary_message, is_compaction_summary
+from mindroom.history.storage import read_scope_state, set_force_compaction_state
+from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.usage_storage import project_usage
-from tests.conftest import FakeModel
-from tests.history_helpers import _make_config
+from tests.conftest import FakeModel, seed_session
+from tests.history_helpers import (
+    RecordingCompactionLifecycle,
+    _completed_run,
+    _make_config,
+    _session,
+    archived_run_ids,
+    compaction_generations,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -594,3 +606,273 @@ async def test_team_member_loop_compacts_run_locally(tmp_path: Path, summary_cal
     assert summary_calls.inputs
     compacted = _first_compacted(member_model)
     assert [message.from_history for message in compacted.messages if is_compaction_summary(message)] == [False]
+
+
+_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
+
+
+def _scoped_agent(
+    model: _ToolLoopModel,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage: object,
+    **kwargs: Any,  # noqa: ANN401
+) -> Agent:
+    agent = _agent(model, config, runtime_paths, db=storage, **kwargs)
+    agent.add_history_to_context = True
+    agent.num_history_runs = None
+    agent.store_history_messages = False
+    return agent
+
+
+def _seeded_storage(config: Config, runtime_paths: RuntimePaths) -> object:
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[
+                _completed_run(
+                    "run-1",
+                    messages=[Message(role="user", content="q1"), Message(role="assistant", content="a1")],
+                ),
+                _completed_run(
+                    "run-2",
+                    messages=[Message(role="user", content="q2"), Message(role="assistant", content="a2")],
+                ),
+            ],
+        ),
+    )
+    return storage
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+@pytest.mark.parametrize("stream", [False, True])
+async def test_long_single_turn_compacts_mid_turn_and_continues(
+    tmp_path: Path,
+    *,
+    stream: bool,
+) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    model = _ToolLoopModel(tool_rounds=5)
+    agent = _scoped_agent(model, config, paths, storage)
+
+    output = await _run_in_session(agent, "Do the task", stream=stream)
+
+    assert str(output.content).endswith("done")
+    compacted = _first_compacted(model)
+    summaries = [message for message in compacted.messages if is_compaction_summary(message)]
+    assert len(summaries) == 1
+    assert summaries[0].from_history is True
+    assert compacted.contents[-1] == "Do the task"
+    assert not {"q1", "a1", "q2", "a2"} & set(compacted.contents)
+    archived = archived_run_ids(storage)
+    assert archived[:2] == ["run-1", "run-2"]
+    assert archived[2].startswith(f"{output.run_id}:compaction-snapshot:")
+    assert output.run_id not in archived
+    generations = compaction_generations(storage, _SCOPE.key)
+    stored = get_agent_session(storage, "session-1")
+    assert stored is not None
+    assert stored.summary is not None
+    assert stored.summary.summary == generations[-1].summary
+    assert any(run.run_id == output.run_id for run in stored.runs or [])
+
+
+@pytest.mark.asyncio
+async def test_next_turn_reuses_the_post_compaction_prefix(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    model = _ToolLoopModel(tool_rounds=5)
+    agent = _scoped_agent(model, config, paths, storage)
+    await _run_in_session(agent, "Do the task")
+    last_request = model.requests[-1]
+    model.requests.clear()
+    model.tool_rounds = 0
+
+    await _run_in_session(agent, "Thanks")
+
+    next_request = model.requests[0]
+    assert summary_calls.inputs
+    assert next_request.roles[: len(last_request.roles)] == last_request.roles
+    assert next_request.contents[: len(last_request.contents)] == last_request.contents
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_after_mid_turn_compaction(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+
+    class _PausingLoop(_ToolLoopModel):
+        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
+            response = await super().ainvoke(messages, **kwargs)
+            if len(self.requests) == 5 and response.tool_calls:
+                response.tool_calls[0]["function"]["name"] = "approve_me"
+            return response
+
+    model = _PausingLoop(tool_rounds=6)
+    agent = _scoped_agent(model, config, paths, storage)
+    agent.tools = [probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)]
+
+    paused = await agent.arun("Do the task", session_id="session-1")
+    assert paused.status == RunStatus.paused
+    assert summary_calls.inputs
+    paused_request = model.requests[-1]
+    for requirement in paused.requirements or []:
+        requirement.confirm()
+    model.requests.clear()
+    await agent.acontinue_run(run_id=paused.run_id, requirements=paused.requirements, session_id="session-1")
+
+    resumed = model.requests[0]
+    summaries = [message for message in resumed.messages if is_compaction_summary(message)]
+    assert len(summaries) == 1
+    assert summaries[0].content == next(m.content for m in paused_request.messages if is_compaction_summary(m))
+    assert resumed.contents[: len(paused_request.contents)] == paused_request.contents
+
+
+@pytest.mark.asyncio
+async def test_partial_commit_then_failure_leaves_the_request_unchanged(
+    tmp_path: Path,
+    summary_calls: _SummaryCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(model="summary", reserve_tokens=500),
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=4000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=6000),
+        },
+    )
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    history = [
+        _completed_run(f"run-{index}", messages=[Message(role="user", content="h" * 6000)]) for index in range(2)
+    ]
+    seed_session(storage, _session("session-1", runs=history))
+
+    async def fail_second(**kwargs: Any) -> SessionSummary:  # noqa: ANN401
+        if summary_calls.inputs:
+            summary_calls.inputs.append(kwargs["summary_input"])
+            msg = "summary model unavailable"
+            raise RuntimeError(msg)
+        return await summary_calls(**kwargs)
+
+    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second)
+    model = _ToolLoopModel(tool_rounds=4)
+
+    output = await _run_in_session(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    assert str(output.content).endswith("done")
+    assert len(summary_calls.inputs) == 2
+    assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
+    stored = get_agent_session(storage, "session-1")
+    assert stored is not None
+    generations = compaction_generations(storage, _SCOPE.key)
+    assert generations
+    assert stored.summary is not None
+    assert stored.summary.summary == generations[-1].summary
+
+
+@pytest.mark.asyncio
+async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    stored = get_agent_session(storage, "session-1")
+    assert stored is not None
+    set_force_compaction_state(stored, _SCOPE, HistoryScopeState(), force=True)
+    storage.upsert_session(stored)
+    model = _ToolLoopModel(tool_rounds=5)
+
+    await _run_in_session(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    assert summary_calls.inputs
+    after = get_agent_session(storage, "session-1")
+    assert after is not None
+    assert read_scope_state(after, _SCOPE).force_compact_before_next_run is True
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    model = _ToolLoopModel(tool_rounds=5)
+    agent = _scoped_agent(model, config, paths, storage)
+    lifecycle = RecordingCompactionLifecycle()
+    bind_compaction_lifecycle(agent, lifecycle)
+
+    await _run_in_session(agent, "Do the task")
+
+    assert summary_calls.inputs
+    kinds = [type(event).__name__ for event in lifecycle.events]
+    assert kinds[0] == "CompactionLifecycleStart"
+    assert "CompactionOutcome" in kinds
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_cancellation_after_the_snapshot_commit_still_rewrites_the_request(tmp_path: Path) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    model = _ToolLoopModel(tool_rounds=5)
+    agent = _scoped_agent(model, config, paths, storage)
+
+    class _CancelOnSuccess(RecordingCompactionLifecycle):
+        async def complete_success(self, outcome: CompactionOutcome) -> None:  # noqa: ARG002
+            raise asyncio.CancelledError
+
+    bind_compaction_lifecycle(agent, _CancelOnSuccess())
+    live_lists: list[list[Message]] = []
+
+    async def capture(messages: list[Message], *_args: object) -> None:
+        live_lists.append(messages)
+
+    install_request_preparation(model, marker="_test_capture", prepare=capture)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_in_session(agent, "Do the task")
+
+    request = live_lists[-1]
+    assert any(is_compaction_summary(message) for message in request)
+    assert all(message.role != "tool" for message in request)
+    live_session = built_request_session(agent)
+    assert live_session is not None
+    generations = compaction_generations(storage, _SCOPE.key)
+    assert live_session.summary is not None
+    assert live_session.summary.summary == generations[-1].summary
+
+
+async def _run_in_session(agent: Agent, prompt: str, *, stream: bool = False) -> RunOutput:
+    if not stream:
+        output = await agent.arun(prompt, session_id="session-1")
+        assert isinstance(output, RunOutput)
+        return output
+    final: RunOutput | None = None
+    async for event in agent.arun(prompt, session_id="session-1", stream=True, yield_run_output=True):
+        if isinstance(event, RunOutput):
+            final = event
+    assert final is not None
+    return final
+
+
+def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
+    legacy_system = Message(
+        role="system",
+        content=(
+            "Be precise.\n\nHere is a brief summary of your previous interactions:\n\n"
+            "<summary_of_previous_interactions>\nOLD\n</summary_of_previous_interactions>\n\n"
+            "Note: this information is from previous interactions and may be outdated. "
+            "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
+            "Current date: Monday"
+        ),
+    )
+    prompt = Message(role="user", content="Do the task")
+    messages = [legacy_system, prompt, Message(role="assistant", content="step"), Message(role="tool", content="r")]
+    run_response = RunOutput(run_id="run", input=RunInput(input_content=[prompt]))
+
+    layout = mid_turn_compaction._layout(messages, run_response)
+    mid_turn_compaction._rewrite(messages, layout, compaction_summary_message("NEW", from_history=True))
+
+    assert messages[0].content == "Be precise.\n\nCurrent date: Monday"
+    assert [is_compaction_summary(message) for message in messages] == [False, True, False]
+    assert messages[2] is prompt

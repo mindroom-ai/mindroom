@@ -372,3 +372,19 @@ def test_scheduled_history_limits_keep_or_drop_the_summary() -> None:
     no_history = _prepared_history_with_scheduled_limit(summary_only, 0).replay_plan
     assert no_history is not None
     assert no_history.add_history_to_context is False
+
+
+@pytest.mark.asyncio
+async def test_in_memory_continuation_keeps_its_one_summary() -> None:
+    agent = _entity("agent")
+    assert isinstance(agent, Agent)
+    carried = compaction_summary_message("carried summary", from_history=True)
+
+    run_messages = await agent_messages.aget_continue_run_messages(
+        agent,
+        input=[carried, Message(role="user", content="current request")],
+        session=_session("agent", _SUMMARY),
+        add_history_to_context=True,
+    )
+
+    assert _summaries(run_messages.messages) == [carried]

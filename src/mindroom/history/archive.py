@@ -23,6 +23,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 from agno.db.sqlite import SqliteDb
 from agno.db.utils import deserialize_run, get_run_type
@@ -41,6 +42,18 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
 _ID_CHUNK_SIZE = 500
+_SNAPSHOT_SEPARATOR = ":compaction-snapshot:"
+
+
+def snapshot_run_id(origin_run_id: str) -> str:
+    """Return a fresh id for one archived snapshot of a run that is still in progress."""
+    return f"{origin_run_id}{_SNAPSHOT_SEPARATOR}{uuid4().hex}"
+
+
+def snapshot_origin(run_id: str) -> str | None:
+    """Return the run an archived snapshot was taken from, or None for an ordinary run."""
+    origin, separator, _suffix = run_id.partition(_SNAPSHOT_SEPARATOR)
+    return origin if separator else None
 
 
 @dataclass(frozen=True)
