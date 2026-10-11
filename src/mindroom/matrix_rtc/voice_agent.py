@@ -944,13 +944,13 @@ async def _attach_private_transcript_synchronizer(
 
 def _bound_live_output_lag(audio_output: AudioOutput) -> AudioOutput:
     """Drop GPT-Live speech that a stall would otherwise queue to play late."""
-    from livekit.agents.voice import io  # noqa: PLC0415
+    from livekit.agents.voice.io import AudioOutput, AudioOutputCapabilities  # noqa: PLC0415
 
-    class _LiveOutputLagBound(io.AudioOutput):
+    class _LiveOutputLagBound(AudioOutput):
         def __init__(self) -> None:
             super().__init__(
                 label="MindRoomLiveOutputLagBound",
-                capabilities=io.AudioOutputCapabilities(pause=True),
+                capabilities=AudioOutputCapabilities(pause=True),
                 next_in_chain=audio_output,
                 sample_rate=audio_output.sample_rate,
             )
