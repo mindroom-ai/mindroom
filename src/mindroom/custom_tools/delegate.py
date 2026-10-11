@@ -18,6 +18,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import authorize_delegation, live_delegation_config, prepare_child_turn
 from mindroom.delegation.personas import (
+    caller_skill_names,
     caller_toolkit_names,
     follow_up_refusal,
     list_profiles,
@@ -26,7 +27,7 @@ from mindroom.delegation.personas import (
 )
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
 )
@@ -95,7 +96,7 @@ class DelegateTools(Toolkit):
         delegation_depth: int = 0,
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
         workspace_root: Path | None = None,
-        persona_tools: tuple[str, ...] | None = None,
+        persona: SubagentPersona | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
@@ -106,9 +107,9 @@ class DelegateTools(Toolkit):
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(config, runtime_paths, delegate_to, execution_identity)
         self._workspace_root = workspace_root
-        # An authored subagent's own tools cap the copies it authors, on every channel.
-        self._persona_tools = persona_tools
-        # A caller that may run itself may also author that copy's prompt, tools, or profile.
+        # An authored subagent's own tools and skills cap the copies it authors, on every channel.
+        self._persona = persona
+        # A caller that may run itself may also author that copy's prompt, tools, skills, or profile.
         self._authoring = agent_name in delegate_to
 
         super().__init__(
@@ -120,7 +121,7 @@ class DelegateTools(Toolkit):
         delegate_function.description = self._build_run_subagent_description()
         hidden = {
             *(() if self._minimal_targets else ("minimal",)),
-            *(() if self._authoring else ("system_prompt", "tools", "profile")),
+            *(() if self._authoring else ("system_prompt", "tools", "skills", "profile")),
         }
         if hidden:
             # Offer no option this caller cannot use. Agno keeps explicitly set
@@ -187,11 +188,13 @@ class DelegateTools(Toolkit):
         minimal = " or minimal=true" if self._agent_name in self._minimal_targets else ""
         return (
             "To author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, "
-            "and optionally tools, a subset of your toolkit names or toolkit.function entries; omit tools to keep all "
-            "of yours. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of "
-            "your configured role and instructions, and gets only those tools. "
+            "and optionally tools, a subset of your toolkit names or toolkit.function entries, and skills, a subset "
+            "of your skill names. Omit tools to keep all of yours; a copy that lists tools gets only the skills it "
+            "lists, and one that lists neither keeps all your skills. The child keeps your workspace, credentials, "
+            "and approval rules, sees that prompt instead of your configured role and instructions, and gets only "
+            "those tools and skills. "
             "Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with "
-            "description and optional tools, model, and mode, then the system prompt as the body. "
+            "description and optional tools, skills, model, and mode, then the system prompt as the body. "
             f"An explicit model{minimal} overrides the profile. "
             "Follow-ups keep the subagent's prompt even if its profile later changes.\n"
             f"{self._profile_listing()}"
@@ -209,6 +212,7 @@ class DelegateTools(Toolkit):
         minimal: bool = False,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        skills: list[str] | None = None,
         profile: str | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
@@ -223,7 +227,8 @@ class DelegateTools(Toolkit):
             minimal: True runs the child in token-efficient minimal mode, only for subagents listed as supporting it.
             system_prompt: Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt.
             tools: Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours.
-            profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt and tools.
+            skills: Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too.
+            profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, and skills.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
@@ -235,6 +240,7 @@ class DelegateTools(Toolkit):
             agent_name=target,
             system_prompt=system_prompt,
             tools=tools,
+            skills=skills,
             profile=profile,
             model=model,
             minimal=minimal,
@@ -245,7 +251,13 @@ class DelegateTools(Toolkit):
                 live_delegation_config(self._config),
                 delegation_depth=self._delegation_depth + 1,
             ),
-            cap=self._persona_tools,
+            available_skills=lambda: caller_skill_names(
+                self._agent_name,
+                live_delegation_config(self._config),
+                self._runtime_paths,
+                self._workspace_root,
+            ),
+            cap=self._persona,
         )
         if isinstance(request, str):
             return request
@@ -353,6 +365,7 @@ class DelegateTools(Toolkit):
             config=config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
+            budget_monitor=current_budget_monitor(),
             model=model,
             agent_mode=agent_mode,
             previous=continuation,

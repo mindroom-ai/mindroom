@@ -24,6 +24,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
+from mindroom.delegation.state import SubagentPersona
 from mindroom.history.archive import archive_runs
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
@@ -40,7 +41,6 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
 
-    from mindroom.delegation.state import SubagentPersona
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -82,7 +82,7 @@ def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        persona=inline_persona(prompt, tools),
+        persona=inline_persona(prompt, tools, None),
         **options,
     )
 
@@ -108,7 +108,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_p
     prompt = "Plain {not_a_var} text"
     configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
     assert "Configured personality" in str(configured.role)
-    prepared = await _prepare(runtime, inline_persona(prompt, None), "task")
+    prepared = await _prepare(runtime, inline_persona(prompt, None, None), "task")
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
 
@@ -158,7 +158,7 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
     ) as scope_context:
         assert scope_context is not None
         prepared = await ai._prepare_agent_and_prompt(
-            replace(_turn_context(), persona=inline_persona("P", None)),
+            replace(_turn_context(), persona=inline_persona("P", None, None)),
             prompt="task",
             runtime_paths=runtime.runtime_paths,
             config=runtime.config,
@@ -325,14 +325,19 @@ async def _system_prompt(agent: Agent) -> str:
     return str(message.content)
 
 
+def _write_skills(runtime: ToolRuntimeContext, *names: str) -> None:
+    for name in names:
+        skill = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} skill\n---\n\n{name} body\n")
+
+
 @pytest.mark.asyncio
-async def test_persona_gets_no_skills_or_skill_authoring_note(tmp_path: Path) -> None:
-    """A configured agent lists its workspace skills and the authoring note; an authored subagent gets neither."""
+async def test_persona_inherits_its_callers_skills_without_the_authoring_note(tmp_path: Path) -> None:
+    """A persona without skills lists its caller's skills, but only a configured agent gets the authoring note."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
     identity = build_execution_identity_from_runtime_context(runtime)
-    skill = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "scripted"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: scripted\ndescription: Scripted skill\n---\n\nSKILL BODY\n")
+    _write_skills(runtime, "scripted")
     options = {"persist_runtime_state": False}
 
     configured = await _system_prompt(
@@ -340,9 +345,119 @@ async def test_persona_gets_no_skills_or_skill_authoring_note(tmp_path: Path) ->
     )
     authored = await _system_prompt(_child(runtime, None, execution_identity=identity))
 
-    for marker in ("skills/<skill-name>/", "scripted"):
-        assert marker in configured
-        assert marker not in authored
+    assert "skills/<skill-name>/" in configured
+    assert "skills/<skill-name>/" not in authored
+    assert "scripted" in configured
+    assert "scripted" in authored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skills", "listed"),
+    [(["scripted"], {"scripted"}), ([], set()), (["scripted", "removed"], {"scripted"})],
+)
+async def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str], listed: set[str]) -> None:
+    """A skill list narrows the caller's skills, an empty list leaves none, and a skill the caller lost is skipped."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    _write_skills(runtime, "scripted", "other")
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        identity,
+        persist_runtime_state=False,
+        persona=inline_persona("P", None, skills),
+    )
+    prompt = await _system_prompt(agent)
+
+    assert set(agent.skills.get_skill_names() if agent.skills is not None else ()) == listed
+    assert {name for name in ("scripted", "other") if f"The {name} skill" in prompt} == listed
+
+
+@pytest.mark.asyncio
+async def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Path) -> None:
+    """A persona listing tools but no skills gets none however it was built, so a narrow child stays narrow."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    _write_skills(runtime, "scripted")
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        identity,
+        persist_runtime_state=False,
+        persona=persona,
+    )
+
+    assert agent.skills is None
+    assert not {"get_skill_instructions", "get_skill_reference", "get_skill_script"} & set(await _function_names(agent))
+
+
+@pytest.mark.asyncio
+async def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: Path) -> None:
+    """A persona keeping only skills its caller has since lost is offered no skill functions, even beside configured skills."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file", skills=["configured"])
+    identity = build_execution_identity_from_runtime_context(runtime)
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        identity,
+        persist_runtime_state=False,
+        persona=inline_persona("P", ["file"], ["removed"]),
+    )
+
+    assert agent.skills is None
+    assert not {"get_skill_instructions", "get_skill_reference", "get_skill_script"} & set(await _function_names(agent))
+
+
+@pytest.mark.asyncio
+async def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
+    """An explicit tool list hides generated functions but still offers the functions that load its skills."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    _write_skills(runtime, "scripted")
+
+    names = await _function_names(
+        agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            identity,
+            persist_runtime_state=False,
+            persona=inline_persona("P", ["file"], ["scripted"]),
+        ),
+    )
+
+    assert "get_skill_instructions" in names
+    assert "read_file" in names
+
+
+def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -> None:
+    """A minimal persona reads the skills it names on demand, like any minimal agent."""
+    runtime = _runtime(tmp_path, tools=["shell"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    _write_skills(runtime, "scripted", "other")
+
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        identity,
+        persist_runtime_state=False,
+        agent_mode="minimal",
+        persona=inline_persona("P", ["shell"], ["scripted"]),
+    )
+
+    assert isinstance(agent, MinimalAgent)
+    documents = list(agent.context_documents.values())
+    assert "scripted\nscripted body" in documents
+    assert not any(document.startswith("other\n") for document in documents)
 
 
 def test_persona_with_tools_gets_no_deferred_loading_guidance(tmp_path: Path) -> None:
@@ -420,7 +535,7 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
             runtime_paths,
             None,
             persist_runtime_state=False,
-            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"]),
+            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None),
         )
 
 
@@ -468,7 +583,7 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
         raise AssertionError(msg)
 
     monkeypatch.setattr(ai, "build_memory_prompt_parts", recall)
-    prepared = await _prepare(runtime, inline_persona("P", None), "the task")
+    prepared = await _prepare(runtime, inline_persona("P", None, None), "the task")
     assert "the task" in prepared.prompt_text
 
 

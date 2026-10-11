@@ -4,21 +4,34 @@
 
 # MindRoom Docs
 
+<div class="mr-hero" markdown>
+
+<img src="assets/logo.svg" alt="" width="128" height="128" />
+
 # MindRoom
 
-**AI agents that know you and your work, in a chat app anyone can use.**
+<p class="mr-tagline">AI agents that know you and your work, in a chat app anyone can use.</p>
 
+<p class="mr-lede">
 MindRoom gives you a personal AI agent for everything from family trips to your homelab, and gives teams shared agents connected to their email, chat, calendar, documents, tickets, and code.
 They find what you need, write what you ask for, run recurring jobs on their own, and learn from every conversation, so they get better the more they are used.
 It is open source, and you choose each agent's model: a local one that keeps your private life at home, or a frontier one for hard problems.
 You can run all of it yourself: the chat app, the server, and the AI backend.
+</p>
 
+[:lucide-rocket: Get started](https://docs.mindroom.chat/getting-started/){ .md-button .md-button--primary }
+[:lucide-play: See it in action](https://docs.mindroom.chat/showcase/){ .md-button }
+[:lucide-cloud: Try hosted MindRoom](https://mindroom.chat/#hosted){ .md-button }
+[:lucide-arrow-right-left: Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/){ .md-button }
+
+</div>
+
+<div class="mr-video">
 <video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-light="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-dark="https://github.com/user-attachments/assets/e126d12b-5609-4c97-b69f-e2f9289a0008">
   <source src="https://github.com/user-attachments/assets/6ec88440-9b9a-4319-b4e9-88d452819bb6" type="video/mp4" media="(prefers-color-scheme: dark)">
   <source src="https://github.com/user-attachments/assets/af51cf1e-840a-415e-ae97-df453d2afdda" type="video/mp4">
 </video>
-
-**[Get started](https://docs.mindroom.chat/getting-started/)** · **[See it in action](https://docs.mindroom.chat/showcase/)** · **[Try hosted MindRoom](https://mindroom.chat/#hosted)** · **[Coming from OpenClaw?](https://docs.mindroom.chat/openclaw/)**
+</div>
 
 ## What People Use It For
 
@@ -45,62 +58,82 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
 
 ## Why MindRoom
 
-### Agents that know you and your work
+<div class="grid cards mr-why" markdown>
 
-Agents connect to 100+ tools, including Gmail, Google Drive, Slack, Jira, Confluence, GitHub, and any MCP server ([Tools](https://docs.mindroom.chat/tools/), [MCP Servers](https://docs.mindroom.chat/mcp/)), and search knowledge bases built from your folders and Git repositories ([Knowledge Bases](https://docs.mindroom.chat/knowledge/)).
-Each person can get a private room with their own agent ([Personal Rooms](https://docs.mindroom.chat/personal-rooms/)), each team can share agents that answer only its members ([Access Control](https://docs.mindroom.chat/authorization/)), and agents can work as a team or hand tasks to each other ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
+-   ### :lucide-plug-zap:{ .lg } Agents that know you and your work
 
-### Private where it matters
+    ---
 
-You choose the model for each agent.
-A private agent can run on a local model through Ollama or llama.cpp, so you can share your most personal data with it, while an agent that writes code uses a frontier model from Anthropic, OpenAI, or Google ([Models](https://docs.mindroom.chat/configuration/models/)).
-Pair a local model with local memory and your own server, and nothing that agent sees leaves your home ([Memory](https://docs.mindroom.chat/memory/), [Deployment](https://docs.mindroom.chat/deployment/)).
-Each agent keeps its own memory, tools, and access, so what you tell a private agent stays out of shared ones, and rooms can be end-to-end encrypted ([End-to-End Encryption](https://docs.mindroom.chat/matrix/#end-to-end-encryption)).
+    Agents connect to 100+ tools, including Gmail, Google Drive, Slack, Jira, Confluence, GitHub, and any MCP server ([Tools](https://docs.mindroom.chat/tools/), [MCP Servers](https://docs.mindroom.chat/mcp/)), and search knowledge bases built from your folders and Git repositories ([Knowledge Bases](https://docs.mindroom.chat/knowledge/)).
+    Each person can get a private room with their own agent ([Personal Rooms](https://docs.mindroom.chat/personal-rooms/)), each team can share agents that answer only its members ([Access Control](https://docs.mindroom.chat/authorization/)), and agents can work as a team or hand tasks to each other ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
 
-### They remember, and keep improving
+-   ### :lucide-lock:{ .lg } Private where it matters
 
-Agents keep what is worth remembering from every conversation without being asked, and look it up again when it becomes relevant ([Memory](https://docs.mindroom.chat/memory/)).
-A shared agent gets better as more people use it: what it learns while helping one person helps the next.
-With skill learning on, an agent also turns work it repeats into reusable skills, following the self-improvement loop of Hermes Agent ([Automatic Skill Learning](https://docs.mindroom.chat/skills/#automatic-skill-learning)).
-You can teach it directly too: tell it a preference or a correction, and it is remembered.
+    ---
 
-### They work while you don't
+    You choose the model for each agent.
+    A private agent can run on a local model through Ollama or llama.cpp, so you can share your most personal data with it, while an agent that writes code uses a frontier model from Anthropic, OpenAI, or Google ([Models](https://docs.mindroom.chat/configuration/models/)).
+    Pair a local model with local memory and your own server, and nothing that agent sees leaves your home ([Memory](https://docs.mindroom.chat/memory/), [Deployment](https://docs.mindroom.chat/deployment/)).
+    Each agent keeps its own memory, tools, and access, so what you tell a private agent stays out of shared ones, and rooms can be end-to-end encrypted ([End-to-End Encryption](https://docs.mindroom.chat/matrix/#end-to-end-encryption)).
 
-Schedule recurring jobs in plain language, such as a daily briefing or a weekly report, including silent checks that post only when something changed ([Scheduling](https://docs.mindroom.chat/scheduling/)).
-Send a voice message from your phone ([Voice Messages](https://docs.mindroom.chat/voice/)), or call an agent and talk while it hands longer tasks to background agents ([Voice Calls](https://docs.mindroom.chat/voice-calls/)).
+-   ### :lucide-brain:{ .lg } They remember, and keep improving
 
-### Safe to give real access
+    ---
 
-- Sending or changing something can wait for your one-tap approval, which shows exactly what will be sent and to whom ([Tool Approval](https://docs.mindroom.chat/tool-approval/)).
-- Code can run in isolated workers ([Workers & Sandboxing](https://docs.mindroom.chat/deployment/sandbox-proxy/)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)).
-- Each agent answers only the people and rooms you allow ([Access Control](https://docs.mindroom.chat/authorization/)).
-- It all runs on [Matrix](https://docs.mindroom.chat/matrix/), an open messaging standard, with optional end-to-end encryption, that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
+    Agents keep what is worth remembering from every conversation without being asked, and look it up again when it becomes relevant ([Memory](https://docs.mindroom.chat/memory/)).
+    A shared agent gets better as more people use it: what it learns while helping one person helps the next.
+    With skill learning on, an agent also turns work it repeats into reusable skills, following the self-improvement loop of Hermes Agent ([Automatic Skill Learning](https://docs.mindroom.chat/skills/#automatic-skill-learning)).
+    You can teach it directly too: tell it a preference or a correction, and it is remembered.
 
-The [Security Model](https://docs.mindroom.chat/architecture/security-posture/) documents exactly which boundary protects what.
+-   ### :lucide-calendar-clock:{ .lg } They work while you don't
 
-### A chat app built for agents
+    ---
 
-MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), on the [Mac](https://docs.mindroom.chat/installation/macos-app/), and in beta on Android, along with the server and the AI backend.
-So agents are not limited to what Slack or WhatsApp can display:
+    Schedule recurring jobs in plain language, such as a daily briefing or a weekly report, including silent checks that post only when something changed ([Scheduling](https://docs.mindroom.chat/scheduling/)).
+    Send a voice message from your phone ([Voice Messages](https://docs.mindroom.chat/voice/)), or call an agent and talk while it hands longer tasks to background agents ([Voice Calls](https://docs.mindroom.chat/voice-calls/)).
 
-- Replies stream in with every tool call shown, and you can stop them at any time ([Streaming Responses](https://docs.mindroom.chat/streaming/)).
-- Approval cards and clickable questions sit right in the conversation ([Interactive Questions](https://docs.mindroom.chat/interactive/)).
-- An agent can work in its own browser that you watch live and take over, for example to log in ([Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#watch-take-control-and-resume)).
-- An agent running on a server across the world can still use your laptop, or any computer you pair: the apps and folders you allow and the shell commands you approve, over end-to-end encrypted Matrix with no open ports ([Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)).
-- An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](https://docs.mindroom.chat/canvases/)).
-- You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](https://docs.mindroom.chat/configuration/models/#model-overrides-in-chat)).
+-   ### :lucide-shield-check:{ .lg } Safe to give real access
 
-### Yours to own
+    ---
 
-- **Open source:** MindRoom is Apache 2.0 licensed, so you can run the whole stack on your own hardware, or use the [hosted Matrix server](https://docs.mindroom.chat/deployment/hosted-matrix/) and run only the backend yourself.
-- **Any model:** pick a model per agent, room, or thread, and switch the day a better one comes out ([Models](https://docs.mindroom.chat/configuration/models/)).
-- **Federated like email:** separate MindRoom deployments, such as groups with different data rules, can still share rooms where that is allowed.
-- **Extensible:** add your own tools, skills, and event hooks as plugins, which reload while MindRoom keeps running ([Plugins](https://docs.mindroom.chat/plugins/), [Hooks](https://docs.mindroom.chat/hooks/)).
+    - Sending or changing something can wait for your one-tap approval, which shows exactly what will be sent and to whom ([Tool Approval](https://docs.mindroom.chat/tool-approval/)).
+    - Code can run in isolated workers ([Workers & Sandboxing](https://docs.mindroom.chat/deployment/sandbox-proxy/)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)).
+    - Each agent answers only the people and rooms you allow ([Access Control](https://docs.mindroom.chat/authorization/)).
+    - It all runs on [Matrix](https://docs.mindroom.chat/matrix/), an open messaging standard, with optional end-to-end encryption, that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
 
-### Works where you already are
+    The [Security Model](https://docs.mindroom.chat/architecture/security-posture/) documents exactly which boundary protects what.
 
-Matrix bridges bring the same agents, with the same memory, to Slack, Telegram, WhatsApp, Discord, and email ([Bridges](https://docs.mindroom.chat/deployment/bridges/)).
-Agents also answer any OpenAI-compatible client ([OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)), and tools like Claude Code and Codex can use them through the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/).
+-   ### :lucide-messages-square:{ .lg } A chat app built for agents
+
+    ---
+
+    MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), on the [Mac](https://docs.mindroom.chat/installation/macos-app/), and in beta on Android, along with the server and the AI backend.
+    So agents are not limited to what Slack or WhatsApp can display:
+
+    - Replies stream in with every tool call shown, and you can stop them at any time ([Streaming Responses](https://docs.mindroom.chat/streaming/)).
+    - Approval cards and clickable questions sit right in the conversation ([Interactive Questions](https://docs.mindroom.chat/interactive/)).
+    - An agent can work in its own browser that you watch live and take over, for example to log in ([Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#watch-take-control-and-resume)).
+    - An agent running on a server across the world can still use your laptop, or any computer you pair: the apps and folders you allow and the shell commands you approve, over end-to-end encrypted Matrix with no open ports ([Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)).
+    - An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](https://docs.mindroom.chat/canvases/)).
+    - You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](https://docs.mindroom.chat/configuration/models/#model-overrides-in-chat)).
+
+-   ### :lucide-key-round:{ .lg } Yours to own
+
+    ---
+
+    - **Open source:** MindRoom is Apache 2.0 licensed, so you can run the whole stack on your own hardware, or use the [hosted Matrix server](https://docs.mindroom.chat/deployment/hosted-matrix/) and run only the backend yourself.
+    - **Any model:** pick a model per agent, room, or thread, and switch the day a better one comes out ([Models](https://docs.mindroom.chat/configuration/models/)).
+    - **Federated like email:** separate MindRoom deployments, such as groups with different data rules, can still share rooms where that is allowed.
+    - **Extensible:** add your own tools, skills, and event hooks as plugins, which reload while MindRoom keeps running ([Plugins](https://docs.mindroom.chat/plugins/), [Hooks](https://docs.mindroom.chat/hooks/)).
+
+-   ### :lucide-globe:{ .lg } Works where you already are
+
+    ---
+
+    Matrix bridges bring the same agents, with the same memory, to Slack, Telegram, WhatsApp, Discord, and email ([Bridges](https://docs.mindroom.chat/deployment/bridges/)).
+    Agents also answer any OpenAI-compatible client ([OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)), and tools like Claude Code and Codex can use them through the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/).
+
+</div>
 
 ## How MindRoom Compares
 
@@ -124,9 +157,33 @@ Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [I
 
 ## Get Started
 
-1. [Install & First Run](https://docs.mindroom.chat/getting-started/): run `uvx mindroom run` and pair it with your MindRoom Chat account.
-2. [Configuration](https://docs.mindroom.chat/configuration/): define agents, models, and teams in `config.yaml` or the [Dashboard](https://docs.mindroom.chat/dashboard/); most changes apply without a restart.
-3. [Deployment](https://docs.mindroom.chat/deployment/): run MindRoom with Docker or Kubernetes when you are ready to share it.
+<div class="grid cards" markdown>
+
+-   ### :lucide-download:{ .lg } 1. Install & First Run
+
+    ---
+
+    Run `uvx mindroom run` and pair it with your MindRoom Chat account.
+
+    [:lucide-arrow-right: Install & First Run](https://docs.mindroom.chat/getting-started/)
+
+-   ### :lucide-sliders-horizontal:{ .lg } 2. Configuration
+
+    ---
+
+    Define agents, models, and teams in `config.yaml` or the [Dashboard](https://docs.mindroom.chat/dashboard/); most changes apply without a restart.
+
+    [:lucide-arrow-right: Configuration](https://docs.mindroom.chat/configuration/)
+
+-   ### :lucide-server:{ .lg } 3. Deployment
+
+    ---
+
+    Run MindRoom with Docker or Kubernetes when you are ready to share it.
+
+    [:lucide-arrow-right: Deployment](https://docs.mindroom.chat/deployment/)
+
+</div>
 
 # Showcase
 
@@ -998,6 +1055,10 @@ See [Models](https://docs.mindroom.chat/configuration/models/) for providers and
 
 See [Usage Tracking](https://docs.mindroom.chat/usage/#dashboard-usage-tab).
 
+### Budgets
+
+See [Budgets](https://docs.mindroom.chat/budgets/#dashboard-budgets-page).
+
 ### Memory
 
 Sets the global memory backend, embedder, file backend, and auto-flush settings; per-agent backend overrides are on the **Agents** tab.
@@ -1379,6 +1440,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
+| `budgets` | Per-user monthly spending caps and the fallback model | [Budgets](https://docs.mindroom.chat/budgets/) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync) |
 | `event_journal` | Storage for the Matrix event journal | [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal) |
@@ -1839,6 +1901,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; equivalent to `extra_kwargs.api_key` |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters (see [Extra Kwargs](#extra-kwargs)) |
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
+| `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](https://docs.mindroom.chat/budgets/): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
@@ -5699,7 +5762,7 @@ See [`mindroom debug-report`](https://docs.mindroom.chat/cli/#debug-report) for 
 
 MindRoom records content-free token usage for agent and team replies, realtime voice calls, and the [helper and internal AI work](#token-usage) listed below, plus call duration for GPT-Live voice calls.
 View it in the dashboard [Usage tab](#dashboard-usage-tab), fetch it over [HTTP](#usage-report-api) for reporting or cost tools, or let agents read it with the [`usage_stats`](#usage_stats) tool.
-Reports show retained usage, not estimated spend or a billing ledger.
+Reports show retained usage, not estimated spend or a billing ledger; to cap spend per user, see [Budgets](https://docs.mindroom.chat/budgets/).
 
 ## Dashboard Usage Tab
 
@@ -5934,6 +5997,102 @@ Errors use the same envelope with a `code` and `message`:
 | --- | --- |
 | `authorization_error` | `get_all_usage()` called without `admin_scope`, from another agent, or by a non-administrator |
 | `context_unavailable` | No active requester or agent context, such as outside a conversation |
+
+# Budgets
+
+Budgets cap how much each Matrix user can spend on AI replies per calendar month.
+A user at their cap keeps chatting, but replies that would use a priced model use a cheaper fallback model until the next month starts.
+
+## Setup
+
+Budgets need prices for the models you pay for and a `budgets` section:
+
+```yaml
+models:
+  astra:
+    provider: openai
+    id: gpt-6-astra
+    pricing:
+      input: 5.0
+      output: 30.0
+      cache_read: 0.5
+  luna:
+    provider: openai
+    id: gpt-6-luna
+    pricing:
+      input: 0.2
+      output: 1.25
+
+budgets:
+  monthly_limit_usd: 20
+  fallback_model: luna
+  users:
+    "@alice:example.com": 100
+    "@intern:example.com": 5
+```
+
+Prices are USD per million tokens, set with the `pricing` field described in [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields).
+Give every model entry that points at a paid model its prices, including entries that differ only in API transport or ID prefix.
+The dashboard **Budgets** page edits the same settings and prices.
+
+## Fields
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `monthly_limit_usd` | number ≥ 0 or `null` | `null` | Cap in USD for each user without an entry in `users`; `null` leaves those users uncapped |
+| `fallback_model` | model name | required | Model that replies use instead of a priced model once the user reaches their cap |
+| `users` | map of Matrix user ID to number ≥ 0 | `{}` | Caps in USD for specific users, overriding `monthly_limit_usd` |
+
+A cap of `0` sends every priced reply for that user to the fallback model.
+Bridge aliases share their canonical user's cap and spend.
+Removing the `budgets` section turns budgets off.
+Changes to caps, prices, and the fallback model apply without a restart.
+
+## How Spend Is Counted
+
+Spend is the cost of the user's [recorded token usage](https://docs.mindroom.chat/usage/#token-usage) since the first day of the current month in UTC, at the configured prices.
+It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
+Usage of models without prices, such as local models or subscription logins, costs nothing.
+`claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
+Reasoning and thinking tokens are charged at the output price.
+Audio tokens count at the model's text prices.
+Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
+Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
+A reply that already started finishes on its model.
+
+## Over-Budget Replies
+
+Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
+This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
+The speech model of a realtime or live call profile is not priced or swapped.
+Models without prices keep running, because they add no spend.
+A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
+The fallback model's usage still counts toward spend, but the fallback is never blocked.
+Requests without a human requester, such as unauthenticated OpenAI-compatible calls, are never budgeted.
+Users get no chat message when the fallback applies; the Budgets page shows who is over budget.
+
+## Dashboard Budgets Page
+
+The **Budgets** page turns budgets on or off, sets the default cap and the fallback model, edits per-user caps, and edits model prices.
+It lists each user with spend or a cap of their own, their month-to-date spend, and whether they are over budget and using the fallback model.
+It also lists models used this month that have no prices.
+Click **Save** to write changes to `config.yaml`.
+
+## Budget Status API
+
+`GET /api/budgets` returns budget settings and spend under standard dashboard authentication.
+With budgets off it returns `{"enabled": false}`.
+
+| Field | Contents |
+| --- | --- |
+| `period_start`, `period_end` | First day of the current UTC month and of the next month |
+| `generated_at` | When spend was last computed, or `null` before the first computation |
+| `default_limit_usd`, `fallback_model` | The configured default cap and fallback model |
+| `users` | Rows with `user_id`, `spend_usd`, `limit_usd`, and `over_budget`, highest spend first |
+| `unpriced_models` | Rows with `provider`, `model`, and this month's `total_tokens` for models without prices |
+| `coverage` | `scanned_sources` and `unavailable_sources`, as in [usage coverage](https://docs.mindroom.chat/usage/#token-usage) |
+
+A `503` with `Budget monitor unavailable` means the agents are not running in the same process as the API, so no spend is available.
 
 # Matrix Integration
 
@@ -7119,7 +7278,7 @@ The option is offered only in Matrix conversations, only for allowed subagents t
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
-Its `mindroom-agent context` documents hold its own prompt and runtime guidance, not the caller's configured role or instructions.
+Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
 ## Standard mode
 
@@ -12205,6 +12364,7 @@ run_subagent(
     minimal: bool = False,
     system_prompt: str | None = None,
     tools: list[str] | None = None,
+    skills: list[str] | None = None,
     profile: str | None = None,
 ) -> str
 continue_subagent(subagent_id: str, message: str) -> str
@@ -12258,14 +12418,15 @@ Common errors:
 An agent whose own name is in `delegate_to` can write the prompt of a fresh copy of itself in place of its configured identity and instructions.
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
+Pass `skills` with a subset of the caller's skill names, or `skills=[]` for none; omitting `skills` keeps all of the caller's skills only when `tools` is omitted too, so a child with a `tools` list has only the skills it names.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
-The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories and skills are left out; a child with a `tools` list also has no knowledge search, though it can still read file-mode knowledge bases with its file tools.
+The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories are left out; a child with a `tools` list also has no knowledge search, though it can still read file-mode knowledge bases with its file tools.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](https://docs.mindroom.chat/configuration/history/), the summary of its earlier turns.
 [Minimal subagents](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) describes what a minimal authored subagent, started with `minimal=True` or a profile's `mode: minimal`, needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
-An authored subagent whose `tools` include `delegate` can author further copies only within those tools, a copy without `tools` inherits them except `delegate` at the maximum depth, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
+An authored subagent with `delegate` can author further copies only within its own `tools` and `skills` lists: a copy that omits `tools` inherits its tools, except `delegate` at the maximum depth, a copy that omits both also inherits its skills, and an authored subagent with either list cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools and skills.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
-A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools.
+A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, and a kept configured skill can run its scripts.
 
 ```python
 run_subagent(
@@ -12291,16 +12452,17 @@ You are a hostile reviewer.
 Find the three most serious risks in the proposal you are given, each with evidence.
 ```
 
-`description` is required, `tools`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
-An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt` or `tools`.
+`description` is required, `tools`, `skills`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
+An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt`, `tools`, or `skills`.
 Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters, and each file is limited to 64 KiB.
 On the agent's next run, its `run_subagent` tool lists every profile with its description and every invalid profile with the reason, or, when that list would exceed 2,000 characters, only a note to list `subagents/` itself.
 A subagent keeps the persona it started with, so editing or deleting a profile affects only subagents started afterwards.
 
 Authoring errors:
 
-- `Cannot author a subagent for '<name>': system_prompt, tools, and profile apply only to yourself.` - authoring applies only to the caller's own copy.
+- `Cannot author a subagent for '<name>': system_prompt, tools, skills, and profile apply only to yourself.` - authoring applies only to the caller's own copy.
 - `Cannot delegate: unknown tool '<entry>'. Your tools: ...` - `tools` names a toolkit or function the caller does not have.
+- `Cannot delegate: unknown skill '<name>'. Your skills: ...` - `skills` names a skill the caller does not have.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
 - `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
@@ -12314,7 +12476,7 @@ Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mind
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
-For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
+For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, skills, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
 These files are audit exports that MindRoom never reads, so editing or deleting them does not affect the delegation.
 
 ## [`dynamic_workflow`]
@@ -12350,11 +12512,12 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
-  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `model`, and `mode`.
+  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads or runs a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     A participant used by several steps continues one session.
-    Each run uses the prompt, tools, and model its participants had when the run started, even if a profile changes during the run.
+    Each run uses the prompt, tools, skills, and model its participants had when the run started, even if a profile changes during the run.
     Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
   - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
     It runs with its configured model and without tools, skills, knowledge, durable state, or context files.
@@ -13992,7 +14155,7 @@ Do not report or "fix" these; they are deliberate.
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
-- An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
+- An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.

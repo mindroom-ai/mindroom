@@ -49,7 +49,7 @@ _SPEC_KEYS = frozenset(
     },
 )
 _ROOM_AGENT_PARTICIPANT_KEYS = frozenset({"id", "kind", "agent", "model", "tools"})
-_SUBAGENT_INLINE_KEYS = frozenset({"system_prompt", "tools", "model", "mode"})
+_SUBAGENT_INLINE_KEYS = frozenset({"system_prompt", "tools", "skills", "model", "mode"})
 _SUBAGENT_PARTICIPANT_KEYS = frozenset({"id", "kind", "description", "profile", *_SUBAGENT_INLINE_KEYS})
 _AGENT_STEP_KEYS = frozenset({"id", "type", "participant", *_AGENT_STEP_TEMPLATE_FIELDS})
 _TRANSFORM_STEP_KEYS = frozenset({"id", "type", "template", "text"})
@@ -367,7 +367,7 @@ def _validate_room_agent_participant(participant: dict[str, object], context: st
 
 
 def _validate_subagent_participant(participant: dict[str, object], context: str) -> None:
-    """Validate an authored subagent: a saved profile, or an inline prompt with optional tools, model, and mode."""
+    """Validate an authored subagent: a saved profile, or an inline prompt with optional tools, skills, model, and mode."""
     _reject_unsupported_fields(participant, _SUBAGENT_PARTICIPANT_KEYS, context)
     if "description" in participant and not isinstance(participant["description"], str):
         msg = f"{context} field 'description' must be a string."
@@ -383,8 +383,9 @@ def _validate_subagent_participant(participant: dict[str, object], context: str)
     if not isinstance(system_prompt, str) or not system_prompt.strip():
         msg = f"{context} needs a non-empty 'system_prompt' or a 'profile'."
         raise DynamicWorkflowError(msg)
-    if participant.get("tools") is not None:
-        participant["tools"] = _normalized_tool_names(participant["tools"], f"{context} field 'tools'")
+    for field in ("tools", "skills"):
+        if participant.get(field) is not None:
+            participant[field] = _normalized_names(participant[field], f"{context} field '{field}'")
     if participant.get("model") is not None:
         participant["model"] = _required_text(participant, "model", context=context)
     mode = participant.get("mode")
@@ -518,21 +519,21 @@ def _validate_permission_models(permissions: dict[str, object]) -> None:
 
 
 def _validate_permission_tools(permissions: dict[str, object]) -> None:
-    permissions["tools"] = _normalized_tool_names(permissions.get("tools", []), "Workflow permission 'tools'")
+    permissions["tools"] = _normalized_names(permissions.get("tools", []), "Workflow permission 'tools'")
 
 
-def _normalized_tool_names(raw_tools: object, context: str) -> list[str]:
-    if raw_tools is None:
+def _normalized_names(raw_names: object, context: str) -> list[str]:
+    if raw_names is None:
         return []
-    if not isinstance(raw_tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in raw_tools):
+    if not isinstance(raw_names, list) or not all(isinstance(name, str) and name.strip() for name in raw_names):
         msg = f"{context} must be a list of non-empty strings."
         raise DynamicWorkflowError(msg)
-    tool_names: list[str] = []
-    for raw_tool in raw_tools:
-        tool_name = cast("str", raw_tool).strip()
-        if tool_name not in tool_names:
-            tool_names.append(tool_name)
-    return tool_names
+    names: list[str] = []
+    for raw_name in raw_names:
+        name = cast("str", raw_name).strip()
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def _validate_participant_tool_grants(spec: dict[str, object], participants: list[dict[str, object]]) -> None:

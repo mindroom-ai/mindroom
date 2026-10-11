@@ -62,7 +62,7 @@ The option is offered only in Matrix conversations, only for allowed subagents t
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
-Its `mindroom-agent context` documents hold its own prompt and runtime guidance, not the caller's configured role or instructions.
+Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
 ## Standard mode
 
