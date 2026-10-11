@@ -213,6 +213,8 @@ async def _run_export_source(
             reader=source.reader,
             config=config,
             runtime_paths=runtime_paths,
+            entity_name=source.entity_name,
+            membership_index=source.membership_index,
             rooms=source.rooms,
             targets=tuple(accumulator.target for accumulator in accumulators),
             max_thread_roots=max_thread_roots,

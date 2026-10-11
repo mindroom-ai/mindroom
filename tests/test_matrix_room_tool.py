@@ -1273,6 +1273,7 @@ def _summary_notice(
     *,
     model: str = "summary-model",
     pinned: bool | None = None,
+    sender: str = _AGENT_ID,
 ) -> ResolvedVisibleMessage:
     metadata: dict[str, object] = {
         "version": 1,
@@ -1284,7 +1285,7 @@ def _summary_notice(
     if pinned is not None:
         metadata["pinned"] = pinned
     return ResolvedVisibleMessage.synthetic(
-        sender=_AGENT_ID,
+        sender=sender,
         body=summary,
         event_id=event_id,
         timestamp=ts,

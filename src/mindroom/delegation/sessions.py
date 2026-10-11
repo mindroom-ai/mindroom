@@ -61,7 +61,7 @@ def _read(path: Path, owner: ToolExecutionIdentity) -> DelegationChild:
     payload = json.loads(path.read_text())
     if payload["owner"] != _owner(owner):
         raise SubagentSessionError(_UNAVAILABLE)
-    return DelegationChild(**payload["child"])
+    return DelegationChild.from_dict(payload["child"])
 
 
 async def load_subagent(
@@ -94,7 +94,7 @@ async def load_retained_subagent_turn(child: DelegationChild, runtime_paths: Run
     def read() -> DelegationChild | None:
         if not path.exists():
             return None
-        retained = DelegationChild(**json.loads(path.read_text())["child"])
+        retained = DelegationChild.from_dict(json.loads(path.read_text())["child"])
         return retained if retained.delegation_id == child.delegation_id else None
 
     return await asyncio.to_thread(read)

@@ -17,6 +17,7 @@ import yaml
 
 from mindroom import yaml_io
 from mindroom.durable_write import write_json_file_durable
+from mindroom.dynamic_workflows.legacy_participants import upgrade_legacy_participants
 from mindroom.dynamic_workflows.validation import (
     ID_RE,
     DynamicWorkflowError,
@@ -86,7 +87,7 @@ class DynamicWorkflowStore:
         owner_id: str,
         created_by: str,
         reason: str | None = None,
-        spec_validator: Callable[[dict[str, object]], None] | None = None,
+        spec_validator: Callable[[dict[str, object]], object] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create a workflow with revision 000001."""
         validated_spec = validate_workflow_spec(spec)
@@ -136,7 +137,7 @@ class DynamicWorkflowStore:
         patch: dict[str, object],
         updated_by: str,
         reason: str,
-        spec_validator: Callable[[dict[str, object]], None] | None = None,
+        spec_validator: Callable[[dict[str, object]], object] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create and publish a new revision by applying a recursive patch."""
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
@@ -359,7 +360,7 @@ class DynamicWorkflowStore:
 
     def _load_revision(self, workflow_dir: Path, revision: str) -> dict[str, object]:
         _validate_revision(revision)
-        return _load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml")
+        return upgrade_legacy_participants(_load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml"))
 
     def _run_report_title(self, workflow_dir: Path, run: DynamicWorkflowRun) -> str:
         try:

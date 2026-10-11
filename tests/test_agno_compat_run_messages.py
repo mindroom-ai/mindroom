@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from agno.agent import Agent
@@ -23,13 +23,17 @@ from agno.session.agent import AgentSession
 from agno.team import _run as team_run
 from agno.tools.function import Function
 
+from mindroom import model_loading
 from mindroom.agent_storage import create_state_storage
+from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.usage_stats import collect_admin_usage
 from mindroom.usage_storage import project_usage
 from tests.history_helpers import RecordingModel
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -109,6 +113,7 @@ def installed():
     return (
         Model.process_response_stream,
         Model.aprocess_response_stream,
+        Model._aprocess_model_response,
         Model._populate_assistant_message,
         Model._populate_assistant_message_from_stream_data,
         agent_run.flush_in_flight_messages_on_error,
@@ -279,3 +284,96 @@ async def test_interrupted_continuation_exports_every_completed_request(
         assert report.request_coverage.unavailable_sources == 0
     finally:
         storage.close()
+
+
+def _tool_call(name: str, arguments: str, usage: MessageMetrics) -> ModelResponse:
+    return ModelResponse(
+        role="assistant",
+        tool_calls=[{"id": f"call-{name}", "type": "function", "function": {"name": name, "arguments": arguments}}],
+        response_usage=usage,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_without_a_run_reports_every_request(tmp_path: Path) -> None:
+    """Callers that meter a whole tool loop without a run must see the usage of every request."""
+    # Creating owned storage installs the repair, as it does in production.
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+
+    def remember(fact: str) -> str:
+        return f"Saved {fact}"
+
+    model = _InterruptedModel(
+        id="test-model",
+        provider="test-provider",
+        responses=[
+            _tool_call(
+                "remember",
+                '{"fact": "tea"}',
+                MessageMetrics(input_tokens=1000, output_tokens=10, total_tokens=1010),
+            ),
+            ModelResponse(
+                role="assistant",
+                content="Done",
+                response_usage=MessageMetrics(input_tokens=1100, output_tokens=20, total_tokens=1120),
+            ),
+        ],
+    )
+    try:
+        response = await model.aresponse(
+            messages=[Message(role="user", content="Remember tea")],
+            tools=[Function.from_callable(remember)],
+        )
+        assert response.response_usage is not None
+        assert (response.response_usage.input_tokens, response.response_usage.output_tokens) == (2100, 30)
+        assert response.response_usage.total_tokens == 2130
+    finally:
+        storage.close()
+
+
+@dataclass
+class _LearningModel(RecordingModel):
+    """Answers normally, and saves one learning before finishing when it is offered a learning tool."""
+
+    calls: int = 0
+
+    def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        self.calls += 1
+        usage = MessageMetrics(input_tokens=1000, output_tokens=10, total_tokens=1010)
+        messages = cast("list[Message]", kwargs.get("messages") or [])
+        offered = {
+            tool["function"]["name"] for tool in cast("list[dict]", kwargs.get("tools") or []) if "function" in tool
+        }
+        learning_tool = next((name for name in ("update_profile", "add_memory") if name in offered), None)
+        if learning_tool is not None and not any(message.role == "tool" for message in messages):
+            arguments = '{"name": "Robin"}' if learning_tool == "update_profile" else '{"memory": "Likes tea"}'
+            return _tool_call(learning_tool, arguments, usage)
+        return ModelResponse(role="assistant", content="ok", response_usage=usage)
+
+    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
+        return self.invoke(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_default_learning_counts_every_extraction_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Learning is on by default, and a profile or memory save takes two model requests."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = Config(
+        models={"default": ModelConfig(provider="openai", id="gpt-6-luna")},
+        agents={"status": AgentConfig(display_name="Status")},
+    )
+    persist_entity_accounts(config, paths)
+    model = _LearningModel(id="gpt-6-luna", provider="OpenAI")
+    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_args, **_kwargs: model)
+    agent = create_agent("status", config, paths, None, session_id="session")
+
+    run = await agent.arun("I am Robin and I like tea", user_id="@robin:example.org", session_id="session")
+
+    # One reply request, then a tool request and a final request for each of the profile and memory stores.
+    assert model.calls == 5
+    assert run.metrics is not None
+    assert run.metrics.input_tokens == 5000
+    assert sum(entry.input_tokens for entry in run.metrics.details["learning_model"]) == 4000

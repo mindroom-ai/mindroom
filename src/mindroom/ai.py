@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -46,6 +47,8 @@ from mindroom.delegation.execution import drive_delegation_stream, drive_delegat
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
+    child_tool_runtime_context,
+    delegation_grant,
     note_child_run_id,
     observe_child_event,
 )
@@ -81,7 +84,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.pre_model_preparation import (
@@ -1045,6 +1048,26 @@ def _minimal_turn_enrichment(
     return render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required])
 
 
+async def _prepare_turn_memory(
+    ctx: ResponseTurnContext,
+    prompt: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> MemoryPromptParts:
+    """Recall memories for a configured agent turn; an authored persona recalls none."""
+    if ctx.persona is not None:
+        return MemoryPromptParts()
+    return await build_memory_prompt_parts(
+        prompt,
+        ctx.entity_label,
+        runtime_paths.storage_root,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     ctx: ResponseTurnContext,
@@ -1113,6 +1136,7 @@ async def _prepare_agent_and_prompt(
                 eager_deferred_tools=eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
                 agent_cli_in_shell=True,
+                persona=ctx.persona,
             )
             prewarm_agent_model_client(
                 agent,
@@ -1147,13 +1171,13 @@ async def _prepare_agent_and_prompt(
         ):
             try:
                 prompt_parts, runtime_model, agent = await prepare_prompt_branches(
-                    prepare_memory=lambda: build_memory_prompt_parts(
+                    prepare_memory=partial(
+                        _prepare_turn_memory,
+                        ctx,
                         prompt,
-                        agent_name,
-                        storage_path,
                         config,
                         runtime_paths,
-                        execution_identity=execution_identity,
+                        execution_identity,
                     ),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
@@ -1169,14 +1193,7 @@ async def _prepare_agent_and_prompt(
         )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await build_memory_prompt_parts(
-            prompt,
-            agent_name,
-            storage_path,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
+        prompt_parts = await _prepare_turn_memory(ctx, prompt, config, runtime_paths, execution_identity)
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
@@ -1372,6 +1389,7 @@ async def run_delegated_child_response(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool,
+    approval_config: Config | None = None,
 ) -> str:
     """Execute the normal response envelope for a prepared child owned by either adapter.
 
@@ -1379,7 +1397,7 @@ async def run_delegated_child_response(
     so no adapter ever has to resume it natively.
     """
     identity = child_execution_identity(child)
-    active_config = authorize_delegation(
+    authorized_config = authorize_delegation(
         child.caller_agent_name,
         child.child_agent_name,
         prompt,
@@ -1387,9 +1405,12 @@ async def run_delegated_child_response(
         runtime_paths=runtime_paths,
         execution_identity=replace(identity, agent_name=child.caller_agent_name),
         depth=child.depth - 1,
+        grant=delegation_grant(child),
     )
-    if isinstance(active_config, str):
-        return active_config
+    if isinstance(authorized_config, str):
+        return authorized_config
+    # A caller's pre-approval overlay replaces the live config for the child's run.
+    active_config = approval_config if approval_config is not None else authorized_config
     knowledge = await resolve_agent_knowledge_access_async(
         child.child_agent_name,
         active_config,
@@ -1398,18 +1419,10 @@ async def run_delegated_child_response(
         execution_identity=identity,
     )
     context = get_tool_runtime_context()
-    child_context = (
-        replace(
-            context,
-            agent_name=child.child_agent_name,
-            active_model_name=child.model_name,
-            target=replace(context.target, session_id=child.session_id),
-        )
-        if context is not None
-        else None
-    )
+    child_context = child_tool_runtime_context(context, child) if context is not None else None
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
+        persona=child.persona,
         entity_label=child.child_agent_name,
         session_id=child.session_id,
         run_id=child.run_id,

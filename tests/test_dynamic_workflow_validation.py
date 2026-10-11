@@ -19,7 +19,7 @@ def _spec(**overrides: object) -> dict[str, object]:
         "id": "demo-workflow",
         "name": "Demo Workflow",
         "kind": "workflow",
-        "participants": [{"id": "writer", "kind": "ephemeral_agent", "name": "Writer"}],
+        "participants": [{"id": "writer", "kind": "subagent", "system_prompt": "You write."}],
         "workflow": [{"id": "write", "type": "agent_step", "participant": "writer", "prompt": "Write."}],
     }
     spec.update(overrides)
@@ -34,8 +34,8 @@ def test_minimal_spec_validates_and_normalizes_defaults() -> None:
     permissions = validated["permissions"]
     assert permissions == {"tools": [], "data": {}, "max_total_agents": 16}
     participant = validated["participants"][0]
-    assert participant["kind"] == "ephemeral_agent"
-    assert participant["tools"] == []
+    assert participant["kind"] == "subagent"
+    assert "tools" not in participant
 
 
 def test_validate_does_not_mutate_the_input_spec() -> None:
@@ -111,20 +111,20 @@ def test_participants_must_be_mappings() -> None:
 def test_participant_requires_id() -> None:
     """Each participant must declare an id."""
     with pytest.raises(DynamicWorkflowError, match="Participant at index 0 field 'id' is missing"):
-        validate_workflow_spec(_spec(participants=[{"kind": "ephemeral_agent"}]))
+        validate_workflow_spec(_spec(participants=[{"kind": "subagent"}]))
 
 
 def test_participant_ids_must_be_unique() -> None:
     """Duplicate participant ids are rejected."""
-    participants = [{"id": "writer"}, {"id": "writer"}]
+    participants = [{"id": "writer", "system_prompt": "P"}, {"id": "writer", "system_prompt": "P"}]
     with pytest.raises(DynamicWorkflowError, match="Duplicate participant id 'writer'"):
         validate_workflow_spec(_spec(participants=participants))
 
 
-def test_participant_kind_defaults_to_ephemeral_agent() -> None:
-    """Participants without a kind default to ephemeral_agent."""
-    validated = validate_workflow_spec(_spec(participants=[{"id": "writer"}]))
-    assert validated["participants"][0]["kind"] == "ephemeral_agent"
+def test_participant_kind_defaults_to_subagent() -> None:
+    """Participants without a kind are authored subagents."""
+    validated = validate_workflow_spec(_spec(participants=[{"id": "writer", "system_prompt": "P"}]))
+    assert validated["participants"][0]["kind"] == "subagent"
 
 
 def test_participant_rejects_unsupported_kind() -> None:
@@ -159,23 +159,49 @@ def test_room_agent_participant_cannot_declare_tools() -> None:
         validate_workflow_spec(_spec(participants=participants))
 
 
-def test_ephemeral_participant_instructions_must_be_strings() -> None:
-    """Participant instructions must be a string or list of strings."""
-    participants = [{"id": "writer", "instructions": [1, 2]}]
-    with pytest.raises(DynamicWorkflowError, match="must be a string or list of strings"):
-        validate_workflow_spec(_spec(participants=participants))
+def test_subagent_participant_requires_prompt_or_profile() -> None:
+    """A subagent participant authors its prompt inline or names a saved profile."""
+    with pytest.raises(DynamicWorkflowError, match="needs a non-empty 'system_prompt' or a 'profile'"):
+        validate_workflow_spec(_spec(participants=[{"id": "writer"}]))
+
+
+@pytest.mark.parametrize(
+    "participant",
+    [
+        {"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["file"], "model": "haiku"},
+        {"id": "writer", "kind": "subagent", "profile": "critic"},
+    ],
+)
+def test_subagent_participant_accepts_inline_fields_or_a_profile(participant: dict[str, object]) -> None:
+    """A subagent participant authors its prompt, tools, and model inline, or names a saved profile."""
+    validate_workflow_spec(_spec(participants=[participant], permissions={"tools": ["file"]}))
+
+
+@pytest.mark.parametrize(
+    "participant",
+    [
+        {"id": "writer", "profile": "critic", "system_prompt": "P"},
+        {"id": "writer", "profile": "critic", "tools": []},
+        {"id": "writer", "kind": "ephemeral_agent", "name": "Writer", "role": "Writes"},
+    ],
+)
+def test_profile_excludes_inline_fields_and_the_retired_kind_is_rejected(participant: dict[str, object]) -> None:
+    """A profile participant cannot add inline fields, and new specs cannot use the retired ephemeral kind."""
+    with pytest.raises(DynamicWorkflowError):
+        validate_workflow_spec(_spec(participants=[participant]))
 
 
 def test_participant_tools_must_be_granted_by_permissions() -> None:
-    """Participant tools must appear in permissions.tools."""
-    participants = [{"id": "writer", "tools": ["shell"]}]
+    """Participant tools must appear in permissions.tools when the spec narrows tools that way."""
+    participants = [{"id": "writer", "system_prompt": "P", "tools": ["shell"]}]
+    validate_workflow_spec(_spec(participants=participants))
     with pytest.raises(DynamicWorkflowError, match=r"not granted by permissions\.tools"):
-        validate_workflow_spec(_spec(participants=participants))
+        validate_workflow_spec(_spec(participants=participants, permissions={"tools": ["file"]}))
 
 
 def test_granted_participant_tools_validate_and_deduplicate() -> None:
     """Granted participant tools are stripped and deduplicated."""
-    participants = [{"id": "writer", "tools": ["shell", " shell "]}]
+    participants = [{"id": "writer", "system_prompt": "P", "tools": ["shell", " shell "]}]
     validated = validate_workflow_spec(_spec(participants=participants, permissions={"tools": ["shell"]}))
     assert validated["participants"][0]["tools"] == ["shell"]
 
@@ -301,7 +327,10 @@ def test_template_accepts_input_and_prior_step_references() -> None:
 
 def test_rejects_too_many_participants() -> None:
     """Participant count is capped at 8."""
-    participants = [{"id": "writer"}, *({"id": f"agent-{index}"} for index in range(8))]
+    participants = [
+        {"id": "writer", "system_prompt": "P"},
+        *({"id": f"agent-{index}", "system_prompt": "P"} for index in range(8)),
+    ]
     with pytest.raises(DynamicWorkflowError, match="participants cannot exceed 8"):
         validate_workflow_spec(_spec(participants=participants))
 
@@ -589,7 +618,7 @@ def test_collect_errors_handles_invalid_participant_tools_without_crashing() -> 
     """Dependent grant validation skips participants that failed normalization."""
     errors = collect_workflow_spec_errors(
         _spec(
-            participants=[{"id": "writer", "tools": 123}],
+            participants=[{"id": "writer", "system_prompt": "P", "tools": 123}],
             workflow=[{"id": "write", "participant": "writer", "prompt": "Write."}],
         ),
     )
@@ -635,7 +664,8 @@ def test_collect_errors_reports_grants_when_workflow_is_missing() -> None:
             "id": "demo",
             "name": "Demo",
             "kind": "workflow",
-            "participants": [{"id": "writer", "tools": ["shell"]}],
+            "participants": [{"id": "writer", "system_prompt": "P", "tools": ["shell"]}],
+            "permissions": {"tools": ["file"]},
         },
     )
 
@@ -647,13 +677,14 @@ def test_collect_errors_reports_grants_when_workflow_is_missing() -> None:
 
 def test_collect_errors_reports_grants_alongside_participant_limit() -> None:
     """Participant count failures do not suppress independent grant errors."""
-    participants: list[dict[str, object]] = [{"id": f"writer_{index}"} for index in range(9)]
+    participants: list[dict[str, object]] = [{"id": f"writer_{index}", "system_prompt": "P"} for index in range(9)]
     participants[0]["tools"] = ["shell"]
 
     errors = collect_workflow_spec_errors(
         _spec(
             participants=participants,
             workflow=[{"id": "write", "participant": "writer_0", "prompt": "Write."}],
+            permissions={"tools": ["file"]},
         ),
     )
 
@@ -686,3 +717,23 @@ def test_collect_errors_does_not_mutate_the_input_spec() -> None:
     collect_workflow_spec_errors(spec)
     assert "permissions" not in spec
     assert "tools" not in spec["participants"][0]
+
+
+@pytest.mark.parametrize("mode", [["standard"], {"standard": True}, "fast"])
+def test_subagent_participant_mode_must_be_a_known_string(mode: object) -> None:
+    """A non-string mode is a validation error, not a crash."""
+    with pytest.raises(DynamicWorkflowError, match="field 'mode' must be 'standard' or 'minimal'"):
+        validate_workflow_spec(_spec(participants=[{"id": "writer", "system_prompt": "P", "mode": mode}]))
+
+
+def test_function_level_permission_grants_cover_matching_participant_tools() -> None:
+    """A permissions.tools entry can grant one function, which a participant may then name."""
+    participants = [{"id": "writer", "system_prompt": "P", "tools": ["file.read_file"]}]
+    validate_workflow_spec(_spec(participants=participants, permissions={"tools": ["file.read_file"]}))
+    with pytest.raises(DynamicWorkflowError, match=r"not granted by permissions\.tools"):
+        validate_workflow_spec(
+            _spec(
+                participants=[{"id": "writer", "system_prompt": "P", "tools": ["file"]}],
+                permissions={"tools": ["file.read_file"]},
+            ),
+        )

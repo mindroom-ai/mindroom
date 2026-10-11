@@ -66,7 +66,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
-from mindroom.helper_usage import helper_usage_context
+from mindroom.helper_usage import helper_usage_context, record_system_usage
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
@@ -1150,6 +1150,7 @@ async def _select_team_mode(
             telemetry=False,
         )
         response = await agent.arun(prompt, session_id="team_mode_decision")
+        await record_system_usage(response, runtime_paths=runtime_paths, kind="team_mode")
         decision = response.content
         if isinstance(decision, _TeamModeDecision):
             logger.info("team_mode_decided", mode=decision.mode, reasoning=decision.reasoning)
