@@ -59,7 +59,8 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # tests/test_claude_stream_usage.py::test_claude_reply_closed_from_another_task_keeps_its_start_usage;
 # tests/test_claude_stream_usage.py::test_completed_claude_stream_counts_its_usage_once;
 # tests/test_claude_stream_usage.py::test_claude_stream_that_fails_after_starting_counts_nothing;
-# tests/test_claude_stream_usage.py::test_stalled_claude_stream_counts_nothing.
+# tests/test_claude_stream_usage.py::test_stalled_claude_stream_counts_nothing;
+# tests/test_vertex_claude_context_guard.py::test_stream_attempt_forgets_earlier_start_usage_before_fitting.
 
 
 class ClaudeProviderSDKCompat:
