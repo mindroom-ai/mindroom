@@ -28,7 +28,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_wor
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
 from tests.cpu_budget_helpers import cpu_budget
 
 if TYPE_CHECKING:
@@ -1259,7 +1259,7 @@ async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(
 
     with patch.object(skills_module, "record_skill_use", spy):
         get_instructions(skill_name="local")
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     assert writers
     assert threading.main_thread() not in writers
     assert "last_used_at" in json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]

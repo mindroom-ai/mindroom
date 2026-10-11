@@ -79,6 +79,5 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
         result = await toolkit.async_functions["echo_echo"].entrypoint(text="hello")
         assert result.content.startswith("echo:hello")
     finally:
-        bind_mcp_server_manager(None)
         sync_mcp_tool_registry(None)
         await manager.shutdown()

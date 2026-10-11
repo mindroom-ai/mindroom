@@ -416,7 +416,9 @@ class _LocalComputer:
         return env
 
     def command(self, *args: str) -> list[str]:
-        return [sys.executable, "-c", "from mindroom.cli.main import main; main()", "desktop", *args]
+        # A pytest started in the background inherits an ignored SIGINT, which would make Ctrl-C a no-op.
+        launcher = "import signal; signal.signal(signal.SIGINT, signal.default_int_handler); "
+        return [sys.executable, "-c", f"{launcher}from mindroom.cli.main import main; main()", "desktop", *args]
 
     def run(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -565,6 +567,11 @@ def _running_bridge(local: _LocalComputer) -> Iterator[list[str]]:
         process.send_signal(signal.SIGINT)
         try:
             process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            reader.join(timeout=10)
+            pytest.fail(f"Desktop bridge did not stop within 30 seconds of Ctrl-C; its output:\n{''.join(lines)}")
         finally:
             if process.poll() is None:
                 process.kill()

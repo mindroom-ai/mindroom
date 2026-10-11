@@ -35,7 +35,7 @@ from mindroom.teams import TeamMode, TeamTurnModelSelection
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.budget_helpers import budget_monitor_with_spend
-from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, patch_response_runner_module, unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
@@ -111,7 +111,7 @@ async def test_completed_response_asks_budgets_to_count_the_new_spend(tmp_path: 
         patch_response_runner_module(typing_indicator=_noop_typing, should_use_streaming=AsyncMock(return_value=False)),
     ):
         await coordinator.generate_response(_plain_request(_target()))
-        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
 
     orchestrator.budgets.response_finished.assert_called_once_with()
 

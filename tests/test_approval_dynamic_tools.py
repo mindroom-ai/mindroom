@@ -121,10 +121,8 @@ class _ScopedCatalogTransport:
 @pytest.fixture(autouse=True)
 def _isolate_dynamic_caches() -> Iterator[None]:
     dynamic_toolkits._loaded_tools.clear()
-    bind_mcp_server_manager(None)
     yield
     dynamic_toolkits._loaded_tools.clear()
-    bind_mcp_server_manager(None)
 
 
 @pytest.mark.asyncio
