@@ -1973,8 +1973,8 @@ def create_agent(
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
     # An authored persona's prompt replaces the agent's identity, and it gets no skills or learning of its own.
-    # An explicit tool list loads every toolkit it names up front and hides functions Agno generates without an
-    # owning toolkit, such as knowledge search.
+    # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
+    # up front; it also hides functions Agno generates without an owning toolkit, such as knowledge search.
     persona_prompt = persona.system_prompt if persona is not None else None
     persona_tools = persona.tools if persona is not None else None
     eager_deferred_tools = eager_deferred_tools or persona_tools is not None
