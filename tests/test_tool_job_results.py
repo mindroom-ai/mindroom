@@ -55,9 +55,10 @@ def test_payload_round_trips_every_field_with_exact_types() -> None:
 def test_payload_keeps_other_values_as_the_text_the_model_reads() -> None:
     """A value with no wire tag, such as a database driver's datetime, keeps its text, so the call's result stands."""
     created = datetime(2026, 10, 10, 12, 30, tzinfo=UTC)
-    payload = ToolResultPayload(value={"created": created, "amount": Decimal("1.50"), 7: "seven", "ratio": math.nan})
+    by_id = {1: "one", "1": "text one"}
+    payload = ToolResultPayload(value={"created": created, "amount": Decimal("1.50"), "ratio": math.nan, "ids": by_id})
 
-    assert _saved(payload).value == {"created": str(created), "amount": "1.50", "7": "seven", "ratio": "nan"}
+    assert _saved(payload).value == {"created": str(created), "amount": "1.50", "ratio": "nan", "ids": str(by_id)}
 
 
 def test_payload_captures_a_local_artifact_before_cleanup(tmp_path: Path) -> None:

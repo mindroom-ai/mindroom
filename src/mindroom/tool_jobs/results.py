@@ -99,7 +99,10 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
     if isinstance(value, Path):
         return {"type": "path", "value": str(value)}
     if isinstance(value, dict):
-        return {"type": "dict", "value": {str(key): _encode(item, allowance) for key, item in value.items()}}
+        if not all(isinstance(key, str) for key in value):
+            # Keys such as 1 and "1" would collide as text, so the whole mapping keeps the text the model reads inline.
+            return str(value)
+        return {"type": "dict", "value": {key: _encode(item, allowance) for key, item in value.items()}}
     if isinstance(value, (list, tuple)):
         kind = "tuple" if isinstance(value, tuple) else "list"
         return {"type": kind, "value": [_encode(item, allowance) for item in value]}
