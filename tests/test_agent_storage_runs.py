@@ -14,6 +14,7 @@ import pytest
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
@@ -125,6 +126,41 @@ def test_loaded_runs_drop_their_stored_tool_schemas(tmp_path: Path) -> None:
 
     assert loaded is not None
     assert [loaded_run.metadata for loaded_run in loaded.runs or []] == [{"room_id": "!room:example.test"}]
+
+
+def test_loaded_team_runs_drop_tool_schemas_of_embedded_member_responses(tmp_path: Path) -> None:
+    """A paused team run stores its paused member responses inside its row; those lose the copy too."""
+    storage = create_state_storage("eng", tmp_path, subdir="sessions", session_table="eng_sessions")
+    schema = [{"name": "demo", "description": "Demo"}]
+    member_run = RunOutput(
+        run_id="m1",
+        agent_id="code",
+        session_id="t1",
+        parent_run_id="team1",
+        status=RunStatus.paused,
+        metadata={"tools_schema": schema},
+    )
+    team_run = TeamRunOutput(
+        run_id="team1",
+        team_id="eng",
+        session_id="t1",
+        status=RunStatus.paused,
+        member_responses=[member_run],
+        metadata={"tools_schema": schema},
+    )
+    try:
+        seed_session(storage, TeamSession(session_id="t1", team_id="eng", runs=[team_run]))
+        storage.close()
+        storage = create_state_storage("eng", tmp_path, subdir="sessions", session_table="eng_sessions")
+        loaded = get_team_session(storage, "t1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    [loaded_team_run] = loaded.runs or []
+    assert isinstance(loaded_team_run, TeamRunOutput)
+    assert loaded_team_run.metadata == {}
+    assert [member.metadata for member in loaded_team_run.member_responses] == [{}]
 
 
 def test_get_session_ignores_runs_limit(tmp_path: Path) -> None:

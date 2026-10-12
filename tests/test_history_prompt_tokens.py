@@ -391,8 +391,8 @@ def _docs_toolkit() -> Toolkit:
     )
 
 
-def test_static_budgeting_and_metadata_reuse_one_tool_surface(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Budget estimators and run-metadata payloads must share one prepared surface per agent."""
+def test_static_budgeting_reuses_one_tool_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Budget estimators and the tool payloads must share one prepared surface per agent."""
     agent = _agent()
     agent.tools = [_docs_toolkit()]
 
@@ -435,7 +435,6 @@ def test_tool_definition_payloads_cached_equal_and_ordered() -> None:
 
     assert first == cached == fresh
     assert [payload["name"] for payload in first] == ["search_docs", "export_notes"]
-
 
 
 def test_tool_surfaces_are_keyed_per_agent_instance() -> None:
