@@ -1,5 +1,5 @@
 # ruff: noqa: D100, B018, F821
-# Names vulture would otherwise report as unused; each line names the files where vulture reports it.
+# Names vulture would otherwise report as unused (tests/test_vulture_whitelist.py keeps every entry needed); each comment names where vulture reported it.
 _.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_budgets  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_template  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
