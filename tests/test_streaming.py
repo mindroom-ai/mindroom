@@ -20,6 +20,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom import interactive
 from mindroom import reply_lifecycle as rl
 from mindroom import streaming as streaming_mod
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
@@ -756,6 +757,33 @@ def test_only_in_progress_edits_hide_an_unfinished_interactive_block(config: Con
     assert in_progress.display_text == "Thinking..."
     assert in_progress.committed_state.visible_body_state == "placeholder_only"
     assert "```interactive" in streaming_mod._prepare_delivery_from_snapshot(final).display_text
+
+
+def test_only_a_final_edit_warns_about_an_unfinished_interactive_block(config: Config) -> None:
+    """A block still arriving is not malformed yet; only a final reply that never closes it logs a warning."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = 'Here is the plan.\n\n```interactive\n{"question": "Which step first?", "options": ['
+    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    final = streaming._delivery_snapshot(
+        is_final=True,
+        allow_empty_progress=False,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    assert progress is not None
+    assert final is not None
+
+    with patch.object(interactive.logger, "warning") as mock_warning:
+        assert streaming_mod._prepare_delivery_from_snapshot(progress).display_text == "Here is the plan."
+    mock_warning.assert_not_called()
+
+    with patch.object(interactive.logger, "warning") as mock_warning:
+        streaming_mod._prepare_delivery_from_snapshot(final)
+    mock_warning.assert_called_once()
+    assert mock_warning.call_args.args == ("Interactive block not parsed",)
 
 
 @pytest.mark.asyncio

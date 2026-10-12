@@ -359,15 +359,14 @@ def _interactive_block_matches(text: str) -> list[re.Match[str]]:
     return matches
 
 
-def hide_unfinished_interactive(formatted_text: str) -> str:
+def hide_unfinished_interactive(text: str) -> str:
     """Cut an interactive block that is still streaming, so its partial JSON stays out of the message.
 
-    Complete blocks are already rendered as questions. When the text ends inside a fenced block marked exactly
-    ``interactive`` or ``interactive json``, the text is cut where that block opens; the text before it stays and
-    the question appears once the block closes. Closed blocks, even ones the parser could not use, and every
-    other code block are left as written.
+    When the text ends inside a fenced block marked exactly ``interactive`` or ``interactive json``, the text is
+    cut where that block opens; the text before it stays and the question appears once the block closes. Closed
+    blocks, interactive or not, and every other code block are left as written.
     """
-    lines = formatted_text.split("\n")
+    lines = text.split("\n")
     open_fence: tuple[int, int, str] | None = None  # line, backtick count, and marker of the block the text ends in
     for index, line in enumerate(lines):
         # One fence line: its backticks and info string. Info strings cannot contain backticks.
@@ -381,12 +380,12 @@ def hide_unfinished_interactive(formatted_text: str) -> str:
         elif not info and ticks >= open_fence[1]:
             open_fence = None
     if open_fence is None:
-        return formatted_text
+        return text
     index, _, marker = open_fence
     if not marker and index + 1 < len(lines):
         marker = lines[index + 1]  # a bare fence may carry its marker on the next line
     if not _is_interactive_marker(marker):
-        return formatted_text
+        return text
     return "\n".join(lines[:index]).rstrip()
 
 

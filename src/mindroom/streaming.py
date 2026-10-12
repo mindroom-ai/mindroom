@@ -480,12 +480,13 @@ def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
     """Format one outbound payload from immutable stream state."""
     text_to_send = snapshot.accumulated_text if snapshot.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
+    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+        # An interactive block still arriving is raw JSON, not a malformed block, so it is cut before parsing;
+        # its question renders once the block closes.
+        text_to_send = interactive.hide_unfinished_interactive(text_to_send) or _PROGRESS_PLACEHOLDER
 
     response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
     display_text = response.formatted_text
-    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
-        # An interactive block still arriving is raw JSON; its question renders once the block closes.
-        display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
 
     latest_for_message = (
         snapshot.latest_thread_event_id if snapshot.event_id is None and not snapshot.room_mode else None
