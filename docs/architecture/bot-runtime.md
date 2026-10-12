@@ -131,7 +131,7 @@ A voice message's batching scope and its echo thread are distinct: a root audio 
 
 ## Handled-Turn Ledger
 
-- One runtime process owns each agent's ledger and its semantic ordering; nothing defines cross-process precedence, and the database does not coordinate independent runtimes pointed at the same storage path.
+- One runtime process owns each agent's ledger and its semantic ordering, so nothing defines cross-process precedence; a second runtime against the same event journal refuses to start.
 - Retention keeps replayable incomplete turns, every group an unsettled journal row references, and every turn record carrying a redaction tombstone, because history cleanup derives from those tombstones once a departure dropped the journal's tombstone or for history older than the journal.
 
 ## Redaction

@@ -27,7 +27,7 @@ Users should not have to wire workspace-relative paths, link context files to ru
   A module that makes its own scope decision or adds its own model of agent-local state reintroduces the drift this design exists to prevent.
 - The work keeps supported external behavior and protocol compatibility but not internal backward compatibility: no transition helpers, alternate internal paths, or legacy wrappers kept only because older internal code used them.
 - No `mind`-specific special cases go into unrelated runtime code, and the feature is not a workaround for one private deployment.
-- `mindroom config init` is not the onboarding surface for private instances: its starter config stays a shared single-user example with top-level `context_files` and shared knowledge, and private instances stay opt-in for multi-user or requester-isolated deployments.
+- `mindroom config init` is not the onboarding surface for private instances: its starter config stays a shared single-user example with top-level `context_files`, and private instances stay opt-in for multi-user or requester-isolated deployments.
 
 ## Non-goals and limitations
 

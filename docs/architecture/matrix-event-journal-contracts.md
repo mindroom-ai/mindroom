@@ -11,7 +11,7 @@ The history of how the design got here, including the theories that turned out w
 
 MindRoom trusts nio's typed sync records and does not reproduce a canonical JSON, digest, or per-record proof protocol over them.
 Nio owns recovery bounds, cold-history classification, and history-loss records, and MindRoom takes timeline provenance from nio rather than inferring it from raw sync state blocks, timeline limits, cursor presence, or repeated memberships.
-Nio also owns confirmation of local membership commands and their sync echoes, so MindRoom keeps its own membership tenure fencing but no second echo protocol or departure-echo counter.
+Nio also owns encryption recipient selection, room-key sharing, and confirmation of local membership commands and their sync echoes, so MindRoom keeps its own membership tenure fencing but no second echo protocol or departure-echo counter.
 Producer membership positions belong to the bound nio stream and application tenures belong to events and deliveries, so the two have separate lifetimes even though they commit together.
 
 ### Ownership transfers at durable outbox enqueue

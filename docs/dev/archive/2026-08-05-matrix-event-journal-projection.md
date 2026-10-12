@@ -190,9 +190,12 @@ These process lessons kept catching real defects and are not visible in the diff
 - Building against the real nio branch, not tracing consumers by hand, showed that `persist_recovery=True` is required: nio refuses an acknowledgement past an open gap unless the gap row outlives the process, so with it false every certified response raises `LocalProtocolError`.
 - Verify with a clean working tree: a marker registered only in an uncommitted `pyproject.toml` made seven tests pass locally that would have failed in CI.
 - Parallel agents collided in git, not code: `git commit` commits the whole index, so one agent's commit swept in other agents' files, and `pre-commit` stashing unstaged files reverted another agent's restore; separate worktrees, or explicit file ownership in a shared one, avoid both.
+  Errors from reading a file another agent is mid-way through editing belong to nobody and must not be fixed outside one's own scope, and a worktree auto-created from `origin/main` looks plausible while containing none of the branch, so check its base.
 
 ## Limitations accepted at the cutover
 
 An attempted outbox row is resent across a rejoin, so when its first send never arrived, the previous membership's answer reaches the new one late.
 That was preferred to deriving a fresh transaction, which posts the answer twice if the first send landed, or refreshing the payload, which leaves the durable record and the room disagreeing about what was said.
 PR #1836 later replaced the resend: an old-membership row is reconciled against the room, adopting an event already there or retiring the row, and is never sent; both rejected alternatives still stand.
+
+A permanently failing send has no retry horizon and is retried after every sync response, deliberately: every available terminal state drops the answer, the membership fence already withdraws rows for rooms the bot has left, and recording the sending device before each send bounds the duplicate scan to once per device change.

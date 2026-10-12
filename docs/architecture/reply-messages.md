@@ -79,7 +79,7 @@ Edits:
 - A coalesced turn whose messages come from more than one requester, or carry a delegated speaker, never regenerates, because a regeneration replays every source under the editor's identity and would run messages the editor did not write as theirs.
 - An edit of an earlier message of the latest coalesced turn regenerates the whole turn, because the turn has one reply.
 - When two messages of one coalesced turn are edited before either regeneration claims the reply, only the newer edit regenerates, and the earlier message keeps its original text in that answer.
-- A regeneration whose history was redacted meanwhile is suppressed instead of rebuilt: the reply keeps what it showed with the interrupted note, or the cancelled note after a Stop.
+- A regeneration whose history was redacted meanwhile is suppressed instead of rebuilt, and the reply keeps the answer it was replacing, with its cancelled note after a Stop.
 - An edit a `message:received` hook suppresses still counts as its message's newest revision, because revisions only move forward.
   An older edit of that message arriving later regenerates nothing, nor does an earlier edit of another message of the same coalesced turn whose regeneration has not claimed the reply yet; a later edit of another message regenerates with the suppressed message's earlier text.
 - A Stop on the old answer after the edit stopped it does nothing to the regeneration, because the stopped reply already applies it; the regeneration offers its own Stop button once it claims, when Stop buttons are enabled and deliverable.
