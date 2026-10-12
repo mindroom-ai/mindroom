@@ -167,7 +167,12 @@ def _check(
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
     agent_name, automation = chain.agent_name, chain.settings
     if definition.requires_file_memory and config.resolve_entity(agent_name).memory_backend != "file":
-        logger.warning("Automation needs file memory; skipped", agent=agent_name, automation=automation.name)
+        logger.warning(
+            "Automation needs file memory; skipped",
+            agent=agent_name,
+            automation=automation.name,
+            requester=chain.requester_id,
+        )
         return None
     # The requester the prompt's turn runs as, so the check and the run resolve the same private instance.
     identity = (

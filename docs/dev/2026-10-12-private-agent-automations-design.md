@@ -39,7 +39,7 @@ Rejected alternatives:
 
 The prompt carries the requester as its trusted original sender, the same way a personal-room welcome dispatch does, so the turn resolves the requester's private instance, applies their access policy and model budget, and records usage for them.
 Before posting, the runner skips a requester the agent may no longer answer in that room, so a revoked requester gets no prompt that would only time out.
-The check and its steps resolve the instance with the same execution identity the turn builds, so both always act on the same workspace.
+The check and its steps build an identity for the same requester the turn runs as, so both resolve the same private instance.
 
 ### Per-instance state
 
@@ -57,6 +57,5 @@ An agent-level `context_files` entry of a private agent loads from the shared ag
 - Only the agent named by `personal_rooms.agent` can run automations as a private agent, because there is one personal-rooms agent per installation.
 - A requester who never got a personal room, or whose personal-room record cannot be read, is skipped.
 - A requester who reaches the agent through a bridge alias is skipped, because the personal-room record is keyed by the Matrix ID that joined onboarding while the private instance is keyed by the canonical requester; this fails closed.
-- An instance whose recorded requester later became an alias of another ID is skipped, because its prompts would run against the canonical ID's instance instead of the one the check measured.
-- A requester who left their personal room still gets prompts there, because the prompts maintain files the requester's other conversations with the agent use.
+- An instance whose recorded requester later became an alias of another ID is skipped, because its prompts would run against the canonical ID's instance instead of the one the check measured; a chain already running when the alias is added finishes its follow-ups against the canonical ID's instance, which belongs to the same person.
 - Access revoked while a chain is running is enforced by ingress on the next prompt, so that step times out after an hour instead of being skipped.

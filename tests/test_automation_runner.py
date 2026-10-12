@@ -17,7 +17,7 @@ from mindroom.automations import runner as runner_module
 from mindroom.automations.registry import AutomationDefinition, compile_automations
 from mindroom.automations.runner import AutomationRunner
 from mindroom.automations.steps import Ask, AutomationContext, Done
-from mindroom.automations.threads import automation_threads
+from mindroom.automations.threads import automation_threads, automations_tracking_root
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import DreamingAutomation, PluginAutomation, PromptCurationAutomation
@@ -773,6 +773,9 @@ async def test_a_private_agent_maintains_each_requesters_own_files_in_their_pers
     assert (recheck["room_id"], recheck["thread_id"]) == (ALICE_ROOM, "$event1")
     assert recheck["body"].startswith("@mind ⚠️ Prompt maintenance needs a re-check: MEMORY.md shrank 100%")
     assert recheck["extra_content"] == {ORIGINAL_SENDER_KEY: ALICE, PER_FIRE_THREAD_ROOT_KEY: True}
+    runner.response_finished(["$event2"])
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
+    assert ("mind", ALICE) not in runner._active
 
 
 @pytest.mark.asyncio
@@ -788,6 +791,21 @@ async def test_one_requesters_chain_does_not_hold_another_requesters(tmp_path: P
         (BOB_ROOM, BOB),
     ]
     assert runner._active == {("mind", ALICE), ("mind", BOB)}
+
+
+@pytest.mark.asyncio
+async def test_a_shared_check_keeps_its_state_beside_the_agent_without_a_requester(tmp_path: Path) -> None:
+    """A shared agent's state stays where it was before private agents could run automations."""
+    _config, paths, runner, _bot = _setup(tmp_path)
+    seen: list[AutomationContext] = []
+    _use_check(runner, lambda ctx: seen.append(ctx))
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    (ctx,) = seen
+    assert (ctx.requester_id, ctx.execution_identity) == (None, None)
+    assert ctx.state_dir == automations_tracking_root(paths) / "mind"
 
 
 @pytest.mark.asyncio
