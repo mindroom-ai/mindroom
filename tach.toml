@@ -976,6 +976,7 @@ visibility = [
     "mindroom.thread_summary",
     "mindroom.voice.handler",
     "mindroom.skill_learning.reviewer",
+    "mindroom.matrix_rtc.call_tools",
 ]
 
 [[modules]]
@@ -4123,6 +4124,7 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.session_context",
     "mindroom.history.turn_recorder",
