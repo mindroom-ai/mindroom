@@ -229,7 +229,7 @@ Several volumes and Secrets only work together, so back them up and restore them
 
 | Volume | Values | Contents |
 |--------|--------|----------|
-| `<fullname>-storage` | `storage` | The storage root (`MINDROOM_STORAGE_PATH`, default `/app/agent_data`): `matrix_state.yaml` with each agent's Matrix account and access token; `tracking/`; `credentials/` and `private_oauth/`; agent and team sessions, learning, memory, and workspaces; `control_state/`; `knowledge_db/` and `knowledge_git/`; `logs/`; and `encryption_keys/` and `sync_continuity/` unless `stateStorage` is enabled |
+| `<fullname>-storage` | `storage` | The storage root (`MINDROOM_STORAGE_PATH`, default `/app/agent_data`), holding everything in [Data Persistence](storage.md#data-persistence) except what an enabled volume below holds instead, such as `encryption_keys/` and `sync_continuity/` with `stateStorage` |
 | `<fullname>-state` | `stateStorage` | When enabled, `encryption_keys/` (each agent's Matrix device store with its E2EE keys and sync position) and `sync_continuity/`, plus each `stateStorage.extraSubPaths` directory, such as `tracking/` |
 | `<fullname>-sessions` | `sessionStorage` | When enabled, the agent and team session databases (`MINDROOM_SESSION_STORAGE_PATH`) |
 | `<fullname>-knowledge` | `knowledgeStorage` | When enabled, `knowledge_db/` |
