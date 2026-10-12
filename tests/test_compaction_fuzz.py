@@ -26,6 +26,8 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom import constants
+from mindroom.history import summary_rows
+from mindroom.history.replay import current_summary_text
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
     append_compaction_chunk,
@@ -74,6 +76,9 @@ class _Runner:
         self._removed: set[str] = set()
         self._paused: list[str] = []
         self._snapshots: list[AgentSession] = []
+        # The lowest index a redaction in the current step may delete from; ``None`` when it may delete nothing.
+        self._cut_floor: int | None = None
+        self._moved: set[str] = set()
         seeding = self._open()
         if legacy:
             seed_session(seeding, self._legacy_session())
@@ -99,18 +104,14 @@ class _Runner:
             "snapshot": self._snapshot,
             "stale_write": self._stale_write,
             "resurrect": self._resurrect,
+            "redact": self._redact,
             "reopen": self._reopen,
         }
         for action in actions:
-            moved: set[str] = set()
-            redacted_event_id: str | None = None
-            if action.kind == "redact":
-                redacted_event_id = self._redact(action)
-            elif action.kind == "resume":
-                moved = self._resume(action)
-            else:
-                operations[action.kind](action)
-            self._check(redacted_event_id, moved)
+            self._cut_floor = None
+            self._moved = set()
+            operations[action.kind](action)
+            self._check()
 
     def close(self) -> None:
         self._storage.close()
@@ -169,15 +170,15 @@ class _Runner:
         self._created.append(run_id)
         self._paused.append(run_id)
 
-    def _resume(self, action: Action) -> set[str]:
+    def _resume(self, action: Action) -> None:
         """Complete a waiting approval, which then sorts after the turns it waited for."""
         waiting = [run_id for run_id in self._paused if run_id in self._stored]
         if not waiting:
-            return set()
+            return
         run_id = waiting[action.index % len(waiting)]
         self._paused.remove(run_id)
         self._storage.upsert_run(run=self._new_run(run_id, RunStatus.completed), session_id=_SESSION, user_id=None)
-        return {run_id}
+        self._moved.add(run_id)
 
     def _chunk(self, count: int) -> tuple[AgentSession, list[str], str] | None:
         """Return the oldest loaded visible runs a compaction would fold next and the summary it would write."""
@@ -202,22 +203,48 @@ class _Runner:
             summary_model="fuzz-model",
         )
 
+    def _basis(self, session: AgentSession, run_ids: list[str]) -> object:
+        return read_chunk_basis(
+            self._storage,
+            session,
+            _SCOPE,
+            run_ids,
+            previous_summary=current_summary_text(session),
+        )
+
     def _compact(self, action: Action) -> None:
         chunk = self._chunk(action.count)
         if chunk is None:
             return
         session, run_ids, summary = chunk
-        assert self._append(session, run_ids, summary, read_chunk_basis(self._storage, session, _SCOPE, run_ids))
+        basis = self._basis(session, run_ids)
+        assert basis is not None
+        assert self._append(session, run_ids, summary, basis)
 
     def _race(self, action: Action) -> None:
-        """Read a chunk's basis, let another compaction commit during the summary call, then try to append."""
+        """Load a chunk, let another compaction or a redaction commit before its basis read or during its summary call."""
         chunk = self._chunk(action.count)
         if chunk is None:
             return
         session, run_ids, summary = chunk
-        basis = read_chunk_basis(self._storage, session, _SCOPE, run_ids)
-        self._compact(Action("compact", count=1))
-        assert not self._append(session, run_ids, summary, basis)
+        compaction = action.index % 2 == 0
+        during_summary_call = action.index % 4 >= 2
+        basis = self._basis(session, run_ids) if during_summary_call else None
+        assert basis is not None or not during_summary_call
+        if compaction:
+            self._compact(Action("compact", count=1))
+        else:
+            self._redact(action)
+        if not during_summary_call:
+            basis = self._basis(session, run_ids)
+            assert basis is None or not compaction
+        if basis is not None:
+            appended = self._append(session, run_ids, summary, basis)
+            if compaction:
+                assert not appended
+            elif not during_summary_call:
+                # A redaction that left the chunk and its summary alone, committed before the basis read.
+                assert appended
 
     def _snapshot(self, _action: Action) -> None:
         self._snapshots.append(self._load())
@@ -235,14 +262,25 @@ class _Runner:
             run = copies[action.index % len(copies)]
             self._storage.upsert_run(run=run, session_id=_SESSION, user_id=None)
 
-    def _redact(self, action: Action) -> str | None:
+    def _redact(self, action: Action) -> None:
         events = [_event(run_id) for run_id in (*_LEGACY_RUNS, *self._created)]
         event_id = events[action.index % len(events)]
+        run_id = event_id[1:]
         before = set(stored_run_ids(self._storage, _SESSION))
+        # The cut starts at the earliest element holding the event: the legacy row before every run while
+        # its summary is in force, otherwise the run that answered it unless that run is retired or gone.
+        if run_id in _LEGACY_RUNS:
+            legacy = summary_rows.legacy_event_ids(self._storage, session_id=_SESSION, scope_key=_SCOPE.key)
+            floor = -1 if legacy is not None else None
+        elif run_id in before - self._behind_latest_barrier():
+            floor = self._run_indexes()[run_id]
+        else:
+            floor = None
+        if floor is not None:
+            self._cut_floor = floor if self._cut_floor is None else min(self._cut_floor, floor)
         _remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
         self._removed |= before - set(stored_run_ids(self._storage, _SESSION))
         self._redacted.add(event_id)
-        return event_id
 
     def _reopen(self, _action: Action) -> None:
         self._storage.close()
@@ -259,7 +297,7 @@ class _Runner:
             ).fetchone() or (None,)
         return {run_id for run_id, index in self._run_indexes().items() if barrier is not None and index <= barrier}
 
-    def _check(self, redacted_event_id: str | None, moved: set[str]) -> None:
+    def _check(self) -> None:
         session = self._load()
         loaded = {run.run_id for run in session.runs or [] if run.run_id}
         visible = {run.run_id for run in session.runs or [] if run.run_id and run.status == RunStatus.completed}
@@ -271,26 +309,34 @@ class _Runner:
         # Replay is the latest summary plus the visible runs after it; no folded run loads.
         assert not loaded & folded
         # Every folded run after the latest barrier is covered by the replayed summary (I1).
+        retired = self._behind_latest_barrier()
         if session.summary is not None:
-            assert folded - self._behind_latest_barrier() <= covered
+            assert folded - retired <= covered
+        # The summary covers only runs that are stored and not retired, and the legacy runs while their
+        # summary is in force, so a retired or cut run never comes back through a chunk's input.
+        assert covered - set(_LEGACY_RUNS) <= stored - retired
+        if covered & set(_LEGACY_RUNS):
+            assert summary_rows.legacy_event_ids(self._storage, session_id=_SESSION, scope_key=_SCOPE.key)
         # Compaction moves no run row; only a completed approval moves, to the end.
         for run_id, index in self._indexes.items():
-            if run_id in indexes and run_id not in moved:
+            if run_id in indexes and run_id not in self._moved:
                 assert indexes[run_id] == index
-        for run_id in moved & set(indexes):
+        for run_id in self._moved & set(indexes):
             assert indexes[run_id] == max(indexes.values())
         # Redacted content never replays: it is gone from loaded runs, the summary, and every stored run
         # except a retired one behind the latest barrier, which neither replays nor counts as seen.
-        retired = self._behind_latest_barrier()
         for event_id in self._redacted:
             assert event_id[1:] not in loaded
             assert event_id[1:] not in covered
             assert event_id[1:] not in stored - retired
         # A run a cut removed never returns, whatever late save arrives.
         assert not stored & self._removed
-        # Nothing stored is lost except by a redaction.
-        if redacted_event_id is None:
-            assert self._stored <= stored
+        # Nothing stored is lost except by a redaction, which loses only the runs at or after its cut.
+        lost = self._stored - stored
+        if self._cut_floor is None:
+            assert not lost
+        else:
+            assert all(self._indexes[run_id] >= self._cut_floor for run_id in lost)
         self._stored = stored
         self._indexes = indexes
         # Seen ids are exactly the events replay represents, so nothing is repeated or dropped.
@@ -401,6 +447,16 @@ _ACTIONS = st.builds(
         Action("compact"),
     ],
     legacy=False,
+)
+@example(
+    # A redaction of a run the chunk loaded lands before the chunk reads its basis.
+    actions=[Action("add"), Action("add"), Action("add"), Action("race", count=3, index=9)],
+    legacy=False,
+)
+@example(
+    # A redaction retires the legacy summary the chunk loaded before the chunk reads its basis.
+    actions=[Action("add"), Action("add"), Action("add"), Action("race", count=1, index=9)],
+    legacy=True,
 )
 def test_generated_compaction_histories_keep_the_log_invariants(actions: list[Action], *, legacy: bool) -> None:
     """Interleaved compaction, races, approvals, stale writes, and redaction never lose, repeat, or leak history."""

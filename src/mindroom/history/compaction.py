@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
+    from mindroom.history.storage import ChunkBasis
     from mindroom.history.summary_call import SummaryRetryDecision
     from mindroom.native_compaction import NativeCompactionModel
 
@@ -360,22 +361,17 @@ async def _rewrite_working_session_for_compaction(
     )
 
     while pending_selected_run_ids:
-        working_visible_runs = scope_visible_runs(working_session, scope)
-        compactable_runs = [
-            run
-            for run in working_visible_runs
-            if isinstance(run.run_id, str) and run.run_id in pending_selected_run_ids
-        ]
-        if not compactable_runs:
-            break
-
-        basis = await run_blocking_until_complete(
-            read_chunk_basis,
-            storage,
-            persisted_session,
-            scope,
-            [run.run_id for run in compactable_runs if run.run_id],
+        chunk = await _next_chunk(
+            storage=storage,
+            persisted_session=persisted_session,
+            working_session=working_session,
+            scope=scope,
+            pending_run_ids=pending_selected_run_ids,
+            compacted_run_count=total_compacted_run_count,
         )
+        if chunk is None:
+            break
+        compactable_runs, basis = chunk
         summary_input, included_runs = await asyncio.to_thread(
             build_summary_input,
             previous_summary=current_summary_text(working_session),
@@ -434,13 +430,7 @@ async def _rewrite_working_session_for_compaction(
             ),
         )
         if not appended:
-            # Another writer changed this scope's history during the summary call; earlier chunks stand.
-            logger.warning(
-                "Compaction stopped because the conversation changed during a summary call",
-                session_id=session_id,
-                scope=scope.key,
-                compacted_runs=total_compacted_run_count,
-            )
+            _log_conversation_changed(session_id, scope, total_compacted_run_count)
             break
         final_summary_text = generated_summary.summary
         working_session.summary = chunk_summary
@@ -478,6 +468,49 @@ async def _rewrite_working_session_for_compaction(
         compacted_run_count=total_compacted_run_count,
         compacted_messages=tuple(compacted_messages),
         served_by=summary_model,
+    )
+
+
+async def _next_chunk(
+    *,
+    storage: BaseDb,
+    persisted_session: AgentSession | TeamSession,
+    working_session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    pending_run_ids: set[str],
+    compacted_run_count: int,
+) -> tuple[list[RunOutput | TeamRunOutput], ChunkBasis] | None:
+    """Return the runs the next chunk may fold and what it builds on, or ``None`` to stop compacting."""
+    compactable_runs = [
+        run
+        for run in scope_visible_runs(working_session, scope)
+        if isinstance(run.run_id, str) and run.run_id in pending_run_ids
+    ]
+    if not compactable_runs:
+        return None
+    basis = await run_blocking_until_complete(
+        partial(
+            read_chunk_basis,
+            storage,
+            persisted_session,
+            scope,
+            [run.run_id for run in compactable_runs if run.run_id],
+            previous_summary=current_summary_text(working_session),
+        ),
+    )
+    if basis is None:
+        _log_conversation_changed(persisted_session.session_id, scope, compacted_run_count)
+        return None
+    return compactable_runs, basis
+
+
+def _log_conversation_changed(session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
+    # Another writer changed this scope's history since the session loaded; earlier chunks stand.
+    logger.warning(
+        "Compaction stopped because the conversation changed",
+        session_id=session_id,
+        scope=scope.key,
+        compacted_runs=compacted_run_count,
     )
 
 

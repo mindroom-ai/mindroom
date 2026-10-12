@@ -18,7 +18,9 @@ from sqlalchemy.dialects.sqlite import insert
 
 from mindroom.history.summary_rows_schema import (
     NON_VISIBLE_RUN_STATUS_VALUES,
-    run_scope_key_sql,
+    latest_row_index_sql,
+    loads_sql,
+    owner_scope_key,
     summary_rows_schema_sql,
     summary_rows_table_names,
 )
@@ -163,16 +165,14 @@ def _is_folded(connection: Connection, runs: str, summaries: str, run_id: str, p
     The chain starts at the stored run and at the parent the save names, so a member row seen for the
     first time is as final as the folded team run it belongs to.
     """
-    hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
     return (
         connection.exec_driver_sql(
             "WITH RECURSIVE chain(run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id) "  # noqa: S608
             f"AS (SELECT run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id FROM {runs} "
             "WHERE run_id IN (?, ?) UNION SELECT run.run_id, run.parent_run_id, run.run_index, run.status, run.run_type, "
             f"run.agent_id, run.team_id, run.session_id FROM {runs} AS run JOIN chain ON run.run_id = chain.parent_run_id) "
-            f"SELECT 1 FROM chain AS top WHERE top.parent_run_id IS NULL AND top.status NOT IN ({hidden}) "
-            f"AND top.run_index <= (SELECT row.after_run_index FROM {summaries} AS row WHERE row.session_id = top.session_id "
-            f"AND row.scope_key = {run_scope_key_sql('top')} ORDER BY row.id DESC LIMIT 1)",
+            f"SELECT 1 FROM chain AS top WHERE top.parent_run_id IS NULL "
+            f"AND NOT {loads_sql('top', latest_row_index_sql(summaries, 'top'))}",
             (run_id, parent_run_id),
         ).first()
         is not None
@@ -287,14 +287,19 @@ def read_session(
                 )
             )
             session_raw = deserialize_session_json_fields(dict(row._mapping))
+            owner = owner_scope_key(
+                session_raw.get("session_type"),
+                session_raw.get("agent_id"),
+                session_raw.get("team_id"),
+            )
             # The summary replays from the owner scope's latest summary row; the session row's copy is ignored.
             latest = (
                 connection.exec_driver_sql(
                     f"SELECT summary, created_at FROM {quote_identifier(summaries)} "  # noqa: S608
                     "WHERE session_id = ? AND scope_key = ? ORDER BY id DESC LIMIT 1",
-                    (session_id, _owner_scope_key(session_raw)),
+                    (session_id, owner),
                 ).first()
-                if has_summaries
+                if has_summaries and owner is not None
                 else None
             )
         finally:
@@ -318,13 +323,6 @@ def read_session(
     return session
 
 
-def _owner_scope_key(session_raw: dict[str, Any]) -> str:
-    """Return the key of the scope that owns a session row and its replayed summary."""
-    if session_raw.get("session_type") == SessionType.TEAM.value:
-        return f"team:{session_raw.get('team_id')}"
-    return f"agent:{session_raw.get('agent_id')}"
-
-
 def _loaded_run_rows(
     connection: Connection,
     runs: Table,
@@ -333,16 +331,8 @@ def _loaded_run_rows(
 ) -> list[tuple[str, str]]:
     """Return ``(run_id, run_data text)`` of the runs after their scope's latest summary row, non-visible runs, and descendants."""
     runs_name = quote_identifier(runs.name)
-    hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
     # A database that has not written a run since it gained a sessions table has no summary rows yet.
-    # A scope without summary rows, and a row without an index, compare as NULL and load.
-    after_latest = (
-        f"AND (run.status IN ({hidden}) OR COALESCE(run.run_index > (SELECT row.after_run_index FROM {summaries} AS row "  # noqa: S608
-        f"WHERE row.session_id = run.session_id AND row.scope_key = {run_scope_key_sql('run')} "
-        "ORDER BY row.id DESC LIMIT 1), 1)) "
-        if summaries is not None
-        else ""
-    )
+    after_latest = f"AND {loads_sql('run', latest_row_index_sql(summaries, 'run'))} " if summaries is not None else ""
     # The runs table has no parent index, so the descendant step searches a materialized child set
     # (SQLite builds an automatic index on it) instead of scanning the session once per loaded run.
     rows = connection.exec_driver_sql(

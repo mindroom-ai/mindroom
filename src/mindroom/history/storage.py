@@ -529,7 +529,7 @@ def update_scope_state_on_latest(
 
 
 @dataclass(frozen=True)
-class _ChunkBasis:
+class ChunkBasis:
     """What one compaction chunk's summary is built on: the latest summary row and the candidate runs, as read."""
 
     based_on: int | None
@@ -541,13 +541,20 @@ def read_chunk_basis(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     run_ids: Sequence[str],
-) -> _ChunkBasis:
-    """Read what a chunk folding some of ``run_ids`` builds on, before its summary call."""
+    *,
+    previous_summary: str | None,
+) -> ChunkBasis | None:
+    """Read what a chunk folding some of ``run_ids`` after ``previous_summary`` builds on, before its summary call.
+
+    The chunk summarizes the session as it was loaded, so this returns ``None`` when the stored history has
+    changed since: the latest row's text is not ``previous_summary``, or a candidate run is gone or hidden.
+    """
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
-    return _ChunkBasis(
-        based_on=latest.id if latest is not None else None,
-        covered=tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids)),
-    )
+    covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
+    latest_summary = (latest.summary or "").strip() or None if latest is not None else None
+    if latest_summary != previous_summary or {run.run_id for run in covered if run.visible} != set(run_ids):
+        return None
+    return ChunkBasis(based_on=latest.id if latest is not None else None, covered=covered)
 
 
 def append_compaction_chunk(
@@ -555,7 +562,7 @@ def append_compaction_chunk(
     storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    basis: _ChunkBasis,
+    basis: ChunkBasis,
     included_run_ids: Collection[str],
     summary: SessionSummary,
     summary_model: str,

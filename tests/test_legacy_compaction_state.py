@@ -279,3 +279,27 @@ def test_opening_storage_turns_pre_archive_blob_runs_into_rows_without_tombstone
         assert stored.summary.summary == "legacy summary"
     finally:
         storage.close()
+
+
+def test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index(tmp_path: Path) -> None:
+    """Rows without an index keep the first places a read gave them, and every row gets an index."""
+    seeding = _open(tmp_path)
+    seed_session(
+        seeding,
+        AgentSession(
+            session_id="session",
+            agent_id="code",
+            runs=[RunOutput(run_id=run_id, agent_id="code") for run_id in ("r0", "r1", "r2")],
+        ),
+    )
+    seeding.close()
+    _as_pre_archive(tmp_path)
+    with sqlite3.connect(tmp_path / "sessions" / "code.db") as connection:
+        connection.execute("UPDATE code_sessions_runs SET run_index = NULL WHERE run_id = 'r2'")
+
+    storage = _open(tmp_path)
+    storage.close()
+
+    with sqlite3.connect(tmp_path / "sessions" / "code.db") as connection:
+        indexes = connection.execute("SELECT run_id, run_index FROM code_sessions_runs ORDER BY run_index").fetchall()
+    assert indexes == [("r2", 0), ("r0", 1), ("r1", 2)]

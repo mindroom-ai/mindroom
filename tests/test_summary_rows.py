@@ -18,7 +18,7 @@ from sqlalchemy import event
 
 from mindroom import constants
 from mindroom.history import summary_rows
-from mindroom.history.storage import remove_runs_answering
+from mindroom.history.storage import read_chunk_basis, remove_runs_answering
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from tests.conftest import seed_session
@@ -263,19 +263,6 @@ def test_load_follows_member_rows_to_any_depth_and_drops_orphans(storage: Sqlite
     assert [run.run_id for run in session.runs or []] == ["m0", "m0-child", "t0"]
 
 
-def test_a_run_without_an_index_loads_first(storage: SqliteDb, tmp_path: Path) -> None:
-    """A row an old writer stored without an index has no place behind a summary, so it loads."""
-    seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=[_run("r0"), _run("r1"), _run("r2")]))
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r1"), summary="folded")
-    with sqlite3.connect(_db_path(tmp_path)) as connection:
-        connection.execute("UPDATE code_sessions_runs SET run_index = NULL WHERE run_id = 'r0'")
-
-    session = get_agent_session(storage, "s1")
-
-    assert session is not None
-    assert [run.run_id for run in session.runs or []] == ["r0", "r2"]
-
-
 def test_load_finds_member_rows_without_scanning_the_session_per_run(storage: SqliteDb) -> None:
     """The descendant step searches a materialized child set, so a load stays linear in the session's rows."""
     seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=[_run("r0"), _run("r1")]))
@@ -385,6 +372,38 @@ def test_load_derives_the_summary_from_the_latest_row(storage: SqliteDb, tmp_pat
     assert raw["summary"]["summary"] == "S1"
     _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary=None)
     assert _loaded(storage).summary is None
+
+
+@pytest.mark.parametrize("change", ["redaction", "retirement", "another compaction", "stale paused copy"])
+def test_a_chunk_refuses_history_that_changed_after_the_session_loaded(storage: SqliteDb, change: str) -> None:
+    """A chunk summarizes the session as it loaded, so a change that landed before its basis read voids it."""
+    _seed_events(storage, [_event_run(f"r{index}") for index in range(4)])
+    assert _fold(storage, ["r0"], "S1") is not None
+    session = _loaded(storage)
+    if change == "redaction":
+        assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r2", match="any")
+    elif change == "retirement":
+        summary_rows.retire(storage, session_id="s1", scope_key=_SCOPE.key)
+    elif change == "another compaction":
+        assert _fold(storage, ["r1"], "S2 by another response") is not None
+    else:
+        storage.upsert_run(_event_run("r2", status=RunStatus.paused), session_id="s1")
+
+    basis = read_chunk_basis(storage, session, _SCOPE, ["r1", "r2", "r3"], previous_summary="S1")
+
+    assert basis is None
+
+
+def test_a_chunk_builds_on_the_summary_it_loaded(storage: SqliteDb) -> None:
+    """With nothing changed since the session loaded, the chunk reads its basis."""
+    _seed_events(storage, [_event_run(f"r{index}") for index in range(3)])
+    assert _fold(storage, ["r0"], "S1") is not None
+    session = _loaded(storage)
+
+    basis = read_chunk_basis(storage, session, _SCOPE, ["r1", "r2"], previous_summary="S1")
+
+    assert basis is not None
+    assert [run.run_id for run in basis.covered] == ["r1", "r2"]
 
 
 def test_append_refuses_a_stale_base(storage: SqliteDb) -> None:
@@ -526,6 +545,23 @@ def test_edit_of_a_message_a_range_only_read_cuts_nothing_there(storage: SqliteD
     assert _loaded(storage).summary.summary == "S1"  # type: ignore[union-attr]
     assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$context", match="any")
     assert _loaded_ids(storage) == []
+
+
+def test_edit_keeps_a_legacy_summary_in_force(storage: SqliteDb, tmp_path: Path) -> None:
+    """An edit cuts what answered the message and never clears or retires a legacy summary, even one that may contain it."""
+    _seed_events(storage, [_event_run("r0"), _event_run("r1")])
+    with sqlite3.connect(_db_path(tmp_path)) as connection:
+        connection.execute(
+            "INSERT INTO code_sessions_summaries "
+            "(session_id, scope_key, after_run_index, summary, legacy, event_ids, seen_event_ids, created_at) "
+            "VALUES ('s1', 'agent:code', -1, 'legacy summary', 1, '[\"$r1\"]', '[\"$r1\"]', 1700000000)",
+        )
+
+    assert remove_runs_answering(storage, "s1", _SCOPE, "$r1")
+
+    assert _loaded(storage).summary.summary == "legacy summary"  # type: ignore[union-attr]
+    assert _loaded_ids(storage) == ["r0"]
+    assert summary_rows.legacy_event_ids(storage, session_id="s1", scope_key=_SCOPE.key) == {"$r1"}
 
 
 def test_edit_removes_following_runs_even_without_metadata(storage: SqliteDb) -> None:

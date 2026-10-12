@@ -454,11 +454,22 @@ def compact_runs(
         storage=storage,
         session=session,
         scope=scope,
-        basis=read_chunk_basis(storage, session, scope, run_ids),
+        basis=read_chunk_basis(
+            storage,
+            session,
+            scope,
+            run_ids,
+            previous_summary=_stored_summary(storage, session, scope),
+        ),
         included_run_ids=run_ids,
         summary=SessionSummary(summary=summary),
         summary_model=summary_model,
     )
+
+
+def _stored_summary(storage: SqliteDb, session: AgentSession | TeamSession, scope: HistoryScope) -> str | None:
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
+    return latest.summary if latest is not None else None
 
 
 def seed_summary(storage: SqliteDb, session: AgentSession | TeamSession, scope: HistoryScope, summary: str) -> None:

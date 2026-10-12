@@ -31,6 +31,7 @@ from mindroom.constants import (
 )
 from mindroom.history.summary_rows_schema import (
     NON_VISIBLE_RUN_STATUS_VALUES,
+    loads_sql,
     run_scope_key_sql,
     summary_rows_schema_sql,
     summary_rows_table_names,
@@ -45,7 +46,6 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
 _ID_CHUNK_SIZE = 500
-_HIDDEN = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
 
 type _Key = tuple[int, int]
 
@@ -68,6 +68,11 @@ class CoveredRun:
     run_id: str
     run_index: int
     status: str | None
+
+    @property
+    def visible(self) -> bool:
+        """Whether the run replays as model history, so a summary may fold it."""
+        return self.status not in NON_VISIBLE_RUN_STATUS_VALUES
 
 
 @dataclass(frozen=True)
@@ -129,7 +134,7 @@ def latest_row(storage: BaseDb, *, session_id: str, scope_key: str) -> _SummaryR
     tables = _tables(db)
     with db.db_engine.begin() as connection:
         _ensure_tables(connection, db)
-        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
+        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
     return rows[-1] if rows else None
 
 
@@ -256,20 +261,24 @@ def cut_at_event(
         _ensure_tables(connection, db)
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         boundary = rows[-1].after_run_index if rows else None
-        loaded_holders = [
-            (run_index, run_id)
-            for run_id, run_index in _loaded_runs(connection, tables, session_id, scope_key, boundary)
-            if _holds(_metadata_of(connection, tables, run_id), event_id, match)
-        ]
-        candidates: list[_Key] = [(loaded_holders[0][0], 0)] if loaded_holders else []
+        loaded_holder = next(
+            (
+                run_index
+                for run_index, metadata in _loaded_runs(connection, tables, session_id, scope_key, boundary)
+                if _holds(metadata, event_id, match)
+            ),
+            None,
+        )
         folded = _folded_holder(connection, tables, session_id, scope_key, rows, event_id, match)
+        candidates: list[_Key] = [] if loaded_holder is None else [(loaded_holder, 0)]
         if folded is not None:
             candidates.append(folded)
         if not candidates:
             return None
-        removed_ids = _cut(connection, tables, session_id, scope_key, rows, min(candidates))
+        # The cut never starts after the first loaded holder, so that run always goes.
+        _cut(connection, tables, session_id, scope_key, rows, min(candidates))
         connection.commit()
-    return _CutResult(removed_loaded_holder=any(run_id in removed_ids for _run_index, run_id in loaded_holders))
+    return _CutResult(removed_loaded_holder=loaded_holder is not None)
 
 
 # LEGACY_COMPAT: Content-free summaries of history compacted before the archive existed.
@@ -332,8 +341,8 @@ def _cut(
     scope_key: str,
     rows: Sequence[_SummaryRow],
     cut: _Key,
-) -> set[str]:
-    """Delete every top-level run and non-barrier row at or after ``cut``, with descendants; return the removed run ids."""
+) -> None:
+    """Delete every top-level run and non-barrier row at or after ``cut``, with descendants, and record the removed runs."""
     segments = dict(
         cast(
             "list[tuple[int, str]]",
@@ -374,7 +383,6 @@ def _cut(
             f"DELETE FROM {tables.summaries} WHERE id IN ({', '.join('?' for _ in deleted_rows)})",  # noqa: S608
             tuple(row.id for row in deleted_rows),
         )
-    return removed
 
 
 def _top_level_from(connection: Connection, tables: _Tables, session_id: str, scope_key: str, cut: _Key) -> list[str]:
@@ -386,7 +394,7 @@ def _top_level_from(connection: Connection, tables: _Tables, session_id: str, sc
         run_id
         for (run_id,) in connection.exec_driver_sql(
             f"SELECT run.run_id FROM {tables.runs} AS run WHERE run.session_id = ? AND run.parent_run_id IS NULL "  # noqa: S608
-            f"AND {run_scope_key_sql('run')} = ? AND COALESCE(run.run_index, -1) >= ?",
+            f"AND {run_scope_key_sql('run')} = ? AND run.run_index >= ?",
             (session_id, scope_key, first_index),
         )
     ]
@@ -429,9 +437,9 @@ def _folded_holder(
         previous_index = row.after_run_index
         if row.id <= barrier or event_id not in row.event_ids:
             continue
-        for run_id, _run_index in _range_runs(connection, tables, session_id, scope_key, start, row.after_run_index):
-            if _holds(_metadata_of(connection, tables, run_id), event_id, match):
-                return (_run_index, 0)
+        for run_index, metadata in _range_runs(connection, tables, session_id, scope_key, start, row.after_run_index):
+            if _holds(metadata, event_id, match):
+                return (run_index, 0)
         segment = connection.exec_driver_sql(
             f"SELECT json_extract(segment, '$.metadata') FROM {tables.summaries} WHERE id = ?",  # noqa: S608
             (row.id,),
@@ -448,12 +456,13 @@ def _range_runs(
     scope_key: str,
     after: int | None,
     through: int,
-) -> list[tuple[str, int]]:
+) -> list[tuple[int, Any]]:
+    """Return the index and metadata of the scope's top-level runs a row at ``through`` sorts after, from ``after`` on."""
     return [
-        (run_id, run_index)
-        for run_id, run_index in connection.exec_driver_sql(
-            f"SELECT run.run_id, run.run_index FROM {tables.runs} AS run WHERE run.session_id = ? "  # noqa: S608
-            f"AND run.parent_run_id IS NULL AND {run_scope_key_sql('run')} = ? "
+        (run_index, json.loads(metadata) if metadata is not None else None)
+        for run_index, metadata in connection.exec_driver_sql(
+            f"SELECT run.run_index, json_extract(run.run_data, '$.metadata') FROM {tables.runs} AS run "  # noqa: S608
+            f"WHERE run.session_id = ? AND run.parent_run_id IS NULL AND {run_scope_key_sql('run')} = ? "
             "AND run.run_index > ? AND run.run_index <= ? ORDER BY run.run_index",
             (session_id, scope_key, -2 if after is None else after, through),
         )
@@ -466,16 +475,15 @@ def _loaded_runs(
     session_id: str,
     scope_key: str,
     boundary: int | None,
-) -> list[tuple[str, int]]:
-    """Return the scope's top-level runs a load returns, in log order, with their keys' run index."""
+) -> list[tuple[int, Any]]:
+    """Return the index and metadata of the scope's top-level runs a load returns, in log order."""
     return [
-        (run_id, -1 if run_index is None else run_index)
-        for run_id, run_index in connection.exec_driver_sql(
-            f"SELECT run.run_id, run.run_index FROM {tables.runs} AS run WHERE run.session_id = ? "  # noqa: S608
-            f"AND run.parent_run_id IS NULL AND {run_scope_key_sql('run')} = ? "
-            f"AND (? IS NULL OR run.status IN ({_HIDDEN}) OR COALESCE(run.run_index > ?, 1)) "
-            "ORDER BY run.run_index, run.created_at, run.run_id",
-            (session_id, scope_key, boundary, boundary),
+        (run_index, json.loads(metadata) if metadata is not None else None)
+        for run_index, metadata in connection.exec_driver_sql(
+            f"SELECT run.run_index, json_extract(run.run_data, '$.metadata') FROM {tables.runs} AS run "  # noqa: S608
+            f"WHERE run.session_id = ? AND run.parent_run_id IS NULL AND {run_scope_key_sql('run')} = ? "
+            f"AND {loads_sql('run', '?')} ORDER BY run.run_index",
+            (session_id, scope_key, boundary),
         )
     ]
 
@@ -502,22 +510,22 @@ def _run_metadata(
     return found
 
 
-def _metadata_of(connection: Connection, tables: _Tables, run_id: str) -> Any:  # noqa: ANN401
-    metadata = connection.exec_driver_sql(
-        f"SELECT json_extract(run_data, '$.metadata') FROM {tables.runs} WHERE run_id = ?",  # noqa: S608
-        (run_id,),
-    ).scalar()
-    return json.loads(metadata) if metadata is not None else None
-
-
 def _holds(metadata: Mapping[str, Any] | None, event_id: str, match: Literal["answered", "any"]) -> bool:
     if event_id in source_event_ids(metadata):
         return True
     return match == "any" and event_id in seen_event_ids(metadata)
 
 
-def _rows(connection: Connection, tables: _Tables, *, session_id: str, scope_key: str) -> list[_SummaryRow]:
-    return [
+def _rows(
+    connection: Connection,
+    tables: _Tables,
+    *,
+    session_id: str,
+    scope_key: str,
+    latest_only: bool = False,
+) -> list[_SummaryRow]:
+    """Return the scope's summary rows, oldest first, or only its latest one."""
+    rows = [
         _SummaryRow(
             id=row_id,
             after_run_index=after_run_index,
@@ -527,10 +535,11 @@ def _rows(connection: Connection, tables: _Tables, *, session_id: str, scope_key
         )
         for row_id, after_run_index, summary, legacy, event_ids in connection.exec_driver_sql(
             f"SELECT id, after_run_index, summary, legacy, event_ids FROM {tables.summaries} "  # noqa: S608
-            "WHERE session_id = ? AND scope_key = ? ORDER BY id",
+            f"WHERE session_id = ? AND scope_key = ? ORDER BY id DESC{' LIMIT 1' if latest_only else ''}",
             (session_id, scope_key),
         )
     ]
+    return rows[::-1]
 
 
 def _after_latest_barrier(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:

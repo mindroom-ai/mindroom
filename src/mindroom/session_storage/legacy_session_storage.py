@@ -52,6 +52,22 @@ def materialize_legacy_run_blobs(connection: Connection, runs: Table, session_ta
         )
 
 
+# LEGACY_COMPAT: Run rows without a position.
+# Legacy format: Run rows whose ``run_index`` is ``NULL``, which Agno 3 writers before its ``upsert_run``
+# index backfill stored when a run arrived without one; Agno reads them first in a session.
+# Last legacy release: unversioned external input; no MindRoom release is known to write them, and the
+# current insertion rules give every new row an index.
+# Handling: The open-time summary-row migration renumbers each session holding such a row in the order a
+# read returned its rows, so every run has a place in the conversation log before any response loads it.
+# Coverage: tests/test_legacy_compaction_state.py::test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index
+# and tests/test_archive_migration.py::test_rows_without_an_index_keep_their_place.
+def number_unindexed_runs(connection: Connection, runs: Table) -> None:
+    """Give every session that holds a row without an index consecutive indexes in its read order."""
+    sessions = connection.execute(select(runs.c.session_id).where(runs.c.run_index.is_(None)).distinct()).scalars()
+    for session_id in list(sessions):
+        renumber_runs(connection, runs, session_id, ordered_run_ids(connection, runs, session_id))
+
+
 def ordered_run_ids(connection: Connection, runs: Table, session_id: str) -> list[str]:
     """Return one session's run rows in the order Agno reads them, rows without an index first."""
     return list(

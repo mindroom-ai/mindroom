@@ -101,8 +101,8 @@ class ResolvedHistorySettings:
 class HistoryScopeState:
     """Persisted compaction control state stored in session metadata.
 
-    Compaction history itself (summary generations and archived runs) lives in
-    the compaction archive owned by ``history/storage.py``.
+    Compaction history itself lives in the summary rows beside the runs table,
+    owned by ``history/summary_rows.py``.
     """
 
     force_compact_before_next_run: bool = False

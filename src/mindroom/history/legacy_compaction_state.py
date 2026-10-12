@@ -7,13 +7,13 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history.summary_rows_schema import summary_rows_schema_sql, summary_rows_table_names
-from mindroom.history.types import HistoryScope
+from mindroom.history.summary_rows_schema import owner_scope_key, summary_rows_schema_sql, summary_rows_table_names
 from mindroom.session_storage import agno_compat_sqlite
 from mindroom.session_storage.legacy_session_storage import (
     decode_persisted_session_json,
     insert_run_entry,
     materialize_legacy_run_blobs,
+    number_unindexed_runs,
     ordered_run_ids,
     renumber_runs,
 )
@@ -58,6 +58,7 @@ def migrate_to_summary_rows(db: SqliteDb) -> None:
         # Another startup may have finished while this connection waited for its write lock.
         if _needs_summary_rows(connection, session_table):
             materialize_legacy_run_blobs(connection, runs, session_table)
+            number_unindexed_runs(connection, runs)
             for statement in summary_rows_schema_sql(session_table):
                 connection.exec_driver_sql(statement)
             if f"{session_table}_compactions" in _tables(connection):
@@ -91,7 +92,7 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
         }
         seen_states = _scope_states(metadata, MINDROOM_MATRIX_HISTORY_METADATA_KEY)
         summary = _summary_text(_decoded_mapping(raw_summary))
-        summary_scope = _owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
+        summary_scope = owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
             scope_seen = json.dumps(_seen_event_ids(seen_states.get(summary_scope)))
             connection.exec_driver_sql(
@@ -231,15 +232,6 @@ def _legacy_tombstones(raw_state: dict[str, Any]) -> tuple[str, ...] | None:
     if not isinstance(raw_run_ids, list):
         return ()
     return tuple(dict.fromkeys(run_id for run_id in raw_run_ids if isinstance(run_id, str) and run_id))
-
-
-def _owner_scope_key(session_type: object, agent_id: object, team_id: object) -> str | None:
-    """Return the key of the scope that owns a session row, which also owns its replayed summary."""
-    if session_type == "team" and isinstance(team_id, str) and team_id:
-        return HistoryScope(kind="team", scope_id=team_id).key
-    if isinstance(agent_id, str) and agent_id:
-        return HistoryScope(kind="agent", scope_id=agent_id).key
-    return None
 
 
 def _without_adopted_state(
