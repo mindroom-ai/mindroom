@@ -347,8 +347,7 @@ def _build_worker_routing_payload(
                 payload["execution_identity"] = to_json_compatible(asdict(execution_identity))
             return payload, None
 
-        effective_agent_name = routing_agent_name
-        if effective_agent_name is None:
+        if worker_target is None or routing_agent_name is None:
             msg = (
                 f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
                 "when using a dedicated worker backend."
@@ -356,9 +355,9 @@ def _build_worker_routing_payload(
             raise RuntimeError(msg)
 
         worker_key = resolve_unscoped_worker_key(
-            agent_name=effective_agent_name,
-            tenant_id=worker_target.tenant_id if worker_target is not None else None,
-            account_id=worker_target.account_id if worker_target is not None else None,
+            agent_name=routing_agent_name,
+            tenant_id=worker_target.tenant_id,
+            account_id=worker_target.account_id,
         )
         worker_handle = resolved_worker_manager.ensure_worker(
             WorkerSpec(worker_key),
@@ -366,7 +365,7 @@ def _build_worker_routing_payload(
         )
         return (
             {
-                "routing_agent_name": effective_agent_name,
+                "routing_agent_name": routing_agent_name,
                 "worker_key": worker_key,
             },
             worker_handle,
