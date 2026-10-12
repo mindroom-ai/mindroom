@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from mindroom.budgets.pricing import PricedModel
+    from mindroom.config.budgets import BudgetsConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -29,11 +30,8 @@ _MIN_SCAN_INTERVAL_SECONDS = 30.0
 _TICK_SECONDS = 300.0
 
 
-def _budget_limit_usd(config: Config, cap: UserCap | None) -> float | None:
-    """Return the monthly cap in USD for a user with ``cap``, or None when budgets are off or the user is uncapped."""
-    budgets = config.budgets
-    if budgets is None:
-        return None
+def _budget_limit_usd(budgets: BudgetsConfig, cap: UserCap | None) -> float | None:
+    """Return the monthly cap in USD for a user with ``cap``, or None when the user is uncapped."""
     return cap.limit_usd if cap is not None else budgets.monthly_limit_usd
 
 
@@ -81,7 +79,7 @@ def budget_model(
     canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)
     if canonical_requester_id is None:
         return model_name
-    limit = _budget_limit_usd(config, monitor.caps.get(canonical_requester_id) if monitor is not None else None)
+    limit = _budget_limit_usd(budgets, monitor.caps.get(canonical_requester_id) if monitor is not None else None)
     if limit is None:
         return model_name
     spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
@@ -210,6 +208,7 @@ class BudgetMonitor:
         config = self.config_provider()
         if config is None or config.budgets is None:
             return _BudgetStatus(enabled=False)
+        budgets = config.budgets
         period_start, period_end = month_bounds(self.clock())
         snapshot = self._current_snapshot()
         spend = dict(snapshot.spend_usd) if snapshot is not None else {}
@@ -221,7 +220,7 @@ class BudgetMonitor:
             if budget_user_id(user_id, config, self.runtime_paths) != user_id:
                 continue
             cap = caps.get(user_id)
-            limit = _budget_limit_usd(config, cap)
+            limit = _budget_limit_usd(budgets, cap)
             user_spend = spend.get(user_id, 0.0)
             users.append(
                 _BudgetUserStatus(
@@ -237,8 +236,8 @@ class BudgetMonitor:
             period_start=period_start,
             period_end=period_end,
             snapshot=snapshot,
-            default_limit_usd=config.budgets.monthly_limit_usd,
-            fallback_model=config.budgets.fallback_model,
+            default_limit_usd=budgets.monthly_limit_usd,
+            fallback_model=budgets.fallback_model,
             users=tuple(sorted(users, key=lambda user: (-user.spend_usd, user.user_id))),
         )
 

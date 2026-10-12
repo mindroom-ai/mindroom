@@ -191,10 +191,12 @@ def test_budget_limit_uses_the_users_cap_then_the_default() -> None:
     cap = UserCap(limit_usd=100.0, updated_at=OCTOBER, updated_by="test")
     config = _config()
 
-    assert _budget_limit_usd(config, cap) == 100.0
-    assert _budget_limit_usd(config, None) == 10.0
-    assert _budget_limit_usd(_config(monthly_limit_usd=None), None) is None
-    assert _budget_limit_usd(Config(), cap) is None
+    assert config.budgets is not None
+    assert _budget_limit_usd(config.budgets, cap) == 100.0
+    assert _budget_limit_usd(config.budgets, None) == 10.0
+    uncapped = _config(monthly_limit_usd=None).budgets
+    assert uncapped is not None
+    assert _budget_limit_usd(uncapped, None) is None
 
 
 def test_monitor_loads_caps_stored_by_an_earlier_run(tmp_path: Path) -> None:
