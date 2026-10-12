@@ -24,6 +24,7 @@ from mindroom.knowledge.read_protocol import (
     request_adapter,
     result_adapter,
 )
+from mindroom.logging_config import subprocess_logging_env
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -80,6 +81,7 @@ def _decode_result(output: bytes, returncode: int) -> ReadResult:
 def _child_environment() -> dict[str, str]:
     env = {name: os.environ[name] for name in _CHILD_ENV_KEYS if name in os.environ}
     env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", TOKIO_WORKER_THREADS="2")
+    env.update(subprocess_logging_env())
     return env
 
 

@@ -6,7 +6,6 @@ import math
 import os
 import signal
 import sys
-import traceback
 from contextlib import closing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
@@ -23,10 +22,13 @@ from mindroom.knowledge.read_protocol import (
     request_adapter,
     result_adapter,
 )
-from mindroom.redaction import redact_sensitive_text
+from mindroom.logging_config import get_logger, setup_subprocess_logging
 
 if TYPE_CHECKING:
     from chromadb.api.models.Collection import Collection
+
+# The parent runs this module with `python -m`, so `__name__` is `__main__`.
+logger = get_logger("mindroom.knowledge.read_worker")
 
 
 class _PublishedChromaDb(ChromaDb):
@@ -70,6 +72,7 @@ def _read(request: ReadRequest) -> ReadResult:
 
 def _main() -> None:
     """Idle until stdin delivers a deadline line and one JSON request, then write one JSON result."""
+    setup_subprocess_logging()
     # Redirect the descriptor too: native code and preconfigured log handlers
     # may retain the original stdout object, bypassing redirect_stdout.
     output = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
@@ -96,7 +99,7 @@ def _main() -> None:
                 message = "Knowledge read result exceeds transport size limit"
                 raise ValueError(message)  # noqa: TRY301
         except Exception as exc:
-            sys.stderr.write(redact_sensitive_text(traceback.format_exc()))
+            logger.exception("Knowledge read failed")
             payload = result_adapter.dump_json(ReadResult(error_type=type(exc).__name__))
         output.write(payload)
 
