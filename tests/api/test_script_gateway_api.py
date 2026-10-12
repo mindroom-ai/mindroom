@@ -385,6 +385,66 @@ async def test_script_gateway_rejects_a_non_finite_field_without_echoing_it() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments_json",
+    [
+        '{"x":NaN}',
+        '{"x":Infinity}',
+        '{"x":-Infinity}',
+        '{"x":1e400}',
+        '{"x":[1,{"y":Infinity}]}',
+        '{"x":{"y":[-1e400]}}',
+    ],
+)
+async def test_script_gateway_rejects_non_finite_arguments_before_broker(arguments_json: str) -> None:
+    """A NaN or infinity anywhere in the arguments, which the call digest cannot encode, gets a 422."""
+    broker = _GatewayBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    body = (
+        '{"run_id":"run-1","call_id":"call-1","toolkit_name":"website","function_name":"read_url",'
+        f'"arguments":{arguments_json}}}'
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            content=body,
+            headers={"Authorization": "Bearer secret-token", "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [
+            {"type": "finite_number", "loc": ["arguments"], "msg": "Arguments must contain only finite numbers"},
+        ],
+    }
+    assert broker.submitted is None
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_accepts_finite_numbers_in_arguments() -> None:
+    """Ordinary integers and floats at any depth still reach the broker unchanged."""
+    broker = _GatewayBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    arguments = {"count": 3, "ratio": -0.5, "nested": [1e300, {"big": 10**30, "flag": True}]}
+
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            json={**_payload(), "arguments": arguments},
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    assert response.status_code == 200
+    assert broker.submitted is not None
+    assert broker.submitted.arguments == arguments
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("extra_bytes", [0, 1], ids=["exact_limit", "overflow"])
 async def test_script_gateway_bounds_chunked_requests_without_content_length(extra_bytes: int) -> None:
     """Streamed calls obey the 64 KiB cap before broker admission, including at the boundary."""

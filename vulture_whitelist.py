@@ -370,3 +370,4 @@ _.scrape_website  # Agno registers this toolkit override as a tool (src/mindroom
 _.custom_scrape_website  # Agno registers this toolkit override as a tool (src/mindroom/custom_tools/agno_compat_agentql.py)
 _._execute_query  # AgentQL page query methods call this override (src/mindroom/custom_tools/agno_compat_agentql.py)
 _.membership_ts  # _SharedWith dataclass equality field (src/mindroom/matrix_rtc/frame_keys.py)
+_._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/script_gateway.py)
