@@ -274,11 +274,11 @@ async def test_every_attempt_of_a_reply_opens_with_the_same_note(tmp_path: Path)
         await conversation.start("finished")
         await conversation.end("finished")
 
-        @owned_tool_execution
+        @owned_tool_execution()
         async def blocking() -> list[tuple[EnrichmentItem, ...]]:
             return [await append_turn_start_job_note(()) for _attempt in range(2)]
 
-        @owned_tool_execution
+        @owned_tool_execution()
         async def streaming() -> AsyncIterator[tuple[EnrichmentItem, ...]]:
             for _attempt in range(2):
                 yield await append_turn_start_job_note(())

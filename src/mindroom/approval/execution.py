@@ -391,8 +391,7 @@ class AgentApprovalExecution:
     knowledge_access: KnowledgeAccessSupport
     refresh_scheduler: Callable[[], KnowledgeRefreshScheduler | None]
 
-    @partial(
-        owned_tool_execution,
+    @owned_tool_execution(
         enabled=lambda self, *_args, **_kwargs: background_tool_jobs_enabled(self.config(), self.runtime_paths),
     )
     async def continue_run(  # noqa: PLR0915 - native and CLI approvals share one reconstruction owner

@@ -84,7 +84,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         else Agent(id="leader", model=model, tools=[assembled_function(report)], db=storage, telemetry=False)
     )
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def run_turn(prompt: str) -> RunOutput | TeamRunOutput:
         set_consumption_storage(storage_factory)
         return await actor.arun(prompt, session_id=context.session_id, user_id=owner.requester_id)
@@ -221,7 +221,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         telemetry=False,
     )
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def run_turn(prompt: str) -> RunOutput:
         set_consumption_storage(storage_factory)
         return await actor.arun(prompt, session_id=context.session_id, user_id=owner.requester_id)

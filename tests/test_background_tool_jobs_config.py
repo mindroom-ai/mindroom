@@ -204,11 +204,11 @@ def test_exclusion_order_is_not_an_execution_policy_change(tmp_path: Path) -> No
 async def test_execution_scope_bypasses_owners_when_disabled(enabled: bool) -> None:
     """Both driver shapes run ordinary work without feature owners while disabled."""
 
-    @partial(owned_tool_execution, enabled=lambda: enabled)
+    @owned_tool_execution(enabled=lambda: enabled)
     async def blocking() -> bool:
         return current_execution_resources() is not None
 
-    @partial(owned_tool_execution, enabled=lambda: enabled)
+    @owned_tool_execution(enabled=lambda: enabled)
     async def streaming() -> AsyncIterator[bool]:
         yield current_execution_resources() is not None
 

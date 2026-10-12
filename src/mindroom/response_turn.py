@@ -965,7 +965,7 @@ async def _open_scope_off_event_loop(
         await run_blocking_until_complete(manager.__exit__, None, None, None)
 
 
-@partial(owned_tool_execution, enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
+@owned_tool_execution(enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def run_blocking_response_turn(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -1280,7 +1280,7 @@ def _settle_completed_attempt(
     )
 
 
-@partial(owned_tool_execution, enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
+@owned_tool_execution(enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def stream_response_turn[ChunkT](
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],

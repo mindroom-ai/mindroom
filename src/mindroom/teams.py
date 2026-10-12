@@ -8,7 +8,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.agent import Agent
@@ -2662,8 +2661,7 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-@partial(
-    owned_tool_execution,
+@owned_tool_execution(
     enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
 )
 async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.

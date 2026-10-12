@@ -243,7 +243,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     install_tool_job_execution(model)
     actor = Agent(id="general", model=model, tools=[assembled_function(composite)], telemetry=False)
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def run() -> str:
         result = await actor.arun("Start the composite tool.", session_id=context.session_id)
         assert defer_execution_cleanup(cleanup)

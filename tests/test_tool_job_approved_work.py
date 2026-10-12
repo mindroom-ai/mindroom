@@ -179,7 +179,7 @@ async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PL
                 state="claimed",
             )
 
-            @owned_tool_execution
+            @owned_tool_execution()
             async def resume_agent() -> str:
                 set_consumption_storage(lambda: SqliteDb(db_file=db_file))
                 assert isinstance(actor, Agent)

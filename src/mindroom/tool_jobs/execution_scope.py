@@ -6,7 +6,7 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
-from typing import cast
+from typing import Protocol, cast
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.tool_jobs.consumption import ConsumptionOwner, consumption_context, finalize_consumption
@@ -15,12 +15,23 @@ from mindroom.tool_jobs.resources import ExecutionResources, bind_execution_reso
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 
 
-def owned_tool_execution[FunctionT: Callable[..., object]](
-    function: FunctionT,
-    *,
-    enabled: Callable[..., bool] = lambda *_args, **_kwargs: True,
-) -> FunctionT:
-    """Own resources, durable result claims, and job notices for a coroutine or async stream."""
+class _OwnedExecution(Protocol):
+    def __call__[FunctionT: Callable[..., object]](self, function: FunctionT, /) -> FunctionT: ...
+
+
+def owned_tool_execution(*, enabled: Callable[..., bool] = lambda *_args, **_kwargs: True) -> _OwnedExecution:
+    """Decorate a coroutine or async stream to own resources, durable result claims, and job notices when ``enabled``.
+
+    The decorated function keeps its signature for type checking.
+    """
+
+    def decorate[FunctionT: Callable[..., object]](function: FunctionT, /) -> FunctionT:
+        return _owned(function, enabled)
+
+    return decorate
+
+
+def _owned[FunctionT: Callable[..., object]](function: FunctionT, enabled: Callable[..., bool]) -> FunctionT:
     if inspect.isasyncgenfunction(function):
 
         @wraps(function)

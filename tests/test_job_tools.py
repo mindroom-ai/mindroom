@@ -219,7 +219,7 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
         member = Agent(id="leader", model=member_model, tools=[JobTools(paths, owner)], db=storage)
         team = Team(id="squad", model=team_model, members=[member], db=storage)
 
-        @owned_tool_execution
+        @owned_tool_execution()
         async def run() -> TeamRunOutput:
             set_consumption_storage(storage_factory)
             return await team.arun("Follow up", session_id=context.session_id, user_id=context.requester_id)
@@ -285,7 +285,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         install_tool_job_execution(model)
         agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage)
 
-        @owned_tool_execution
+        @owned_tool_execution()
         async def run() -> RunOutput:
             set_consumption_storage(storage_factory)
             return await agent.arun("wait", session_id=context.session_id, user_id=context.requester_id)
@@ -547,7 +547,7 @@ async def _collect_in_a_run(
     tools = JobTools(paths, owner)
     agent = Agent(id="leader", model=model, tools=[tools], db=storage)
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def run() -> RunOutput:
         set_consumption_storage(storage_factory)
         return await agent.arun("collect", session_id=context.session_id, user_id=context.requester_id)

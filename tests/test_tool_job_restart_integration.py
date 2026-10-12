@@ -113,7 +113,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         telemetry=False,
     )
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def start_original() -> RunOutput:
         set_consumption_storage(storage_factory)
         return await original_actor.arun(
@@ -241,7 +241,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
             telemetry=False,
         )
 
-        @owned_tool_execution
+        @owned_tool_execution()
         async def retrieve_after_restart() -> RunOutput:
             set_consumption_storage(storage_factory)
             return await final_actor.arun(

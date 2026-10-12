@@ -489,7 +489,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(
             members=[Agent(id="unused", model=DelegationModel(id="test"))],
         )
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def parent_run() -> RunOutput | TeamRunOutput:
         return await agent.arun("start", session_id=context.session_id)
 
@@ -541,7 +541,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
     install_tool_job_execution(model)
     agent = Agent(id="leader", model=model, tools=[assembled_function(generated)])
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def parent_run() -> RunOutput | TeamRunOutput:
         return await agent.arun("start", session_id=context.session_id)
 
@@ -668,7 +668,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
 
         monkeypatch.setattr(type(storage), "upsert_run", fail_save)
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def parent_run() -> RunOutput | TeamRunOutput:
         set_consumption_storage(storage_factory)
         response = await agent.arun("start", session_id=context.session_id, user_id=context.requester_id)
@@ -741,7 +741,7 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
     bind_toolkit_authority(toolkit, authored_name="slow")
     agent = Agent(id="leader", model=model, tools=[toolkit])
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def parent_run() -> RunOutput | TeamRunOutput:
         return await agent.arun("start", session_id=context.session_id)
 
@@ -869,7 +869,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
             session_state={"counter": 0},
         )
 
-        @owned_tool_execution
+        @owned_tool_execution()
         async def cancel() -> RunOutput:
             set_consumption_storage(storage_factory)
             with tool_runtime_context(context):
@@ -911,7 +911,7 @@ async def test_saved_result_reread_preserves_later_session_state(
         run_context.session_state["counter"] = 1
         return "original output"
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def run(agent: Agent) -> RunOutput:
         set_consumption_storage(storage_factory)
         with tool_runtime_context(context):
@@ -1050,7 +1050,7 @@ async def test_streamed_state_conflict_notice_reaches_sdk_tool_message(tmp_path:
     call = FunctionCall(function=function, call_id="stream-state", arguments={})
     messages = []
 
-    @owned_tool_execution
+    @owned_tool_execution()
     async def dispatch() -> list[object]:
         with tool_runtime_context(context):
             return [event async for event in model.arun_function_calls([call], messages)]
