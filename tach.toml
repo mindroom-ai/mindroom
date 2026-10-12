@@ -7114,7 +7114,7 @@ depends_on = [
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
-    "mindroom.tool_jobs.wait_timeout",
+    "mindroom.tool_jobs.background_after",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
@@ -7905,7 +7905,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.runtime"
 depends_on = [
-    "mindroom.tool_jobs.wait_timeout",
+    "mindroom.tool_jobs.background_after",
     "mindroom.ai_runtime",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.worker_routing",
@@ -8002,7 +8002,7 @@ depends_on = [
     "mindroom.tool_jobs.results",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
-    "mindroom.tool_jobs.wait_timeout",
+    "mindroom.tool_jobs.background_after",
     "mindroom.tool_system.construction",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
@@ -8084,6 +8084,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.agno_compat_execution"
 depends_on = [
+    "mindroom.tool_jobs.background_after",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.resources",
     "mindroom.tool_system.context_bound_streams",
@@ -8392,9 +8393,10 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.tool_jobs.wait_timeout"
+path = "mindroom.tool_jobs.background_after"
 depends_on = []
 visibility = [
+    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.delegation.execution",

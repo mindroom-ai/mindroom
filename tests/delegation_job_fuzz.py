@@ -352,7 +352,7 @@ class DelegationFuzzRunner:
             for turn in range(step.script.approvals)
         ]
         self.children.append(_Child(step.script, [*responses, ModelResponse(content=f"Child {index} result")]))
-        budget = {} if step.budget is None else {"wait_timeout": step.budget}
+        budget = {} if step.budget is None else {"background_after": step.budget}
         call = _call("run_subagent", f"delegate{index}", agent_name="code", task=f"script{index}", **budget)
         agent = self._parent([ModelResponse(tool_calls=[call]), ModelResponse(content="Parent done")])
         self._start_turn(f"delegate{index}", self._drive(agent))
@@ -364,7 +364,7 @@ class DelegationFuzzRunner:
     async def _wait(self, step: Step) -> None:
         if (job_id := self._job(step.index)) is None:
             return
-        budget = {} if step.budget is None else {"wait_timeout": step.budget}
+        budget = {} if step.budget is None else {"background_after": step.budget}
         call = _call("job", f"wait{self._turn_count}", action="wait", job_id=job_id, **budget)
         agent = self._parent([ModelResponse(tool_calls=[call]), ModelResponse(content="Parent read")])
         self._start_turn(f"wait:{job_id}", self._drive(agent))

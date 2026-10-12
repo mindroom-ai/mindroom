@@ -73,7 +73,9 @@ async def test_custom_event_family_and_result_survive_execution(
     model = DelegationModel(
         id="test",
         responses=[
-            ModelResponse(tool_calls=[_call("generated", "custom-call", **({"wait_timeout": 0} if detached else {}))]),
+            ModelResponse(
+                tool_calls=[_call("generated", "custom-call", **({"background_after": 0} if detached else {}))],
+            ),
             ModelResponse(content="done"),
         ],
     )

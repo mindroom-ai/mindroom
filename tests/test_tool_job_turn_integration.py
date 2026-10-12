@@ -73,7 +73,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
     model = DelegationModel(id="test")
     for topic in topics:
         model.responses += [
-            ModelResponse(tool_calls=[_call("report", f"{topic}-call", topic=topic, wait_timeout=None)]),
+            ModelResponse(tool_calls=[_call("report", f"{topic}-call", topic=topic, background_after=None)]),
             ModelResponse(content=f"The {topic} report is ready."),
         ]
     install_tool_job_execution(model)
@@ -207,7 +207,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
 
     model = _ListBarrierModel(
         [
-            ModelResponse(tool_calls=[_call("slow_tool", "original-call", wait_timeout=None)]),
+            ModelResponse(tool_calls=[_call("slow_tool", "original-call", background_after=None)]),
             ModelResponse(content="The original turn was released."),
         ],
     )

@@ -182,8 +182,8 @@ class DelegateTools(Toolkit):
         )
         background = self._background_jobs_available()
         background_guidance = (
-            "Managed Matrix calls accept wait_timeout: null waits, zero returns a Job ID immediately, "
-            "and a positive number bounds the wait while work continues. "
+            "Managed Matrix calls accept background_after: null waits, zero returns a Job ID immediately, "
+            "and a positive number is how many seconds to wait before the child continues in the background. "
             "A newer message you answer releases the wait while the child keeps working. "
             if background
             else ""

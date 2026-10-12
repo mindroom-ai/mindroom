@@ -124,7 +124,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         assert "Knowledge about tea" in str(results["search_knowledge_base"].result)
         assert "# Body" in str(results["get_skill_instructions"].result)
         assert set(model.schemas["search_knowledge_base"]["properties"]) == {"query"}
-        assert all("wait_timeout" not in model.schemas[name]["properties"] for name in _SDK_FUNCTIONS)
+        assert all("background_after" not in model.schemas[name]["properties"] for name in _SDK_FUNCTIONS)
         assert await saved_jobs(paths.storage_root) == {}
         machine = agent.learning_machine
         assert machine is not None

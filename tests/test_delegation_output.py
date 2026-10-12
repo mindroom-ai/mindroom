@@ -144,7 +144,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         {} if mode == "automatic" else {"mindroom_output_path": "../escape.txt" if mode == "invalid" else "report.txt"}
     )
     if execution == "detached":
-        output_args["wait_timeout"] = 0
+        output_args["background_after"] = 0
     model = DelegationModel(
         id="parent",
         responses=[

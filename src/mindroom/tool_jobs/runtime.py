@@ -19,6 +19,7 @@ from mindroom.background_tasks import (
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.background_after import validate_wait_seconds
 from mindroom.tool_jobs.control import (
     JobControl,
     current_pending_human_messages,
@@ -27,7 +28,6 @@ from mindroom.tool_jobs.control import (
 )
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
 from mindroom.tool_system.call_record import without_tool_call_recording
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
@@ -615,7 +615,7 @@ class ToolJobRuntime:
         ``approval_timeout`` bounds how long the wait lasts once the job awaits approval, from when this wait sees it
         ask, however long the job ran before; ``timeout`` bounds it all.
         """
-        timeout = validate_wait_timeout(timeout)
+        timeout = validate_wait_seconds(timeout, argument="wait_timeout")
         deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
         approval_deadline: float | None = None
         retained = False

@@ -12379,7 +12379,7 @@ Related tools documented elsewhere:
 
 `delegate` gives an agent `run_subagent` and `continue_subagent`, which run another configured agent in a fresh session and return its answer inside the same tool call.
 Use it when the caller needs a specialist's result before continuing; use [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) for a conversation that should be visible in Matrix.
-With [background jobs](#background-jobs) enabled, managed calls accept `wait_timeout`, a child that needs approval posts its own cards from its job, and detached children may overlap.
+With [background jobs](#background-jobs) enabled, managed calls accept `background_after`, a child that needs approval posts its own cards from its job, and detached children may overlap.
 
 ### Agent Delegation
 
@@ -12543,17 +12543,17 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-With the option off, tools run as they always do, without the generic `wait_timeout` argument or the `job` function, and shell tools keep their own background commands.
+With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and shell tools keep their own background commands.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
 An approval that needed a job fails when it resumes while the option is off.
 
-Tools that can run as background jobs accept an optional `wait_timeout` argument, which the tool itself never receives.
-This waiting budget is separate from a tool's own execution or network timeout.
-The name `wait_timeout` is reserved on managed tools.
+Tools that can run as background jobs accept an optional `background_after` argument, which the tool itself never receives.
+It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
+The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
-Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
-Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `wait_timeout`.
+Their schemas omit `background_after`, and a value for it is rejected before execution.
+Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -12567,8 +12567,8 @@ background_tool_jobs:
 The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
 Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
 Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
-The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls when a newer message arrives.
-A tool's own argument named `wait_timeout` remains its native argument.
+The generic runtime adds no `background_after`, creates no job, and does not release these calls when a newer message arrives.
+A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
 With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
@@ -12576,13 +12576,13 @@ Shell handles do not appear in `job(action="list")` or the jobs bar, and cannot 
 
 ### When a call becomes a job
 
-| `wait_timeout` | Behavior |
+| `background_after` | Behavior |
 | --- | --- |
 | Omitted or `null` | Wait until completion or until a newer human message arrives in the conversation. |
 | `0` | Return a job handle immediately while execution continues. |
-| Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
+| Positive finite seconds | Return the result if ready within that many seconds, otherwise continue in the background and return a job handle. |
 
-Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
+Negative, nonnumeric, boolean, and nonfinite values are rejected before execution.
 A newer human message in the conversation releases the wait without pausing or cancelling the work, so the agent answers the new message while the job runs on.
 Scheduled turns and other agents' messages queued behind the reply wait for it instead.
 
@@ -12645,7 +12645,7 @@ A managed tool call that needs approval asks for it from its job, so a pending a
 The job posts the approval card, reports `awaiting_approval`, and runs the call only once it is approved; a denied or expired approval becomes the job's `denied` outcome.
 The reply waits for the decision for `background_tool_jobs.approval_wait_timeout` seconds, then goes on while the job keeps waiting; the result arrives like any other job's.
 The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
-A call's own `wait_timeout`, or a newer human message, releases the reply the same way.
+A call's own `background_after`, or a newer human message, releases the reply the same way.
 Cancelling the job before the decision denies its card.
 Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
 

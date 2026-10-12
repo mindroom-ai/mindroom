@@ -136,9 +136,9 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
         registered_tool_name="delegate",
     )
     jobs = JobTools(paths, owner)
-    arguments = {"task": "must-not-run", "agent_name": "code", "wait_timeout": budget}
+    arguments = {"task": "must-not-run", "agent_name": "code", "background_after": budget}
     if tool_name == "continue_subagent":
-        arguments = {"subagent_id": "missing", "message": "must-not-run", "wait_timeout": budget}
+        arguments = {"subagent_id": "missing", "message": "must-not-run", "background_after": budget}
     model = DelegationModel(
         id="test",
         responses=[
@@ -177,10 +177,11 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
         assert response.content == "corrected"
         rejected = next(tool for tool in response.tools if tool.tool_call_id == "invalid")
         assert rejected.tool_call_error
-        assert "wait_timeout" in rejected.result
+        assert "background_after" in rejected.result
         assert rejected.tool_args == arguments
         assert any(
-            message.tool_call_id == "invalid" and "wait_timeout" in message.content for message in model.seen_messages
+            message.tool_call_id == "invalid" and "background_after" in message.content
+            for message in model.seen_messages
         )
         assert DelegationState.from_metadata(response.metadata).children == []
         assert await runtime.list_jobs(owner=owner, depth=0) == []
@@ -487,7 +488,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     "first",
                     task="Report",
                     agent_name="code",
-                    wait_timeout=0.01 if detach and not human else None,
+                    background_after=0.01 if detach and not human else None,
                 ),
             )
             driving = asyncio.create_task(drive(current_parent))
@@ -1571,7 +1572,7 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
     try:
         delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner, delegation_depth=depth)
         description = delegate.async_functions["run_subagent"].description or ""
-        offered = "wait_timeout" in description
+        offered = "background_after" in description
         instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.instructions or "")
         assert (offered, instructed) == (depth == 0, depth == 0)
     finally:

@@ -104,7 +104,7 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
         )
         arguments = {"agent_name": "code", "task": "Research"}
         if not initially_excluded:
-            arguments["wait_timeout"] = 0
+            arguments["background_after"] = 0
         model = DelegationModel(
             id="test",
             responses=([] if resumed else [ModelResponse(tool_calls=[_call("run_subagent", "approval", **arguments)])])

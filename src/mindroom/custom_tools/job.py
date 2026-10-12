@@ -106,12 +106,12 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                "Managed tool calls accept wait_timeout: omitted or null waits until completion or a newer message you "
-                "answer, "
-                "zero returns a job_id immediately, and a positive number bounds waiting without cancelling work. "
-                "Only use wait_timeout when the tool schema exposes it; excluded toolkits keep their native controls, "
+                "Managed tool calls accept background_after: omitted or null waits until completion or a newer message "
+                "you answer, zero returns a job_id immediately, and a positive number is how many seconds to wait "
+                "before the call continues in the background, without cancelling it. "
+                "Only use background_after when the tool schema exposes it; excluded toolkits keep their native controls, "
                 "so a shell handle is checked or killed with check_shell_command or kill_shell_command. "
-                "Calls made inside an already running job stay with that job and accept no separate wait budget. "
+                "Calls made inside an already running job stay with that job and accept no background_after. "
                 "A newer message you answer releases waits while work continues. "
                 'Use job(action="list") to rediscover jobs and their status after a new turn, '
                 'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to ask '

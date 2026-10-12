@@ -75,11 +75,11 @@ async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team", [False, True])
-@pytest.mark.parametrize("wait_timeout", [0, 0.001])
+@pytest.mark.parametrize("background_after", [0, 0.001])
 async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PLR0915
     tmp_path: Path,
     team: bool,
-    wait_timeout: float,
+    background_after: float,
 ) -> None:
     """A resumed approval finishes while its approved work runs on, leaving that work to its follow-up."""
     config = Config(
@@ -105,7 +105,7 @@ async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PL
     model = DelegationModel(
         id="test",
         responses=[
-            ModelResponse(tool_calls=[_call("add", "approved-call", wait_timeout=wait_timeout)]),
+            ModelResponse(tool_calls=[_call("add", "approved-call", background_after=background_after)]),
             ModelResponse(content="Independent work done."),
         ],
     )
@@ -147,7 +147,7 @@ async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PL
             "leader",
             2**62,
             toolkit_name="calculator",
-            arguments_digest=approval_arguments_digest({"wait_timeout": wait_timeout}),
+            arguments_digest=approval_arguments_digest({"background_after": background_after}),
         ),
     )
     pending = None

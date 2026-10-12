@@ -119,7 +119,7 @@ Matrix sync callback
 | `tool_jobs/execution_authority.py` | Application-entry authority checks |
 | `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
 | `tool_jobs/control.py` | Newer human messages that release waits, and cancellation checkpoints |
-| `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
+| `tool_jobs/background_after.py` | The reserved `background_after` argument of managed calls and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
 | `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and how long a reply waits for a job's approval |
 | `tool_jobs/notices.py` | The notice on a tool result and the turn-start note about jobs that ended |

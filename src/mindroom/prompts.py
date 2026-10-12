@@ -683,7 +683,7 @@ Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 
 
-DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept wait_timeout like other managed calls, so a child can keep working as a job.
+DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept background_after like other managed calls, so a child can keep working as a job.
 A newer message you answer releases the wait while the child continues working.
 A child tool that requires approval asks the requester through an approval card of the child's job; only the child waits for the decision.
 Waiting neither restarts the child nor grants tool approval.

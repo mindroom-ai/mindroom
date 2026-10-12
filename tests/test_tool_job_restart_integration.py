@@ -99,7 +99,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     original_model = DelegationModel(
         id="test",
         responses=[
-            ModelResponse(tool_calls=[_call("slow_tool", "original-call", wait_timeout=None)]),
+            ModelResponse(tool_calls=[_call("slow_tool", "original-call", background_after=None)]),
             ModelResponse(content="Original response released."),
         ],
     )

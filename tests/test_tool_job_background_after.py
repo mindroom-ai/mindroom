@@ -42,13 +42,13 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("depth", [0, 1])
-async def test_application_wait_timeout_collision_fails_before_execution(tmp_path: Path, depth: int) -> None:
+async def test_application_background_after_collision_fails_before_execution(tmp_path: Path, depth: int) -> None:
     """An application argument cannot silently become runtime metadata, including in nested calls."""
     invoked = []
 
-    async def application(wait_timeout: int = 7) -> str:
-        invoked.append(wait_timeout)
-        return str(wait_timeout)
+    async def application(background_after: int = 7) -> str:
+        invoked.append(background_after)
+        return str(background_after)
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
@@ -69,16 +69,16 @@ async def test_application_wait_timeout_collision_fails_before_execution(tmp_pat
                 schemas = model._format_tools([sibling, function])
                 assert len(schemas) == 2
                 schema = next(item["function"] for item in schemas if item["function"]["name"] == "application")
-                assert schema["parameters"]["properties"]["wait_timeout"]["type"] == "integer"
+                assert schema["parameters"]["properties"]["background_after"]["type"] == "integer"
                 success, _, call, result = await model.arun_function_call(
-                    FunctionCall(function=function, call_id="collision", arguments={"wait_timeout": None}),
+                    FunctionCall(function=function, call_id="collision", arguments={"background_after": None}),
                 )
         assert success is False
         assert result.status == "failure"
         assert "exclude_toolkits" in call.error
         assert invoked == []
         assert await runtime.list_jobs(owner=owner, depth=depth) == []
-        assert function.parameters["properties"]["wait_timeout"]["type"] == "integer"
+        assert function.parameters["properties"]["background_after"]["type"] == "integer"
     finally:
         await runtime.shutdown()
 
@@ -110,20 +110,25 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
             with tool_runtime_context(context):
                 formatted = (backup if fallback else model)._format_tools([function, controls])
         schema = formatted[0]["function"]["parameters"]
-        assert schema["properties"]["wait_timeout"]["anyOf"] == [{"type": "number", "minimum": 0}, {"type": "null"}]
-        assert "wait_timeout" not in schema["required"]
-        assert "wait_timeout" not in function.parameters["properties"]
+        assert schema["properties"]["background_after"]["anyOf"] == [{"type": "number", "minimum": 0}, {"type": "null"}]
+        assert "background_after" not in schema["required"]
+        assert "background_after" not in function.parameters["properties"]
         control_schema = next(item["function"] for item in formatted if item["function"]["name"] == "job")
+        # The job controls keep their own wait_timeout, and gain no background_after.
         assert (
             control_schema["parameters"]["properties"]["wait_timeout"]
             == controls.parameters["properties"]["wait_timeout"]
         )
+        assert "background_after" not in control_schema["parameters"]["properties"]
     finally:
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", [{}, {"wait_timeout": None}, {"wait_timeout": 0}, {"wait_timeout": 0.01}])
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"background_after": None}, {"background_after": 0}, {"background_after": 0.01}],
+)
 async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, arguments: dict[str, object]) -> None:
     """A real no-keyword callable executes once and bounded waits return without cancellation."""
     invoked = []
@@ -156,7 +161,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
         async with execution_resources():
             with tool_runtime_context(context):
                 waiting = asyncio.create_task(model.arun_function_call(call))
-                if arguments.get("wait_timeout") is None:
+                if arguments.get("background_after") is None:
                     await asyncio.wait_for(entered.wait(), 30)
                     assert not waiting.done()
                     gate.set()
@@ -213,14 +218,14 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                call = FunctionCall(function=function, call_id="call", arguments={"wait_timeout": budget})
+                call = FunctionCall(function=function, call_id="call", arguments={"background_after": budget})
                 success, _, returned_call, result = await model.arun_function_call(call)
                 assert success is False
                 assert returned_call is call
                 assert result.status == "failure"
-                assert "wait_timeout" in call.error
+                assert "background_after" in call.error
                 assert result.error == call.error
-                assert call.arguments == {"wait_timeout": budget}
+                assert call.arguments == {"background_after": budget}
         assert invoked == []
         assert await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0) == []
     finally:
@@ -265,8 +270,8 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
         responses=[
             ModelResponse(
                 tool_calls=[
-                    _call("slow", "slow-call", value="slow-result", wait_timeout=0),
-                    _call("fast", "fast-call", value="fast-result", wait_timeout=None),
+                    _call("slow", "slow-call", value="slow-result", background_after=0),
+                    _call("fast", "fast-call", value="fast-result", background_after=None),
                 ],
             ),
             ModelResponse(content="ready"),
@@ -284,7 +289,7 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
                 handle = json.loads(results["slow"].result)
                 assert handle["status"] == "running"
                 assert results["fast"].result == "fast-result"
-                assert results["slow"].tool_args == {"value": "slow-result", "wait_timeout": 0}
+                assert results["slow"].tool_args == {"value": "slow-result", "background_after": 0}
                 gate.set()
                 completed = await runtime.wait(handle["job_id"], owner=owner, depth=0)
                 assert completed.job.result == "slow-result"
@@ -332,7 +337,10 @@ async def test_rich_stream_reaches_sdk_with_media_metadata_and_events(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", [{}, {"wait_timeout": None}, {"wait_timeout": 0}, {"wait_timeout": 1}])
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"background_after": None}, {"background_after": 0}, {"background_after": 1}],
+)
 async def test_owned_nested_application_cannot_create_detached_job(
     tmp_path: Path,
     arguments: dict[str, object],
@@ -358,9 +366,9 @@ async def test_owned_nested_application_cannot_create_detached_job(
         async with execution_resources():
             with tool_runtime_context(context), job_control_context(JobControl()):
                 schema = model._format_tools([function])[0]["function"]["parameters"]
-                assert "wait_timeout" not in schema["properties"]
+                assert "background_after" not in schema["properties"]
                 call = FunctionCall(function=function, call_id="call", arguments=arguments)
-                if arguments.get("wait_timeout") is None:
+                if arguments.get("background_after") is None:
                     success, _, _, result = await model.arun_function_call(call)
                     assert success is True
                     assert result.result == "inline result"
@@ -411,11 +419,11 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
         responses=[
             ModelResponse(
                 tool_calls=[
-                    _call("application", "invalid", value="must-not-run", wait_timeout=invalid_budget),
-                    _call("application", "sibling", value="sibling", wait_timeout=None),
+                    _call("application", "invalid", value="must-not-run", background_after=invalid_budget),
+                    _call("application", "sibling", value="sibling", background_after=None),
                 ],
             ),
-            ModelResponse(tool_calls=[_call("application", "corrected", value="corrected", wait_timeout=None)]),
+            ModelResponse(tool_calls=[_call("application", "corrected", value="corrected", background_after=None)]),
             ModelResponse(content="done"),
         ],
     )
@@ -443,10 +451,11 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
         assert invoked == ["sibling", "corrected"]
         rejected = next(tool for tool in response.tools if tool.tool_call_id == "invalid")
         assert rejected.tool_call_error
-        assert "wait_timeout" in rejected.result
-        assert rejected.tool_args == {"value": "must-not-run", "wait_timeout": invalid_budget}
+        assert "background_after" in rejected.result
+        assert rejected.tool_args == {"value": "must-not-run", "background_after": invalid_budget}
         assert any(
-            message.tool_call_id == "invalid" and "wait_timeout" in message.content for message in model.seen_messages
+            message.tool_call_id == "invalid" and "background_after" in message.content
+            for message in model.seen_messages
         )
         jobs = await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0)
         assert len(jobs) == (0 if nested else 2)
@@ -584,7 +593,7 @@ async def test_run_connected_toolkits_run_inline_without_wait_metadata(
         async with execution_resources():
             with tool_runtime_context(context):
                 schema = model._format_tools([function])[0]["function"]["parameters"]
-                assert "wait_timeout" not in schema.get("properties", {})
+                assert "background_after" not in schema.get("properties", {})
                 success, _, call, _ = await model.arun_function_call(
                     FunctionCall(function=function, call_id="connected", arguments={}),
                 )
@@ -592,10 +601,10 @@ async def test_run_connected_toolkits_run_inline_without_wait_metadata(
                 assert call.result == "rows"
                 # A stale budget is rejected rather than silently running the call without detaching it.
                 success, _, call, _ = await model.arun_function_call(
-                    FunctionCall(function=function, call_id="stale", arguments={"wait_timeout": 0}),
+                    FunctionCall(function=function, call_id="stale", arguments={"background_after": 0}),
                 )
                 assert success is False
-                assert "wait_timeout" in str(call.error)
+                assert "background_after" in str(call.error)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         await runtime.shutdown()

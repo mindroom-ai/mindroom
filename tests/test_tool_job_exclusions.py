@@ -175,7 +175,7 @@ async def test_shell_native_handles_control_the_actual_process(
         assert await runtime.list_jobs(owner=owner, depth=0) == []
         for name in toolkit.get_async_functions():
             schema = model.schemas[name]
-            assert "wait_timeout" not in schema["properties"]
+            assert "background_after" not in schema["properties"]
         run_schema = model.schemas["run_shell_command"]
         assert "timeout" in run_schema["properties"]
         assert "mindroom_output_path" in run_schema["properties"]
@@ -197,16 +197,16 @@ async def test_empty_exclusion_list_includes_shell(shell_runtime: _ShellRuntime)
     assert not result.tool_call_error
     assert "managed shell" in result.result
     assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
-    assert "wait_timeout" in model.schemas["run_shell_command"]["properties"]
+    assert "background_after" in model.schemas["run_shell_command"]["properties"]
 
 
 @pytest.mark.asyncio
 async def test_shell_rejects_extra_wait_before_side_effect(tmp_path: Path, shell_runtime: _ShellRuntime) -> None:
     """A stale model call cannot silently create a second shell execution owner."""
     actor, model, runtime, owner, _ = shell_runtime
-    result = await _invoke(actor, model, "run_shell_command", args="echo wrong > unexpected", wait_timeout=0)
+    result = await _invoke(actor, model, "run_shell_command", args="echo wrong > unexpected", background_after=0)
     assert result.tool_call_error
-    assert "wait_timeout" in result.result
+    assert "background_after" in result.result
     assert not (tmp_path / "unexpected").exists()
     assert await runtime.list_jobs(owner=owner, depth=0) == []
 
@@ -253,7 +253,7 @@ async def test_same_named_unrelated_function_still_backgrounds(shell_runtime: _S
 
     actor.tools = [assembled_function(run_shell_command)]
     try:
-        result = await _invoke(actor, model, "run_shell_command", wait_timeout=0)
+        result = await _invoke(actor, model, "run_shell_command", background_after=0)
         handle = json.loads(result.result)
         assert handle["status"] == "running"
         release.set()
@@ -286,9 +286,9 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
             def __init__(self):
                 super().__init__(name="different_runtime_name", tools=[self.native_step, self.native_status])
 
-            async def native_step(self, wait_timeout: int = 7) -> str:
-                Path(__file__).with_name("executions").write_text(f"step:{wait_timeout}\\n")
-                return f"step:{wait_timeout}"
+            async def native_step(self, background_after: int = 7) -> str:
+                Path(__file__).with_name("executions").write_text(f"step:{background_after}\\n")
+                return f"step:{background_after}"
 
             async def native_status(self) -> str:
                 with Path(__file__).with_name("executions").open("a") as output:
@@ -327,7 +327,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
             )
             async with execution_resources():
                 if not excluded:
-                    rejected = await _invoke(actor, model, "native_step", wait_timeout=3)
+                    rejected = await _invoke(actor, model, "native_step", background_after=3)
                     assert rejected.tool_call_error
                     assert "exclude_toolkits" in rejected.result
                     assert not (plugin / "executions").exists()
@@ -338,7 +338,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 lifecycle = _make_lifecycle(tmp_path, current_config=config)
                 lifecycle.record_applied(config)
                 assert lifecycle.status.status == "restart_required"
-                step = await _invoke(actor, model, "native_step", wait_timeout=3)
+                step = await _invoke(actor, model, "native_step", background_after=3)
                 assert not step.tool_call_error
                 assert step.result == "step:3"
                 status = await _invoke(actor, model, "native_status")
@@ -346,15 +346,15 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 for name in toolkit.get_async_functions():
                     properties = model.schemas[name]["properties"]
                     if name == "native_step":
-                        assert properties["wait_timeout"]["type"] == "integer"
+                        assert properties["background_after"]["type"] == "integer"
                     else:
-                        assert "wait_timeout" not in properties
+                        assert "background_after" not in properties
                 assert (plugin / "executions").read_text().splitlines() == [step.result, "status"]
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
                 release_background_tool_jobs(paths, instance)
                 instance = pin_background_tool_jobs(config, paths)
                 register_background_runtime(paths, runtime)
-                rejected = await _invoke(actor, model, "native_step", wait_timeout=3)
+                rejected = await _invoke(actor, model, "native_step", background_after=3)
                 assert rejected.tool_call_error
                 assert "exclude_toolkits" in rejected.result
                 assert await runtime.list_jobs(owner=owner, depth=0) == []

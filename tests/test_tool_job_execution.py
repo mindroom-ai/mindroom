@@ -194,7 +194,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
         async with execution_resources():
             with tool_runtime_context(context):
                 result = await model.arun_function_call(
-                    FunctionCall(function=function, call_id="call", arguments={"wait_timeout": 0}),
+                    FunctionCall(function=function, call_id="call", arguments={"background_after": 0}),
                 )
                 job_id = json.loads(result[3].result)["job_id"]
                 assert await asyncio.to_thread(started.wait, JOB_TEST_TIMEOUT)
@@ -220,11 +220,11 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("managed", "wait_timeout"), [(False, None), (True, None), (True, 0)])
+@pytest.mark.parametrize(("managed", "background_after"), [(False, None), (True, None), (True, 0)])
 async def test_registered_sync_tool_completes_through_sdk_dispatch(
     tmp_path: Path,
     managed: bool,
-    wait_timeout: float | None,
+    background_after: float | None,
 ) -> None:
     """The registered sync hook bridge must not give its job a foreign-loop completion task."""
     (tmp_path / "input.txt").write_text("registered sync result\n")
@@ -250,7 +250,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
     bind_toolkit_authority(toolkit, authored_name="coding")
     arguments: dict[str, object] = {"path": "input.txt"}
     if managed:
-        arguments["wait_timeout"] = wait_timeout
+        arguments["background_after"] = background_after
     model = DelegationModel(
         id="test",
         responses=[
@@ -273,7 +273,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
                     waited = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
                     assert waited.job.status == "completed", waited.job.result
                     assert "registered sync result" in waited.job.result
-                if wait_timeout is None:
+                if background_after is None:
                     assert not tool.tool_call_error, tool.result
                     assert "registered sync result" in tool.result
                 else:
@@ -641,7 +641,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
     model = DelegationModel(
         id="test",
         responses=[
-            ModelResponse(tool_calls=[_call("fast_tool", "exact-call", wait_timeout=None)]),
+            ModelResponse(tool_calls=[_call("fast_tool", "exact-call", background_after=None)]),
             ModelResponse(content="done"),
         ],
     )
@@ -677,7 +677,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         if approval:
             assert await runtime.list_jobs(owner=owner, depth=0) == []
             for requirement in response.requirements or []:
-                assert requirement.tool_execution.tool_args == {"wait_timeout": None}
+                assert requirement.tool_execution.tool_args == {"background_after": None}
                 requirement.confirm()
             response = await agent.acontinue_run(run_response=response)
         await runtime.quiesce()
@@ -690,7 +690,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             assert response.tools[0].result == "actual result"
         jobs = await runtime.list_jobs(owner=owner, depth=0)
         assert len(jobs) == 1
-        assert jobs[0].adapter["arguments"] == encode_tool_result({"wait_timeout": None})
+        assert jobs[0].adapter["arguments"] == encode_tool_result({"background_after": None})
         assert jobs[0].source_event_id == "$original-request"
         assert jobs[0].owner == owner
         assert jobs[0].consumed is not save_fails
@@ -704,7 +704,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             assert saved.owner == owner
             assert saved.consumed is not save_fails
             assert len(pending_outcomes(restored)) == int(save_fails)
-            assert saved.adapter["arguments"] == encode_tool_result({"wait_timeout": None})
+            assert saved.adapter["arguments"] == encode_tool_result({"background_after": None})
         finally:
             await restored.shutdown()
     finally:
@@ -1220,7 +1220,7 @@ async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path
     register_background_runtime(paths, runtime)
     arguments: dict[str, object] = {"text": "hello"}
     if case == "released":
-        arguments["wait_timeout"] = 0
+        arguments["background_after"] = 0
     model = DelegationModel(
         id="test",
         responses=[

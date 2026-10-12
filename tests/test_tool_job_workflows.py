@@ -236,7 +236,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     model = DelegationModel(
         id="test",
         responses=[
-            ModelResponse(tool_calls=[_call("composite", "outer", wait_timeout=0)]),
+            ModelResponse(tool_calls=[_call("composite", "outer", background_after=0)]),
             ModelResponse(content="done"),
         ],
     )

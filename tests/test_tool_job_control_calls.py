@@ -36,12 +36,12 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("when", ["next-turn", "after-toolcall"])
-@pytest.mark.parametrize("wait_timeout", [None, 0, 0.001])
+@pytest.mark.parametrize("background_after", [None, 0, 0.001])
 async def test_model_control_preserves_timing_across_human_followup(  # noqa: PLR0915
     tmp_path: Path,
     team: bool,
     when: str,
-    wait_timeout: float | None,
+    background_after: float | None,
 ) -> None:
     """Control calls finish inline; unsupported wait budgets fail before changing the model."""
     config = Config(
@@ -72,8 +72,8 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
 
     function.pre_hook = before
     arguments: dict[str, object] = {"model_name": "alternate", "when": when}
-    if wait_timeout is not None:
-        arguments["wait_timeout"] = wait_timeout
+    if background_after is not None:
+        arguments["background_after"] = background_after
     model = DelegationModel(
         id="test",
         responses=[ModelResponse(tool_calls=[_call("switch_thread_model", "switch", **arguments)])],
@@ -91,7 +91,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
         async with execution_resources():
             with tool_runtime_context(context), pending_human_messages_context(signal):
                 pending = asyncio.create_task(actor.arun("Switch the model", session_id=context.session_id))
-                if wait_timeout is None:
+                if background_after is None:
                     await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                     signal.set()
                     done, _ = await asyncio.wait({pending}, timeout=0.05)
@@ -100,7 +100,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                 response = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
                 assert response.tools is not None
                 tool = response.tools[0]
-                if wait_timeout is None:
+                if background_after is None:
                     payload = json.loads(tool.result)
                     assert payload["status"] == "ok"
                     decision = continuation_decision_from_tools(
@@ -116,12 +116,12 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                     )
                 else:
                     assert tool.tool_call_error
-                    assert "wait_timeout" in tool.result
+                    assert "background_after" in tool.result
                     assert not started.is_set()
                     assert resolve_thread_model_override(paths, "$thread", config=config).active == {}
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
                 schema = model._format_tools([function])[0]["function"]["parameters"]
-                assert "wait_timeout" not in schema["properties"]
+                assert "background_after" not in schema["properties"]
                 dynamic = DynamicToolsToolkit(
                     agent_name="leader",
                     config=config,
@@ -129,7 +129,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                     stop_after_tool_call=True,
                 )
                 loader_schema = model._format_tools([dynamic.functions["load_tool"]])[0]["function"]["parameters"]
-                assert "wait_timeout" not in loader_schema["properties"]
+                assert "background_after" not in loader_schema["properties"]
     finally:
         release.set()
         if pending is not None:

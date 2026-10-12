@@ -154,7 +154,7 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
     toolkit = DelegateTools("lead", ["lead"], test_runtime_paths(tmp_path), config)
     instructions = toolkit.instructions or ""
     description = toolkit.async_functions["run_subagent"].description or ""
-    assert "wait_timeout" not in instructions + description
+    assert "background_after" not in instructions + description
     assert "job(action=" not in instructions + description
     assert "continue_subagent" in instructions + description
     # The default prompt keeps main's foreground wording; background semantics live only in the opt-in addendum.
@@ -296,7 +296,7 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
         functions = [function for toolkit in agent.tools for function in toolkit.get_async_functions().values()]
         assert any(function.name == "add" for function in functions)
         assert all(function.name != "job" for function in functions)
-        assert all("wait_timeout" not in function.parameters.get("properties", {}) for function in functions)
+        assert all("background_after" not in function.parameters.get("properties", {}) for function in functions)
         assert not vars(agent.model).get("_mindroom_tool_jobs")
         assert not agno_compat_execution._SDK_BINDINGS_INSTALLED
         assert all(vars(module)[name] is original for module, name, original in bindings)

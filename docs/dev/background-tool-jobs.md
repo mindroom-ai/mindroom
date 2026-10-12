@@ -9,7 +9,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
   With the feature off, startup builds no job runtime and leaves saved jobs untouched; the next enabled start recovers them, reporting unfinished ones as interrupted, and an approval continuation that needed a job fails on resume.
 - Tools block by default.
-  `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
+  `background_after: 0` detaches immediately; a positive value limits foreground waiting.
   Only a newer human message in the conversation releases that wait while accepted work continues; scheduled turns, other agents' messages, and follow-ups queued behind the reply wait for it.
   Releasing a wait neither pauses a job nor authorizes a protected tool.
 - One `job` tool provides scoped `list`, `wait`, `cancel`, and `collect`; `cancel` asks a job to stop and returns at once.

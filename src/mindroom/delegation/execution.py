@@ -73,6 +73,7 @@ from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, application_arguments, read_background_after
 from mindroom.tool_jobs.consumption import retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
@@ -83,7 +84,6 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
-from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.output_files import (
@@ -791,7 +791,7 @@ async def _await_background_child(
     cancel: Callable[[DelegationChild], Awaitable[None]],
     owner: ToolExecutionIdentity,
     depth: int,
-    wait_timeout: float | None,
+    background_after: float | None,
     settle: Callable[[str], Awaitable[None]],
     record_return: Callable[[object], Awaitable[None]],
     parent_call: _ParentCall,
@@ -813,7 +813,7 @@ async def _await_background_child(
             child.delegation_id,
             owner=owner,
             depth=depth,
-            timeout=wait_timeout,
+            timeout=background_after,
             claim=claim,
             # A child awaiting a human decision holds its caller's reply no longer than a gated call's own wait does.
             approval_timeout=current_approval_wait_timeout(),
@@ -1083,12 +1083,15 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     elif excluded:
         # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
-        if "wait_timeout" in (tool.tool_args or {}):
+        if BACKGROUND_AFTER in (tool.tool_args or {}):
             tool.tool_call_error = True
-            resolve_result("wait_timeout is unavailable for the excluded delegate toolkit.")
+            resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.")
             return False
     try:
-        wait_timeout = read_wait_timeout(tool.tool_args, owned_execution=job_owns_execution() or delegation_depth > 0)
+        background_after = read_background_after(
+            tool.tool_args,
+            owned_execution=job_owns_execution() or delegation_depth > 0,
+        )
     except ValueError as error:
         tool.tool_call_error = True
         resolve_result(str(error))
@@ -1293,7 +1296,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         cancel=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
                         owner=caller_identity,
                         depth=delegation_depth,
-                        wait_timeout=wait_timeout,
+                        background_after=background_after,
                         parent_call=_ParentCall(
                             run_id=response.run_id or "",
                             team=isinstance(response, TeamRunOutput),

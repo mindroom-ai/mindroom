@@ -63,9 +63,9 @@ class _NativeTools(Toolkit):
 
     async def native_step(self, **options: int) -> str:
         """Observe native keywords without declaring a reserved managed parameter."""
-        wait_timeout = options.get("wait_timeout", 7)
-        self.observed.append(wait_timeout)
-        return f"native:{wait_timeout}"
+        background_after = options.get("background_after", 7)
+        self.observed.append(background_after)
+        return f"native:{background_after}"
 
 
 @pytest.mark.asyncio
@@ -105,7 +105,7 @@ async def test_approved_call_follows_exclusions_current_at_resume(
                 paused = await actor(
                     DelegationModel(
                         id="test",
-                        responses=[ModelResponse(tool_calls=[_call("native_step", "approved", wait_timeout=3)])],
+                        responses=[ModelResponse(tool_calls=[_call("native_step", "approved", background_after=3)])],
                     ),
                 ).arun("Execute", session_id=context.session_id)
                 assert paused.status is RunStatus.paused
@@ -450,7 +450,7 @@ async def test_a_calls_own_budget_does_not_outlast_its_approval_wait(
         async with execution_resources():
             with tool_runtime_context(run.context):
                 response = await asyncio.wait_for(
-                    run.agent(wait_timeout=600).arun("Write", session_id=run.context.session_id),
+                    run.agent(background_after=600).arun("Write", session_id=run.context.session_id),
                     JOB_TEST_TIMEOUT,
                 )
         handle = json.loads(_tool_result(response))

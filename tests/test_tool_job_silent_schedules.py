@@ -230,7 +230,7 @@ async def test_a_turn_with_jobs_on_lets_a_managed_call_detach(
     """Every reply entry point runs its managed calls as jobs once the instance runs them."""
     turn = await _run_silent_turn(
         tmp_path,
-        [ModelResponse(tool_calls=[_call("probe_tool", "read", wait_timeout=0)]), ModelResponse(content="done")],
+        [ModelResponse(tool_calls=[_call("probe_tool", "read", background_after=0)]), ModelResponse(content="done")],
         enabled=True,
         collect_stream=collect_stream,
         direct_stream=direct_stream,
@@ -315,7 +315,7 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
     model = DelegationModel(
         id="test",
         responses=[
-            ModelResponse(tool_calls=[_call("slow", "call", wait_timeout=0)]),
+            ModelResponse(tool_calls=[_call("slow", "call", background_after=0)]),
             ModelResponse(content="NO_REPLY"),
         ],
     )

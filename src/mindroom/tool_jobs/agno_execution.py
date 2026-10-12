@@ -42,6 +42,12 @@ from mindroom.tool_jobs.agno_compat_functions import (
 )
 from mindroom.tool_jobs.approvals import ask_tool_call_approval
 from mindroom.tool_jobs.authorization import function_authority
+from mindroom.tool_jobs.background_after import (
+    BACKGROUND_AFTER,
+    ToolWaitMode,
+    application_arguments,
+    read_background_after,
+)
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
@@ -60,7 +66,6 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
-from mindroom.tool_jobs.wait_timeout import ToolWaitMode, application_arguments, read_wait_timeout
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -158,16 +163,16 @@ def _is_framework_function(function: Function) -> bool:
     return function.owning_toolkit is None or function_actor(function) is None
 
 
-def declares_wait_timeout(function: Function) -> bool:
-    """Whether the application function itself declares a wait_timeout parameter."""
-    return "wait_timeout" in function.parameters.get("properties", {})
+def declares_background_after(function: Function) -> bool:
+    """Whether the application function itself declares a background_after parameter."""
+    return BACKGROUND_AFTER in function.parameters.get("properties", {})
 
 
-def _validate_wait_timeout_parameter(function: Function) -> None:
+def _validate_background_after_parameter(function: Function) -> None:
     """Reject application parameters that would be consumed as framework metadata."""
-    if declares_wait_timeout(function):
+    if declares_background_after(function):
         msg = (
-            f"Tool {function.name!r} declares its own wait_timeout parameter. "
+            f"Tool {function.name!r} declares its own {BACKGROUND_AFTER} parameter. "
             "Rename it or add its toolkit to background_tool_jobs.exclude_toolkits."
         )
         raise ValueError(msg)
@@ -444,14 +449,14 @@ async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolW
 
 def _wait_budget(call: FunctionCall, *, mode: ToolWaitMode, depth: int) -> float | None:
     """Return how long the caller waits for this call's job, or raise ValueError for an unusable budget."""
-    wait_timeout = None
+    background_after = None
     if mode != "native":
-        _validate_wait_timeout_parameter(call.function)
-        wait_timeout = read_wait_timeout(call.arguments, owned_execution=job_owns_execution() or depth > 0)
-    if call.function.stop_after_tool_call and wait_timeout is not None:
-        msg = "wait_timeout is not supported for tools that stop the current model step"
+        _validate_background_after_parameter(call.function)
+        background_after = read_background_after(call.arguments, owned_execution=job_owns_execution() or depth > 0)
+    if call.function.stop_after_tool_call and background_after is not None:
+        msg = f"{BACKGROUND_AFTER} is not supported for tools that stop the current model step"
         raise ValueError(msg)
-    return wait_timeout
+    return background_after
 
 
 def _job_approval(
@@ -509,7 +514,7 @@ async def _execute_call(original: _Execute, call: FunctionCall, *, depth: int) -
     if job_approval and mode != "managed":
         return _unaskable(call)
     try:
-        wait_timeout = _wait_budget(call, mode=mode, depth=depth)
+        background_after = _wait_budget(call, mode=mode, depth=depth)
     except ValueError as error:
         return _failed_call(call, error)
     owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
@@ -537,7 +542,7 @@ async def _execute_call(original: _Execute, call: FunctionCall, *, depth: int) -
         resources,
         owner,
         depth=depth,
-        wait_timeout=wait_timeout,
+        background_after=background_after,
         job_approval=job_approval,
     )
 
@@ -551,7 +556,7 @@ async def _run_managed_call(
     owner: ToolExecutionIdentity,
     *,
     depth: int,
-    wait_timeout: float | None,
+    background_after: float | None,
     job_approval: bool,
 ) -> ToolCallResult:
     """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned."""
@@ -596,7 +601,7 @@ async def _run_managed_call(
                 job_id,
                 owner=owner,
                 depth=depth,
-                timeout=wait_timeout,
+                timeout=background_after,
                 claim=claim,
                 # The reply waits this long for a human decision, then goes on while the job waits for it.
                 approval_timeout=current_approval_wait_timeout() if job_approval else None,

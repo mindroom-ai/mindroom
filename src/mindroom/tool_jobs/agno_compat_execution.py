@@ -11,11 +11,12 @@ from agno.models.base import Model
 from agno.tools.function import Function
 
 from mindroom.tool_jobs.agno_execution import (
-    declares_wait_timeout,
+    declares_background_after,
     execute_owned_tool_call,
     wait_mode,
     wrap_tool_execution,
 )
+from mindroom.tool_jobs.background_after import BACKGROUND_AFTER
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -63,7 +64,7 @@ def _install_owned_dispatch_binding() -> None:
 # Upstream issue: No matching public reserved-parameter extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK supports per-call framework metadata outside application kwargs.
-# Coverage: tests/test_tool_job_wait_timeout.py::test_shared_schema_adds_optional_wait_without_changing_application_schema
+# Coverage: tests/test_tool_job_background_after.py::test_shared_schema_adds_optional_wait_without_changing_application_schema
 # Coverage: tests/test_tool_job_exclusions.py::test_registered_plugin_exclusion_is_pinned_for_every_function
 def _wrap_tool_schemas(
     original: Callable[..., list[dict[str, Any]]],
@@ -81,28 +82,28 @@ def _wrap_tool_schemas(
             return original(tools)
         projected: list[Function | dict[str, Any]] = []
         for tool in tools or []:
-            # A declared wait_timeout keeps its authored schema; the collision fails only that call's execution.
+            # A declared background_after keeps its authored schema; the collision fails only that call's execution.
             if (
                 not isinstance(tool, Function)
                 or wait_mode(tool, depth=depth) != "managed"
-                or declares_wait_timeout(tool)
+                or declares_background_after(tool)
             ):
                 projected.append(tool)
                 continue
             function = tool.model_copy()
             function.parameters = deepcopy(tool.parameters)
-            function.parameters.setdefault("properties", {})["wait_timeout"] = {
+            function.parameters.setdefault("properties", {})[BACKGROUND_AFTER] = {
                 "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
                 "description": (
-                    "Seconds to wait for this call, without cancelling its execution. "
+                    "Seconds to wait for this call before it continues in the background, without cancelling it. "
                     "Omit or pass null to wait until completion or a newer message you answer; "
-                    "zero returns a job handle immediately."
+                    "zero continues in the background at once and returns a job handle."
                 ),
             }
             if function.strict:
                 required = function.parameters.setdefault("required", [])
-                if "wait_timeout" not in required:
-                    required.append("wait_timeout")
+                if BACKGROUND_AFTER not in required:
+                    required.append(BACKGROUND_AFTER)
             projected.append(function)
         return original(projected)
 
