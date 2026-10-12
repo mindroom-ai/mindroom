@@ -43,8 +43,8 @@ Turn records are scoped to the agent name alone, so a re-login under a new Matri
   Grant maintenance clears it when an unrevoked grant expires, when either owning principal leaves the room, or when the revocation edit is acknowledged, and acknowledged revocation outbox rows are removed once it is cleared.
   A revocation accepted before expiry keeps its material until acknowledged, and compact grant identity remains so a duplicate action cannot recreate a window.
 - `scheduled_call_approvals.arguments_json` holds each scheduled call's unredacted arguments beside its task, room, thread, requester, and approver, while Matrix task state and the trigger carry only the task ID.
-- `background_approval_calls.reason` can hold the text of a human's denial reply to a scheduled-call or script approval card, and it is deleted with its call once the shared card retires.
   Grant maintenance deletes the row 30 days after its send time or withdrawal, once its card has retired and any receipt is settled.
+- `background_approval_calls.reason` can hold the text of a human's denial reply to a scheduled-call or script approval card, and it is deleted with its call once the shared card retires.
 
 There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
 
