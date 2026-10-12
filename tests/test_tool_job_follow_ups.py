@@ -264,6 +264,23 @@ async def test_an_admitted_follow_up_is_not_admitted_again(tmp_path: Path) -> No
         await runtime.shutdown()
 
 
+async def test_the_admission_memo_forgets_follow_ups_whose_jobs_were_collected(tmp_path: Path) -> None:
+    """A long-running process keeps only the follow-ups of jobs still waiting to be reported."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    try:
+        await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
+        await coordinator._admit_follow_ups(runtime)
+        assert coordinator._admitted_follow_ups
+        collected = await runtime.wait("job_a", owner=job_owner(), depth=0, timeout=0)
+        await runtime.acknowledge_wait("job_a", collected.claim)
+        await coordinator._admit_follow_ups(runtime)
+        assert coordinator._admitted_follow_ups == set()
+    finally:
+        await runtime.shutdown()
+
+
 def _runner_key(bot: AgentBot) -> ConversationKey:
     return ConversationKey(
         recipient=bot.agent_name,

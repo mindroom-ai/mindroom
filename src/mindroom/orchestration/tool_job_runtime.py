@@ -112,7 +112,7 @@ class ToolJobRuntimeCoordinator:
     _initialized: bool = field(default=False, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
     _publisher: JobStatePublisher = field(default_factory=JobStatePublisher, init=False)
-    # Follow-ups this process admitted, which later passes over the same ended jobs leave alone.
+    # Follow-ups this process admitted for jobs still waiting to be reported, which later passes leave alone.
     _admitted_follow_ups: set[str] = field(default_factory=set, init=False)
 
     async def initialize(self) -> None:
@@ -353,6 +353,7 @@ class ToolJobRuntimeCoordinator:
         A job a follow-up turn started counts that follow-up, so work that keeps starting work stops at the limit;
         a job a human message started counts none.
         """
+        due: set[str] = set()
         for key in _follow_up_keys(runtime.retained_jobs()):
             jobs = follow_up_jobs(await ended_jobs(runtime, key))
             bot = self.bot_provider(key.recipient)
@@ -370,10 +371,13 @@ class ToolJobRuntimeCoordinator:
             if not reported:
                 continue
             follow_up_id = follow_up_event_id(key, reported)
+            due.add(follow_up_id)
             if follow_up_id in self._admitted_follow_ups:
                 continue
             await bot.admit_job_follow_up(key, follow_up_id, 1 + max(streaks[job.job_id] for job in reported))
             self._admitted_follow_ups.add(follow_up_id)
+        # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
+        self._admitted_follow_ups &= due
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""
