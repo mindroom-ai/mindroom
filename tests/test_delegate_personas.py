@@ -705,7 +705,6 @@ async def test_authored_skills_are_checked_against_the_callers_skills(
     assert harness.session_child()["persona"]["skills"] == ["research"]
 
 
-@pytest.mark.asyncio
 def _native_resolver(
     tmp_path: Path,
     config: Config,
