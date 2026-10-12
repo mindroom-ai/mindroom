@@ -73,7 +73,7 @@ export default function UpgradePage() {
   if (loading || pricingLoading) {
     return (
       <div className="flex items-center justify-center h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-brand-600"></div>
       </div>
     )
   }
@@ -120,7 +120,7 @@ export default function UpgradePage() {
           Choose a plan that fits your needs. You can change or cancel anytime.
         </p>
         {activeTier && (
-          <p className="text-sm text-orange-600 dark:text-orange-400 mt-2">
+          <p className="text-sm text-brand-700 dark:text-brand-400 mt-2">
             Currently on {activeTier} plan. Upgrading will prorate your billing.
           </p>
         )}
@@ -187,14 +187,14 @@ export default function UpgradePage() {
               onClick={() => !isCurrentPlan && !downgrade && setSelectedPlan(plan.id)}
               className={`
                 relative rounded-lg border-2 p-6 cursor-pointer transition-all
-                ${selectedPlan === plan.id ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/10' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}
+                ${selectedPlan === plan.id ? 'border-brand-600 bg-brand-50 dark:bg-brand-900/10' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}
                 ${isCurrentPlan ? 'opacity-50 cursor-not-allowed' : ''}
                 ${downgrade ? 'opacity-50 cursor-not-allowed' : ''}
               `}
             >
               {plan.recommended && !isCurrentPlan && (
                 <div className="absolute -top-3 left-1/2 transform -translate-x-1/2 z-10">
-                  <span className="bg-orange-500 text-white px-3 py-1 rounded-full text-xs font-semibold flex items-center">
+                  <span className="bg-brand-600 text-white px-3 py-1 rounded-full text-xs font-semibold flex items-center">
                     <Sparkles className="w-3 h-3 mr-1" />
                     Recommended
                   </span>
@@ -245,7 +245,7 @@ export default function UpgradePage() {
               </ul>
 
               {selectedPlan === plan.id && (
-                <div className="absolute inset-0 rounded-lg ring-2 ring-orange-500 pointer-events-none"></div>
+                <div className="absolute inset-0 rounded-lg ring-2 ring-brand-600 pointer-events-none"></div>
               )}
             </div>
           )
@@ -277,7 +277,7 @@ export default function UpgradePage() {
             className={`
               px-6 py-2 rounded-lg font-semibold transition-colors
               ${selectedPlan
-                ? 'bg-orange-500 text-white hover:bg-orange-600'
+                ? 'bg-brand-600 text-white hover:bg-brand-700'
                 : 'bg-gray-300 text-gray-500 cursor-not-allowed'}
               disabled:opacity-50 disabled:cursor-not-allowed
             `}

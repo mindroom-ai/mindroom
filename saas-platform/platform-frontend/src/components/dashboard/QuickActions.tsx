@@ -65,8 +65,8 @@ export function QuickActions({ subscription, subscriptionLoading }: QuickActions
               className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
             >
               <div className="flex-shrink-0">
-                <div className="w-10 h-10 bg-orange-100 dark:bg-orange-900/30 rounded-lg flex items-center justify-center">
-                  <Icon className="w-5 h-5 text-orange-600 dark:text-orange-400" />
+                <div className="w-10 h-10 bg-brand-100 dark:bg-brand-900/30 rounded-lg flex items-center justify-center">
+                  <Icon className="w-5 h-5 text-brand-700 dark:text-brand-400" />
                 </div>
               </div>
               <div className="flex-1 min-w-0">
@@ -81,8 +81,8 @@ export function QuickActions({ subscription, subscriptionLoading }: QuickActions
               className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
             >
               <div className="flex-shrink-0">
-                <div className="w-10 h-10 bg-orange-100 dark:bg-orange-900/30 rounded-lg flex items-center justify-center">
-                  <Icon className="w-5 h-5 text-orange-600 dark:text-orange-400" />
+                <div className="w-10 h-10 bg-brand-100 dark:bg-brand-900/30 rounded-lg flex items-center justify-center">
+                  <Icon className="w-5 h-5 text-brand-700 dark:text-brand-400" />
                 </div>
               </div>
               <div className="flex-1 min-w-0">

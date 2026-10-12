@@ -137,7 +137,7 @@ export default function BillingPage() {
               <span className={`px-3 py-1 rounded-full text-sm font-medium ${
                 subscription?.cancelled_at && subscription?.status !== 'cancelled'
                   ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300'
-                  : 'bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300'
+                  : 'bg-brand-100 text-brand-800 dark:bg-brand-900/50 dark:text-brand-300'
               }`}>
                 {tierInfo.name}
               </span>
@@ -171,7 +171,7 @@ export default function BillingPage() {
             {!hasPlan && (
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
                 Choose a plan to run a hosted MindRoom instance{trialDayCount > 0 ? `; your first plan starts with a ${trialDayCount}-day free trial` : ''}.{' '}
-                <Link href="/dashboard/billing/upgrade" className="font-semibold text-orange-600 hover:underline dark:text-orange-400">
+                <Link href="/dashboard/billing/upgrade" className="font-semibold text-brand-700 hover:underline dark:text-brand-400">
                   Choose a plan
                 </Link>
               </p>
@@ -301,7 +301,7 @@ export default function BillingPage() {
             </p>
             <button
               onClick={() => window.location.href = '/dashboard/billing/upgrade'}
-              className="text-orange-600 hover:text-orange-700 font-medium"
+              className="text-brand-700 hover:text-brand-800 font-medium"
             >
               {activePlanTier ? 'Upgrade Plan →' : 'Choose a plan →'}
             </button>
@@ -324,16 +324,16 @@ export default function BillingPage() {
                   key={key}
                   className={`border rounded-lg p-4 ${
                     isCurrentPlan
-                      ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/20'
+                      ? 'border-brand-600 bg-brand-50 dark:bg-brand-900/20'
                       : downgrade
                       ? 'border-gray-200 dark:border-gray-700 opacity-50'
-                      : 'border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-600'
+                      : 'border-gray-200 dark:border-gray-700 hover:border-brand-300 dark:hover:border-brand-700'
                   }`}
                 >
                   <div className="flex justify-between items-start mb-2">
                     <h3 className="font-semibold text-lg">{plan.name}</h3>
                     {isCurrentPlan && (
-                      <span className="text-xs px-2 py-1 bg-orange-500 text-white rounded-full">Current</span>
+                      <span className="text-xs px-2 py-1 bg-brand-600 text-white rounded-full">Current</span>
                     )}
                   </div>
                   <p className="text-2xl font-bold mb-2">
@@ -346,7 +346,7 @@ export default function BillingPage() {
                   {!isCurrentPlan && !downgrade && (
                     <button
                       onClick={() => window.location.href = `/dashboard/billing/upgrade?plan=${key}`}
-                      className="w-full px-3 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 transition-colors"
+                      className="w-full px-3 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700 transition-colors"
                     >
                       {activePlanTier ? 'Upgrade to' : 'Choose'} {plan.name}
                     </button>
@@ -363,7 +363,7 @@ export default function BillingPage() {
         <div className="mt-4 text-center">
           <button
             onClick={() => window.location.href = '/dashboard/billing/upgrade'}
-            className="text-sm text-orange-600 hover:text-orange-700 font-medium"
+            className="text-sm text-brand-700 hover:text-brand-800 font-medium"
           >
             View all plans and billing options →
           </button>

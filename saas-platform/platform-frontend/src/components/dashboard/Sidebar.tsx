@@ -48,13 +48,13 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
               className={`
                 group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold transition-all duration-150
                 ${isActive
-                  ? 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400'
-                  : 'text-gray-700 dark:text-gray-300 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-50 dark:hover:bg-gray-800'
+                  ? 'bg-brand-50 dark:bg-brand-900/20 text-brand-700 dark:text-brand-400'
+                  : 'text-gray-700 dark:text-gray-300 hover:text-brand-700 dark:hover:text-brand-400 hover:bg-gray-50 dark:hover:bg-gray-800'
                 }
-                active:scale-95 active:bg-orange-100 dark:active:bg-orange-900/30
+                active:scale-95 active:bg-brand-100 dark:active:bg-brand-900/30
               `}
             >
-              <Icon className={`h-6 w-6 shrink-0 ${isActive ? 'text-orange-600 dark:text-orange-400' : 'text-gray-400 dark:text-gray-500 group-hover:text-orange-600 dark:group-hover:text-orange-400'}`} />
+              <Icon className={`h-6 w-6 shrink-0 ${isActive ? 'text-brand-700 dark:text-brand-400' : 'text-gray-400 dark:text-gray-500 group-hover:text-brand-700 dark:group-hover:text-brand-400'}`} />
               {item.name}
             </Link>
           </li>
@@ -66,7 +66,7 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
   // Extract common logo with dark mode support
   const logo = (
     <Link href="/dashboard" className="flex items-center gap-2">
-      <MindRoomLogo className="text-orange-500" size={32} />
+      <MindRoomLogo className="text-brand-600" size={32} />
       <span className="text-xl font-bold dark:text-white">MindRoom</span>
     </Link>
   )
@@ -85,12 +85,12 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
     <button
       onClick={handleSignOut}
       disabled={isSigningOut}
-      className="group -mx-2 flex gap-x-3 rounded-md p-2 text-sm font-semibold leading-6 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-orange-600 dark:hover:text-orange-400 w-full transition-all duration-150 active:scale-95 active:bg-orange-100 dark:active:bg-orange-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+      className="group -mx-2 flex gap-x-3 rounded-md p-2 text-sm font-semibold leading-6 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-brand-700 dark:hover:text-brand-400 w-full transition-all duration-150 active:scale-95 active:bg-brand-100 dark:active:bg-brand-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
     >
       {isSigningOut ? (
         <Loader2 className="h-6 w-6 shrink-0 text-gray-400 dark:text-gray-500 animate-spin" />
       ) : (
-        <LogOut className="h-6 w-6 shrink-0 text-gray-400 dark:text-gray-500 group-hover:text-orange-600 dark:group-hover:text-orange-400" />
+        <LogOut className="h-6 w-6 shrink-0 text-gray-400 dark:text-gray-500 group-hover:text-brand-700 dark:group-hover:text-brand-400" />
       )}
       <span className="select-none">{isSigningOut ? 'Signing out...' : 'Sign out'}</span>
     </button>
@@ -116,7 +116,7 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
             {logo}
             <button
               type="button"
-              className="-m-2.5 p-2.5 text-gray-700 dark:text-gray-300 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+              className="-m-2.5 p-2.5 text-gray-700 dark:text-gray-300 hover:text-brand-700 dark:hover:text-brand-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
               onClick={() => setSidebarOpen(false)}
             >
               <span className="sr-only">Close sidebar</span>

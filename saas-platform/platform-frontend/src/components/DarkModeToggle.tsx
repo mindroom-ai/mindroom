@@ -44,7 +44,7 @@ export function DarkModeToggle() {
                 setShowDropdown(false)
               }}
               className={`flex items-center px-4 py-2 text-sm w-full hover:bg-gray-100 dark:hover:bg-gray-700 ${
-                mode === 'light' ? 'text-orange-600 dark:text-orange-400' : 'text-gray-700 dark:text-gray-300'
+                mode === 'light' ? 'text-brand-700 dark:text-brand-400' : 'text-gray-700 dark:text-gray-300'
               }`}
             >
               <Sun className="h-4 w-4 mr-2" />
@@ -56,7 +56,7 @@ export function DarkModeToggle() {
                 setShowDropdown(false)
               }}
               className={`flex items-center px-4 py-2 text-sm w-full hover:bg-gray-100 dark:hover:bg-gray-700 ${
-                mode === 'dark' ? 'text-orange-600 dark:text-orange-400' : 'text-gray-700 dark:text-gray-300'
+                mode === 'dark' ? 'text-brand-700 dark:text-brand-400' : 'text-gray-700 dark:text-gray-300'
               }`}
             >
               <Moon className="h-4 w-4 mr-2" />
@@ -68,7 +68,7 @@ export function DarkModeToggle() {
                 setShowDropdown(false)
               }}
               className={`flex items-center px-4 py-2 text-sm w-full hover:bg-gray-100 dark:hover:bg-gray-700 ${
-                mode === 'system' ? 'text-orange-600 dark:text-orange-400' : 'text-gray-700 dark:text-gray-300'
+                mode === 'system' ? 'text-brand-700 dark:text-brand-400' : 'text-gray-700 dark:text-gray-300'
               }`}
             >
               <Monitor className="h-4 w-4 mr-2" />

@@ -42,7 +42,7 @@ export function Header({ sidebarOpen, setSidebarOpen }: HeaderProps) {
             <p className="hidden sm:block text-sm font-semibold leading-6 text-gray-900 dark:text-gray-100">
               {user?.email ?? 'Account'}
             </p>
-            <div className="h-8 w-8 rounded-full bg-orange-500 flex items-center justify-center text-white font-semibold">
+            <div className="h-8 w-8 rounded-full bg-brand-600 flex items-center justify-center text-white font-semibold">
               {(user?.email?.[0]?.toUpperCase() ?? '?')}
             </div>
           </div>
