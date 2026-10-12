@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated: 2026-08-14
+Last updated: 2026-10-11
 
 This Privacy Policy explains how MindRoom and related MindRoom clients/services handle information.
 
@@ -45,6 +45,8 @@ To provide messaging features, MindRoom and your selected homeserver process dat
 If you use MindRoom's hosted control plane, it also processes account profile and status data, subscription and payment records, hosted instance records, audit events, and marketing or analytics consent choices.
 These records support service operation, billing, security, fraud prevention, compliance, and the preferences you select.
 Hosted account and instance data is stored with Supabase, and payment processing is handled by Stripe.
+
+This documentation site and the public pages of app.mindroom.chat (not the signed-in dashboard) count page views with a self-hosted instance of Plausible Analytics, which sets no cookies and reports only aggregate statistics.
 
 ## Matrix and Homeservers
 

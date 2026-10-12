@@ -1,7 +1,7 @@
 import { render } from '@testing-library/react'
 import { PlausibleAnalytics } from '../PlausibleAnalytics'
 
-// next/script injects scripts after hydration; render plain elements so the configuration is visible.
+// next/script injects scripts after hydration; render plain elements so their content can be run here.
 jest.mock('next/script', () => ({
   __esModule: true,
   default: ({ children, ...props }: { children?: string; [key: string]: unknown }) => (
@@ -10,6 +10,15 @@ jest.mock('next/script', () => ({
     </script>
   ),
 }))
+
+type PlausibleStub = { o?: { transformRequest?: (request: { u: string }) => { u: string } | null } }
+
+function initOptions() {
+  const { getByTestId } = render(<PlausibleAnalytics />)
+  delete (window as unknown as { plausible?: unknown }).plausible
+  new Function(getByTestId('plausible-init').textContent ?? '')()
+  return (window as unknown as { plausible: PlausibleStub }).plausible.o
+}
 
 describe('PlausibleAnalytics', () => {
   it('loads the site Plausible script after the page is interactive', () => {
@@ -20,11 +29,20 @@ describe('PlausibleAnalytics', () => {
     expect(script).toHaveAttribute('data-strategy', 'afterInteractive')
   })
 
-  it('queues calls until the script loads and then initializes it', () => {
-    const { getByTestId } = render(<PlausibleAnalytics />)
+  it('counts page views on the public pages', () => {
+    const transform = initOptions()?.transformRequest
 
-    const init = getByTestId('plausible-init')
-    expect(init.textContent).toContain('window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)}')
-    expect(init.textContent).toContain('plausible.init()')
+    for (const path of ['/', '/privacy', '/terms', '/auth/login', '/auth/signup?plan=hobby']) {
+      const request = { u: `https://app.mindroom.chat${path}` }
+      expect(transform?.(request)).toBe(request)
+    }
+  })
+
+  it('never sends dashboard, admin, or other signed-in pages, even after client-side navigation', () => {
+    const transform = initOptions()?.transformRequest
+
+    for (const path of ['/dashboard', '/dashboard/billing', '/admin/accounts/3f2c9a1e-account-id', '/auth/complete', '/privacy-old']) {
+      expect(transform?.({ u: `https://app.mindroom.chat${path}` })).toBeNull()
+    }
   })
 })

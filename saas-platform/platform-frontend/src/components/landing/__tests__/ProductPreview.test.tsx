@@ -14,6 +14,7 @@ describe('ProductPreview', () => {
     const preview = within(screen.getByRole('img', { name: /MindRoom Chat/ }))
     expect(preview.getByText('Approve')).toBeInTheDocument()
     expect(preview.getByText('Deny')).toBeInTheDocument()
+    expect(preview.getByText('Pending approval')).toBeInTheDocument()
   })
 
   it('pictures only panels MindRoom Chat has: rooms, the thread, and the member list', () => {

@@ -61,7 +61,7 @@ export function ProductFilm() {
               <Play className="h-4 w-4 translate-x-px fill-current" />
             </span>
             Play the MindRoom film
-            <span aria-hidden="true" className="font-normal opacity-80">{FILM_LENGTH}</span>
+            <span aria-hidden="true" className="font-normal tabular-nums">{FILM_LENGTH}</span>
           </span>
         </button>
       )}

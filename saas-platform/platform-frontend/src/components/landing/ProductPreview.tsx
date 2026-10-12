@@ -111,7 +111,7 @@ export function ProductPreview() {
                     <span className="font-mono text-xs font-medium text-brand-800 dark:text-brand-200">create_event</span>
                     <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 dark:text-amber-300">
                       <Pause className="h-3 w-3" />
-                      Needs approval
+                      Pending approval
                     </span>
                   </div>
                   <p className="mt-1.5 text-[13px] font-medium text-gray-900 dark:text-white">Launch copy review</p>

@@ -12,7 +12,8 @@ function sourceFiles(dir: string): string[] {
 }
 
 // brand-600 and darker read as dark ink: fine on light surfaces, unreadable on the dark theme's grays.
-const DARK_INK = /(?<![\w:-])(text|border|ring)-brand-(600|700|800|900)(?![\w/-])/g
+// Variant prefixes such as focus: or hover: count too; dark: ones are the overrides themselves.
+const DARK_INK = /(?<![\w-]|dark:)(text|border|ring)-brand-(600|700|800|900)(?![\w/-])/g
 
 describe('brand colors in dark mode', () => {
   it('gives every dark brand text, border, or ring color a dark-mode override in the same class string', () => {
@@ -22,7 +23,7 @@ describe('brand colors in dark mode', () => {
       for (const literal of literals) {
         for (const [, kind, shade] of literal.matchAll(DARK_INK)) {
           const lightInBothThemes = /(?<![\w:-])bg-white(?![\w/-])/.test(literal) && !literal.includes('dark:bg-')
-          if (!new RegExp(`dark:(?:hover:)?${kind}-`).test(literal) && !literal.includes('onDark') && !lightInBothThemes) {
+          if (!new RegExp(`dark:(?:[a-z-]+:)?${kind}-`).test(literal) && !literal.includes('onDark') && !lightInBothThemes) {
             offenders.push(`${relative(SRC, file)}: ${kind}-brand-${shade} in ${literal.slice(0, 80)}`)
           }
         }

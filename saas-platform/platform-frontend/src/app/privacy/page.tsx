@@ -2,7 +2,7 @@ export default function PrivacyPage() {
   return (
     <main className="max-w-3xl px-6 py-12 mx-auto space-y-6">
       <header className="space-y-2">
-        <p className="text-sm text-muted-foreground">Last reviewed: August 14, 2026</p>
+        <p className="text-sm text-muted-foreground">Last reviewed: October 11, 2026</p>
         <h1 className="text-3xl font-semibold">MindRoom Privacy Notice</h1>
         <p className="text-base text-muted-foreground">
           This hosted control-plane notice supplements the canonical MindRoom privacy policy.
@@ -35,6 +35,8 @@ export default function PrivacyPage() {
         <p>
           The hosted control plane uses Supabase for database and authentication services and Stripe for
           payment processing. Matrix homeserver and installation operators have their own data boundaries.
+          Public pages of this site, not the signed-in dashboard, count page views with a self-hosted instance
+          of Plausible Analytics, which sets no cookies and reports only aggregate statistics.
         </p>
       </section>
       <section className="space-y-3">
