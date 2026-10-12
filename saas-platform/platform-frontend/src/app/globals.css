@@ -16,8 +16,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-serif: var(--font-instrument-serif), ui-serif, Georgia, serif;
+  --font-sans: var(--font-hanken-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-bricolage-grotesque), var(--font-hanken-grotesk), ui-sans-serif, sans-serif;
   --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, monospace;
 }
 
@@ -34,7 +34,6 @@
   --color-brand-800: #462c93;
   --color-brand-900: #2f2161;
   --color-brand-950: #1e1b35;
-  --color-paper: #f7f6f3;
   --animate-rise: rise 1.1s cubic-bezier(0.16, 1, 0.3, 1) both;
 
   /* Starts visible, so the picture never depends on the animation running. */

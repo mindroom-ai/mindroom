@@ -247,22 +247,22 @@ const footerLinks = [
 
 const primaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-lg bg-brand-600 px-5 py-3 text-sm font-semibold text-white shadow-sm shadow-brand-900/20 transition-colors hover:bg-brand-700 dark:bg-brand-400 dark:text-brand-950 dark:hover:bg-brand-300'
 const secondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white/70 px-5 py-3 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10'
-const darkPrimaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white bg-white px-5 py-3 text-sm font-semibold text-gray-950 transition-colors hover:bg-gray-200'
-const darkSecondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/14 bg-transparent px-5 py-3 text-sm font-semibold text-white/82 transition-colors hover:bg-white/8 hover:text-white'
+const darkPrimaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-lg bg-white px-5 py-3 text-sm font-semibold text-brand-800 shadow-[0_8px_20px_-10px_rgba(17,24,39,0.5)] transition-colors hover:bg-brand-50'
+const darkSecondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-lg border border-white/35 bg-transparent px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/10'
 const textLinkClass = 'inline-flex items-center gap-1 text-sm font-semibold text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200'
 
-// The film's typographic accent: a phrase set in italic serif, in MindRoom Chat's violet.
-function Em({ children }: { children: ReactNode }) {
-  return <em className="font-serif text-[1.08em] font-normal italic tracking-normal text-brand-600 dark:text-brand-300">{children}</em>
+// Emphasis is carried by MindRoom Chat's violet alone, in the heading's own face and weight.
+function Em({ children, onDark = false }: { children: ReactNode; onDark?: boolean }) {
+  return <em className={`not-italic ${onDark ? 'text-brand-300' : 'text-brand-600 dark:text-brand-300'}`}>{children}</em>
 }
 
-function SectionHeading({ title, body }: { title: ReactNode; body: string }) {
+function SectionHeading({ title, body, onDark = false }: { title: ReactNode; body: string; onDark?: boolean }) {
   return (
     <div className="max-w-2xl">
-      <h2 className="text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.03em] text-gray-950 dark:text-white sm:text-[2.75rem]">
+      <h2 className={`text-balance font-display text-3xl font-semibold leading-[1.08] tracking-[-0.025em] sm:text-[2.75rem] ${onDark ? 'text-white' : 'text-gray-950 dark:text-white'}`}>
         {title}
       </h2>
-      <p className="mt-5 text-pretty text-base leading-7 text-gray-600 dark:text-gray-300 sm:text-lg sm:leading-8">
+      <p className={`mt-5 text-pretty text-base leading-7 sm:text-lg sm:leading-8 ${onDark ? 'text-brand-100/80' : 'text-gray-600 dark:text-gray-300'}`}>
         {body}
       </p>
     </div>
@@ -292,7 +292,7 @@ function CopyCommand({ command, large = false }: { command: string; large?: bool
   return (
     <div
       className={`flex items-center justify-between gap-3 bg-gray-950 pr-2 dark:bg-black ${
-        large ? 'rounded-xl py-3 pl-5 shadow-lg shadow-brand-950/20 dark:ring-1 dark:ring-white/12' : 'rounded-md py-2 pl-4'
+        large ? 'rounded-xl py-3 pl-5 shadow-[0_12px_28px_-14px_rgba(17,24,39,0.55)] dark:shadow-none dark:ring-1 dark:ring-white/12' : 'rounded-md py-2 pl-4'
       }`}
     >
       <pre className={`min-w-0 overflow-x-auto whitespace-pre-wrap font-mono text-gray-100 ${large ? 'text-base' : 'text-sm'}`}>
@@ -423,7 +423,7 @@ function RunItYourself({ setup }: { setup: IconItem }) {
 function UseCaseList({ title, items }: { title: string; items: UseCase[] }) {
   return (
     <div>
-      <h3 className="text-xl font-semibold tracking-tight text-gray-950 dark:text-white">{title}</h3>
+      <h3 className="font-display text-xl font-semibold tracking-[-0.01em] text-gray-950 dark:text-white">{title}</h3>
       <ul className="mt-4 divide-y divide-gray-950/8 border-t border-gray-950/8 dark:divide-white/8 dark:border-white/8">
         {items.map((item) => (
           <li key={item.text} className="flex items-center gap-4 py-3.5">
@@ -438,18 +438,18 @@ function UseCaseList({ title, items }: { title: string; items: UseCase[] }) {
 
 function ReasonList({ items }: { items: Reason[] }) {
   return (
-    <div className="divide-y divide-gray-950/8 border-y border-gray-950/8 dark:divide-white/8 dark:border-white/8">
+    <div className="divide-y divide-white/10 border-y border-white/10">
       {items.map((item) => (
         <article key={item.title} className="flex gap-5 py-7">
           <AgentAvatar name={item.avatar} size={52} />
           <div className="min-w-0">
-            <h3 className="text-lg font-semibold tracking-tight text-gray-950 dark:text-white">
-              <a href={item.href} className="group hover:text-brand-700 dark:hover:text-brand-300">
+            <h3 className="font-display text-lg font-semibold tracking-[-0.01em] text-white">
+              <a href={item.href} className="group hover:text-brand-200">
                 {item.title}
-                <ArrowRight className="ml-1.5 inline h-4 w-4 align-[-2px] text-gray-400 transition-transform group-hover:translate-x-0.5 group-hover:text-current" />
+                <ArrowRight className="ml-1.5 inline h-4 w-4 align-[-2px] text-brand-300 transition-transform group-hover:translate-x-0.5 group-hover:text-current" />
               </a>
             </h3>
-            <p className="mt-2 text-[15px] leading-7 text-gray-600 dark:text-gray-300">{item.body}</p>
+            <p className="mt-2 max-w-[65ch] text-[15px] leading-7 text-brand-100/75">{item.body}</p>
           </div>
         </article>
       ))}
@@ -574,21 +574,21 @@ export default function LandingPage() {
         </div>
       </nav>
 
-      <section className="relative overflow-hidden border-b border-gray-950/8 bg-paper dark:border-white/8 dark:bg-gray-950">
+      <section className="relative overflow-hidden border-b border-gray-950/8 bg-white dark:border-white/8 dark:bg-gray-950">
         <HeroParticleBackground />
         <div className="relative z-10 mx-auto max-w-7xl px-4 pt-14 sm:px-6 sm:pt-20 lg:px-8 lg:pt-24">
           <div className="mx-auto max-w-6xl text-center">
-            <h1 className="text-balance text-[2.6rem] font-semibold leading-[1.05] tracking-[-0.03em] text-gray-950 dark:text-white sm:text-6xl lg:text-[4.1rem]">
+            <h1 className="text-balance font-display text-[2.6rem] font-semibold leading-[1.04] tracking-[-0.03em] text-gray-950 dark:text-white sm:text-6xl lg:text-[4.1rem]">
               <span className="lg:block">AI agents that know you and your work,</span>{' '}
               <span className="lg:block">in a <Em>chat app anyone can use.</Em></span>
             </h1>
-            <p className="mx-auto mt-6 max-w-2xl text-pretty text-base leading-7 text-gray-600 dark:text-gray-300 sm:text-lg sm:leading-8">
+            <p className="mx-auto mt-6 max-w-xl text-pretty text-base leading-7 text-gray-600 dark:text-gray-300 sm:text-lg sm:leading-8">
               A personal agent for your calendar, notes, trips, and homelab, and shared agents for your team&apos;s email, documents, and code.
               Pick a local model for your private life or a frontier model for hard problems.
             </p>
             <div className="mx-auto mt-9 max-w-md text-left">
               <CopyCommand command={installOptions[0].command} large />
-              <p className="mt-2.5 text-center text-xs leading-5 text-gray-500 dark:text-gray-400">{installOptions[0].note}</p>
+              <p className="mt-2.5 text-center text-xs leading-5 text-gray-600 dark:text-gray-400">{installOptions[0].note}</p>
             </div>
             <div className="mt-7 flex flex-col justify-center gap-3 sm:flex-row">
               <a href={installGuideUrl} className={primaryCtaClass}>
@@ -646,11 +646,12 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="why" className="border-b border-gray-950/8 bg-paper py-20 dark:border-white/8 dark:bg-gray-900/40 sm:py-24">
+      <section id="why" className="bg-brand-950 py-20 text-white sm:py-24">
         <div className="mx-auto grid max-w-7xl gap-12 px-4 sm:px-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16 lg:px-8">
           <div className="lg:sticky lg:top-28 lg:self-start">
             <SectionHeading
-              title={<>Agents that remember and stay <Em>yours.</Em></>}
+              onDark
+              title={<>Agents that remember and stay <Em onDark>yours.</Em></>}
               body="MindRoom builds the whole stack, from the chat app to the server to the AI backend, so it can be private, extensible, and built for agents from end to end."
             />
           </div>
@@ -688,7 +689,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="hosted" className="bg-paper py-20 dark:bg-gray-900/40 sm:py-24">
+      <section id="hosted" className="bg-brand-50 py-20 dark:bg-gray-900/40 sm:py-24">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
             title={<>Prefer us to <Em>host it?</Em></>}
@@ -700,7 +701,7 @@ export default function LandingPage() {
                 <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{plan.name}</h3>
                 <p className="mt-1.5 text-sm leading-6 text-gray-600 dark:text-gray-300 lg:min-h-12">{plan.description}</p>
                 <div className="mt-6 flex items-baseline gap-2">
-                  <span className="text-5xl font-semibold tracking-[-0.03em] text-gray-950 dark:text-white">{plan.price}</span>
+                  <span className="font-display text-5xl font-semibold tracking-[-0.03em] text-gray-950 dark:text-white">{plan.price}</span>
                   <span className="text-sm text-gray-500 dark:text-gray-400">monthly</span>
                 </div>
                 <ul className="mt-6 flex-1 space-y-2.5">
@@ -729,13 +730,13 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="bg-brand-950 py-20 text-white">
+      <section className="bg-brand-600 py-20 text-white dark:bg-brand-800">
         <div className="mx-auto flex max-w-7xl flex-col gap-8 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
-            <h2 className="text-4xl font-semibold tracking-[-0.03em] text-white sm:text-5xl">
-              Run MindRoom <em className="font-serif text-[1.08em] font-normal italic tracking-normal text-brand-300">today.</em>
+            <h2 className="font-display text-4xl font-semibold tracking-[-0.025em] text-white sm:text-5xl">
+              Run MindRoom <em className="not-italic text-brand-200">today.</em>
             </h2>
-            <p className="mt-4 max-w-2xl text-base leading-7 text-brand-100/80">
+            <p className="mt-4 max-w-2xl text-base leading-7 text-white/85">
               Install it with one command, read the docs, or let us host it for you.
             </p>
           </div>

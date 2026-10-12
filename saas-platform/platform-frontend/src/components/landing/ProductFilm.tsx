@@ -44,8 +44,8 @@ export function ProductFilm() {
           onClick={() => videoRef.current?.play().catch(() => setStartedFilm(film))}
           className="group absolute inset-0 flex items-center justify-center bg-gradient-to-t from-gray-950/25 via-transparent to-transparent"
         >
-          <span className="flex items-center gap-3 rounded-full bg-brand-600 py-3 pl-4 pr-6 text-sm font-semibold text-white shadow-[0_12px_30px_-8px_rgba(47,33,97,0.6)] transition-transform duration-300 ease-out group-hover:scale-105 group-active:scale-100 dark:bg-brand-400 dark:text-brand-950">
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white/20">
+          <span className="flex items-center gap-2 rounded-full bg-brand-600 py-2 pl-2.5 pr-4 text-xs font-semibold sm:gap-3 sm:py-3 sm:pl-4 sm:pr-6 sm:text-sm text-white shadow-[0_12px_30px_-10px_rgba(17,24,39,0.55)] dark:shadow-none transition-transform duration-300 ease-out group-hover:scale-105 group-active:scale-100 dark:bg-brand-400 dark:text-brand-950">
+            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/20 sm:h-9 sm:w-9">
               <Play className="h-4 w-4 translate-x-px fill-current" />
             </span>
             Play the MindRoom film

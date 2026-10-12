@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
-import { Instrument_Sans, Instrument_Serif, JetBrains_Mono } from "next/font/google";
+import { Bricolage_Grotesque, Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
 import { DarkModeProvider } from "@/hooks/useDarkMode";
 import { getServerRuntimeConfig, serializeRuntimeConfig } from "@/lib/runtime-config";
 
-const instrumentSans = Instrument_Sans({ subsets: ["latin"], variable: "--font-instrument-sans" });
-const instrumentSerif = Instrument_Serif({ weight: "400", style: "italic", subsets: ["latin"], variable: "--font-instrument-serif" });
+const hankenGrotesk = Hanken_Grotesk({ subsets: ["latin"], variable: "--font-hanken-grotesk" });
+const bricolageGrotesque = Bricolage_Grotesque({ subsets: ["latin"], variable: "--font-bricolage-grotesque" });
 const jetbrainsMono = JetBrains_Mono({ weight: "500", subsets: ["latin"], variable: "--font-jetbrains-mono" });
 
 const title = "MindRoom: open-source AI agents in a chat app you can self-host";
@@ -33,7 +33,7 @@ export default function RootLayout({
   const serializedConfig = serializeRuntimeConfig(runtimeConfig)
 
   return (
-    <html lang="en" className={`${instrumentSans.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
+    <html lang="en" className={`${hankenGrotesk.variable} ${bricolageGrotesque.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
       <body className="min-h-screen bg-background text-foreground antialiased transition-colors">
         <Script
           id="mindroom-runtime-config"
