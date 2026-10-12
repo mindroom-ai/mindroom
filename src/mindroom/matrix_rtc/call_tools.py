@@ -513,6 +513,7 @@ class _CallAgentCache:
         agent: AgnoAgent | None = None
         try:
             # Build the same tools and system prompt as text chat so call turns reuse its prompt cache.
+            # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
             agent = create_agent(
                 self.agent_name,
                 self.config,
@@ -527,7 +528,6 @@ class _CallAgentCache:
                 dynamic_tool_continuation=True,
                 supports_native_tool_approval=True,
                 eager_deferred_tools=True,
-                agent_cli_in_shell=True,
             )
             _refuse_text_chat_functions(agent, self.config)
             prewarm_agent_model_client(agent, history_storage)

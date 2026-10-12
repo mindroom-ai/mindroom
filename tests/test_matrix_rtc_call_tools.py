@@ -220,7 +220,6 @@ def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
         session_id="call-session",
         dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
-        agent_cli_in_shell=True,
     )
 
     def functions(agent: AgnoAgent) -> dict[str, Function]:
@@ -1221,7 +1220,7 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert "tool_function_filter" not in create_agent_mock.call_args.kwargs
     assert "include_interactive_questions" not in create_agent_mock.call_args.kwargs
     assert create_agent_mock.call_args.kwargs["supports_native_tool_approval"] is True
-    assert create_agent_mock.call_args.kwargs["agent_cli_in_shell"] is True
+    assert "agent_cli_in_shell" not in create_agent_mock.call_args.kwargs
     assert set(toolkit.functions) == {"safe", "confirm", "policy_approval", "run_workflow"}
     assert not safe.tool_hooks
     for refused in (confirm, policy, workflow):
