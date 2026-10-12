@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import httpx
@@ -83,9 +84,11 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
 @pytest.mark.asyncio
 async def test_script_worker_client_returns_normalized_status_and_cancel_receipts() -> None:
     """Status and cancellation should preserve normalized worker process facts."""
+    requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET":
+        requests.append(request)
+        if request.url.path.endswith("/status"):
             return httpx.Response(
                 200,
                 json={"ok": True, "state": "exited", "output": "done", "exit_code": 7},
@@ -108,6 +111,9 @@ async def test_script_worker_client_returns_normalized_status_and_cancel_receipt
 
     assert status == WorkerScriptStatus(state="exited", output="done", exit_code=7)
     assert cancelled == WorkerScriptCancel(cancel_requested=False, already_finished=True, unknown_handle=False)
+    # Access logs record request URLs, so the worker key, which names the requester, travels only in the body.
+    assert all(handle.worker_key not in str(request.url) for request in requests)
+    assert all(json.loads(request.content)["worker_key"] == handle.worker_key for request in requests)
 
 
 @pytest.mark.asyncio

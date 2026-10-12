@@ -37,8 +37,8 @@ def _raw_worker_key_arguments(call: ast.Call) -> list[ast.expr]:
     return [
         value
         for value in values
-        if (isinstance(value, ast.Name) and value.id == "worker_key")
-        or (isinstance(value, ast.Attribute) and value.attr == "worker_key")
+        if (isinstance(value, ast.Name) and value.id.endswith("worker_key"))
+        or (isinstance(value, ast.Attribute) and value.attr.endswith("worker_key"))
     ]
 
 

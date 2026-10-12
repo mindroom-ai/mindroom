@@ -225,10 +225,10 @@ def test_worker_script_controls_report_supervisor_startup_failure(
     )
 
     if operation == "status":
-        response = client.get(
-            f"/api/sandbox-runner/scripts/{run_id}",
+        response = client.post(
+            f"/api/sandbox-runner/scripts/{run_id}/status",
             headers=_HEADERS,
-            params={"worker_key": _WORKER_KEY},
+            json={"worker_key": _WORKER_KEY},
         )
     else:
         response = client.post(
@@ -287,10 +287,10 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    status = client.get(
-        f"/api/sandbox-runner/scripts/{run_id}",
+    status = client.post(
+        f"/api/sandbox-runner/scripts/{run_id}/status",
         headers=_HEADERS,
-        params={"worker_key": _WORKER_KEY},
+        json={"worker_key": _WORKER_KEY},
     )
     assert status.status_code == 200
     assert status.json()["state"] == "running"
@@ -333,17 +333,17 @@ def test_worker_script_endpoint_applies_workspace_environment_overlay(
     assert response.status_code == 200
     assert response.json()["ok"] is True
     deadline = time.monotonic() + 5
-    status = client.get(
-        f"/api/sandbox-runner/scripts/{run_id}",
+    status = client.post(
+        f"/api/sandbox-runner/scripts/{run_id}/status",
         headers=_HEADERS,
-        params={"worker_key": _WORKER_KEY},
+        json={"worker_key": _WORKER_KEY},
     )
     while status.json()["state"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
-        status = client.get(
-            f"/api/sandbox-runner/scripts/{run_id}",
+        status = client.post(
+            f"/api/sandbox-runner/scripts/{run_id}/status",
             headers=_HEADERS,
-            params={"worker_key": _WORKER_KEY},
+            json={"worker_key": _WORKER_KEY},
         )
 
     assert status.json()["state"] == "exited"
@@ -449,17 +449,17 @@ router:
         assert response.json()["ok"] is True
 
         deadline = time.monotonic() + 5
-        status = client.get(
-            f"/api/sandbox-runner/scripts/{run_id}",
+        status = client.post(
+            f"/api/sandbox-runner/scripts/{run_id}/status",
             headers=_HEADERS,
-            params={"worker_key": worker_key},
+            json={"worker_key": worker_key},
         )
         while status.json()["state"] == "running" and time.monotonic() < deadline:
             time.sleep(0.01)
-            status = client.get(
-                f"/api/sandbox-runner/scripts/{run_id}",
+            status = client.post(
+                f"/api/sandbox-runner/scripts/{run_id}/status",
                 headers=_HEADERS,
-                params={"worker_key": worker_key},
+                json={"worker_key": worker_key},
             )
 
         assert status.json()["state"] == "exited"
@@ -578,17 +578,17 @@ router:
         assert response.json()["ok"] is True
 
         deadline = time.monotonic() + 5
-        status = client.get(
-            f"/api/sandbox-runner/scripts/{run_id}",
+        status = client.post(
+            f"/api/sandbox-runner/scripts/{run_id}/status",
             headers=_HEADERS,
-            params={"worker_key": worker_key},
+            json={"worker_key": worker_key},
         )
         while status.json()["state"] == "running" and time.monotonic() < deadline:
             time.sleep(0.01)
-            status = client.get(
-                f"/api/sandbox-runner/scripts/{run_id}",
+            status = client.post(
+                f"/api/sandbox-runner/scripts/{run_id}/status",
                 headers=_HEADERS,
-                params={"worker_key": worker_key},
+                json={"worker_key": worker_key},
             )
 
         assert status.json()["state"] == "exited"
@@ -847,10 +847,10 @@ def test_worker_script_status_is_bound_to_run_namespace(
     assert response.status_code == 200
     owned_run_id = f"script-{'5' * 32}"
     try:
-        status = client.get(
-            f"/api/sandbox-runner/scripts/script-{'6' * 32}",
+        status = client.post(
+            f"/api/sandbox-runner/scripts/script-{'6' * 32}/status",
             headers=_HEADERS,
-            params={"worker_key": _WORKER_KEY},
+            json={"worker_key": _WORKER_KEY},
         )
 
         assert status.status_code == 200
@@ -1095,13 +1095,13 @@ def test_worker_script_runs_agent_known_only_to_primary_config_snapshot(
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    status_url = f"/api/sandbox-runner/scripts/{_LIVE_SCRIPT_RUN_ID}"
-    status_params = {"worker_key": payload["worker_key"]}
+    status_url = f"/api/sandbox-runner/scripts/{_LIVE_SCRIPT_RUN_ID}/status"
+    status_body = {"worker_key": payload["worker_key"]}
     deadline = time.monotonic() + 5
-    status = client.get(status_url, headers=_HEADERS, params=status_params)
+    status = client.post(status_url, headers=_HEADERS, json=status_body)
     while status.json()["state"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
-        status = client.get(status_url, headers=_HEADERS, params=status_params)
+        status = client.post(status_url, headers=_HEADERS, json=status_body)
     assert status.json()["state"] == "exited"
     assert status.json()["exit_code"] == 0
     assert (private_workspace / "result.txt").read_text(encoding="utf-8") == "live"

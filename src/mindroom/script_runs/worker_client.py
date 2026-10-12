@@ -104,11 +104,9 @@ class ScriptWorkerClient:
         """Poll one worker-owned supervisor handle."""
         data = await self._request(
             worker,
-            method="GET",
-            url=f"{worker_api_endpoint(worker, 'script-status')}/{quote(run_id, safe='')}",
-            params={
-                "worker_key": worker.worker_key,
-            },
+            method="POST",
+            url=f"{worker_api_endpoint(worker, 'script-status')}/{quote(run_id, safe='')}/status",
+            json={"worker_key": worker.worker_key},
         )
         self._raise_structured_failure(data)
         state = data.get("state")
