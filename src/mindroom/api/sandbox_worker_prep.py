@@ -159,7 +159,7 @@ def _prepare_worker(
     dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
     if dedicated_worker_key is not None:
         if worker_key != dedicated_worker_key:
-            msg = f"Dedicated sandbox worker is pinned to '{dedicated_worker_key}' but received '{worker_key}'."
+            msg = f"Dedicated sandbox worker is pinned to '{worker_log_id(dedicated_worker_key)}' but received '{worker_log_id(worker_key)}'."
             raise WorkerBackendError(msg)
         dedicated_root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
         if dedicated_root is None:
@@ -172,7 +172,7 @@ def _prepare_worker(
             else:
                 ensure_local_worker_state_locked(paths)
         except Exception as exc:
-            failure_reason = f"Failed to initialize dedicated worker '{worker_key}': {exc}"
+            failure_reason = f"Failed to initialize dedicated worker '{worker_log_id(worker_key)}': {exc}"
             raise WorkerBackendError(failure_reason) from exc
         now = time.time()
         return WorkerHandle(
@@ -239,7 +239,7 @@ def _resolve_worker_base_dir(
     elif workspace_roots:
         candidate = (storage_root.resolve() / raw_path).resolve()
     else:
-        msg = f"base_dir requires a resolved worker key with visible workspaces: {worker_key}"
+        msg = f"base_dir requires a resolved worker key with visible workspaces: {worker_log_id(worker_key)}"
         raise ValueError(msg)
 
     for root in (paths.root.resolve(), *workspace_roots):
@@ -273,7 +273,7 @@ def _explicit_private_agent_names(
     if not requires_explicit_private_agent_visibility(worker_key):
         return frozenset()
     if private_agent_names is None:
-        msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
+        msg = f"user_agent workers require explicit private-agent visibility: {worker_log_id(worker_key)}"
         raise ValueError(msg)
     return private_agent_names
 

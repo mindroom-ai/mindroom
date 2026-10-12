@@ -639,7 +639,7 @@ def _resolve_execution_identity_for_worker_scope(
 def worker_log_id(worker_key: str) -> str:
     """Return the digest that names a worker in logs, because worker keys embed requester identifiers.
 
-    It matches the digest suffix of `worker_dir_name`, so a logged worker can be found on disk.
+    `worker_dir_name` ends with it, so a logged worker can be found on disk.
     """
     return hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
 
@@ -650,8 +650,7 @@ def worker_dir_name(worker_key: str) -> str:
     prefix = prefix[:_WORKER_DIRNAME_MAX_PREFIX_LENGTH].rstrip("._-")
     if not prefix:
         prefix = "worker"
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}-{digest}"
+    return f"{prefix}-{worker_log_id(worker_key)}"
 
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:

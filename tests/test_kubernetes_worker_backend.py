@@ -41,6 +41,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
+    worker_log_id,
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -5252,7 +5253,7 @@ def test_kubernetes_script_worker_omits_agent_vault_identity_material(tmp_path: 
 
 
 def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp_path: Path) -> None:
-    """The defensive vault-name guard should include the worker key that failed."""
+    """The defensive vault-name guard should name the worker that failed by its log ID."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
@@ -5271,7 +5272,8 @@ def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp
     with pytest.raises(WorkerBackendError) as exc_info:
         backend._resources._agent_vault_main_env(worker_key=worker_key)
 
-    assert f"worker_key={worker_key!r}" in str(exc_info.value)
+    assert f"worker={worker_log_id(worker_key)!r}" in str(exc_info.value)
+    assert worker_key not in str(exc_info.value)
 
 
 def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> None:

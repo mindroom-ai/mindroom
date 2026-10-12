@@ -278,7 +278,7 @@ def _build_progress_reporter(
             "worker_key": worker_key,
             "backend_name": backend_name,
         },
-        name=f"kubernetes-worker-progress:{worker_key}",
+        name=f"kubernetes-worker-progress:{worker_log_id(worker_key)}",
         daemon=True,
     )
     thread.start()
@@ -657,10 +657,10 @@ class KubernetesWorkerBackend:
             if deployment is not None:
                 annotations = dict(deployment.metadata.annotations or {})
                 if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
-                    msg = f"Kubernetes worker Deployment does not match retirement key '{worker_key}'."
+                    msg = f"Kubernetes worker Deployment does not match retirement key '{worker_log_id(worker_key)}'."
                     raise WorkerBackendError(msg)
                 if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
-                    msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_key}'."
+                    msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_log_id(worker_key)}'."
                     raise WorkerBackendError(msg)
             try:
                 with open_worker_state_root(
@@ -686,7 +686,7 @@ class KubernetesWorkerBackend:
             except WorkerBackendError:
                 raise
             except (OSError, RecursionError, TypeError, ValueError) as exc:
-                msg = f"Failed to retire Kubernetes worker '{worker_key}': {exc}"
+                msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
                 raise WorkerBackendError(msg) from exc
 
     def _cleanup_idle_deployments(
@@ -888,7 +888,7 @@ class KubernetesWorkerBackend:
         worker_id = self._worker_id(worker_key)
         deployment = self._resources.read_deployment(worker_id)
         if deployment is None:
-            msg = f"Unknown worker '{worker_key}' for Kubernetes failure recording."
+            msg = f"Unknown worker '{worker_log_id(worker_key)}' for Kubernetes failure recording."
             raise WorkerBackendError(msg)
         current = self._handle_from_deployment(deployment, now=now)
         if startup_count is not None and current.startup_count != startup_count:

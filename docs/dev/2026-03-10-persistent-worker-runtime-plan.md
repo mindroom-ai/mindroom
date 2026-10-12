@@ -58,6 +58,7 @@ Users talk to one visible agent with one prompt, model, tool config, and Matrix 
 - Fleet-level metrics are missing: worker creation and reuse counts, startup latency, idle evictions, execute requests by tool and scope, and credential lease issuance and expiry.
   The workers API serves debugging, not fleet observability.
   Such metrics should name workers by the same digest logs use, because worker keys embed requester identifiers.
+- Worker and private-scope directory names start with a readable form of the worker key, so a log or error that prints a path below them still names the requester; log calls and error messages name the worker by its digest, and the workspace mount logs print paths below the private scope.
 - Operator guidance for stuck or unhealthy dedicated workers is missing, and no production validation of dedicated Kubernetes workers is recorded.
 - Worker state retention should be configurable per deployment, because local developer workflows and hosted SaaS expect different things; the hosted retention policy is undecided.
 - Whether tool metadata should also declare a tool's credential scope, whether it needs persistent state, and which memory backends it allows, beyond its default execution target and need for the primary runtime.

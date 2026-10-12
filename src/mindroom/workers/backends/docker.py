@@ -47,6 +47,7 @@ from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     worker_dir_name,
     worker_key_agent_name,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
@@ -828,7 +829,7 @@ class DockerWorkerBackend:
                 ):
                     if state.exists and not control.exists:
                         msg = (
-                            f"Docker worker '{worker_key}' is missing the control identity metadata "
+                            f"Docker worker '{worker_log_id(worker_key)}' is missing the control identity metadata "
                             "required to retire its state root."
                         )
                         raise WorkerBackendError(msg)
@@ -839,17 +840,17 @@ class DockerWorkerBackend:
                         container_name=container_name,
                         worker_key=worker_key,
                     ):
-                        msg = f"Docker worker container does not match retirement key '{worker_key}'."
+                        msg = f"Docker worker container does not match retirement key '{worker_log_id(worker_key)}'."
                         raise WorkerBackendError(msg)
                     self._remove_container(container)
                     if self._read_container(container_name) is not None:
-                        msg = f"Docker worker '{worker_key}' still exists after retirement."
+                        msg = f"Docker worker '{worker_log_id(worker_key)}' still exists after retirement."
                         raise WorkerBackendError(msg)
                     self._projection_manager.retire_worker_projection(worker_name)
                     state.remove()
                     control.remove()
             except (OSError, RecursionError, TypeError, ValueError) as exc:
-                msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
+                msg = f"Failed to retire Docker worker '{worker_log_id(worker_key)}': {exc}"
                 raise WorkerBackendError(msg) from exc
 
     def record_failure(
@@ -1066,7 +1067,7 @@ class DockerWorkerBackend:
         ):
             msg = (
                 f"Docker container '{container_name}' is not owned by this MindRoom worker runtime. "
-                f"Remove it manually before running worker '{worker_key}'."
+                f"Remove it manually before running worker '{worker_log_id(worker_key)}'."
             )
             raise WorkerBackendError(msg)
         return container
