@@ -74,6 +74,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_sto
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
@@ -800,7 +801,6 @@ async def _await_background_child(
     The parent's liveness claim ends once the job owns the child: the job claims liveness itself while it runs the
     child, and a parent claim held across the wait would block cancel cleanup.
     """
-    context = get_tool_runtime_context()
     claim = None
     retained = False
     try:
@@ -814,9 +814,7 @@ async def _await_background_child(
             timeout=wait_timeout,
             claim=claim,
             # A child awaiting a human decision holds its caller's reply no longer than a gated call's own wait does.
-            approval_timeout=None
-            if context is None
-            else context.current_config.background_tool_jobs.approval_wait_timeout,
+            approval_timeout=current_approval_wait_timeout(),
         )
     except JobAccessError as error:
         await background.release_wait(child.delegation_id, claim)

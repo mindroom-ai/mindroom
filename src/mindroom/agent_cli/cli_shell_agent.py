@@ -10,7 +10,7 @@ from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.shell_access import minimal_shell_problems
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
-from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
+from mindroom.approval.tool_approval import approval_gated
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
@@ -97,12 +97,10 @@ def wrap_native_shell_window(tools: Sequence[Toolkit]) -> bool:
 def _cli_callable(function: Function) -> bool:
     """Offer only calls that finish inside the shell command, without approval, questions, or run control.
 
-    Approval-gated functions carry `requires_confirmation` or ask as their job, or were removed where approvals
-    cannot pause.
+    Approval-gated functions were removed already where approvals cannot pause.
     """
     return not (
-        function.requires_confirmation
-        or function.approval_type == JOB_APPROVAL_TYPE
+        approval_gated(function)
         or function.requires_user_input
         or function.external_execution
         or function.stop_after_tool_call

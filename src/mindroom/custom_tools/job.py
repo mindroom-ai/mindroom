@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
-from mindroom.tool_jobs.conversation import current_conversation
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
     describe_job,
@@ -32,21 +32,14 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def _job_toolkit(function: Function) -> JobTools | None:
-    """Resolve the reserved owner through SDK and MindRoom output wrappers."""
+def is_job_function(function: Function) -> bool:
+    """Recognize the reserved implementation through SDK and MindRoom output wrappers, never a same-named plugin."""
     entrypoint = tool_schema_source(inspect.unwrap(function.entrypoint)) if function.entrypoint is not None else None
-    if (
+    return (
         inspect.ismethod(entrypoint)
         and isinstance(entrypoint.__self__, JobTools)
         and entrypoint.__func__ is JobTools.job
-    ):
-        return entrypoint.__self__
-    return None
-
-
-def is_job_function(function: Function) -> bool:
-    """Recognize the reserved implementation, never an unrelated same-named plugin."""
-    return _job_toolkit(function) is not None
+    )
 
 
 async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - SDK tool value.
@@ -216,16 +209,13 @@ class JobTools(Toolkit):
             if job_id is None:
                 return "job_id is required for this action."
             if action == "wait":
-                context = get_tool_runtime_context()
                 waited = await runtime.wait(
                     job_id,
                     owner=owner,
                     depth=0,
                     timeout=wait_timeout,
                     # A job awaiting a human decision holds the reply no longer than the gated call itself does.
-                    approval_timeout=None
-                    if context is None
-                    else context.current_config.background_tool_jobs.approval_wait_timeout,
+                    approval_timeout=current_approval_wait_timeout(),
                 )
                 if waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)

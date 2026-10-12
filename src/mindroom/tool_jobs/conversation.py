@@ -29,6 +29,12 @@ class ConversationKey:
     silent: bool
 
 
+def current_approval_wait_timeout() -> float | None:
+    """Return how long the reply running now waits for a job's human decision before it goes on without it."""
+    context = get_tool_runtime_context()
+    return None if context is None else context.current_config.background_tool_jobs.approval_wait_timeout
+
+
 def current_conversation() -> tuple[ToolJobRuntime, ConversationKey] | None:
     """Return the runtime and key of the reply running now; a job's own run has no conversation here."""
     context = get_tool_runtime_context()

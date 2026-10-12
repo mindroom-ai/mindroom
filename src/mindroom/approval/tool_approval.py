@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
+    from agno.tools.function import Function
+
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.event_journal import (
@@ -49,6 +51,7 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "approval_gated",
     "arm_scheduled_call_approval",
     "claim_scheduled_call",
     "evaluate_tool_approval",
@@ -176,6 +179,11 @@ def _clear_script_cache() -> None:
 
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+
+
+def approval_gated(function: Function) -> bool:
+    """Return whether a call waits for a human decision, by pausing its run or as the first phase of its job."""
+    return bool(function.requires_confirmation or function.approval_type == JOB_APPROVAL_TYPE)
 
 
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:
