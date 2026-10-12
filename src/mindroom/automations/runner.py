@@ -75,6 +75,11 @@ class _Chain:
     room_id: str
 
     @property
+    def instance(self) -> _Instance:
+        """Return the agent or private instance whose automations this chain holds."""
+        return (self.agent_name, self.requester_id)
+
+    @property
     def hook_source(self) -> str:
         """Return the hook source the chain's messages carry, which marks the turns they start as automation turns."""
         return f"{AUTOMATION_HOOK_PREFIX}{self.settings.name}"
@@ -133,9 +138,12 @@ def _room_id(
     """Return where the instance's prompts go: the configured room, or the requester's personal room with the agent."""
     agent_name, requester_id = instance
     if requester_id is not None:
-        # Only a personal room is private to the requester and the agent, which the replies quote private files to.
+        # Replies quote the requester's private files, so they go only to a personal room nobody else may stay in;
+        # an adopted one can keep other attested participants.
         record = read_personal_room(personal_room_record_path(runtime_paths, agent_name, requester_id))
-        return record.room_id if record is not None else None
+        if record is None or (record.adoption is not None and record.adoption.additional_user_ids):
+            return None
+        return record.room_id
     rooms = config.get_agent(agent_name).rooms
     room_key = room if room is not None else (rooms[0] if rooms else None)
     if room_key is None:
@@ -228,7 +236,8 @@ class AutomationRunner:
         # ``now`` is the loop's clock; prompts measure their hour on it from the moment they are delivered.
         clock_offset = now - datetime.now(UTC)
         for instance in instances:
-            for automation in config.resolve_entity(instance[0]).automations:
+            agent_name, _requester_id = instance
+            for automation in config.resolve_entity(agent_name).automations:
                 key = _key(instance, automation.name)
                 enabled.add(key)
                 schedule = (automation.cron, config.timezone)
@@ -288,7 +297,7 @@ class AutomationRunner:
             if room_id is None and requester_id is not None:
                 # A requester who never got a personal room is a normal state, not a misconfiguration.
                 logger.info(
-                    "Automation requester has no personal room; skipped",
+                    "Automation requester has no private personal room; skipped",
                     agent=agent_name,
                     automation=automation.name,
                     requester=requester_id,
@@ -307,20 +316,32 @@ class AutomationRunner:
                 return
             bot = self.bot_provider(agent_name)
             if bot is None:
-                logger.warning("Automation agent is not running", agent=agent_name, automation=automation.name)
+                logger.warning(
+                    "Automation agent is not running",
+                    agent=agent_name,
+                    automation=automation.name,
+                    requester=requester_id,
+                )
                 return
             if (definition := self.definition_provider(automation.name)) is None:
                 logger.warning(
                     "Automation is not provided by any loaded plugin",
                     agent=agent_name,
                     automation=automation.name,
+                    requester=requester_id,
                 )
                 return
             chain = _Chain(key, agent_name, requester_id, automation, room_id)
             try:
                 step = await asyncio.to_thread(_check, config, self.runtime_paths, chain, definition)
             except (OSError, ValueError) as exc:
-                logger.warning("Automation check failed", agent=agent_name, automation=automation.name, error=str(exc))
+                logger.warning(
+                    "Automation check failed",
+                    agent=agent_name,
+                    automation=automation.name,
+                    requester=requester_id,
+                    error=str(exc),
+                )
                 await self._notify(bot, chain, None, f"⚠️ The {automation.name} automation could not run: {exc}")
                 return
             if step is not None:
@@ -357,7 +378,13 @@ class AutomationRunner:
             try:
                 step = await asyncio.to_thread(pending.ask.then, config, pending.thread_id, timed_out)
             except (OSError, ValueError) as exc:
-                logger.warning("Automation step failed", agent=chain.agent_name, automation=name, error=str(exc))
+                logger.warning(
+                    "Automation step failed",
+                    agent=chain.agent_name,
+                    automation=name,
+                    requester=chain.requester_id,
+                    error=str(exc),
+                )
                 await self._notify(bot, chain, pending.thread_id, f"⚠️ The {name} automation could not finish: {exc}")
                 return
             if isinstance(step, Done):
@@ -370,7 +397,7 @@ class AutomationRunner:
             posted = await self._post(config, bot, chain, pending.thread_id, step, timedelta(0))
         finally:
             if not posted:
-                self._release((chain.agent_name, chain.requester_id))
+                self._release(chain.instance)
 
     async def _notify(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` without mentioning the agent, so it starts no run."""
@@ -399,11 +426,17 @@ class AutomationRunner:
             try:
                 await asyncio.to_thread(record_automation_thread, self.runtime_paths, event_id)
             except (OSError, ValueError) as exc:
-                logger.warning("Automation could not record its thread", agent=chain.agent_name, error=str(exc))
+                logger.warning(
+                    "Automation could not record its thread",
+                    agent=chain.agent_name,
+                    requester=chain.requester_id,
+                    error=str(exc),
+                )
         logger.info(
             "Automation prompt posted",
             agent=chain.agent_name,
             automation=chain.settings.name,
+            requester=chain.requester_id,
             new_thread=ask.new_thread,
         )
         return True
@@ -421,7 +454,12 @@ class AutomationRunner:
                 set_by=bot.client.user_id,
             )
         except ThreadTagsError as exc:
-            logger.warning("Automation could not resolve its thread", agent=chain.agent_name, error=str(exc))
+            logger.warning(
+                "Automation could not resolve its thread",
+                agent=chain.agent_name,
+                requester=chain.requester_id,
+                error=str(exc),
+            )
 
     async def _post_mention(
         self,

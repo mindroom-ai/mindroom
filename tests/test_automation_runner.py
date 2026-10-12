@@ -31,7 +31,12 @@ from mindroom.constants import (
     primary_records_dir,
     resolve_runtime_paths,
 )
-from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
+from mindroom.matrix.personal_room_store import (
+    PersonalRoomAdoption,
+    PersonalRoomRecord,
+    personal_room_record_path,
+    write_personal_room,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
@@ -290,7 +295,12 @@ async def test_a_thread_the_bot_cannot_tag_still_gets_its_notice(tmp_path: Path)
 
     set_tag.assert_awaited_once()
     assert bot.sent[1]["body"].startswith("✅ ")
-    warning.assert_called_once_with("Automation could not resolve its thread", agent="mind", error="power too low")
+    warning.assert_called_once_with(
+        "Automation could not resolve its thread",
+        agent="mind",
+        requester=None,
+        error="power too low",
+    )
 
 
 @pytest.mark.asyncio
@@ -822,11 +832,34 @@ async def test_a_requester_without_a_personal_room_gets_no_prompt(tmp_path: Path
     assert ("mind", BOB) not in runner._active
     logger.warning.assert_not_called()
     logger.info.assert_any_call(
-        "Automation requester has no personal room; skipped",
+        "Automation requester has no private personal room; skipped",
         agent="mind",
         automation="prompt_curation",
         requester=BOB,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_requester_whose_adopted_room_keeps_other_participants_gets_no_prompt(tmp_path: Path) -> None:
+    """An adopted personal room may keep attested guests, who would read replies quoting the requester's files."""
+    _config, paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
+    record = PersonalRoomRecord(
+        user_id=BOB,
+        alias="#personal-bob:example.test",
+        source_room_id="!lobby:example.test",
+        room_id=BOB_ROOM,
+        adoption=PersonalRoomAdoption(
+            creator_user_id=BOB,
+            agent_user_id="@mindroom_mind:example.test",
+            additional_user_ids=["@carol:example.test"],
+        ),
+    )
+    write_personal_room(personal_room_record_path(paths, "mind", BOB), record)
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]
 
 
 @pytest.mark.asyncio

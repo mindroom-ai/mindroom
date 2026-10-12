@@ -321,6 +321,25 @@ def build_tool_execution_identity(
     )
 
 
+def build_requester_execution_identity(
+    *,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+) -> ToolExecutionIdentity:
+    """Build the Matrix execution identity that resolves one requester's state outside any conversation."""
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+
+
 def resolve_worker_execution_scope(
     worker_scope: WorkerScope | None,
     execution_identity: ToolExecutionIdentity | None,

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -26,15 +26,10 @@ def automation_execution_identity(
     """Return the identity a requester's turns resolve their private instance of the agent with, or None for a shared agent."""
     if requester_id is None:
         return None
-    return build_tool_execution_identity(
-        channel="matrix",
+    return build_requester_execution_identity(
         agent_name=agent_name,
         runtime_paths=runtime_paths,
         requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
     )
 
 

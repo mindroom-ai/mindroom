@@ -22,7 +22,7 @@ from mindroom.private_storage.private_instance_identity import (
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
-from mindroom.tool_system.worker_routing import build_tool_execution_identity, worker_dir_name
+from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_RELATIVE_PATH,
@@ -229,15 +229,10 @@ def discover_private_usage_sources(
         if agent_config.private is None:
             continue
         for user_id in sorted(requester_ids):
-            identity = build_tool_execution_identity(
-                channel="matrix",
+            identity = build_requester_execution_identity(
                 agent_name=agent_name,
                 runtime_paths=runtime_paths,
                 requester_id=user_id,
-                room_id=None,
-                thread_id=None,
-                resolved_thread_id=None,
-                session_id=None,
             )
             try:
                 agent_sources = discover_self_usage_sources(
