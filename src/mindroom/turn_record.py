@@ -142,6 +142,7 @@ class RevisionSnapshotChangedError(RuntimeError):
 class RevisionReplay:
     """Physical edit provenance, independent of source completion and selection."""
 
+    # Field order is also the row layout `_RevisionReplayRows` stores; change `_revision_replay_map` with it.
     source_event_id: str
     timestamp_ms: int
     redacted: bool = False
@@ -180,6 +181,9 @@ class _RevisionReplayRows(Mapping[str, RevisionReplay]):
 
     def __getitem__(self, event_id: str) -> RevisionReplay:
         return RevisionReplay(*self._rows[event_id])
+
+    def __contains__(self, event_id: object) -> bool:
+        return event_id in self._rows
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._rows)
