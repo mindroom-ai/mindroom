@@ -1,4 +1,4 @@
-"""The graph reads every finished Matrix turn of a session, live or compacted, once."""
+"""The graph reads every finished Matrix turn of a session, compacted or not, once."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
-from mindroom.history import archive
+from mindroom.history.types import HistoryScope
 from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from tests.conftest import seed_session
+from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -59,19 +60,13 @@ def _seed(storage: SqliteDb, runs: list[RunOutput], session_id: str = SESSION) -
     return seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=runs))
 
 
-def test_session_runs_merge_live_and_archived_runs_in_order(storage: SqliteDb) -> None:
-    """Compacted runs are still read, in time order with the live ones, each once."""
+def test_session_runs_read_compacted_and_later_runs_in_order(storage: SqliteDb) -> None:
+    """Runs a summary folded are still read, in time order with the later ones, each once."""
     session = _seed(storage, [_run("r1", 100), _run("r2", 200), _run("r3", 300)])
-    archive.archive_runs(
-        storage,
-        session_id=SESSION,
-        scope_key="agent:mind",
-        summary="summary",
-        summary_model="m",
-        runs=[run for run in session.runs or [] if run.run_id in {"r1", "r2"}],
-        event_ids={},
-        seen_event_ids={},
-    )
+    compact_runs(storage, session, HistoryScope(kind="agent", scope_id="mind"), ["r1", "r2"], "summary")
+    loaded = get_agent_session(storage, SESSION)
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["r3"]
 
     assert [run.run_id for run in session_runs(storage, SESSION)] == ["r1", "r2", "r3"]
 

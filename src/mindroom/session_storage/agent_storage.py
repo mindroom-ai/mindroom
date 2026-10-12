@@ -23,7 +23,7 @@ from sqlalchemy import Engine, create_engine, event, select
 from sqlalchemy.dialects.sqlite import insert
 
 from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.history.legacy_compaction_state import migrate_compaction_database, migrate_to_summary_rows
+from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage import (
@@ -221,7 +221,6 @@ def _create_sqlite_state_storage(
         db_dir.mkdir(parents=True, exist_ok=True)
         if subdir == "sessions":
             migrate_usage_database(db_dir / f"{storage_name}.db", session_table)
-            migrate_compaction_database(db_dir / f"{storage_name}.db", session_table)
         db_file = str(db_dir / f"{storage_name}.db")
         # Both: the engine is what the database is reached through, and the path
         # is what it reports itself as. Handing over an engine alone leaves

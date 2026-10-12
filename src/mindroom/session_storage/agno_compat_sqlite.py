@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.db.base import SessionType
 from agno.db.utils import build_single_run_row, deserialize_session, deserialize_session_json_fields
+from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
+from agno.session.team import TeamSession
 from sqlalchemy import and_, case, event, func, select
 from sqlalchemy.dialects.sqlite import insert
 
@@ -242,7 +246,7 @@ def read_session(
     *,
     deserialize: bool,
 ) -> AgnoSession | dict[str, Any] | None:
-    """Read one session with the runs a load returns, from one snapshot, as Agno would build it."""
+    """Read one session with the runs a load returns and its replayed summary, from one snapshot, as Agno would build it."""
     sessions = _existing_table(db, "sessions")
     if sessions is None:
         return None
@@ -272,17 +276,43 @@ def read_session(
                     session_id,
                 )
             )
+            session_raw = deserialize_session_json_fields(dict(row._mapping))
+            # The summary replays from the owner scope's latest summary row; the session row's copy is ignored.
+            latest = (
+                connection.exec_driver_sql(
+                    f"SELECT summary, created_at FROM {quote_identifier(summaries)} "  # noqa: S608
+                    "WHERE session_id = ? AND scope_key = ? ORDER BY id DESC LIMIT 1",
+                    (session_id, _owner_scope_key(session_raw)),
+                ).first()
+                if has_summaries
+                else None
+            )
         finally:
             connection.rollback()
-    session_raw = deserialize_session_json_fields(dict(row._mapping))
+    summary = (
+        SessionSummary(summary=latest[0], updated_at=datetime.fromtimestamp(latest[1], UTC))
+        if latest is not None and latest[0] is not None
+        else None
+    )
     cached_runs = deserialize and session_raw.get("session_type") == SessionType.AGENT.value
     session_raw["runs"] = None if cached_runs else [json.loads(run_data) for _run_id, run_data in run_rows]
     if not deserialize:
+        session_raw["summary"] = summary.to_dict() if summary is not None else None
         return session_raw
+    session_raw["summary"] = None
     session = deserialize_session(session_type, session_raw)
+    if isinstance(session, (AgentSession, TeamSession)):
+        session.summary = summary
     if cached_runs:
         session.runs = db._run_object_cache.runs_from_rows(session_id, run_rows)  # type: ignore[union-attr]
     return session
+
+
+def _owner_scope_key(session_raw: dict[str, Any]) -> str:
+    """Return the key of the scope that owns a session row and its replayed summary."""
+    if session_raw.get("session_type") == SessionType.TEAM.value:
+        return f"team:{session_raw.get('team_id')}"
+    return f"agent:{session_raw.get('agent_id')}"
 
 
 def _loaded_run_rows(

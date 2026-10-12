@@ -17,7 +17,6 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
 from mindroom.session_storage.agent_storage import (
@@ -326,14 +325,12 @@ def test_session_json_is_written_once_and_legacy_json_still_loads(
     session_data = {"session_state": {"topic": "café", "enabled": True}}
     metadata = {"requester": "@alice:example.test", "nested": {"count": 2}}
     entity_data = {"name": "Code", "description": "Helpful assistant"}
-    summary = SessionSummary(summary="Earlier discussion", topics=["weather"])
     session_class = AgentSession if session_type == SessionType.AGENT else TeamSession
     session = session_class(
         session_id="json-session",
         user_id="@alice:example.test",
         session_data=session_data,
         metadata=metadata,
-        summary=summary,
         created_at=1_700_000_000,
     )
     if isinstance(session, AgentSession):
@@ -345,9 +342,8 @@ def test_session_json_is_written_once_and_legacy_json_still_loads(
         metadata,
         entity_data if session_type == SessionType.AGENT else None,
         entity_data if session_type == SessionType.TEAM else None,
-        {"summary": "Earlier discussion", "topics": ["weather"]},
     )
-    select_json = "SELECT session_data, metadata, agent_data, team_data, summary FROM code_sessions"
+    select_json = "SELECT session_data, metadata, agent_data, team_data FROM code_sessions"
     try:
         if bulk:
             assert len(storage.upsert_sessions([session])) == 1
@@ -357,14 +353,13 @@ def test_session_json_is_written_once_and_legacy_json_still_loads(
             stored = connection.execute(select_json).fetchone()
             assert tuple(json.loads(value) if value is not None else None for value in stored) == expected
             connection.execute(
-                "UPDATE code_sessions SET session_data = ?, metadata = ?, agent_data = ?, team_data = ?, summary = ?",
+                "UPDATE code_sessions SET session_data = ?, metadata = ?, agent_data = ?, team_data = ?",
                 tuple(json.dumps(value) if value is not None else None for value in stored),
             )
         loaded = storage.get_session("json-session", session_type)
         assert isinstance(loaded, session_class)
         assert loaded.session_data == session_data
         assert loaded.metadata == metadata
-        assert loaded.summary == summary
         assert (loaded.agent_data if isinstance(loaded, AgentSession) else loaded.team_data) == entity_data
         assert storage.upsert_session(loaded) is not None
         with sqlite3.connect(db_path) as connection:

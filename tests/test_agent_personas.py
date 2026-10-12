@@ -24,7 +24,6 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
 from mindroom.delegation.state import SubagentPersona
-from mindroom.history.archive import archive_runs
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -32,6 +31,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import seed_session
+from tests.history_helpers import compact_runs
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_dynamic_toolkits import _base_config_data, _egress_broker_env, _validated_config
 from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
@@ -134,17 +134,8 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
     )
     storage = create_session_storage("helper", runtime.config, runtime.runtime_paths, identity)
     try:
-        seed_session(storage, AgentSession(session_id="session-1", agent_id="helper", runs=[old_run]))
-        archive_runs(
-            storage,
-            session_id="session-1",
-            scope_key=HistoryScope(kind="agent", scope_id="helper").key,
-            summary="EARLIER-WORK",
-            summary_model="summary-model",
-            runs=[old_run],
-            event_ids={},
-            seen_event_ids={},
-        )
+        session = seed_session(storage, AgentSession(session_id="session-1", agent_id="helper", runs=[old_run]))
+        compact_runs(storage, session, HistoryScope(kind="agent", scope_id="helper"), ["old-run"], "EARLIER-WORK")
     finally:
         storage.close()
 

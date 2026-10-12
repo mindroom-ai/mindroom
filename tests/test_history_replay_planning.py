@@ -55,7 +55,7 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _runtime_paths,
     _session,
-    archived_run_ids,
+    folded_run_ids,
 )
 
 
@@ -1552,7 +1552,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     assert persisted.summary.summary == "merged summary"
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
-    assert len(archived_run_ids(storage)) == 2
+    assert len(folded_run_ids(storage)) == 2
     assert state.force_compact_before_next_run is False
 
 

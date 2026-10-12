@@ -84,8 +84,11 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     tmp_path: Path,
     journal_store: EventJournalStore,
     shutdown_intent: RuntimeShutdownIntent,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The edit is left pending for the successor runtime, then replay commits the exact edit."""
+    # The store's storage is a mock here; which runs the edit removes is covered by the summary-row tests.
+    monkeypatch.setattr("mindroom.turn_store.remove_runs_answering", lambda *_args: False)
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store, agent_name=AGENT_NAME)
     await store.record_responded_turn(_turn_record(source_event_prompts={ORIGINAL_EVENT_ID: "original"}))

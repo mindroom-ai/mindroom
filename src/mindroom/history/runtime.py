@@ -37,7 +37,6 @@ from mindroom.history.storage import (
     clear_force_compaction_state,
     consume_pending_force_compaction_scope,
     read_scope_state,
-    reconcile_compaction_state,
     set_force_compaction_state,
     update_scope_state_on_latest,
 )
@@ -972,7 +971,6 @@ def _prepare_scope_state_for_run(
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
-    reconcile_compaction_state(storage, session, scope)
     state = read_scope_state(session, scope)
     if consume_pending_force_compaction_scope(session, scope):
         state = set_force_compaction_state(session, scope, state, force=True)

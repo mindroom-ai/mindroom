@@ -53,7 +53,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
-from tests.history_helpers import archived_run_ids
+from tests.history_helpers import folded_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -111,6 +111,7 @@ def _completed_run(run_id: str, *, agent_id: str) -> RunOutput:
 def _session(session_id: str, *, runs: list[RunOutput] | None = None) -> AgentSession:
     return AgentSession(
         session_id=session_id,
+        agent_id="test_agent",
         runs=runs or [],
         created_at=1,
         updated_at=1,
@@ -700,7 +701,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
-    assert len(archived_run_ids(storage)) == 1
+    assert len(folded_run_ids(storage)) == 1
     assert len(prepared.compaction_outcomes) == 1
 
 

@@ -12,9 +12,14 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from sqlalchemy import event
 
+from mindroom import constants
+from mindroom.history import summary_rows
+from mindroom.history.storage import remove_runs_answering
+from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from tests.conftest import seed_session
 
@@ -293,3 +298,296 @@ def test_load_finds_member_rows_without_scanning_the_session_per_run(storage: Sq
     step = plan[plan.index("RECURSIVE STEP") + 1 :]
     # The runs table is read once, to materialize the child set; each step only probes that set's index.
     assert "SEARCH children USING AUTOMATIC COVERING INDEX (parent_run_id=?)" in step
+
+
+# --- Summary rows written by compaction, edits, and redactions ---------------------------
+
+_SCOPE = HistoryScope(kind="agent", scope_id="code")
+
+
+def _event_run(run_id: str, *, status: RunStatus = RunStatus.completed, seen: tuple[str, ...] = ()) -> RunOutput:
+    return RunOutput(
+        run_id=run_id,
+        agent_id="code",
+        session_id="s1",
+        status=status,
+        messages=[Message(role="user", content=f"question {run_id}")],
+        metadata={
+            constants.MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}",
+            constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: [f"${run_id}", *seen],
+        },
+    )
+
+
+def _seed_events(storage: SqliteDb, runs: list[RunOutput]) -> AgentSession:
+    return seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+
+
+def _fold(storage: SqliteDb, run_ids: list[str], summary: str) -> int | None:
+    latest = summary_rows.latest_row(storage, session_id="s1", scope_key=_SCOPE.key)
+    return summary_rows.append_summary(
+        storage,
+        session_id="s1",
+        scope_key=_SCOPE.key,
+        based_on=latest.id if latest is not None else None,
+        covered=summary_rows.covered_runs(storage, session_id="s1", run_ids=run_ids),
+        summary=summary,
+        summary_model="model",
+    )
+
+
+def _loaded(storage: SqliteDb) -> AgentSession:
+    session = get_agent_session(storage, "s1")
+    assert session is not None
+    return session
+
+
+def _loaded_ids(storage: SqliteDb) -> list[str]:
+    return [run.run_id or "" for run in _loaded(storage).runs or []]
+
+
+def _row_payloads(tmp_path: Path) -> list[tuple[str, int, str]]:
+    with sqlite3.connect(_db_path(tmp_path)) as connection:
+        return connection.execute(
+            "SELECT run_id, run_index, run_data FROM code_sessions_runs ORDER BY run_id",
+        ).fetchall()
+
+
+def test_compaction_moves_no_run_row(storage: SqliteDb, tmp_path: Path) -> None:
+    """Each chunk appends a summary row; every run row keeps its index and payload, and replay starts after it."""
+    _seed_events(storage, [_event_run(f"r{index}") for index in range(5)])
+    before = _row_payloads(tmp_path)
+
+    first = _fold(storage, ["r0", "r1"], "S1")
+    second = _fold(storage, ["r2", "r3"], "S2")
+
+    assert first is not None
+    assert second is not None
+    assert _row_payloads(tmp_path) == before
+    session = _loaded(storage)
+    assert [run.run_id for run in session.runs or []] == ["r4"]
+    assert session.summary is not None
+    assert session.summary.summary == "S2"
+
+
+def test_load_derives_the_summary_from_the_latest_row(storage: SqliteDb, tmp_path: Path) -> None:
+    """A summary written into the session row never replays; only summary rows do."""
+    session = _seed_events(storage, [_event_run("r0"), _event_run("r1")])
+    session.summary = SessionSummary(summary="stale session-row summary")
+    storage.upsert_session(session)
+    assert _loaded(storage).summary is None
+
+    _fold(storage, ["r0"], "S1")
+    raw = storage.get_session("s1", SessionType.AGENT, deserialize=False)
+
+    assert _loaded(storage).summary.summary == "S1"  # type: ignore[union-attr]
+    assert isinstance(raw, dict)
+    assert raw["summary"]["summary"] == "S1"
+    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary=None)
+    assert _loaded(storage).summary is None
+
+
+def test_append_refuses_a_stale_base(storage: SqliteDb) -> None:
+    """A chunk built on a summary another append replaced writes nothing."""
+    _seed_events(storage, [_event_run("r0"), _event_run("r1")])
+    covered = summary_rows.covered_runs(storage, session_id="s1", run_ids=["r1"])
+    assert _fold(storage, ["r0"], "S1") is not None
+
+    raced = summary_rows.append_summary(
+        storage,
+        session_id="s1",
+        scope_key=_SCOPE.key,
+        based_on=None,
+        covered=covered,
+        summary="built without S1",
+        summary_model="model",
+    )
+
+    assert raced is None
+    assert _loaded(storage).summary.summary == "S1"  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("change", ["stale paused copy", "moved past a new run"])
+def test_append_refuses_a_covered_run_changed_during_the_summary_call(storage: SqliteDb, change: str) -> None:
+    """The summary covers what was read; a covered run that changed status or place since then voids it."""
+    _seed_events(storage, [_event_run("r0"), _event_run("r1")])
+    covered = summary_rows.covered_runs(storage, session_id="s1", run_ids=["r0"])
+    storage.upsert_run(_event_run("r0", status=RunStatus.paused), session_id="s1")
+    if change == "moved past a new run":
+        storage.upsert_run(_event_run("r2"), session_id="s1")
+        storage.upsert_run(_event_run("r0"), session_id="s1")
+
+    appended = summary_rows.append_summary(
+        storage,
+        session_id="s1",
+        scope_key=_SCOPE.key,
+        based_on=None,
+        covered=covered,
+        summary="S1",
+        summary_model="model",
+    )
+
+    assert appended is None
+    assert _loaded(storage).summary is None
+
+
+def test_append_reads_event_sets_from_the_stored_rows(storage: SqliteDb) -> None:
+    """A response event id linked while the summary call ran still counts as seen behind the summary."""
+    _seed_events(storage, [_event_run("r0"), _event_run("r1")])
+    covered = summary_rows.covered_runs(storage, session_id="s1", run_ids=["r0"])
+    linked = _event_run("r0")
+    assert linked.metadata is not None
+    linked.metadata[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = "$reply-r0"
+    storage.upsert_run(linked, session_id="s1")
+
+    assert (
+        summary_rows.append_summary(
+            storage,
+            session_id="s1",
+            scope_key=_SCOPE.key,
+            based_on=None,
+            covered=covered,
+            summary="S1",
+            summary_model="model",
+        )
+        is not None
+    )
+    assert summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="seen") == {
+        "$r0",
+        "$reply-r0",
+    }
+
+
+def test_redacting_a_compacted_run_restores_the_runs_before_it(storage: SqliteDb, tmp_path: Path) -> None:
+    """A cut removes the run holding the event and everything after it; earlier folded runs replay again."""
+    _seed_events(storage, [_event_run(f"r{index}") for index in range(5)])
+    _fold(storage, ["r0", "r1"], "S1")
+    _fold(storage, ["r2", "r3"], "S2")
+
+    result = summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r3", match="any")
+
+    assert result is not None
+    session = _loaded(storage)
+    assert [run.run_id for run in session.runs or []] == ["r2"]
+    assert session.summary.summary == "S1"  # type: ignore[union-attr]
+    storage.upsert_run(_event_run("r3"), session_id="s1")
+    assert _loaded_ids(storage) == ["r2"]
+    assert "r3" not in {run_id for run_id, _index, _data in _row_payloads(tmp_path)}
+
+
+def test_a_pending_approval_before_the_cut_survives(storage: SqliteDb) -> None:
+    """A run paused before the redacted turn did not see it and stays resumable."""
+    _seed_events(
+        storage,
+        [_event_run("p0", status=RunStatus.paused), _event_run("r1"), _event_run("r2"), _event_run("r3")],
+    )
+    _fold(storage, ["r1", "r2"], "S1")
+
+    assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r2", match="any")
+
+    session = _loaded(storage)
+    assert [run.run_id for run in session.runs or []] == ["p0", "r1"]
+    assert session.summary is None
+
+
+def test_an_approval_completed_after_newer_turns_replays_after_the_summary(storage: SqliteDb) -> None:
+    """A continuation that finishes after a compaction is not hidden behind the summary it never fed."""
+    _seed_events(storage, [_event_run("p0", status=RunStatus.paused), _event_run("r1"), _event_run("r2")])
+    _fold(storage, ["r1", "r2"], "S1")
+
+    storage.upsert_run(_event_run("p0"), session_id="s1")
+
+    session = _loaded(storage)
+    assert [run.run_id for run in session.runs or []] == ["p0"]
+    assert session.summary.summary == "S1"  # type: ignore[union-attr]
+
+
+def test_edit_cuts_a_summary_whose_range_answered_the_event(storage: SqliteDb) -> None:
+    """Editing a message a folded run answered removes that run, its summary, and what followed."""
+    _seed_events(storage, [_event_run("r0"), _event_run("r1"), _event_run("r2")])
+    _fold(storage, ["r0", "r1"], "S1")
+
+    assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r1", match="answered")
+
+    session = _loaded(storage)
+    assert [run.run_id for run in session.runs or []] == ["r0"]
+    assert session.summary is None
+
+
+def test_edit_of_a_message_a_range_only_read_cuts_nothing_there(storage: SqliteDb) -> None:
+    """An edit cuts what answered the message; a redaction also cuts what only read it."""
+    _seed_events(storage, [_event_run("r0", seen=("$context",)), _event_run("r1")])
+    _fold(storage, ["r0"], "S1")
+
+    assert (
+        summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$context", match="answered")
+        is None
+    )
+    assert _loaded(storage).summary.summary == "S1"  # type: ignore[union-attr]
+    assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$context", match="any")
+    assert _loaded_ids(storage) == []
+
+
+def test_edit_removes_following_runs_even_without_metadata(storage: SqliteDb) -> None:
+    """Everything after the run that answered the edited message goes, including runs with no metadata."""
+    runs = [
+        RunOutput(run_id="before", agent_id="code", session_id="s1", metadata={"matrix_event_id": "$before"}),
+        RunOutput(run_id="matched", agent_id="code", session_id="s1", metadata={"matrix_event_id": "$target"}),
+        RunOutput(run_id="bare-after", agent_id="code", session_id="s1"),
+        RunOutput(run_id="after", agent_id="code", session_id="s1", metadata={"matrix_event_id": "$after"}),
+    ]
+    _seed_events(storage, runs)
+
+    assert remove_runs_answering(storage, "s1", _SCOPE, "$target")
+
+    assert _loaded_ids(storage) == ["before"]
+
+
+def test_edit_removes_a_team_run_with_its_members(storage: SqliteDb) -> None:
+    """Team edit regeneration deletes the stale team run and its member rows from the team session."""
+    seed_session(
+        storage,
+        TeamSession(
+            session_id="s1",
+            team_id="eng",
+            runs=[
+                TeamRunOutput(
+                    run_id="original",
+                    team_id="eng",
+                    session_id="s1",
+                    metadata={"matrix_event_id": "$original"},
+                ),
+                RunOutput(run_id="member", agent_id="helper", session_id="s1", parent_run_id="original"),
+                TeamRunOutput(run_id="other", team_id="eng", session_id="s1", metadata={"matrix_event_id": "$other"}),
+            ],
+        ),
+    )
+
+    assert remove_runs_answering(storage, "s1", HistoryScope(kind="team", scope_id="eng"), "$original")
+
+    session = get_team_session(storage, "s1")
+    assert session is not None
+    assert session.runs == []
+
+
+@pytest.mark.parametrize(
+    ("metadata_key", "edited"),
+    [
+        (constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, "$first"),
+        (constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY, "$selection"),
+    ],
+    ids=["coalesced-source", "discovery-alias"],
+)
+def test_edit_matches_every_event_a_run_answered(storage: SqliteDb, metadata_key: str, edited: str) -> None:
+    """A coalesced batch member or an interactive discovery alias identifies the run that answered it."""
+    run = RunOutput(
+        run_id="answer",
+        agent_id="code",
+        session_id="s1",
+        metadata={constants.MATRIX_EVENT_ID_METADATA_KEY: "$primary", metadata_key: [edited, "$primary"]},
+    )
+    _seed_events(storage, [run])
+
+    assert remove_runs_answering(storage, "s1", _SCOPE, edited)
+
+    assert _loaded_ids(storage) == []

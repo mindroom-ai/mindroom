@@ -97,7 +97,7 @@ Graphiti needs structured output; small local models may fail extraction, which 
 ## Ingestion invariants
 
 - Only finished turns are ingested, and a turn waiting for approval holds back every later turn of its conversation, because it finishes in place with its original, earlier creation time and a marker past it would skip it.
-- Runs are read from the live session and the compaction archive, because compaction can move runs before ingestion reaches them.
+- Runs are read from the whole run log rather than the loaded session, because a loaded session holds only the runs after the latest compaction summary.
 - Episodes are rendered from full messages and tool results, not the skill-learning digest, which shortens older messages and drops older tool results.
 - Each episode kind has its own marker, so a kind that keeps failing never repeats the other kind's episodes.
 - The marker is the only record of completion: Graphiti's `add_episode(uuid=...)` loads an existing episode and extracts again rather than skipping it, so a crash between the write and the marker re-extracts one episode, which Graphiti's entity and fact resolution merges.

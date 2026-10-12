@@ -1,14 +1,12 @@
-"""One-time migration of compaction state written before compacted runs were archived."""
+"""One-time migration of a conversation database into the summary rows of the conversation log."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history.archive_schema import archive_schema_sql, archive_table_names
 from mindroom.history.summary_rows_schema import summary_rows_schema_sql, summary_rows_table_names
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage import agno_compat_sqlite
@@ -17,7 +15,6 @@ from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Collection
-    from pathlib import Path
 
     from agno.db.sqlite import SqliteDb
     from sqlalchemy import Connection
@@ -26,15 +23,14 @@ if TYPE_CHECKING:
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
 # tombstones and ``last_compacted_at``/``last_summary_model``/``last_compacted_run_count``
 # audit fields, and a replayed ``session.summary``, written when compaction deleted the runs it
-# summarized.
-# Last legacy release: v2026.9.314; replacement: the next release archives compacted runs
-# in ``<session_table>_compactions`` and ``<session_table>_compacted_runs``.
-# Handling: ``migrate_compaction_database`` runs once per conversation database when storage
-# opens, before any response uses it, and is detected by the archive tables' absence. It records
-# each such scope as a content-free legacy generation holding its tombstone rows; the scope owning
-# the summary also gets the summary and its preserved seen ids, which move out of session metadata.
-# The retired keys are stripped.
-# Runs deleted by those releases stay lost; ``history/storage.py`` owns redaction of the summary.
+# summarized, in a database that never got the compaction archive.
+# Last legacy release: v2026.9.314; replacement: v2026.9.315 archived compacted runs, now summary rows.
+# Handling: ``migrate_to_summary_rows`` runs once per conversation database when storage opens, before
+# any response uses it, and is detected by the summary-row tables' absence. The scope owning the
+# summary gets a content-free legacy summary row before every run, holding the summary and its
+# preserved seen ids, which move out of session metadata; stored copies of tombstoned runs are dropped.
+# The retired keys are stripped. Runs deleted by those releases stay lost; ``history/storage.py``
+# owns redaction of the summary.
 # Coverage: tests/test_legacy_compaction_state.py.
 _LEGACY_STATE_KEYS = frozenset(
     {"compacted_run_ids", "last_compacted_at", "last_summary_model", "last_compacted_run_count"},
@@ -44,29 +40,8 @@ _SEEN_STATE_VERSION = 1
 _SEEN_STATE_KEYS = frozenset({"seen_event_ids"})
 
 
-def migrate_compaction_database(path: Path, session_table: str) -> None:
-    """Create the archive once, adopting every scope the destructive compactor left behind."""
-    if not path.is_file():
-        return
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=30)
-    try:
-        if not _needs_migration(connection, session_table):
-            return
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("BEGIN IMMEDIATE")
-        # Another startup may have finished while this connection waited for its write lock.
-        if _needs_migration(connection, session_table):
-            for statement in archive_schema_sql(session_table):
-                connection.execute(statement)
-            _adopt_legacy_sessions(connection, session_table)
-        connection.commit()
-    finally:
-        # close rolls back both DDL and rows on interruption, leaving migration retryable.
-        connection.close()
-
-
 def migrate_to_summary_rows(db: SqliteDb) -> None:
-    """Create the summary-row tables once, first giving every stored run a position in the conversation log."""
+    """Create the summary-row tables once, first giving every stored run a position and adopting older state."""
     session_table = db.session_table_name
     with db.db_engine.connect() as connection:
         if not _needs_summary_rows(connection, session_table):
@@ -79,23 +54,24 @@ def migrate_to_summary_rows(db: SqliteDb) -> None:
             materialize_legacy_run_blobs(connection, runs, session_table)
             for statement in summary_rows_schema_sql(session_table):
                 connection.exec_driver_sql(statement)
+            if f"{session_table}_compactions" not in _tables(connection):
+                _adopt_legacy_sessions(connection, session_table, runs.name)
         connection.commit()
 
 
 def _needs_summary_rows(connection: Connection, session_table: str) -> bool:
-    tables = {name for (name,) in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    tables = _tables(connection)
     return session_table in tables and summary_rows_table_names(session_table)[0] not in tables
 
 
-def _needs_migration(connection: sqlite3.Connection, session_table: str) -> bool:
-    tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    return session_table in tables and archive_table_names(session_table)[0] not in tables
+def _tables(connection: Connection) -> set[str]:
+    return {name for (name,) in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
-def _adopt_legacy_sessions(connection: sqlite3.Connection, session_table: str) -> None:
+def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_table: str) -> None:
     sessions = quote_identifier(session_table)
-    compactions, compacted_runs = (quote_identifier(name) for name in archive_table_names(session_table))
-    rows = connection.execute(
+    summaries = quote_identifier(summary_rows_table_names(session_table)[0])
+    rows = connection.exec_driver_sql(
         f"SELECT session_id, session_type, agent_id, team_id, metadata, summary FROM {sessions}",  # noqa: S608
     ).fetchall()
     for session_id, session_type, agent_id, team_id, raw_metadata, raw_summary in rows:
@@ -109,30 +85,41 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, session_table: str) -
         summary = _summary_text(_decoded_mapping(raw_summary))
         summary_scope = _owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
-            scopes.setdefault(summary_scope, ())
-        for scope_key, tombstones in scopes.items():
-            compaction_id = connection.execute(
-                f"INSERT INTO {compactions} "  # noqa: S608
-                "(session_id, scope_key, summary, legacy, legacy_event_ids, created_at) VALUES (?, ?, ?, 1, ?, ?)",
-                (
-                    session_id,
-                    scope_key,
-                    summary if scope_key == summary_scope else None,
-                    json.dumps(_seen_event_ids(seen_states.get(scope_key)) if scope_key == summary_scope else []),
-                    int(time.time()),
-                ),
-            ).lastrowid
-            connection.executemany(
-                f"INSERT INTO {compacted_runs} (compaction_id, session_id, run_id, event_ids) "  # noqa: S608
-                "VALUES (?, ?, ?, '[]') ON CONFLICT(session_id, run_id) DO NOTHING",
-                [(compaction_id, session_id, run_id) for run_id in tombstones],
+            scope_seen = json.dumps(_seen_event_ids(seen_states.get(summary_scope)))
+            connection.exec_driver_sql(
+                f"INSERT INTO {summaries} (session_id, scope_key, after_run_index, summary, legacy, event_ids, "  # noqa: S608
+                "seen_event_ids, created_at) VALUES (?, ?, -1, ?, 1, ?, ?, ?)",
+                (session_id, summary_scope, summary, scope_seen, scope_seen, int(time.time())),
             )
+            scopes.setdefault(summary_scope, ())
+        tombstoned = {run_id for ids in scopes.values() for run_id in ids}
+        _drop_tombstoned_runs(connection, runs_table, session_id, tombstoned)
         adopted_metadata = _without_adopted_state(metadata, scopes, summary_scope)
         if adopted_metadata != metadata:
-            connection.execute(
+            connection.exec_driver_sql(
                 f"UPDATE {sessions} SET metadata = ? WHERE session_id = ?",  # noqa: S608
                 (json.dumps(adopted_metadata), session_id),
             )
+
+
+def _drop_tombstoned_runs(connection: Connection, runs_table: str, session_id: str, run_ids: set[str]) -> None:
+    """Drop stored copies of runs the destructive compactor deleted, with their member runs."""
+    runs = quote_identifier(runs_table)
+    frontier = sorted(run_ids)
+    while frontier:
+        placeholders = ", ".join("?" for _ in frontier)
+        children = [
+            run_id
+            for (run_id,) in connection.exec_driver_sql(
+                f"SELECT run_id FROM {runs} WHERE session_id = ? AND parent_run_id IN ({placeholders})",  # noqa: S608
+                (session_id, *frontier),
+            )
+        ]
+        connection.exec_driver_sql(
+            f"DELETE FROM {runs} WHERE session_id = ? AND run_id IN ({placeholders})",  # noqa: S608
+            (session_id, *frontier),
+        )
+        frontier = children
 
 
 def _legacy_tombstones(raw_state: dict[str, Any]) -> tuple[str, ...] | None:

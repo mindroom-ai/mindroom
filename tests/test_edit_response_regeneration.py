@@ -4,27 +4,22 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import nio
 import pytest
-from agno.db.base import SessionType
 from agno.media import Audio
 from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 from mindroom import interactive
 from mindroom.coalescing.batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import (
-    MATRIX_EVENT_ID_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     ROUTER_AGENT_NAME,
@@ -34,7 +29,6 @@ from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
-from mindroom.history.storage import remove_run_by_event_id
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.event_info import EventInfo
@@ -83,70 +77,6 @@ def _room_send_response(event_id: str) -> MagicMock:
     response = MagicMock(spec=nio.RoomSendResponse)
     response.event_id = event_id
     return response
-
-
-@dataclass
-class _FakeTeamStorage:
-    session: TeamSession | None
-    upserted_session: TeamSession | None = None
-    upserted_runs: list[object] = field(default_factory=list)
-    deleted_run_ids: list[str] = field(default_factory=list)
-
-    def get_session(self, session_id: str, _session_type: object) -> TeamSession | None:
-        if self.session is None or self.session.session_id != session_id:
-            return None
-        return self.session
-
-    def upsert_session(self, session: TeamSession) -> None:
-        self.upserted_session = session
-
-    def upsert_run(
-        self,
-        run: object,
-        session_id: str,
-        user_id: str | None = None,
-        run_index: int | None = None,
-    ) -> None:
-        del session_id, user_id, run_index
-        self.upserted_runs.append(run)
-
-    def delete_runs(self, run_ids: list[str]) -> None:
-        self.deleted_run_ids.extend(run_ids)
-
-    def close(self) -> None:
-        return None
-
-
-@dataclass
-class _FakeAgentStorage:
-    session: AgentSession | None
-    upserted_session: AgentSession | None = None
-    upserted_runs: list[object] = field(default_factory=list)
-    deleted_run_ids: list[str] = field(default_factory=list)
-
-    def get_session(self, session_id: str, _session_type: object) -> AgentSession | None:
-        if self.session is None or self.session.session_id != session_id:
-            return None
-        return self.session
-
-    def upsert_session(self, session: AgentSession) -> None:
-        self.upserted_session = session
-
-    def upsert_run(
-        self,
-        run: object,
-        session_id: str,
-        user_id: str | None = None,
-        run_index: int | None = None,
-    ) -> None:
-        del session_id, user_id, run_index
-        self.upserted_runs.append(run)
-
-    def delete_runs(self, run_ids: list[str]) -> None:
-        self.deleted_run_ids.extend(run_ids)
-
-    def close(self) -> None:
-        return None
 
 
 def _test_config(
@@ -862,154 +792,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     assert response_target == stored_target
 
 
-def test_remove_run_by_event_id_removes_following_runs_even_without_metadata() -> None:
-    """Everything after the matched run goes, including runs that carry no metadata at all."""
-    session = AgentSession(
-        session_id="session-1",
-        agent_id="test_agent",
-        runs=[
-            RunOutput(run_id="before", session_id="session-1", metadata={"matrix_event_id": "$before:example.com"}),
-            RunOutput(run_id="matched", session_id="session-1", metadata={"matrix_event_id": "$target:example.com"}),
-            RunOutput(run_id="bare-after", session_id="session-1"),
-            RunOutput(run_id="after", session_id="session-1", metadata={"matrix_event_id": "$after:example.com"}),
-        ],
-    )
-    storage = _FakeAgentStorage(session)
-
-    removed = remove_run_by_event_id(
-        storage,
-        "session-1",
-        "$target:example.com",
-        session_type=SessionType.AGENT,
-        remove_following_runs=True,
-    )
-
-    assert removed is True
-    assert [run.run_id for run in session.runs or []] == ["before"]
-    assert sorted(storage.deleted_run_ids) == ["after", "bare-after", "matched"]
-
-
-def test_remove_run_by_event_id_removes_team_runs() -> None:
-    """Team edit regeneration should be able to delete stale runs from TeamSession storage."""
-    session = TeamSession(
-        session_id="session-1",
-        team_id="test_team",
-        runs=[
-            TeamRunOutput(
-                run_id="original",
-                session_id="session-1",
-                metadata={"matrix_event_id": "$original:example.com"},
-            ),
-            RunOutput(run_id="member", session_id="session-1", parent_run_id="original"),
-            TeamRunOutput(
-                run_id="other",
-                session_id="session-1",
-                metadata={"matrix_event_id": "$other:example.com"},
-            ),
-        ],
-    )
-    storage = _FakeTeamStorage(session)
-    original_run_id = (session.runs or [])[0].run_id
-
-    removed = remove_run_by_event_id(
-        storage,
-        "session-1",
-        "$original:example.com",
-        session_type=SessionType.TEAM,
-    )
-
-    assert removed is True
-    assert sorted(storage.deleted_run_ids) == sorted([original_run_id, "member"])
-    assert len(session.runs or []) == 1
-    assert session.runs[0].metadata["matrix_event_id"] == "$other:example.com"
-
-
-def test_remove_run_by_event_id_matches_coalesced_source_event_ids() -> None:
-    """Coalesced runs should be removable through any batch member event ID."""
-    session = TeamSession(
-        session_id="session-1",
-        team_id="test_team",
-        runs=[
-            TeamRunOutput(
-                session_id="session-1",
-                metadata={
-                    "matrix_event_id": "$primary:example.com",
-                    "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
-                },
-            ),
-        ],
-    )
-    storage = _FakeTeamStorage(session)
-
-    removed = remove_run_by_event_id(
-        storage,
-        "session-1",
-        "$first:example.com",
-        session_type=SessionType.TEAM,
-    )
-
-    assert removed is True
-    assert session.runs == []
-
-
-def test_remove_run_by_event_id_matches_discovery_aliases() -> None:
-    """Interactive discovery aliases should remove the run they identify."""
-    session = TeamSession(
-        session_id="session-1",
-        team_id="test_team",
-        runs=[
-            TeamRunOutput(
-                session_id="session-1",
-                metadata={
-                    "matrix_event_id": "$question:example.com",
-                    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$question:example.com"],
-                    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
-                },
-            ),
-        ],
-    )
-    storage = _FakeTeamStorage(session)
-
-    removed = remove_run_by_event_id(
-        storage,
-        "session-1",
-        "$selection:example.com",
-        session_type=SessionType.TEAM,
-    )
-
-    assert removed is True
-    assert session.runs == []
-
-
-def test_remove_run_by_event_id_optionally_matches_consumed_history() -> None:
-    """Redaction cleanup may remove later runs whose replay consumed the source."""
-    session = TeamSession(
-        session_id="session-1",
-        team_id="test_team",
-        runs=[
-            TeamRunOutput(
-                session_id="session-1",
-                metadata={
-                    MATRIX_EVENT_ID_METADATA_KEY: "$later:example.com",
-                    MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source:example.com", "$later:example.com"],
-                },
-            ),
-        ],
-    )
-    storage = _FakeTeamStorage(session)
-
-    removed = remove_run_by_event_id(
-        storage,
-        "session-1",
-        "$source:example.com",
-        session_type=SessionType.TEAM,
-        include_seen_event_ids=True,
-    )
-
-    assert removed is True
-    assert session.runs == []
-
-
 @pytest.mark.asyncio
 async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path: Path) -> None:
     """Team edit regeneration should delete stale runs from the shared team session."""
@@ -1126,7 +908,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             "create_storage",
             return_value=storage,
         ),
-        patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch("mindroom.turn_store.remove_runs_answering", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -1140,13 +922,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         await finish_edit_regenerations(bot)
 
     assert mock_remove_run.call_args_list == [
-        call(
-            storage,
-            stored_target.session_id,
-            "$original:example.com",
-            session_type=SessionType.TEAM,
-            remove_following_runs=True,
-        ),
+        call(storage, stored_target.session_id, _team_history_scope("test_team"), "$original:example.com"),
     ]
     mock_team_response.assert_awaited_once()
 
@@ -1667,7 +1443,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             bot._conversation_state_writer,
             "create_storage",
         ) as mock_create_storage,
-        patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch("mindroom.turn_store.remove_runs_answering", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
@@ -1714,16 +1490,14 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                 call(
                     mock_create_storage.return_value,
                     "!test:example.com",
+                    _agent_history_scope("test_agent"),
                     "$first:example.com",
-                    session_type=SessionType.AGENT,
-                    remove_following_runs=True,
                 ),
                 call(
                     mock_create_storage.return_value,
                     "!test:example.com",
+                    _agent_history_scope("test_agent"),
                     "$primary:example.com",
-                    session_type=SessionType.AGENT,
-                    remove_following_runs=True,
                 ),
             ],
         )
@@ -1816,7 +1590,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             bot._conversation_state_writer,
             "create_storage",
         ),
-        patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
+        patch("mindroom.turn_store.remove_runs_answering", return_value=False) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -1932,7 +1706,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
             bot._conversation_state_writer,
             "create_storage",
         ),
-        patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
+        patch("mindroom.turn_store.remove_runs_answering", return_value=False) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -2104,7 +1878,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             bot._conversation_state_writer,
             "create_storage",
         ),
-        patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
+        patch("mindroom.turn_store.remove_runs_answering", return_value=False) as mock_remove_run,
         patch(
             "mindroom.delivery_gateway.send_message_outcome",
             return_value=MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Matrix send failed"),
@@ -2254,7 +2028,7 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
             "create_storage",
             return_value=storage,
         ) as mock_create_storage,
-        patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch("mindroom.turn_store.remove_runs_answering", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
