@@ -6,7 +6,9 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import UTC, datetime, timedelta
+import time
+from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import time as day_time
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 from urllib.parse import quote
@@ -35,6 +37,31 @@ PROJECTS = "\n".join(f"- Project {index} is owned by person {index}." for index 
 EXPORT = "thread_exports/room/thread.yaml"
 
 
+_CLOCK_START = time.monotonic()
+
+
+def _now() -> datetime:
+    """Return a clock that starts at noon on TODAY and advances with real time.
+
+    The note names above are fixed at collection, so a clock that reaches midnight only after twelve hours keeps them
+    right whenever the run starts, while run IDs taken from it still increase.
+    """
+    return datetime.combine(TODAY, day_time(12), UTC) + timedelta(seconds=time.monotonic() - _CLOCK_START)
+
+
+class _ClockOnToday(datetime):
+    """The dreaming automation's clock, read through ``_now``."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:
+        return _now().astimezone(tz)
+
+
+@pytest.fixture(autouse=True)
+def _dreaming_clock_on_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("mindroom.automations.dreaming.datetime", _ClockOnToday)
+
+
 class _Workspace:
     """An agent with file memory, its config, and helpers to play the dream and review runs."""
 
@@ -56,13 +83,12 @@ class _Workspace:
         assert root is not None
         return config, paths, root
 
-    def write(self, path: str, text: str, *, age: timedelta | None = None) -> None:
+    def write(self, path: str, text: str, *, age: timedelta = timedelta()) -> None:
         target = self.root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-        if age is not None:
-            moment = (datetime.now(UTC) - age).timestamp()
-            os.utime(target, (moment, moment))
+        moment = (_now() - age).timestamp()
+        os.utime(target, (moment, moment))
 
     def read(self, path: str) -> str:
         return (self.root / path).read_text(encoding="utf-8")
@@ -162,8 +188,8 @@ def test_a_new_agent_with_only_old_files_asks_for_nothing(tmp_path: Path) -> Non
 def test_a_freshly_exported_old_conversation_counts_by_its_last_message(tmp_path: Path) -> None:
     """Turning on thread exports writes every old thread today; the room index's last message time decides its age."""
     workspace = _workspace(tmp_path)
-    old = int((datetime.now(UTC) - timedelta(days=90)).timestamp() * 1000)
-    recent = int(datetime.now(UTC).timestamp() * 1000)
+    old = int((_now() - timedelta(days=90)).timestamp() * 1000)
+    recent = int(_now().timestamp() * 1000)
     workspace.write("thread_exports/room/old.yaml", "messages: [long ago]\n")
     workspace.write("thread_exports/room/new.yaml", "messages: [today]\n")
     workspace.write(
@@ -187,7 +213,7 @@ def test_thread_exports_turned_on_later_start_from_recent_history_too(tmp_path: 
     workspace.write("memory/2026-01-01.md", "- Old note.\n", age=timedelta(days=30))
     assert workspace.check() is None
     assert "memory/2026-01-01.md" in workspace.state()["reviewed"]
-    old = int((datetime.now(UTC) - timedelta(days=200)).timestamp() * 1000)
+    old = int((_now() - timedelta(days=200)).timestamp() * 1000)
     workspace.write("thread_exports/room/old.yaml", "messages: [long ago]\n")
     workspace.write(
         "thread_exports/room/index.json",
@@ -419,7 +445,10 @@ def test_a_valid_proposal_is_saved_as_a_patch_and_reviewed_in_a_thread_of_its_ow
     assert "+- Sam moved to Utrecht." in patch_text
 
 
-@pytest.mark.parametrize("path", [TODAY_NOTE, "memory/profile.md", "memory/notes.txt", "MEMORY.md"])
+@pytest.mark.parametrize(
+    "path",
+    [pytest.param(TODAY_NOTE, id="today-note"), "memory/profile.md", "memory/notes.txt", "MEMORY.md"],
+)
 def test_staged_files_outside_what_the_run_may_change_are_findings(tmp_path: Path, path: str) -> None:
     """Today's note, context files, non-Markdown files, and anything outside memory/ stop the run unapplied."""
     workspace = _workspace(tmp_path, context_files=["memory/profile.md"])

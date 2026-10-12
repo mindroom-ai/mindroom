@@ -59,8 +59,6 @@ async def test_subagent_model_selection(
         paths,
         thread_id="$thread",
         model_name="default",
-        room_id="!room:example.org",
-        set_by="@alice:example.org",
         entity_names=("leader", "worker"),
         config=config,
     )

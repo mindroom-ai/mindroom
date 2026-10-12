@@ -137,6 +137,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S27 | Isolated | [`dynamic_workflows/legacy_participants.py`][workflow-legacy-participants] reads a saved revision's `ephemeral_agent` participants as `subagent` participants, rendering name, role, and instructions into `system_prompt` and keeping absent tools as none; the next `update_workflow()` writes the current format. |
 | S28 | Tiny retained default | [`delegation/lifecycle.py`][delegation-lifecycle] reads a retained subagent without `requested_model_name` as requested on its recorded model, so follow-ups of delegations saved before budgets keep that model. |
 | S29 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained authored persona without `skills` as having none, matching the releases since v2026.10.236 that ran authored subagents without skills. |
+| S30 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained authored persona without `knowledge` as following its tool list, so a child with a tool list keeps no knowledge search and one without keeps every caller knowledge base, as before persona knowledge. |
 
 ## Configuration and credentials
 

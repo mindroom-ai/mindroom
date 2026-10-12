@@ -143,7 +143,7 @@ class ToolRuntimeContext:
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[Function], bool] | None = None
-    # Persona of the authored subagent running this turn; copies it authors stay within its tools and skills.
+    # Persona of the authored subagent running this turn; copies it authors stay within its tools, skills, and knowledge.
     persona: SubagentPersona | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None

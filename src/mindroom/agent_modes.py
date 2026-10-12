@@ -24,7 +24,7 @@ def _key(agent_name: str, session_id: str) -> str:
 
 def _valid(key: str, record: dict[object, object]) -> bool:
     return (
-        all(isinstance(record.get(field), str) for field in ("agent", "session", "mode", "set_by", "set_at"))
+        all(isinstance(record.get(field), str) for field in ("agent", "session", "mode", "set_at"))
         and record["mode"] in {"standard", "minimal"}
         and key == _key(cast("str", record["agent"]), cast("str", record["session"]))
     )
@@ -48,9 +48,8 @@ def set_agent_mode(
     agent_name: str,
     session_id: str,
     mode: AgentMode,
-    set_by: str,
 ) -> None:
-    """Audit and atomically replace a choice without losing concurrent updates."""
+    """Atomically replace a choice without losing concurrent updates."""
     path = _path(runtime_paths, state_root)
     with advisory_file_lock(path.with_suffix(".lock")):
         records = load_cached_override_records(path, _valid)
@@ -58,7 +57,6 @@ def set_agent_mode(
             "agent": agent_name,
             "session": session_id,
             "mode": mode,
-            "set_by": set_by,
             "set_at": datetime.now(UTC).isoformat(),
         }
         write_bounded_override_records(path, records, max_records=1000)

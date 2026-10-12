@@ -8,7 +8,7 @@ from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.room_thread_modes import (
     RoomThreadMode,
     clear_room_thread_mode_override,
-    get_room_thread_mode_override,
+    resolve_room_thread_mode_override,
     set_room_thread_mode_override,
 )
 
@@ -24,17 +24,14 @@ _USAGE = "Usage: `!thread_mode [room|thread|reset|show]`"
 
 
 def _show_room_thread_mode(runtime_paths: RuntimePaths, room_id: str) -> str:
-    override = get_room_thread_mode_override(runtime_paths, room_id)
-    if override.mode is None:
+    mode = resolve_room_thread_mode_override(runtime_paths, room_id)
+    if mode is None:
         return (
             "No room thread mode override is set. "
             "Agents use their configured `thread_mode` and `room_thread_modes` values.\n\n"
             f"{_USAGE}"
         )
-    return (
-        f"This room uses the `{override.mode}` thread mode override.\n\n"
-        "Use `!thread_mode reset` to restore configured modes."
-    )
+    return f"This room uses the `{mode}` thread mode override.\n\nUse `!thread_mode reset` to restore configured modes."
 
 
 async def handle_thread_mode_command(
@@ -54,8 +51,7 @@ async def handle_thread_mode_command(
     if requested not in _VALID_MODES and requested not in _RESET_ARGUMENTS:
         return f"❌ Unknown thread mode `{args_text.strip()}`.\n\n{_USAGE}"
 
-    admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
-    if admin_user_id is None:
+    if await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id)) is None:
         return "❌ Room admin only."
 
     if requested in _RESET_ARGUMENTS:
@@ -64,12 +60,7 @@ async def handle_thread_mode_command(
         return "This room has no thread mode override."
 
     mode = cast("RoomThreadMode", requested)
-    set_room_thread_mode_override(
-        runtime_paths,
-        room_id=room_id,
-        mode=mode,
-        set_by=admin_user_id,
-    )
+    set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=mode)
     return (
         f"✅ This room now uses `{mode}` thread mode for future agent replies.\n\n"
         "Use `!thread_mode reset` to restore configured modes."

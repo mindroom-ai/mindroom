@@ -754,7 +754,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     """Build one configured toolkit for an agent.
 
     ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
-    the copies it authors within the persona's tools and skills.
+    the copies it authors within the persona's tools, skills, and knowledge bases.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
@@ -2028,7 +2028,8 @@ def create_agent(  # noqa: PLR0915
             dynamic tool state.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
-        knowledge: Optional shared knowledge base instance for RAG-enabled agents.
+        knowledge: Optional shared knowledge base instance for RAG-enabled agents; for a persona, callers resolve
+            it narrowed to the persona's kept knowledge bases.
         history_storage: Optional already-open session storage to reuse for this agent.
         active_model_name: Optional runtime-selected model name overriding the configured model.
         include_interactive_questions: Whether to include the interactive
@@ -2060,7 +2061,7 @@ def create_agent(  # noqa: PLR0915
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
-        persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool and skill subsets.
+        persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -2090,9 +2091,9 @@ def create_agent(  # noqa: PLR0915
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
     # An authored persona's prompt replaces the agent's identity; it gets no learning of its own and only the caller
-    # skills its persona keeps.
+    # skills and knowledge bases its persona keeps.
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
-    # up front; it also hides functions Agno generates without an owning toolkit, such as knowledge search.
+    # up front; it also hides functions Agno generates without an owning toolkit, other than kept skills and knowledge.
     persona_prompt = persona.system_prompt if persona is not None else None
     persona_tools = persona.tools if persona is not None else None
     eager_deferred_tools = eager_deferred_tools or persona_tools is not None
@@ -2246,7 +2247,7 @@ def create_agent(  # noqa: PLR0915
     knowledge_enabled = (
         not disable_runtime_capabilities
         and knowledge is not None
-        and persona_tools is None
+        and (persona is None or persona.kept_knowledge != ())
         and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
     )
     knowledge_sources = (

@@ -143,7 +143,7 @@ _VOICE_STYLE_ADDENDUM = (
     "You are participating in a live voice call. Everything you say is spoken aloud: give the answer first "
     "in at most three short sentences, about 60 words, unless the caller asks for detail or a longer answer. "
     "Speak conversationally in plain sentences, without markdown, lists, links, file paths, code, "
-    "or other written formatting."
+    "interactive questions, or other written formatting."
 )
 
 _LIVE_VOICE_INSTRUCTIONS = (

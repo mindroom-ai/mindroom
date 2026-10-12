@@ -246,7 +246,6 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths,
             room_id="!test:localhost",
             model_name="large",
-            set_by="@admin:localhost",
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
@@ -261,7 +260,6 @@ class TestAgentBot(AgentBotTestBase):
                 runtime_paths,
                 room_id="!test:localhost",
                 model_name="default",
-                set_by="@admin:localhost",
             )
             return await original_prepare_admitted_turn(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -313,7 +311,6 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths,
             room_id="!test:localhost",
             model_name="large",
-            set_by="@admin:localhost",
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
@@ -328,7 +325,6 @@ class TestAgentBot(AgentBotTestBase):
                 runtime_paths,
                 room_id="!test:localhost",
                 model_name="default",
-                set_by="@admin:localhost",
             )
             return await original_prepare_admitted_turn(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -443,7 +439,6 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths,
             room_id="!test:localhost",
             model_name="large",
-            set_by="@admin:localhost",
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
@@ -456,7 +451,6 @@ class TestAgentBot(AgentBotTestBase):
                 runtime_paths,
                 room_id="!test:localhost",
                 model_name="default",
-                set_by="@admin:localhost",
             )
             return False
 

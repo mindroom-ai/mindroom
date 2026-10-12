@@ -338,13 +338,11 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     paths = runtime_paths_for(config)
     config.models["room"] = ModelConfig(provider="openai", id="room-model")
     config.models["thread"] = ModelConfig(provider="openai", id="thread-model")
-    set_room_model_override(paths, room_id=ROOM, model_name="room", set_by=USER)
+    set_room_model_override(paths, room_id=ROOM, model_name="room")
     set_thread_model_override(
         paths,
-        room_id=ROOM,
         thread_id="$root",
         model_name="thread",
-        set_by=USER,
         entity_names=("helper",),
         config=config,
     )
@@ -375,10 +373,8 @@ async def test_selection_reports_only_an_override_governing_every_picker_entity(
     config.models["thread"] = ModelConfig(provider="openai", id="thread-model")
     set_thread_model_override(
         paths,
-        room_id=ROOM,
         thread_id="$root",
         model_name="thread",
-        set_by="@other:localhost",
         entity_names=("router", "restricted"),
         config=config,
     )

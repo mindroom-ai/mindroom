@@ -178,7 +178,6 @@ async def test_team_dynamic_continuation_pins_member_model_for_whole_turn() -> N
         runtime_paths,
         room_id=room_id,
         model_name="large",
-        set_by="@admin:localhost",
     )
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -199,7 +198,6 @@ async def test_team_dynamic_continuation_pins_member_model_for_whole_turn() -> N
                 runtime_paths,
                 room_id=room_id,
                 model_name="default",
-                set_by="@admin:localhost",
             )
             return _dynamic_tool_team_output()
         return TeamRunOutput(content="Used the loaded tool.")

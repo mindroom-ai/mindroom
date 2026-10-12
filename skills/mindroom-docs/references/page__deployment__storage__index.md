@@ -9,14 +9,19 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
 - `agents/*/learning/` - Per-agent Agno Learning state when learning is enabled
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
+- `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `knowledge_db/` - Knowledge base vector stores
+- `knowledge_git/` - Git data of [Git-backed knowledge bases](https://docs.mindroom.chat/knowledge/#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
+- `control_state/` - Primary-only control records, such as [external triggers](https://docs.mindroom.chat/external-triggers/), [background script](https://docs.mindroom.chat/tools/background-scripts/) runs, and [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#safe-send-retries) send receipts, unless [`MINDROOM_CONTROL_STATE_PATH`](https://docs.mindroom.chat/configuration/#environment-variables) points elsewhere
 - `credentials/` - Secrets synchronized from `.env`
+- `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
-- `matrix_state.yaml` - Matrix connection state
+- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, and the space room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
+- `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 
 Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; learning and memory stay under the storage directory.
 

@@ -553,7 +553,6 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
             [tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests
         )
     finally:
-        bind_mcp_server_manager(None)
         sync_mcp_tool_registry(None)
         await manager.shutdown()
 

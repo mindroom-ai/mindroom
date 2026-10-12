@@ -191,6 +191,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 |----------|-------------|---------|
 | `MINDROOM_CONFIG_PATH` | Path to `config.yaml` | `./config.yaml`, then `~/.mindroom/config.yaml` |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
+| `MINDROOM_CONTROL_STATE_PATH` | Separate root for the primary's [control state](https://docs.mindroom.chat/deployment/storage/#data-persistence); relative paths resolve from the config directory | `control_state/` under `MINDROOM_STORAGE_PATH` |
 | `MINDROOM_SESSION_STORAGE_PATH` | Separate root for agent and team session databases; relative paths resolve from the config directory, and other state stays under `MINDROOM_STORAGE_PATH` (see [Storage](https://docs.mindroom.chat/deployment/storage/)) | `MINDROOM_STORAGE_PATH` |
 | `MINDROOM_CONFIG_TEMPLATE` | File copied to the config path when `config.yaml` does not exist, used by Docker images to seed config | _(unset)_ |
 | `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Key for encrypted-at-rest credential files (see [Credential Storage Encryption](https://docs.mindroom.chat/oauth-framework/#credential-storage-encryption)) | _(unset)_ |

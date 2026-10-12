@@ -317,10 +317,12 @@ def test_timeout_kills_child_and_keeps_template_alive(
         _stub_execute(manager, envelope=f"sleep:{pid_file}", timeout_seconds=0.5)
 
     pid_deadline = time.monotonic() + 2.0
-    while not pid_file.exists() and time.monotonic() < pid_deadline:
+    while not (pid_file.exists() and pid_file.read_text(encoding="utf-8")) and time.monotonic() < pid_deadline:
         time.sleep(0.01)
     assert pid_file.exists(), "forked child did not start before the request timeout"
-    child_pid = int(pid_file.read_text(encoding="utf-8"))
+    child_pid_text = pid_file.read_text(encoding="utf-8")
+    assert child_pid_text, "forked child did not record its pid before the request timeout"
+    child_pid = int(child_pid_text)
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         try:

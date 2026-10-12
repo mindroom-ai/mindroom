@@ -3067,13 +3067,9 @@ def test_disconnect_deletes_mcp_credentials_encrypted_with_unreadable_key(tmp_pa
         oauth_lifecycle.load_oauth_credentials_snapshot_sync(context)
     mcp_manager = MCPServerManager(runtime_paths)
     bind_mcp_server_manager(mcp_manager)
-    try:
-        with TestClient(api_app) as client:
-            _login(client)
-            response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
-    finally:
-        bind_mcp_server_manager(None)
-
+    with TestClient(api_app) as client:
+        _login(client)
+        response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
     assert response.status_code == 200
     assert _stored_oauth_credentials(provider, runtime_paths) is None
 

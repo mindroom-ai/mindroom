@@ -216,11 +216,14 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
 
     monkeypatch.setattr(read_process, "_spawn_reader", gated_spawn)
     monkeypatch.setattr(collections, "collection_lifetime_lock", observed_lock)
+    # These waits stay below the reader's 30-second read deadline, so a cancelled read that stopped killing
+    # its reader cannot pass by the reader timing itself out.
     read_task = asyncio.create_task(proxy.async_search("alpha"))
     refresh_task = None
     try:
         async with asyncio.timeout(10):
-            while not selected.exists():  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
+            # The reader creates the file before writing the collection name into it.
+            while not (selected.exists() and selected.read_text()):  # noqa: ASYNC110 - Observe the real subprocess selection boundary.
                 await asyncio.sleep(0.01)
         assert selected.read_text() == proxy.collection_name
         [reader] = processes
@@ -234,8 +237,9 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         assert collection_exists(str(space.storage_path), proxy.collection_name)
         if cancel:
             read_task.cancel()
+            assert (await asyncio.wait({read_task}, timeout=10))[0], "cancelling the read did not stop its reader"
             with pytest.raises(asyncio.CancelledError):
-                await read_task
+                read_task.result()
         else:
             reader.send_signal(signal.SIGUSR1)
             assert [document.content for document in await read_task] == ["original"]
@@ -348,7 +352,7 @@ else:
                 ',"collection":"published","query":"query","embedding":[1.0]}').encode())
             process.stdin.close()
         deadline = time.monotonic() + 15
-        while not pid_path.exists():
+        while not (pid_path.exists() and pid_path.read_text()):
             assert process.poll() is None, process.stderr.read().decode()
             assert time.monotonic() < deadline
             time.sleep(.01)

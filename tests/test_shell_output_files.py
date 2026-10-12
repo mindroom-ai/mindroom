@@ -247,10 +247,11 @@ async def test_cancelled_capture_does_not_publish(shell_toolkit: Toolkit, tmp_pa
             mindroom_output_path="cancelled.txt",
         ),
     )
+    pid_file = tmp_path / "process.pid"
     async with asyncio.timeout(10):
-        while not (tmp_path / "process.pid").exists():  # noqa: ASYNC110
+        while not (pid_file.exists() and pid_file.read_text()):  # noqa: ASYNC110
             await asyncio.sleep(0.01)
-    pid = int((tmp_path / "process.pid").read_text())
+    pid = int(pid_file.read_text())
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -589,9 +590,9 @@ async def test_inherited_pipe_cannot_publish_partial_capture(
         assert destination.read_text() == "keep existing"
     finally:
         pid_file = tmp_path / "child.pid"
-        if pid_file.exists():
+        if pid_file.exists() and (pid := pid_file.read_text()):
             with contextlib.suppress(ProcessLookupError):
-                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                os.kill(int(pid), signal.SIGKILL)
 
 
 @pytest.mark.asyncio

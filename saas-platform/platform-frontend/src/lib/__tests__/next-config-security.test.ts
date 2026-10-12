@@ -24,4 +24,12 @@ describe('Next security headers', () => {
       expect.not.arrayContaining([expect.objectContaining({ key: 'X-XSS-Protection' })])
     )
   })
+
+  it('lets the browser load the Plausible analytics script and nothing else from that host', async () => {
+    const headerRules = await nextConfig.headers?.()
+    const csp = headerRules?.find((rule) => rule.source === '/(.*)')?.headers.find((header) => header.key === 'Content-Security-Policy')?.value ?? ''
+    const scriptSrc = csp.split('; ').find((directive) => directive.startsWith('script-src '))
+
+    expect(scriptSrc).toBe("script-src 'self' 'unsafe-inline' https://plausible.nijho.lt")
+  })
 })

@@ -82,7 +82,7 @@ def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        persona=inline_persona(prompt, tools, None),
+        persona=inline_persona(prompt, tools, None, None),
         **options,
     )
 
@@ -108,7 +108,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_p
     prompt = "Plain {not_a_var} text"
     configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None, persist_runtime_state=False)
     assert "Configured personality" in str(configured.role)
-    prepared = await _prepare(runtime, inline_persona(prompt, None, None), "task")
+    prepared = await _prepare(runtime, inline_persona(prompt, None, None, None), "task")
 
     message = await prepared.agent.aget_system_message(AgentSession(session_id="session-1"), _run_context(), [])
 
@@ -158,7 +158,7 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
     ) as scope_context:
         assert scope_context is not None
         prepared = await ai._prepare_agent_and_prompt(
-            replace(_turn_context(), persona=inline_persona("P", None, None)),
+            replace(_turn_context(), persona=inline_persona("P", None, None, None)),
             prompt="task",
             runtime_paths=runtime.runtime_paths,
             config=runtime.config,
@@ -317,6 +317,23 @@ async def test_persona_with_tools_never_advertises_knowledge_search(tmp_path: Pa
     assert "search_knowledge_base" not in content
 
 
+@pytest.mark.asyncio
+async def test_persona_with_tools_searches_the_knowledge_it_names(tmp_path: Path) -> None:
+    """A persona listing tools keeps knowledge search when it names knowledge bases."""
+    runtime = _runtime(tmp_path, tools=["file"])
+    agent = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        None,
+        persist_runtime_state=False,
+        persona=inline_persona("P", ["file"], None, ["docs"]),
+        knowledge=Knowledge(name="docs"),
+    )
+
+    assert "search_knowledge_base" in await _function_names(agent)
+
+
 async def _system_prompt(agent: Agent) -> str:
     session = AgentSession(session_id="session-1")
     tools = await agent.aget_tools(RunOutput(run_id="run-1"), _run_context(), session)
@@ -368,7 +385,7 @@ async def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: li
         runtime.runtime_paths,
         identity,
         persist_runtime_state=False,
-        persona=inline_persona("P", None, skills),
+        persona=inline_persona("P", None, skills, None),
     )
     prompt = await _system_prompt(agent)
 
@@ -409,7 +426,7 @@ async def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_p
         runtime.runtime_paths,
         identity,
         persist_runtime_state=False,
-        persona=inline_persona("P", ["file"], ["removed"]),
+        persona=inline_persona("P", ["file"], ["removed"], None),
     )
 
     assert agent.skills is None
@@ -430,7 +447,7 @@ async def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> N
             runtime.runtime_paths,
             identity,
             persist_runtime_state=False,
-            persona=inline_persona("P", ["file"], ["scripted"]),
+            persona=inline_persona("P", ["file"], ["scripted"], None),
         ),
     )
 
@@ -451,7 +468,7 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
         identity,
         persist_runtime_state=False,
         agent_mode="minimal",
-        persona=inline_persona("P", ["shell"], ["scripted"]),
+        persona=inline_persona("P", ["shell"], ["scripted"], None),
     )
 
     assert isinstance(agent, MinimalAgent)
@@ -535,7 +552,7 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
             runtime_paths,
             None,
             persist_runtime_state=False,
-            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None),
+            persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None, None),
         )
 
 
@@ -583,7 +600,7 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
         raise AssertionError(msg)
 
     monkeypatch.setattr(ai, "build_memory_prompt_parts", recall)
-    prepared = await _prepare(runtime, inline_persona("P", None, None), "the task")
+    prepared = await _prepare(runtime, inline_persona("P", None, None, None), "the task")
     assert "the task" in prepared.prompt_text
 
 

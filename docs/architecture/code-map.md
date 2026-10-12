@@ -204,7 +204,7 @@ Matrix sync callback
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage/preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
-| `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool and skill subsets, `subagents/<name>.md` workspace profiles, and the caller tool and skill checks |
+| `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool, skill, and knowledge subsets, `subagents/<name>.md` workspace profiles, and the caller tool, skill, and knowledge checks |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `credentials/manager.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
@@ -328,19 +328,5 @@ Matrix sync callback
 
 ## Persistent State
 
-Persistent state lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
-
-- `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, such as an agent's traces in `agents/<agent>/sessions/<agent>.db`, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `agents/*/learning/` – Per-agent Agno Learning data when learning is enabled
-- `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
-- `knowledge_db/` – Knowledge base vector stores for file-backed RAG
-- `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones; its event journal also keeps background tool jobs when `background_tool_jobs.enabled` is set
-- `credentials/` – JSON secrets synchronized from `.env`
-- `budgets/user_caps.json` – Per-user monthly budget caps set from the dashboard or the budget service
-- `encryption_keys/` – Matrix E2E encryption keys
-- `sync_continuity/` – Crash-atomic pending join/decrypt fences
-- `logs/` – Log files
-- `matrix_state.yaml` – Matrix sync state
-
-These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
-`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
+[Data Persistence](../deployment/storage.md#data-persistence) lists the main directories under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
+An agent's Agno session database, including its traces, is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.

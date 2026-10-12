@@ -32,6 +32,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import Function, FunctionCall
+from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
@@ -511,6 +512,8 @@ class _CallAgentCache:
         )
         agent: AgnoAgent | None = None
         try:
+            # Build the same tools and system prompt as text chat so call turns reuse its prompt cache.
+            # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
             agent = create_agent(
                 self.agent_name,
                 self.config,
@@ -521,12 +524,12 @@ class _CallAgentCache:
                 knowledge=knowledge,
                 history_storage=history_storage,
                 active_model_name=self.active_model_name,
-                include_interactive_questions=False,
-                tool_function_filter=self.context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=True,
+                supports_native_tool_approval=True,
                 eager_deferred_tools=True,
             )
+            _refuse_text_chat_functions(agent, self.config)
             prewarm_agent_model_client(agent, history_storage)
         except Exception:
             history_storage.close()
@@ -869,8 +872,6 @@ async def _run_authorized_call_agent(
                     config=config,
                     knowledge=knowledge_resolution.knowledge,
                     run_id_callback=recorder.set_run_id,
-                    include_interactive_questions=False,
-                    tool_function_filter=context.tool_function_filter,
                     show_tool_calls=False,
                     run_metadata_collector=run_metadata,
                     execution_identity=execution_identity,
@@ -988,7 +989,7 @@ def _function_requires_async_execution(function: Function) -> bool:
 
 
 def _function_requires_text_chat(function: Function, config: Config) -> bool:
-    """Return whether voice must hide a function with no usable approval UI."""
+    """Return whether a function needs text-chat UI that a voice call lacks."""
     is_matrix_room_runtime_function = (
         function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
     )
@@ -1002,8 +1003,34 @@ def _function_requires_text_chat(function: Function, config: Config) -> bool:
     )
 
 
+def _refuse_text_chat_call(name: str) -> str:
+    logger.info("call_tool_blocked_needs_text_chat", tool=name)
+    return _TEXT_CHAT_REQUIRED_MESSAGE
+
+
+def _refuse_text_chat_functions(agent: AgnoAgent, config: Config) -> None:
+    """Keep functions that need text chat visible, so the prompt matches chat's, but refuse them when called."""
+    # MindRoom builds each agent's tools as a list of configured toolkits.
+    for toolkit in agent.tools if isinstance(agent.tools, list) else ():
+        if not isinstance(toolkit, Toolkit):
+            continue
+        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if function.external_execution_silent:
+                # Chat hands delegation to its driver; calls run the child turn directly.
+                function.external_execution = False
+                function.external_execution_silent = False
+            if not _function_requires_text_chat(function, config):
+                continue
+            # Agno pauses the run for these flags before any tool hook can refuse.
+            function.requires_confirmation = False
+            function.requires_user_input = False
+            function.external_execution = False
+            function.approval_type = None
+            function.tool_hooks = [_refuse_text_chat_call, *(function.tool_hooks or [])]
+
+
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
-    """Return whether the call agent can send Matrix messages; calls hide tools that may need approval."""
+    """Return whether the call agent can send Matrix messages; tools that may need approval are unavailable in calls."""
     return "matrix_message" in config.resolve_entity(agent_name).available_tools and not tool_may_require_approval(
         config,
         "matrix_message",

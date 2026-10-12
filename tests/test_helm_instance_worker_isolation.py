@@ -1038,7 +1038,7 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
         paths.storage_root / "agents" / "helper",
         paths.storage_root / "private_instances" / "s" / "helper",
     ):
-        set_agent_mode(paths, state_root, "helper", "session", "minimal", "@alice:example.org")
+        set_agent_mode(paths, state_root, "helper", "session", "minimal")
         with closing(_open_sessions(state_root)):
             pass
     ensure_private_instance_identity(

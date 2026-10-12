@@ -327,7 +327,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     identity = build_execution_identity_from_runtime_context(runtime)
     root = resolve_agent_storage("helper", runtime.config, runtime.runtime_paths, identity).state_root
-    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     saved_choice = (primary_records_dir(root, runtime.runtime_paths) / "agent_modes.json").read_bytes()
     workspace = root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -421,7 +421,7 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
     identity = build_execution_identity_from_runtime_context(runtime)
     root = resolve_agent_storage("helper", runtime.config, runtime.runtime_paths, identity).state_root
-    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     agent = agents.create_agent(
@@ -718,7 +718,6 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
             "helper",
             ctx.session_id,
             "standard",
-            runtime.requester_id,
         )
         ctx = replace(ctx, reply_to_event_id="$next", correlation_id="next")
         runtime = replace(runtime, target=replace(runtime.target, reply_to_event_id="$next"), correlation_id="next")
