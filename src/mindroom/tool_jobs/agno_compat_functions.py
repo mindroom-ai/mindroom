@@ -47,7 +47,8 @@ def isolated_function_call(call: FunctionCall) -> FunctionCall:
             context,
             session_state=deepcopy(context.session_state),
             metadata=deepcopy(context.metadata),
-            messages=deepcopy(context.messages),
+            # Agno shares Message objects read-only; a new list keeps the run's later messages out of the job.
+            messages=list(context.messages) if context.messages is not None else None,
             dependencies=dict(context.dependencies) if context.dependencies is not None else None,
         )
     return FunctionCall(function=function, arguments=deepcopy(call.arguments), call_id=call.call_id)
