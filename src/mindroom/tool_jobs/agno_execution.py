@@ -332,11 +332,8 @@ async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> Too
             await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
 
 
-@dataclass(frozen=True)
-class _JobApproval:
-    """The approval a gated call asks for as the first phase of its job."""
-
-    ask: Callable[[], Awaitable[tuple[bool, str | None]]]
+# The approval a gated call asks for as the first phase of its job: whether it was approved, and why not.
+type _AskApproval = Callable[[], Awaitable[tuple[bool, str | None]]]
 
 
 async def _run_operation(
@@ -345,11 +342,11 @@ async def _run_operation(
     owner: ToolExecutionIdentity,
     baseline: dict[str, Any],
     reference: ExecutionResourceReference,
-    approval: _JobApproval | None = None,
+    approval: _AskApproval | None = None,
 ) -> BackgroundOutcome:
     try:
         if approval is not None:
-            approved, reason = await approval.ask()
+            approved, reason = await approval()
             if not approved:
                 return BackgroundOutcome("denied", reason or "The requester did not approve this call.")
             job_checkpoint()
@@ -461,18 +458,16 @@ def _job_approval(
     owned_call: FunctionCall,
     owner: ToolExecutionIdentity,
     context: ToolRuntimeContext,
-) -> _JobApproval:
+) -> _AskApproval:
     """Ask for a gated call's approval as its job, on the frozen call the job then runs."""
-    return _JobApproval(
-        # The policy and approver current when the job asks decide, as for a paused reply.
-        ask=lambda: ask_tool_call_approval(
-            runtime,
-            job_id,
-            owned_call,
-            owner=owner,
-            config=context.current_config,
-            runtime_paths=context.runtime_paths,
-        ),
+    # The policy and approver current when the job asks decide, as for a paused reply.
+    return lambda: ask_tool_call_approval(
+        runtime,
+        job_id,
+        owned_call,
+        owner=owner,
+        config=context.current_config,
+        runtime_paths=context.runtime_paths,
     )
 
 
