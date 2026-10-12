@@ -118,7 +118,8 @@ async def append_turn_start_job_note(items: Sequence[EnrichmentItem]) -> tuple[E
 async def _append_job_notice(messages: list[Message], *, entity_name: str) -> None:
     """Append the notice for jobs that ended during the tool batch to the batch's last result.
 
-    Only the answering entity hears it: an agent, or a team's leader, never the member a team delegated to.
+    Only the answering entity hears it: an agent, or a configured team's leader, never a member it delegated to; an
+    ad hoc team answers as the agent whose account posts its replies, so that member hears it.
     """
     notices = _NOTICES.get()
     context = get_tool_runtime_context()
