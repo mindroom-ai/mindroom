@@ -37,6 +37,14 @@ def _budget_limit_usd(config: Config, cap: UserCap | None) -> float | None:
     return cap.limit_usd if cap is not None else budgets.monthly_limit_usd
 
 
+def budget_user_id(user_id: str, config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the canonical person whose cap and spend ``user_id`` uses, or None for agents and bots."""
+    if not is_human_requester_id(user_id, config, runtime_paths):
+        return None
+    # A bridge alias shares its canonical user's spend, so it shares one cap too.
+    return resolve_human_requester_alias(user_id, config, runtime_paths)
+
+
 def _is_priced(config: Config, model_name: str) -> bool:
     """Return whether usage of this model adds spend, including through another alias of the same model."""
     model_config = config.models.get(model_name)
@@ -70,9 +78,9 @@ def budget_model(
     # Unpriced models add no tracked spend, so swapping them could only raise cost.
     if model_name == budgets.fallback_model or not _is_priced(config, model_name):
         return model_name
-    if not is_human_requester_id(requester_id, config, runtime_paths):
+    canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)
+    if canonical_requester_id is None:
         return model_name
-    canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     limit = _budget_limit_usd(config, monitor.caps.get(canonical_requester_id) if monitor is not None else None)
     if limit is None:
         return model_name
@@ -210,10 +218,7 @@ class BudgetMonitor:
         for user_id in set(spend) | set(caps):
             # Agents and bridge bots are never budgeted, and a cap stored under an ID that is now a
             # bridge alias no longer applies, because replies resolve that ID to its canonical user.
-            if (
-                not is_human_requester_id(user_id, config, self.runtime_paths)
-                or resolve_human_requester_alias(user_id, config, self.runtime_paths) != user_id
-            ):
+            if budget_user_id(user_id, config, self.runtime_paths) != user_id:
                 continue
             cap = caps.get(user_id)
             limit = _budget_limit_usd(config, cap)

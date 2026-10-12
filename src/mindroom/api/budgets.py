@@ -8,9 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_budget_service, verify_user
-from mindroom.budgets.monitor import BudgetMonitor
+from mindroom.budgets.monitor import BudgetMonitor, budget_user_id
 from mindroom.matrix_identifiers import is_concrete_matrix_user_id
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 __all__ = [
     "clear_service_user_cap",
@@ -92,9 +91,8 @@ def _cap_target(request: Request, user_id: str) -> tuple[BudgetMonitor, str]:
             "User ID must be a concrete Matrix user ID",
             headers=_NO_STORE,
         )
-    # A bridge alias shares its canonical user's spend, so it shares one cap too.
-    canonical_user_id = resolve_human_requester_alias(user_id, config, monitor.runtime_paths)
-    if not is_human_requester_id(canonical_user_id, config, monitor.runtime_paths):
+    canonical_user_id = budget_user_id(user_id, config, monitor.runtime_paths)
+    if canonical_user_id is None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Caps apply only to people, not agents or bots",

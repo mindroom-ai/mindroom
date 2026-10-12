@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
-from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model
+from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
 from mindroom.budgets.pricing import _PriceTable
 from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
 from mindroom.config.auth import AuthorizationConfig
@@ -374,6 +374,15 @@ def test_status_before_first_scan_reports_current_month_without_spend(tmp_path: 
     assert payload["generated_at"] is None
     assert payload["period_start"] == "2026-10-01"
     assert payload["users"] == []
+
+
+def test_budget_user_id_names_the_canonical_person_or_none_for_bots(tmp_path: Path) -> None:
+    config = _config().model_copy(update={"bot_accounts": ["@bridgebot:example.test"]})
+    paths = _paths(tmp_path)
+
+    assert budget_user_id(ALICE, config, paths) == ALICE
+    assert budget_user_id(ALICE_BRIDGE, config, paths) == ALICE
+    assert budget_user_id("@bridgebot:example.test", config, paths) is None
 
 
 def test_bridge_bot_requesters_are_never_budgeted(tmp_path: Path) -> None:
