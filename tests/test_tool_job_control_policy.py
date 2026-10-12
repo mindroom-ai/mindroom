@@ -11,12 +11,10 @@ from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
 from mindroom.agents import create_agent
-from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -33,14 +31,14 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approval", [False, True])
-@pytest.mark.parametrize("action", ["list", "inspect", "wait", "cancel"])
-async def test_reserved_controls_obey_approval_and_plugin_hooks(
+@pytest.mark.parametrize("action", ["list", "collect", "wait", "cancel"])
+async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     approval: bool,
     action: str,
 ) -> None:
-    """Real actor construction must gate every action and emit its before/after pair."""
+    """Every action runs at once, even when every call needs approval, and emits its before/after pair."""
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", tools=[], learning=False)},
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
@@ -96,40 +94,6 @@ async def test_reserved_controls_obey_approval_and_plugin_hooks(
                 persist_runtime_state=False,
             )
             response = await actor.arun("Check the job", session_id=owner.session_id)
-            if approval:
-                assert response.status == RunStatus.paused
-                assert phases == []
-                for requirement in response.requirements:
-                    requirement.confirm()
-                calls = (
-                    ApprovalCall(
-                        "control",
-                        "job",
-                        "leader",
-                        2**62,
-                        toolkit_name="job",
-                        arguments_digest=approval_arguments_digest({"action": action, "job_id": "missing"}),
-                    ),
-                )
-                restored_tools = await required_approval_tool_names(
-                    "leader",
-                    calls,
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=owner,
-                )
-                actor = create_agent(
-                    "leader",
-                    config,
-                    paths,
-                    owner,
-                    hook_registry=registry,
-                    supports_native_tool_approval=True,
-                    persist_runtime_state=False,
-                    required_tool_names=restored_tools,
-                )
-                validate_approval_tool_owners([actor], calls, response.requirements)
-                response = await actor.acontinue_run(run_response=response)
             assert response.status == RunStatus.completed
             assert phases == [("before", "job", action), ("after", "job", action)]
     finally:
