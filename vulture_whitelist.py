@@ -18,7 +18,6 @@ _.pinned_site  # Pydantic model validator (src/mindroom/tool_system/atlassian_co
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 _.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)
 _._save_file_to_disk  # FileGenerationTools save step overridden to write inside the workspace (src/mindroom/tools/agno_compat_file_generation.py)
-_._run_context  # Agno reads the run context bound on a prepared Function (src/mindroom/agno_compat_prepared_tools.py)
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)
 is_shared  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
 can_use  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
@@ -318,7 +317,6 @@ _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
 _.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
 _.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
-_.external_execution_silent  # Agno suppresses the internal delegation wait message (src/mindroom/agents.py)
 _.external_execution_required  # Agno reads the retained tool pause flags (src/mindroom/delegation/execution.py, src/mindroom/delegation/recovery.py)
 _enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/session_storage/agent_storage.py)
 

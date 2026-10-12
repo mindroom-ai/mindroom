@@ -21,11 +21,12 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agents import create_agent
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.invite_router import InviteRouterTools
 from mindroom.history.types import HistoryScope
@@ -184,11 +185,17 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
     assert calls == []
 
 
+@pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
 def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    jobs: bool,
 ) -> None:
-    """The cached call agent exposes chat's functions, so calls reuse chat's prompt cache."""
+    """The cached call agent exposes chat's functions, so calls reuse chat's prompt cache.
+
+    A gated call is refused in a call whether chat would pause for it or ask as its job, so no card is posted.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -198,6 +205,7 @@ def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
             },
             models={"default": ModelConfig(provider="ollama", id="test")},
             tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="add", action="require_approval")]),
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=jobs),
         ),
         runtime_paths,
     )
@@ -232,8 +240,12 @@ def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
     call_functions = functions(call_agent)
     assert list(call_functions) == list(functions(chat_agent))
     assert call_agent.instructions == chat_agent.instructions
+    assert functions(chat_agent)["add"].approval_type == (
+        JOB_APPROVAL_TYPE if jobs else POLICY_CONFIRMATION_APPROVAL_TYPE
+    )
     add = call_functions["add"]
     assert add.requires_confirmation is False
+    assert add.approval_type is None
     assert add.tool_hooks is not None
     assert add.tool_hooks[0](name="add") == _TEXT_CHAT_REQUIRED_MESSAGE
     # Delegation runs the child turn directly in calls instead of pausing for chat's driver.
