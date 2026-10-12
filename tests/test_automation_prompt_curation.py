@@ -13,13 +13,13 @@ from mindroom.automations.prompt_curation import (
     _plan_curation,
     _verify_curation,
 )
-from mindroom.automations.steps import automation_execution_identity
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -318,7 +318,11 @@ def test_a_private_instance_curates_its_own_context_files_not_the_shared_ones(tm
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    identity = automation_execution_identity(paths, "mind", "@alice:example.test")
+    identity = build_requester_execution_identity(
+        agent_name="mind",
+        runtime_paths=paths,
+        requester_id="@alice:example.test",
+    )
     root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
     assert root is not None
     for name, text in (("MEMORY.md", MEMORY), ("SOUL.md", SOUL), ("SHARED.md", MEMORY)):

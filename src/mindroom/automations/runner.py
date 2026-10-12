@@ -24,13 +24,7 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
-from mindroom.automations.steps import (
-    AUTOMATION_HOOK_PREFIX,
-    Ask,
-    AutomationContext,
-    Done,
-    automation_execution_identity,
-)
+from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationContext, Done
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import create_background_task
 from mindroom.config.automations import PluginAutomation
@@ -44,6 +38,7 @@ from mindroom.private_storage.private_instance_identity import private_instances
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -140,7 +135,7 @@ def _room_id(
     """Return where the instance's prompts go: the configured room, or the requester's personal room with the agent."""
     agent_name, requester_id = instance
     if requester_id is not None:
-        # Replies quote the requester's private files, so they go to the room meant for the requester and the agent.
+        # Replies quote the requester's private files, so they go to the room meant for no other person.
         record = read_personal_room(personal_room_record_path(runtime_paths, agent_name, requester_id))
         return record.room_id if record is not None else None
     rooms = config.get_agent(agent_name).rooms
@@ -170,7 +165,15 @@ def _check(
         logger.warning("Automation needs file memory; skipped", agent=agent_name, automation=automation.name)
         return None
     # The same identity the prompt's turn resolves, so the check and the run work on the same files.
-    identity = automation_execution_identity(runtime_paths, agent_name, chain.requester_id)
+    identity = (
+        None
+        if chain.requester_id is None
+        else build_requester_execution_identity(
+            agent_name=agent_name,
+            runtime_paths=runtime_paths,
+            requester_id=chain.requester_id,
+        )
+    )
     runtime = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=identity)
     context = AutomationContext(
         agent_name=agent_name,
@@ -181,6 +184,7 @@ def _check(
         options=MappingProxyType(deepcopy(automation.options) if isinstance(automation, PluginAutomation) else {}),
         settings=MappingProxyType(deepcopy(dict(definition.settings))),
         requester_id=chain.requester_id,
+        execution_identity=identity,
         workspace=runtime.workspace.root if runtime.workspace is not None else None,
         state_dir=_state_dir(runtime_paths, chain, runtime.state_root),
     )

@@ -16,7 +16,7 @@ from urllib.parse import quote
 import pytest
 
 from mindroom.automations.dreaming import check_dreaming
-from mindroom.automations.steps import Ask, AutomationContext, Done, automation_execution_identity
+from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import DreamingAutomation
@@ -24,11 +24,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 TODAY = datetime.now(UTC).date()
 YESTERDAY = f"memory/{TODAY - timedelta(days=1)}.md"
@@ -80,14 +82,14 @@ class _Workspace:
         self.requester_id = requester_id
         self.private_context_files = private_context_files
         self.agent_fields = agent_fields
-        self.config, self.paths, self.root = self._build()
+        self.config, self.paths, self.identity, self.root = self._build()
         self.state_dir = (
             automations_tracking_root(self.paths) / "mind"
             if requester_id is None
             else tmp_path / "tracking" / "instance-automations"
         )
 
-    def _build(self) -> tuple[Config, RuntimePaths, Path]:
+    def _build(self) -> tuple[Config, RuntimePaths, ToolExecutionIdentity | None, Path]:
         private = (
             None
             if self.requester_id is None
@@ -107,10 +109,18 @@ class _Workspace:
             router=RouterConfig(model="default"),
         )
         paths = resolve_runtime_paths(config_path=self.tmp_path / "config.yaml", storage_path=self.tmp_path)
-        identity = automation_execution_identity(paths, "mind", self.requester_id)
+        identity = (
+            None
+            if self.requester_id is None
+            else build_requester_execution_identity(
+                agent_name="mind",
+                runtime_paths=paths,
+                requester_id=self.requester_id,
+            )
+        )
         root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
         assert root is not None
-        return config, paths, root
+        return config, paths, identity, root
 
     def write(self, path: str, text: str, *, age: timedelta = timedelta()) -> None:
         target = self.root / path
@@ -133,6 +143,7 @@ class _Workspace:
                 options={},
                 settings={},
                 requester_id=self.requester_id,
+                execution_identity=self.identity,
                 workspace=self.root,
                 state_dir=self.state_dir,
             ),
@@ -836,7 +847,7 @@ def test_an_applied_private_proposal_refreshes_the_requesters_memory_search(tmp_
         workspace.root,
         workspace.config,
         workspace.paths,
-        automation_execution_identity(workspace.paths, "mind", ALICE),
+        build_requester_execution_identity(agent_name="mind", runtime_paths=workspace.paths, requester_id=ALICE),
     )
 
 

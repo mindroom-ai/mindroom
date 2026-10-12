@@ -117,6 +117,15 @@ def test_the_personal_rooms_private_agent_can_list_automations() -> None:
     assert [entry.name for entry in config.resolve_entity("mind").automations] == ["prompt_curation", "dreaming"]
 
 
+def test_a_private_agent_other_than_the_personal_rooms_agent_gets_no_automations() -> None:
+    """Personal rooms belong to one agent, so another private agent has nowhere private to post."""
+    with pytest.raises(ValidationError, match=r"personal_rooms\.agent"):
+        _personal_rooms_config(mind=_mind(), other=_private_mind(automations=["prompt_curation"]))
+    config = _personal_rooms_config(["prompt_curation"], mind=_mind(), other=_private_mind())
+
+    assert config.resolve_entity("other").automations == []
+
+
 def test_a_private_agent_entry_cannot_choose_a_room() -> None:
     """A configured room would show one requester's private files to everyone in it."""
     with pytest.raises(ValidationError, match="cannot set room"):

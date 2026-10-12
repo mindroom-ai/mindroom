@@ -8137,7 +8137,7 @@ visibility = ["mindroom.automations", "mindroom.automations.dreaming", "mindroom
 
 [[modules]]
 path = "mindroom.automations.steps"
-depends_on = ["mindroom.tool_system.worker_routing"]
+depends_on = []
 visibility = [
     "mindroom.automations",
     "mindroom.automations.dreaming",
@@ -8196,6 +8196,7 @@ depends_on = [
     "mindroom.private_storage.private_instance_identity",
     "mindroom.runtime_resolution",
     "mindroom.thread_tags",
+    "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.orchestrator"]
 

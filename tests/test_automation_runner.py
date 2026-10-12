@@ -17,7 +17,7 @@ from mindroom.automations import automation
 from mindroom.automations import runner as runner_module
 from mindroom.automations.registry import AutomationDefinition, compile_automations
 from mindroom.automations.runner import AutomationRunner
-from mindroom.automations.steps import Ask, AutomationContext, Done, automation_execution_identity
+from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -38,6 +38,7 @@ from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
@@ -741,7 +742,7 @@ def _private_setup(
     rooms = {ALICE: ALICE_ROOM, BOB: BOB_ROOM} if personal_rooms is None else personal_rooms
     roots: dict[str, Path] = {}
     for requester, memory in memories.items():
-        identity = automation_execution_identity(paths, "mind", requester)
+        identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=requester)
         root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
         assert root is not None
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
@@ -814,7 +815,7 @@ async def test_a_private_check_gets_the_requesters_workspace_state_and_identity(
     await _tick(runner, DAY_LATER)
 
     (ctx,) = seen
-    identity = automation_execution_identity(paths, "mind", ALICE)
+    identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=ALICE)
     state_root = resolve_agent_runtime("mind", config, paths, identity).state_root
     assert (ctx.requester_id, ctx.workspace) == (ALICE, roots[ALICE])
     assert ctx.state_dir == primary_records_dir(state_root, paths) / "automations"
@@ -897,7 +898,7 @@ async def test_an_instance_the_primary_never_recorded_an_owner_for_gets_no_promp
         "mind",
         config,
         paths,
-        automation_execution_identity(paths, "mind", BOB),
+        build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=BOB),
     ).state_root
     (primary_records_dir(bob_state_root.parent, paths) / ".mindroom-private-instance.json").unlink()
 
