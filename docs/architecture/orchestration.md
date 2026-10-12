@@ -82,7 +82,7 @@ Room setup runs one full pass; transport retries stay with nio, and returned adm
 
 ## Session Storage Recovery
 
-Before opening an owned session database, `session_storage_preflight.py` checks any existing session table for the required Agno columns.
+Before opening an owned session database, `session_storage/preflight.py` checks any existing session table for the required Agno columns.
 If any are missing, it moves the whole `sessions/` directory, including SQLite journals and sidecars, to a unique `sessions.incompatible-*` sibling and recreates `sessions/` with its original permissions; see [Incompatible session databases](../deployment/storage.md#incompatible-session-databases) for the operator view.
 Only session storage is archived; learning, authored files, credentials, and Matrix encryption keys stay in place.
 Permission failures, corruption, unexpected schema objects, and unsafe paths raise errors instead of triggering an archive.

@@ -950,11 +950,40 @@ async def require_personal_user(request: Request) -> dict[str, Any]:
 
 async def require_usage_service(request: Request) -> None:
     """Authenticate the dedicated usage-export service without creating a user identity."""
+    await _require_service_jwt(
+        request,
+        audience_env="MINDROOM_USAGE_SERVICE_JWT_AUDIENCE",
+        client_id_env="MINDROOM_USAGE_SERVICE_CLIENT_ID",
+        unconfigured_detail="Usage export service authentication is not configured",
+        invalid_detail="Invalid usage service JWT",
+    )
+
+
+async def require_budget_service(request: Request) -> None:
+    """Authenticate the dedicated budget service without creating a user identity."""
+    await _require_service_jwt(
+        request,
+        audience_env="MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE",
+        client_id_env="MINDROOM_BUDGET_SERVICE_CLIENT_ID",
+        unconfigured_detail="Budget service authentication is not configured",
+        invalid_detail="Invalid budget service JWT",
+    )
+
+
+async def _require_service_jwt(
+    request: Request,
+    *,
+    audience_env: str,
+    client_id_env: str,
+    unconfigured_detail: str,
+    invalid_detail: str,
+) -> None:
+    """Require a trusted-upstream service assertion for one dedicated audience and client ID."""
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
     jwt_settings = settings.jwt
-    audience = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_JWT_AUDIENCE")
-    client_id = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_CLIENT_ID")
+    audience = _env_text(auth_state.runtime_paths, audience_env)
+    client_id = _env_text(auth_state.runtime_paths, client_id_env)
     if (
         not settings.enabled
         or settings.user_id_header is None
@@ -967,7 +996,7 @@ async def require_usage_service(request: Request) -> None:
         or client_id is None
         or auth_state.trusted_upstream_jwt_client is None
     ):
-        raise HTTPException(status_code=503, detail="Usage export service authentication is not configured")
+        raise HTTPException(status_code=503, detail=unconfigured_detail)
 
     claims = await _verified_trusted_upstream_jwt_claims(
         request,
@@ -977,7 +1006,7 @@ async def require_usage_service(request: Request) -> None:
         issuer=jwt_settings.issuer,
         algorithms=("RS256",),
         required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
-        invalid_detail="Invalid usage service JWT",
+        invalid_detail=invalid_detail,
     )
 
     if (
@@ -986,7 +1015,7 @@ async def require_usage_service(request: Request) -> None:
         or not isinstance(claims.get("common_name"), str)
         or claims["common_name"] != client_id
     ):
-        raise HTTPException(status_code=401, detail="Invalid usage service JWT")
+        raise HTTPException(status_code=401, detail=invalid_detail)
 
 
 async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[str, Any]:

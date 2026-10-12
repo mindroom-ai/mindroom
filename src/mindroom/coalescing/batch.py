@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, NamedTuple
 
-from mindroom.attachment_ids import merge_attachment_ids
+from mindroom.attachments.ids import merge_attachment_ids
 from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,

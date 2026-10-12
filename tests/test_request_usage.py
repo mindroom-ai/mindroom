@@ -17,11 +17,11 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats import collect_admin_usage
 from tests.history_helpers import RecordingModel

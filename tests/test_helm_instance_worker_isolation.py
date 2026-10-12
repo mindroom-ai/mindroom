@@ -18,14 +18,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import yaml
 
-from mindroom import agent_storage
 from mindroom.agent_modes import set_agent_mode
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, pending_room_invites_path
 from mindroom.matrix.personal_room_store import personal_room_record_path
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.session_storage import agent_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 
 if TYPE_CHECKING:
     from agno.db.base import BaseDb

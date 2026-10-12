@@ -30,7 +30,6 @@ from agno.session.summary import SessionSummary
 from anthropic import APIConnectionError as AnthropicAPIConnectionError
 from openai import APIConnectionError as OpenAIAPIConnectionError
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -72,6 +71,7 @@ from mindroom.history.types import (
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.openai_models import MindRoomOpenRouter
 from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test, seed_session
 from tests.history_helpers import latest_summary_model

@@ -18,8 +18,8 @@ from agno.models.openrouter import OpenRouter
 from openai import OpenAI
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
-from mindroom.attachment_media import attachment_records_to_media
-from mindroom.attachments import AttachmentRecord
+from mindroom.attachments.media import attachment_records_to_media
+from mindroom.attachments.storage import AttachmentRecord
 from mindroom.providers.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.providers.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.providers.openai_models import (

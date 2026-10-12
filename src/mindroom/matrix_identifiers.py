@@ -97,7 +97,7 @@ def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePath
     return identifiers
 
 
-def _is_concrete_matrix_user_id(user_id: str) -> bool:
+def is_concrete_matrix_user_id(user_id: str) -> bool:
     """Return whether this string is a concrete Matrix user ID (no wildcards or placeholders)."""
     if not user_id.startswith("@") or "*" in user_id or "?" in user_id:
         return False
@@ -110,8 +110,8 @@ def _is_concrete_matrix_user_id(user_id: str) -> bool:
 def split_concrete_matrix_user_ids(user_ids: Iterable[str]) -> tuple[list[str], list[str]]:
     """Split user IDs into deduplicated concrete Matrix IDs and sorted skipped entries."""
     unique_ids = list(dict.fromkeys(user_ids))
-    concrete = [user_id for user_id in unique_ids if _is_concrete_matrix_user_id(user_id)]
-    skipped = sorted(user_id for user_id in unique_ids if not _is_concrete_matrix_user_id(user_id))
+    concrete = [user_id for user_id in unique_ids if is_concrete_matrix_user_id(user_id)]
+    skipped = sorted(user_id for user_id in unique_ids if not is_concrete_matrix_user_id(user_id))
     return concrete, skipped
 
 

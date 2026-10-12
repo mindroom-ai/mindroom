@@ -18,7 +18,6 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from agno.team import _run as team_run
 
-from mindroom import agno_compat_session_persistence
 from mindroom.bot import AgentBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -42,6 +41,7 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.session_storage import agno_compat_session_persistence
 from mindroom.streaming import StreamingDeliveryError, UnfinishedStreamedReply
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access

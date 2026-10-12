@@ -30,7 +30,6 @@ from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -45,6 +44,7 @@ from mindroom.providers.model_loading import get_model_instance
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.providers.tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning import library
 from mindroom.skill_learning import runner as runner_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, observe_final_request

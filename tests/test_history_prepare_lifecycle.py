@@ -15,7 +15,6 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.execution_preparation import (
@@ -24,8 +23,12 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
 )
 from mindroom.history.replay import _estimate_session_summary_tokens, estimate_prompt_visible_history_tokens
-from mindroom.history.runtime import prepare_bound_scope_history, prepare_scope_history
-from mindroom.history.session_context import open_scope_session_context
+from mindroom.history.runtime import (
+    prepare_bound_scope_history,
+    prepare_scope_history,
+    resolve_agent_preparation_inputs,
+)
+from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import (
     read_scope_state,
     set_force_compaction_state,
@@ -43,6 +46,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -795,6 +799,112 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     assert summary_mock.await_count == 2
     assert len(prepared.compaction_outcomes) == 1
     assert len(archived_run_ids(storage)) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_native_compaction", [True, False])
+async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_compaction_is_disallowed(
+    tmp_path: Path,
+    *,
+    allow_native_compaction: bool,
+) -> None:
+    """A scheduled run with a history limit cannot rely on native compaction above the trigger budget."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                f"run-{index}",
+                messages=[
+                    Message(role="user", content="u" * 2_000),
+                    Message(role="assistant", content="a" * 2_000),
+                ],
+            )
+            for index in range(3)
+        ],
+    )
+    seed_session(storage, session)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    history_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+    trigger_budget = history_tokens // 2
+    hard_budget = history_tokens * 2
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_enabled=True,
+        text_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=64_000,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=trigger_budget,
+        reserve_tokens=0,
+        static_prompt_tokens=0,
+        replay_budget_tokens=trigger_budget,
+        hard_replay_budget_tokens=hard_budget,
+        summary_input_budget_tokens=50_000,
+        compaction_timeout_seconds=600.0,
+    )
+    agent = _agent(db=storage)
+    resolved_inputs = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        config=config,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        execution_plan=execution_plan,
+    )
+    summary_mock = AsyncMock(return_value=SessionSummary(summary="short summary", updated_at=datetime.now(UTC)))
+    with (
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+    ):
+        prepared = await prepare_scope_history(
+            agent=agent,
+            agent_name="test_agent",
+            resolved_inputs=resolved_inputs,
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            allow_native_compaction=allow_native_compaction,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    if allow_native_compaction:
+        assert prepared.compaction_decision.mode == "none"
+        assert prepared.compaction_decision.reason == "within_hard_budget"
+        assert prepared.compaction_outcomes == []
+        summary_mock.assert_not_awaited()
+        assert len(persisted.runs or []) == 3
+        return
+
+    assert prepared.compaction_decision.mode == "required"
+    assert prepared.compaction_decision.reason == "over_trigger_native_disabled"
+    assert prepared.compaction_reply_outcome == "success"
+    summary_mock.assert_awaited_once()
+    [outcome] = prepared.compaction_outcomes
+    assert outcome.history_budget_tokens == trigger_budget
+    assert outcome.before_tokens == history_tokens
+    assert outcome.after_tokens <= trigger_budget
+    assert (
+        estimate_prompt_visible_history_tokens(
+            session=persisted,
+            scope=scope,
+            history_settings=_ALL_HISTORY_SETTINGS,
+        )
+        <= trigger_budget
+    )
 
 
 @pytest.mark.asyncio

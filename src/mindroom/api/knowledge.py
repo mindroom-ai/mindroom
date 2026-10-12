@@ -718,7 +718,7 @@ async def upload_knowledge_files(base_id: str, request: Request) -> dict[str, An
         files = [upload for upload in form.getlist("files") if isinstance(upload, UploadFile)]
         if not files:
             raise RequestValidationError(
-                [{"type": "missing", "loc": ("body", "files"), "msg": "Field required", "input": None}],
+                [{"type": "missing", "loc": ("body", "files"), "msg": "Field required"}],
             )
         return await _upload_knowledge_files(base_id, request, files)
     finally:

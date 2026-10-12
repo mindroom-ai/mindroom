@@ -40,9 +40,9 @@ from mindroom.agent_cli.session import (
 )
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import create_state_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context

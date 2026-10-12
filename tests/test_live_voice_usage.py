@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_storage import save_independent_usage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
+from mindroom.session_storage.agent_storage import save_independent_usage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage
 from tests.conftest import test_runtime_paths

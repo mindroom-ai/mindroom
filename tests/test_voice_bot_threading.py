@@ -14,7 +14,7 @@ import pytest
 from agno.media import Audio
 
 from mindroom import inbound_turn_normalizer
-from mindroom.attachments import _attachment_id_for_event, load_attachment
+from mindroom.attachments.storage import _attachment_id_for_event, load_attachment
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate
 from mindroom.config.main import Config

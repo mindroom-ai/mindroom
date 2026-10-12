@@ -13,11 +13,11 @@ from agno.models.anthropic import Claude
 from agno.session.summary import SessionSummary
 from structlog.testing import capture_logs
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.constants import DEFAULT_COMPACTION_TIMEOUT_SECONDS
 from mindroom.history.compaction import SummaryModel, _rewrite_working_session_for_compaction
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,

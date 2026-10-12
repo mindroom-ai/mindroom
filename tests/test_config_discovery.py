@@ -80,7 +80,7 @@ _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
 }
 _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
     ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
-    ("src/mindroom/agent_storage.py", "create_session_storage", "execution_identity"),
+    ("src/mindroom/session_storage/agent_storage.py", "create_session_storage", "execution_identity"),
     ("src/mindroom/agents.py", "create_agent", "execution_identity"),
     ("src/mindroom/credentials/manager.py", "load_scoped_credentials", "worker_target"),
     ("src/mindroom/credentials/manager.py", "_resolve_worker_credentials_manager", "worker_target"),
@@ -1142,7 +1142,7 @@ class TestRuntimeGuardrails:
         interfaces = _tach_public_interfaces()
 
         agents_exports = interfaces.get("mindroom.agents", set())
-        agent_storage_exports = interfaces.get("mindroom.agent_storage", set())
+        agent_storage_exports = interfaces.get("mindroom.session_storage.agent_storage", set())
 
         assert not (_AGENT_STORAGE_HELPERS & agents_exports)
         assert agent_storage_exports >= _AGENT_STORAGE_HELPERS

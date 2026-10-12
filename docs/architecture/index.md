@@ -61,7 +61,7 @@ Only `oauth/credential_store.py` can import it; the store retains schema, scope 
 OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
 
 Existing lifecycle adapters remain at their focused entry points: `private_storage/legacy_private_storage.py` at startup, `config/legacy_access.py` during config loading, and Nio journal and crypto adapters when their stores open.
-`session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](orchestration.md#session-storage-recovery).
+`session_storage/preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](orchestration.md#session-storage-recovery).
 Tach visibility rules keep compatibility internals behind their owning boundaries.
 
 ## Data Flow

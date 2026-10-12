@@ -12,7 +12,7 @@ from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 
 import nio
 
-from mindroom.attachments import AttachmentRecord, register_local_attachment
+from mindroom.attachments.storage import AttachmentRecord, register_local_attachment
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig

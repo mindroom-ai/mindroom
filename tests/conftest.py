@@ -57,7 +57,6 @@ import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.scheduling.tasks as scheduling_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
@@ -140,6 +139,7 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
+from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin

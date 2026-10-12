@@ -297,7 +297,7 @@ Expected outcome: Voice dispatch uses the original human sender for permission e
 
 ## 9. Images, Files, Attachments, Videos, And Voice
 
-Source anchors: `src/mindroom/matrix/image_handler.py`, `src/mindroom/matrix/media.py`, `src/mindroom/attachments.py`, `src/mindroom/attachment_media.py`, `src/mindroom/voice/handler.py`, `src/mindroom/bot.py`.
+Source anchors: `src/mindroom/matrix/image_handler.py`, `src/mindroom/matrix/media.py`, `src/mindroom/attachments/storage.py`, `src/mindroom/attachments/media.py`, `src/mindroom/voice/handler.py`, `src/mindroom/bot.py`.
 
 - [ ] `MEDIA-001` Send an unencrypted image with a text caption to a room with a vision-capable agent.
 Expected outcome: The image and caption reach the agent and produce a response that reflects both the media and the text.

@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import math
 import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from mindroom.approval.tool_approval import (
     scheduled_call,
 )
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
@@ -79,24 +79,17 @@ class LiveFunction:
 def _parse_arguments(text: str) -> dict[str, object] | str:
     """Parse strict JSON object arguments, or return why they are not usable."""
 
-    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        keys = [key for key, _value in pairs]
-        if len(keys) != len(set(keys)):
-            msg = "duplicate key"
-            raise ValueError(msg)
-        return dict(pairs)
-
     def reject_constant(name: str) -> object:
         msg = f"{name} is not JSON"
         raise ValueError(msg)
 
     try:
-        arguments = json.loads(text, object_pairs_hook=reject_duplicates, parse_constant=reject_constant)
+        arguments = json.loads(text, object_pairs_hook=object_with_unique_keys, parse_constant=reject_constant)
     except ValueError as exc:
         return f"arguments_json is not valid JSON ({exc})"
     if not isinstance(arguments, dict):
         return "arguments_json must be a JSON object of the tool's arguments"
-    if not _finite(arguments):
+    if not has_only_finite_numbers(arguments):
         return "arguments_json must not contain non-finite numbers"
     return arguments
 
@@ -280,13 +273,3 @@ def _refused(task_id: str, reason: str) -> str:
 
 def _sentence(reason: str) -> str:
     return f"❌ {reason}."
-
-
-def _finite(value: object) -> bool:
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, dict):
-        return all(_finite(item) for item in value.values())
-    if isinstance(value, list):
-        return all(_finite(item) for item in value)
-    return True

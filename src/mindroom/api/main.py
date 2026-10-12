@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,6 +52,7 @@ from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
 from mindroom.api.usage_export import close_usage_export_runner
+from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
@@ -691,6 +693,7 @@ app = FastAPI(
     docs_url=_api_docs["docs_url"],
     redoc_url=_api_docs["redoc_url"],
     openapi_url=_api_docs["openapi_url"],
+    exception_handlers={RequestValidationError: validation_error_response},
 )
 initialize_api_app(app, _runtime_paths)
 # Added before CORS, so a 413 still carries the dashboard's CORS headers.
@@ -775,7 +778,7 @@ app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(usage_router)  # Routes require dashboard, signed personal, or dedicated service authentication.
-app.include_router(budgets_router, dependencies=[Depends(verify_user)])
+app.include_router(budgets_router)  # Routes require dashboard or dedicated budget-service authentication.
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)

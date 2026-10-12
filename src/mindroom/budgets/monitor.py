@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
+from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import price_table, provider_identity
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
 from mindroom.logging_config import get_logger
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from mindroom.budgets.pricing import PricedModel
+    from mindroom.config.budgets import BudgetsConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -28,15 +30,17 @@ _MIN_SCAN_INTERVAL_SECONDS = 30.0
 _TICK_SECONDS = 300.0
 
 
-def _budget_limit_usd(config: Config, canonical_user_id: str) -> float | None:
-    """Return a canonical requester's monthly cap in USD, or None when budgets are off or the user is uncapped."""
-    budgets = config.budgets
-    if budgets is None:
+def _budget_limit_usd(budgets: BudgetsConfig, cap: UserCap | None) -> float | None:
+    """Return the monthly cap in USD for a user with ``cap``, or None when the user is uncapped."""
+    return cap.limit_usd if cap is not None else budgets.monthly_limit_usd
+
+
+def budget_user_id(user_id: str, config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the canonical person whose cap and spend ``user_id`` uses, or None for agents and bots."""
+    if not is_human_requester_id(user_id, config, runtime_paths):
         return None
-    for configured_user_id, limit in budgets.users.items():
-        if config.authorization.resolve_alias(configured_user_id) == canonical_user_id:
-            return limit
-    return budgets.monthly_limit_usd
+    # A bridge alias shares its canonical user's spend, so it shares one cap too.
+    return resolve_human_requester_alias(user_id, config, runtime_paths)
 
 
 def _is_priced(config: Config, model_name: str) -> bool:
@@ -63,7 +67,7 @@ def budget_model(
     """Return the model a reply for this requester should use under their budget.
 
     ``config`` is the snapshot ``model_name`` was resolved from, so the fallback names a model it defines.
-    Without a monitor no spend is known yet, as before the first scan.
+    Without a monitor neither spend nor per-user caps are known, so the default cap applies against zero spend.
     Callers that only check, without choosing a reply model, pass ``log_fallback=False``.
     """
     budgets = config.budgets
@@ -72,10 +76,10 @@ def budget_model(
     # Unpriced models add no tracked spend, so swapping them could only raise cost.
     if model_name == budgets.fallback_model or not _is_priced(config, model_name):
         return model_name
-    if not is_human_requester_id(requester_id, config, runtime_paths):
+    canonical_requester_id = budget_user_id(requester_id, config, runtime_paths)
+    if canonical_requester_id is None:
         return model_name
-    canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    limit = _budget_limit_usd(config, canonical_requester_id)
+    limit = _budget_limit_usd(budgets, monitor.caps.get(canonical_requester_id) if monitor is not None else None)
     if limit is None:
         return model_name
     spend = monitor._spend_usd(canonical_requester_id) if monitor is not None else 0.0
@@ -101,14 +105,19 @@ class _BudgetUserStatus:
     spend_usd: float
     limit_usd: float | None
     over_budget: bool
+    cap: UserCap | None
 
     def to_dict(self) -> dict[str, object]:
         """Return the dashboard row."""
+        cap = self.cap
         return {
             "user_id": self.user_id,
             "spend_usd": self.spend_usd,
             "limit_usd": self.limit_usd,
             "over_budget": self.over_budget,
+            "override_usd": cap.limit_usd if cap is not None else None,
+            "updated_at": cap.updated_at.isoformat() if cap is not None else None,
+            "updated_by": cap.updated_by if cap is not None else None,
         }
 
 
@@ -161,11 +170,16 @@ class BudgetMonitor:
     clock: Callable[[], datetime] = _utc_now
     min_scan_interval_seconds: float = _MIN_SCAN_INTERVAL_SECONDS
     tick_seconds: float = _TICK_SECONDS
+    caps: BudgetCaps = field(init=False)
     _snapshot: SpendSnapshot | None = field(default=None, init=False)
     # Priced models are instantiated to learn their recorded identity, so the table is kept per config object.
     _prices: tuple[Config, Mapping[tuple[str, str], PricedModel]] | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        """Load the per-user caps a previous run stored."""
+        self.caps = BudgetCaps(budget_caps_path(self.runtime_paths))
 
     def sync(self) -> None:
         """Start the refresh loop once and rescan for the active config."""
@@ -190,20 +204,23 @@ class BudgetMonitor:
         return 0.0 if snapshot is None else snapshot.spend_usd.get(user_id, 0.0)
 
     def status(self) -> _BudgetStatus:
-        """Return budget settings with each spender's and configured user's month-to-date spend."""
+        """Return budget settings with month-to-date spend for each spender and each user with a cap."""
         config = self.config_provider()
         if config is None or config.budgets is None:
             return _BudgetStatus(enabled=False)
+        budgets = config.budgets
         period_start, period_end = month_bounds(self.clock())
         snapshot = self._current_snapshot()
         spend = dict(snapshot.spend_usd) if snapshot is not None else {}
-        user_ids = set(spend) | {config.authorization.resolve_alias(user_id) for user_id in config.budgets.users}
+        caps = self.caps.entries()
         users = []
-        for user_id in user_ids:
-            # Replies for agents and bridge bots are never swapped, so they have no budget to show.
-            if not is_human_requester_id(user_id, config, self.runtime_paths):
+        for user_id in set(spend) | set(caps):
+            # Agents and bridge bots are never budgeted, and a cap stored under an ID that is now a
+            # bridge alias no longer applies, because replies resolve that ID to its canonical user.
+            if budget_user_id(user_id, config, self.runtime_paths) != user_id:
                 continue
-            limit = _budget_limit_usd(config, user_id)
+            cap = caps.get(user_id)
+            limit = _budget_limit_usd(budgets, cap)
             user_spend = spend.get(user_id, 0.0)
             users.append(
                 _BudgetUserStatus(
@@ -211,6 +228,7 @@ class BudgetMonitor:
                     spend_usd=user_spend,
                     limit_usd=limit,
                     over_budget=limit is not None and user_spend >= limit,
+                    cap=cap,
                 ),
             )
         return _BudgetStatus(
@@ -218,8 +236,8 @@ class BudgetMonitor:
             period_start=period_start,
             period_end=period_end,
             snapshot=snapshot,
-            default_limit_usd=config.budgets.monthly_limit_usd,
-            fallback_model=config.budgets.fallback_model,
+            default_limit_usd=budgets.monthly_limit_usd,
+            fallback_model=budgets.fallback_model,
             users=tuple(sorted(users, key=lambda user: (-user.spend_usd, user.user_id))),
         )
 

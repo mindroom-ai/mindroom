@@ -18,7 +18,6 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, journal
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
@@ -26,6 +25,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.turn_store import TurnStore
 from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response

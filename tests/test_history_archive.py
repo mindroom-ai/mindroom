@@ -11,9 +11,9 @@ from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history import archive
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from tests.conftest import seed_session
 from tests.history_helpers import StoredGeneration, archived_content, compaction_generations
 

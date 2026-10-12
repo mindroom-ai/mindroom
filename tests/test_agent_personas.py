@@ -17,7 +17,6 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
 from mindroom.agent_cli.minimal_agent import MinimalAgent
-from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.models import ModelConfig
@@ -29,6 +28,7 @@ from mindroom.history.archive import archive_runs
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import seed_session

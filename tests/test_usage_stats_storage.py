@@ -18,10 +18,10 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from agno.team._session import update_session_metrics
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats_storage import (

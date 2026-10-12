@@ -14,7 +14,7 @@ from agno.media import Audio, File, Video
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
-from mindroom.attachments import (
+from mindroom.attachments.storage import (
     AttachmentRecord,
     attachments_for_tool_payload,
     filter_attachments_for_context,

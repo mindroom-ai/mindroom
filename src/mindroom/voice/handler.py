@@ -18,7 +18,7 @@ from agno.metrics import MessageMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 
-from mindroom.attachments import register_audio_attachment
+from mindroom.attachments.storage import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.config.voice import normalize_speech_base_url
 from mindroom.constants import (

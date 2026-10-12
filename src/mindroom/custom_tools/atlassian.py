@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from agno.tools import Toolkit
 
-from mindroom.attachments import register_bytes_attachment
+from mindroom.attachments.storage import register_bytes_attachment
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import RETAINED_MEDIA_MAX_BYTES

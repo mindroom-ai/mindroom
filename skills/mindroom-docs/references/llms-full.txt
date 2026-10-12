@@ -1440,7 +1440,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
-| `budgets` | Per-user monthly spending caps and the fallback model | [Budgets](https://docs.mindroom.chat/budgets/) |
+| `budgets` | Default monthly spending cap per user and the fallback model | [Budgets](https://docs.mindroom.chat/budgets/) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync) |
 | `event_journal` | Storage for the Matrix event journal | [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal) |
@@ -2918,7 +2918,8 @@ defaults:
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply only when history exceeds the hard replay budget, or when [requested manually](#manual-compaction).
+Text compaction runs before a reply when history exceeds the hard replay budget, or when [requested manually](#manual-compaction).
+A [scheduled task](https://docs.mindroom.chat/scheduling/) run with a `history_limit` cannot use native compaction, so it also runs text compaction once history exceeds the compaction threshold.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
 If compaction fails, the notice reads `Compaction failed; continuing with trimmed history.` with the reason, and the reply continues with fitted history.
 
@@ -6026,27 +6027,32 @@ models:
 budgets:
   monthly_limit_usd: 20
   fallback_model: luna
-  users:
-    "@alice:example.com": 100
-    "@intern:example.com": 5
 ```
 
 Prices are USD per million tokens, set with the `pricing` field described in [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields).
 Give every model entry that points at a paid model its prices, including entries that differ only in API transport or ID prefix.
 The dashboard **Budgets** page edits the same settings and prices.
+To give a user a cap other than the default, see [Per-User Caps](#per-user-caps).
 
 ## Fields
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `monthly_limit_usd` | number ≥ 0 or `null` | `null` | Cap in USD for each user without an entry in `users`; `null` leaves those users uncapped |
+| `monthly_limit_usd` | number ≥ 0 or `null` | `null` | Cap in USD for each user without a [cap of their own](#per-user-caps); `null` leaves those users uncapped |
 | `fallback_model` | model name | required | Model that replies use instead of a priced model once the user reaches their cap |
-| `users` | map of Matrix user ID to number ≥ 0 | `{}` | Caps in USD for specific users, overriding `monthly_limit_usd` |
 
 A cap of `0` sends every priced reply for that user to the fallback model.
 Bridge aliases share their canonical user's cap and spend.
 Removing the `budgets` section turns budgets off.
 Changes to caps, prices, and the fallback model apply without a restart.
+
+## Per-User Caps
+
+A user's own cap replaces `monthly_limit_usd` for that user.
+Set it on the [Budgets page](#dashboard-budgets-page) or through the [Budget API](#budget-api), including for users who have not used MindRoom yet.
+Per-user caps are not part of `config.yaml`: they survive restarts, and config edits or redeploys leave them unchanged.
+Only people have caps; agents, bot accounts, and MindRoom's internal user cannot get one.
+Caps can be set only while budgets are on, and they stay stored if budgets are turned off.
 
 ## How Spend Is Counted
 
@@ -6074,25 +6080,66 @@ Users get no chat message when the fallback applies; the Budgets page shows who 
 ## Dashboard Budgets Page
 
 The **Budgets** page turns budgets on or off, sets the default cap and the fallback model, edits per-user caps, and edits model prices.
-It lists each user with spend or a cap of their own, their month-to-date spend, and whether they are over budget and using the fallback model.
+It lists each user with spend or a cap of their own, their month-to-date spend, whether they are over budget and using the fallback model, and who last set their cap.
 It also lists models used this month that have no prices.
-Click **Save** to write changes to `config.yaml`.
+A per-user cap is saved as soon as you leave its field or press Enter, and clearing the field returns the user to the default cap.
+Click **Save** to write the other changes to `config.yaml`.
 
-## Budget Status API
+## Budget API
 
-`GET /api/budgets` returns budget settings and spend under standard dashboard authentication.
-With budgets off it returns `{"enabled": false}`.
+The dashboard routes use standard dashboard authentication, and the same routes under `/api/budgets/service` use the [budget service](#budget-service) credential.
+
+| Route | Effect |
+| --- | --- |
+| `GET /api/budgets` | Budget settings and spend, or `{"enabled": false}` with budgets off |
+| `PUT /api/budgets/users/{user_id}` | Create or replace one user's cap with a body like `{"limit_usd": 50}` |
+| `DELETE /api/budgets/users/{user_id}` | Remove one user's cap so the default applies; returns `204`, also when the user had no cap |
+| `GET /api/budgets/service` | Same as `GET /api/budgets` |
+| `PUT /api/budgets/service/users/{user_id}` | Same as `PUT /api/budgets/users/{user_id}` |
+| `DELETE /api/budgets/service/users/{user_id}` | Same as `DELETE /api/budgets/users/{user_id}` |
+
+URL-encode `user_id` in the path, for example `/api/budgets/users/%40alice%3Aexample.com`.
+`limit_usd` is a JSON number of at least `0`; no other body fields are accepted.
+`PUT` returns `user_id`, `limit_usd`, `updated_at`, and `updated_by`, where `user_id` is the canonical user the cap belongs to.
+`updated_by` is `dashboard` for a cap set on the Budgets page or its routes, and `budget-service` for the budget service.
+
+`GET` returns these fields:
 
 | Field | Contents |
 | --- | --- |
 | `period_start`, `period_end` | First day of the current UTC month and of the next month |
 | `generated_at` | When spend was last computed, or `null` before the first computation |
 | `default_limit_usd`, `fallback_model` | The configured default cap and fallback model |
-| `users` | Rows with `user_id`, `spend_usd`, `limit_usd`, and `over_budget`, highest spend first |
+| `users` | One row per user with spend this month or a cap of their own, highest spend first, with `user_id`, `spend_usd`, the applied `limit_usd`, `over_budget`, and the user's own cap as `override_usd`, `updated_at`, and `updated_by`, which are `null` when the default applies |
 | `unpriced_models` | Rows with `provider`, `model`, and this month's `total_tokens` for models without prices |
 | `coverage` | `scanned_sources` and `unavailable_sources`, as in [usage coverage](https://docs.mindroom.chat/usage/#token-usage) |
 
-A `503` with `Budget monitor unavailable` means the agents are not running in the same process as the API, so no spend is available.
+| Status | Meaning |
+| --- | --- |
+| `503` `Budget monitor unavailable` | The agents are not running in the same process as the API, so no spend or caps are available |
+| `409` `Budgets are off` | Turn on budgets before setting or removing caps |
+| `422` `User ID must be a concrete Matrix user ID` | Use a full Matrix user ID like `@alice:example.com` |
+| `422` `Caps apply only to people, not agents or bots` | The ID belongs to an agent, a bot account, or MindRoom's internal user |
+| `422` with a list of errors | `limit_usd` is missing, negative, not a finite number, or the body has other fields |
+
+## Budget Service
+
+Strict JWT deployments can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
+Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), then add a dedicated audience and client ID:
+
+```bash
+MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE=mindroom-budget-service
+MINDROOM_BUDGET_SERVICE_CLIENT_ID=budget-service-client.example.org
+```
+
+The service sends an assertion that follows the rules of the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service), with this audience and client ID instead.
+Give the `/api/budgets/service` path its own access application, so the service's audience never applies to dashboard routes.
+A budget service assertion authorizes only the `/api/budgets/service` routes, and a usage export assertion does not authorize them.
+
+| Status | Meaning |
+| --- | --- |
+| `503` `Budget service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a budget service setting is missing |
+| `401` `Invalid budget service JWT` | Missing or invalid assertion |
 
 # Matrix Integration
 
@@ -17777,7 +17824,7 @@ Beyond the chart's required settings:
 Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned reverse proxy or identity gateway that has already authenticated the human.
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
-The [Connections portal](#connections-portal), the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service) also build on this mode.
+The [Connections portal](#connections-portal), the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service), and the [budget service](https://docs.mindroom.chat/budgets/#budget-service) also build on this mode.
 
 Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
 Enable it only when every network path to MindRoom removes client-supplied copies of the trusted headers and injects verified values itself; never expose such an instance directly to browsers or the public internet.
@@ -17974,6 +18021,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `knowledge_db/` - Knowledge base vector stores
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
 - `credentials/` - Secrets synchronized from `.env`
+- `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)

@@ -14,13 +14,13 @@ from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
 import mindroom.tools  # noqa: F401
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (

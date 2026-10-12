@@ -21,7 +21,6 @@ from agno.session.summary import SessionSummary
 from agno.team import Team
 from PIL import Image as PillowImage
 
-from mindroom.agent_storage import get_agent_session
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history import archive
@@ -40,6 +39,7 @@ from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import _agent, _completed_run, _completed_team_run, _make_config, _session, _team_session

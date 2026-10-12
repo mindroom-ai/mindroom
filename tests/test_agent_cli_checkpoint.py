@@ -17,8 +17,8 @@ from agno.tools.function import Function, FunctionCall, ToolResult
 
 from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint, inner_cli_dispatch
 from mindroom.agent_cli.lifetime import response_cli_lifetime
-from mindroom.agent_storage import create_state_storage
 from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.session_storage.agent_storage import create_state_storage
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
