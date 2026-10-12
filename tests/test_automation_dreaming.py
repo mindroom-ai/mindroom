@@ -6,7 +6,9 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import time as day_time
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 from urllib.parse import quote
@@ -35,10 +37,16 @@ PROJECTS = "\n".join(f"- Project {index} is owned by person {index}." for index 
 EXPORT = "thread_exports/room/thread.yaml"
 
 
+_CLOCK_START = time.monotonic()
+
+
 def _now() -> datetime:
-    """Return the current time moved back onto TODAY, so a test run that crosses midnight keeps the dates collection fixed."""
-    now = datetime.now(UTC)
-    return now - (now.date() - TODAY)
+    """Return a clock that starts at noon on TODAY and advances with real time.
+
+    The note names above are fixed at collection, so a clock that never nears midnight keeps them right however long
+    the run takes and whenever it starts, while run IDs taken from it still increase.
+    """
+    return datetime.combine(TODAY, day_time(12), UTC) + timedelta(seconds=time.monotonic() - _CLOCK_START)
 
 
 class _ClockOnToday(datetime):
@@ -75,13 +83,12 @@ class _Workspace:
         assert root is not None
         return config, paths, root
 
-    def write(self, path: str, text: str, *, age: timedelta | None = None) -> None:
+    def write(self, path: str, text: str, *, age: timedelta = timedelta()) -> None:
         target = self.root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-        if age is not None:
-            moment = (_now() - age).timestamp()
-            os.utime(target, (moment, moment))
+        moment = (_now() - age).timestamp()
+        os.utime(target, (moment, moment))
 
     def read(self, path: str) -> str:
         return (self.root / path).read_text(encoding="utf-8")
