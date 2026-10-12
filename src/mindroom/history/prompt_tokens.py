@@ -129,16 +129,6 @@ def _estimate_team_non_prompt_static_tokens(team: Team) -> int:
     return static_tokens + surface.definition_tokens
 
 
-def agent_tool_definition_payloads_for_logging(agent: Agent) -> list[dict[str, object]]:
-    """Return model-visible agent tool schemas using Agno's prompt-preparation path."""
-    return [deepcopy(payload) for payload in _agent_prompt_tool_surface(agent).payloads]
-
-
-def team_tool_definition_payloads_for_logging(team: Team) -> list[dict[str, object]]:
-    """Return model-visible team tool schemas using Agno's prompt-preparation path."""
-    return [deepcopy(payload) for payload in _team_prompt_tool_surface(team).payloads]
-
-
 def _cached_tool_surface(entity: Agent | Team) -> _PromptToolSurface | None:
     with _TOOL_SURFACE_CACHE_LOCK:
         entry = _TOOL_SURFACE_CACHE.get(id(entity))

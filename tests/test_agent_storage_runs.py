@@ -109,6 +109,24 @@ def test_upsert_run_strips_prompt_roles_from_the_row_only(tmp_path: Path) -> Non
     assert [message.role for message in run.messages or []] == ["system", "user"]
 
 
+def test_loaded_runs_drop_their_stored_tool_schemas(tmp_path: Path) -> None:
+    """Older runs carry a copy of every tool schema; loading drops it and keeps the rest of the metadata."""
+    storage = _storage(tmp_path)
+    try:
+        run = _run("s1", "r1")
+        run.metadata = {"room_id": "!room:example.test", "tools_schema": [{"name": "demo", "description": "Demo"}]}
+        storage.upsert_session(_session("s1", []))
+        storage.upsert_run(run=run, session_id="s1", user_id="@alice:example.test", run_index=0)
+        storage.close()
+        storage = _storage(tmp_path)
+        loaded = get_agent_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    assert [loaded_run.metadata for loaded_run in loaded.runs or []] == [{"room_id": "!room:example.test"}]
+
+
 def test_get_session_ignores_runs_limit(tmp_path: Path) -> None:
     """MindRoom's history layer reasons over the whole run list."""
     storage = _storage(tmp_path)

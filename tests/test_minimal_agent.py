@@ -34,7 +34,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
-from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging, estimate_agent_static_tokens
+from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, estimate_agent_static_tokens
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.hooks import EnrichmentItem
 from mindroom.memory.functions import MemoryPromptParts
@@ -766,7 +766,7 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
     )
     agent.response_context = _turn_context()
     assert estimate_agent_static_tokens(agent, "budget input") > 0
-    assert [item["name"] for item in agent_tool_definition_payloads_for_logging(agent)] == ["bash"]
+    assert [item["name"] for item in _agent_prompt_tool_surface(agent).payloads] == ["bash"]
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
             await agent.aget_tools(

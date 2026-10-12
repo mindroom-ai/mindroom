@@ -5057,11 +5057,6 @@ class TestTeamCompletion:
                     new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
                 ),
                 patch(
-                    "mindroom.teams.team_tool_definition_payloads_for_logging",
-                    return_value=[{"name": "demo_tool", "description": "Demo"}],
-                    create=True,
-                ),
-                patch(
                     "mindroom.teams.model_params_payload",
                     return_value={"temperature": 0.7},
                     create=True,
@@ -5081,7 +5076,7 @@ class TestTeamCompletion:
 
         assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
         assert prepared_prompt.run_metadata is not None
-        assert prepared_prompt.run_metadata["tools_schema"] == [{"name": "demo_tool", "description": "Demo"}]
+        assert "tools_schema" not in prepared_prompt.run_metadata
         assert prepared_prompt.run_metadata["model_params"] == {"temperature": 0.7}
         assert prepared_prompt.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         with open_bound_scope_session_context(

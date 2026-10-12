@@ -297,10 +297,6 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
                 "mindroom.ai._prepare_agent_and_prompt",
                 new=AsyncMock(return_value=_prepared_prompt_result(agent)),
             ),
-            patch(
-                "mindroom.ai.agent_tool_definition_payloads_for_logging",
-                return_value=[{"name": "demo_tool", "description": "Echo"}],
-            ),
         ):
             response = await ai_response(
                 make_turn_context(
@@ -417,7 +413,6 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         "reply_to_event_id": "$event:localhost",
         "requester_id": "@user:localhost",
         "correlation_id": "$event:localhost",
-        "tools_schema": [{"name": "demo_tool", "description": "Echo"}],
         "model_params": {"temperature": 0.7},
         "matrix_event_id": "$event:localhost",
         "matrix_seen_event_ids": ["$event:localhost"],
@@ -463,10 +458,6 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
             "mindroom.ai._prepare_agent_and_prompt",
             new=AsyncMock(return_value=_prepared_prompt_result(agent)),
         ),
-        patch(
-            "mindroom.ai.agent_tool_definition_payloads_for_logging",
-            return_value=[{"name": "demo_tool", "description": "Echo"}],
-        ),
     ):
         chunks = [
             chunk
@@ -500,7 +491,6 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
     assert metadata["reply_to_event_id"] == "$event:localhost"
     assert metadata["thread_id"] == "$thread:localhost"
     assert metadata["requester_id"] == "@user:localhost"
-    assert metadata["tools_schema"] == [{"name": "demo_tool", "description": "Echo"}]
 
 
 @pytest.mark.asyncio
@@ -541,10 +531,6 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
         patch(
             "mindroom.ai._prepare_agent_and_prompt",
             new=AsyncMock(return_value=_prepared_prompt_result(agent)),
-        ),
-        patch(
-            "mindroom.ai.agent_tool_definition_payloads_for_logging",
-            return_value=[{"name": "demo_tool", "description": "Echo"}],
         ),
     ):
         expected_correlation_id = uuid.uuid4().hex

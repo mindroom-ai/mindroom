@@ -170,7 +170,6 @@ def build_matrix_run_metadata(
     thread_id: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,
-    tools_schema: list[dict[str, object]] | None = None,
     model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -186,10 +185,6 @@ def build_matrix_run_metadata(
         metadata["requester_id"] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
-    if tools_schema is not None:
-        metadata["tools_schema"] = tools_schema
-    else:
-        metadata.setdefault("tools_schema", [])
     if model_params is not None:
         metadata["model_params"] = model_params
     else:
