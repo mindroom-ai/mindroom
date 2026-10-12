@@ -47,6 +47,7 @@ from mindroom.tool_system.worker_routing import (
     normalize_worker_key_part,
     resolved_worker_key_scope,
     worker_key_agent_name,
+    worker_log_id,
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -667,7 +668,7 @@ def _plan_knowledge_storage_mounts(
             # kubelet follows links inside the volume when it mounts, so another worker could redirect it.
             logger.error(
                 "Refusing to mount knowledge inside a directory other sandbox workers write",
-                worker_key=worker_key,
+                worker=worker_log_id(worker_key),
                 path=str(relative_path),
             )
             continue

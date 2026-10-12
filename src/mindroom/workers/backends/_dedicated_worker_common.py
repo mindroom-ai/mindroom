@@ -21,6 +21,7 @@ from mindroom.tool_system.worker_routing import (
     shared_storage_root,
     visible_workspace_roots,
     worker_key_agent_name,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
 
@@ -307,7 +308,7 @@ def plan_scoped_workspace_mounts(
         except FileNotFoundError:
             logger.info(
                 "Not mounting a workspace that does not exist yet",
-                worker_key=worker_key,
+                worker=worker_log_id(worker_key),
                 workspace=str(relative_path),
             )
         except OSError as exc:
@@ -316,7 +317,7 @@ def plan_scoped_workspace_mounts(
                 raise WorkerBackendError(msg) from exc
             logger.warning(
                 "Not mounting a workspace reached through a link",
-                worker_key=worker_key,
+                worker=worker_log_id(worker_key),
                 workspace=str(relative_path),
             )
     canonical_scope = private_instance_scope_root_path(storage_root, worker_key)

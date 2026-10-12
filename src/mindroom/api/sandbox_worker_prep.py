@@ -19,6 +19,7 @@ from mindroom.tool_system.worker_routing import (
     requires_explicit_private_agent_visibility,
     visible_workspace_roots,
     worker_dir_name,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import (
@@ -294,7 +295,7 @@ def prepare_worker_request(
     try:
         worker_handle = _prepare_worker(worker_key, runtime_paths, runner_token=runner_token)
     except WorkerBackendError as exc:
-        logger.warning("sandbox_worker_initialization_failed", worker_key=worker_key, exc_info=True)
+        logger.warning("sandbox_worker_initialization_failed", worker=worker_log_id(worker_key), exc_info=True)
         dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
         failure_kind: Literal["request", "worker"] = "worker"
         if dedicated_worker_key is not None and worker_key != dedicated_worker_key:

@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING
 from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.credentials.policy import credential_service_policy
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
+from mindroom.tool_system.worker_routing import (
+    resolved_worker_key_scope,
+    worker_dir_name,
+    worker_id_for_key,
+    worker_log_id,
+)
 from mindroom.workers.backend import (
     WorkerBackendError,
     effective_idle_status,
@@ -793,8 +798,8 @@ class KubernetesWorkerBackend:
             # Deployments created before visibility persistence cannot be rebuilt
             # deterministically; the ensure-time hash check recreates them on next use.
             logger.debug(
-                "Deferring pod-template reconciliation for worker %r: no persisted private-agent visibility",
-                handle.worker_key,
+                "Deferring pod-template reconciliation for worker %s: no persisted private-agent visibility",
+                worker_log_id(handle.worker_key),
             )
             return False
         try:
@@ -808,7 +813,11 @@ class KubernetesWorkerBackend:
                 resource_profile=resource_profile,
             )
         except WorkerBackendError:
-            logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
+            logger.warning(
+                "Skipping pod-template reconciliation for worker %s",
+                worker_log_id(handle.worker_key),
+                exc_info=True,
+            )
             return False
 
     def _reconcile_worker_deployment(self, handle: WorkerHandle, *, now: float) -> WorkerHandle | None:
@@ -836,7 +845,11 @@ class KubernetesWorkerBackend:
                 resource_profile=resources.parse_resource_profile_annotation(annotations),
             )
         except WorkerBackendError:
-            logger.warning("Skipping pod-template reconciliation for worker %r", live_handle.worker_key, exc_info=True)
+            logger.warning(
+                "Skipping pod-template reconciliation for worker %s",
+                worker_log_id(live_handle.worker_key),
+                exc_info=True,
+            )
             return None
         # The recreate keeps the lifecycle annotations and zero replicas, so the
         # handle projected from the live read still describes the reconciled worker.
