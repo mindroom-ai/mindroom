@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 from urllib.parse import quote
@@ -35,6 +35,25 @@ PROJECTS = "\n".join(f"- Project {index} is owned by person {index}." for index 
 EXPORT = "thread_exports/room/thread.yaml"
 
 
+def _now() -> datetime:
+    """Return the current time moved back onto TODAY, so a test run that crosses midnight keeps the dates collection fixed."""
+    now = datetime.now(UTC)
+    return now - (now.date() - TODAY)
+
+
+class _ClockOnToday(datetime):
+    """The dreaming automation's clock, read through ``_now``."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:
+        return _now().astimezone(tz)
+
+
+@pytest.fixture(autouse=True)
+def _dreaming_clock_on_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("mindroom.automations.dreaming.datetime", _ClockOnToday)
+
+
 class _Workspace:
     """An agent with file memory, its config, and helpers to play the dream and review runs."""
 
@@ -61,7 +80,7 @@ class _Workspace:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
         if age is not None:
-            moment = (datetime.now(UTC) - age).timestamp()
+            moment = (_now() - age).timestamp()
             os.utime(target, (moment, moment))
 
     def read(self, path: str) -> str:
@@ -162,8 +181,8 @@ def test_a_new_agent_with_only_old_files_asks_for_nothing(tmp_path: Path) -> Non
 def test_a_freshly_exported_old_conversation_counts_by_its_last_message(tmp_path: Path) -> None:
     """Turning on thread exports writes every old thread today; the room index's last message time decides its age."""
     workspace = _workspace(tmp_path)
-    old = int((datetime.now(UTC) - timedelta(days=90)).timestamp() * 1000)
-    recent = int(datetime.now(UTC).timestamp() * 1000)
+    old = int((_now() - timedelta(days=90)).timestamp() * 1000)
+    recent = int(_now().timestamp() * 1000)
     workspace.write("thread_exports/room/old.yaml", "messages: [long ago]\n")
     workspace.write("thread_exports/room/new.yaml", "messages: [today]\n")
     workspace.write(
@@ -187,7 +206,7 @@ def test_thread_exports_turned_on_later_start_from_recent_history_too(tmp_path: 
     workspace.write("memory/2026-01-01.md", "- Old note.\n", age=timedelta(days=30))
     assert workspace.check() is None
     assert "memory/2026-01-01.md" in workspace.state()["reviewed"]
-    old = int((datetime.now(UTC) - timedelta(days=200)).timestamp() * 1000)
+    old = int((_now() - timedelta(days=200)).timestamp() * 1000)
     workspace.write("thread_exports/room/old.yaml", "messages: [long ago]\n")
     workspace.write(
         "thread_exports/room/index.json",
