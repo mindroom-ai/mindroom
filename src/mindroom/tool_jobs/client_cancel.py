@@ -126,14 +126,13 @@ async def cancel_jobs_command(
     runtime: ToolJobRuntime,
     *,
     room_id: str,
-    thread_id: str | None,
     request: JobCancelRequest,
     may_cancel: Callable[[BackgroundJob], bool],
 ) -> str:
     """Cancel the jobs a chat command names that its sender may stop, and describe what it cancelled."""
     prefix = request.job_id
     if prefix is None:
-        targets = conversation_jobs(runtime, room_id=room_id, thread_id=thread_id)
+        targets = conversation_jobs(runtime, room_id=room_id, thread_id=request.thread_id)
     else:
         # A job ID, or any start of one, names one job, wherever in the room it runs.
         targets = [

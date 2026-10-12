@@ -127,15 +127,10 @@ async def _background_jobs_command(
             context.agent_reply_memberships,
         )
 
-    request = JobCancelRequest(
-        job_id=command.args["job_id"],
-        thread_id=thread_id,
-    )
     return await cancel_jobs_command(
         runtime,
         room_id=room.room_id,
-        thread_id=thread_id,
-        request=request,
+        request=JobCancelRequest(job_id=command.args["job_id"], thread_id=thread_id),
         may_cancel=may_cancel,
     )
 
