@@ -32,6 +32,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import Function, FunctionCall
+from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
@@ -511,6 +512,7 @@ class _CallAgentCache:
         )
         agent: AgnoAgent | None = None
         try:
+            # Build the same tools and system prompt as text chat so call turns reuse its prompt cache.
             agent = create_agent(
                 self.agent_name,
                 self.config,
@@ -521,12 +523,11 @@ class _CallAgentCache:
                 knowledge=knowledge,
                 history_storage=history_storage,
                 active_model_name=self.active_model_name,
-                include_interactive_questions=False,
-                tool_function_filter=self.context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=True,
                 eager_deferred_tools=True,
             )
+            _refuse_text_chat_functions(agent, self.config)
             prewarm_agent_model_client(agent, history_storage)
         except Exception:
             history_storage.close()
@@ -999,6 +1000,33 @@ def _function_requires_text_chat(function: Function, config: Config) -> bool:
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
         or (not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name))
     )
+
+
+def _refuse_text_chat_call(name: str) -> str:
+    logger.info("call_tool_blocked_needs_text_chat", tool=name)
+    return _TEXT_CHAT_REQUIRED_MESSAGE
+
+
+def _refuse_text_chat_functions(agent: AgnoAgent, config: Config) -> None:
+    """Keep functions that need text chat visible, so the prompt matches chat's, but refuse them when called."""
+    seen: set[int] = set()
+    for tool in agent.tools if isinstance(agent.tools, list) else ():
+        if isinstance(tool, Toolkit):
+            functions = (*tool.functions.values(), *tool.async_functions.values())
+        elif isinstance(tool, Function):
+            functions = (tool,)
+        else:
+            continue
+        for function in functions:
+            if id(function) in seen or not _function_requires_text_chat(function, config):
+                continue
+            seen.add(id(function))
+            # Agno pauses the run for these flags before any tool hook can refuse.
+            function.requires_confirmation = False
+            function.requires_user_input = False
+            function.external_execution = False
+            function.approval_type = None
+            function.tool_hooks = [_refuse_text_chat_call, *(function.tool_hooks or [])]
 
 
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:

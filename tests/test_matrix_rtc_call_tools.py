@@ -17,6 +17,7 @@ from agno.metrics import RunMetrics
 from agno.models.anthropic import Claude
 from agno.run.base import RunStatus
 from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -31,6 +32,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
+    _TEXT_CHAT_REQUIRED_MESSAGE,
     CallAgentResponse,
     _CallAgentCache,
     _CallAgentRunState,
@@ -1067,7 +1069,15 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
         )
         return "It is sunny."
 
-    cached_agent = SimpleNamespace(additional_context="base context", model=None)
+    empty_schema = {"type": "object", "properties": {}}
+    safe = _function(lambda: "safe", empty_schema, name="safe")
+    confirm = _function(lambda: "confirm", empty_schema, name="confirm")
+    confirm.requires_confirmation = True
+    policy = _function(lambda: "policy", empty_schema, name="policy_approval")
+    workflow = _function(lambda: "workflow", empty_schema, name="run_workflow")
+    toolkit = Toolkit(name="call_tools")
+    toolkit.functions = {function.name: function for function in (safe, confirm, policy, workflow)}
+    cached_agent = SimpleNamespace(additional_context="base context", model=None, tools=[toolkit])
     create_agent_mock = MagicMock(return_value=cached_agent)
     history_storage = MagicMock()
     create_scope_session_storage_mock = MagicMock(return_value=history_storage)
@@ -1143,6 +1153,16 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert kwargs["eager_deferred_tools"] is True
     assert kwargs["reusable_agent"] is cached_agent
     assert create_agent_mock.call_args.kwargs["history_storage"] is history_storage
+    # The cached delegate keeps chat's tools and prompt, so calls reuse chat's prompt cache.
+    assert "tool_function_filter" not in create_agent_mock.call_args.kwargs
+    assert "include_interactive_questions" not in create_agent_mock.call_args.kwargs
+    assert set(toolkit.functions) == {"safe", "confirm", "policy_approval", "run_workflow"}
+    assert not safe.tool_hooks
+    for refused in (confirm, policy, workflow):
+        assert refused.requires_confirmation is False
+        assert refused.parameters == empty_schema
+        assert refused.tool_hooks is not None
+        assert refused.tool_hooks[0](name=refused.name) == _TEXT_CHAT_REQUIRED_MESSAGE
     create_scope_session_storage_mock.assert_called_once_with(
         agent_name=AGENT,
         scope=HistoryScope(kind="agent", scope_id=AGENT),
@@ -1223,24 +1243,14 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert persisted_interruptions[-1]["partial_text"] == ("provider failed" if reconcile_spoken_response else "")
     assert persisted_interruptions[-1]["original_status"] is RunStatus.error
 
+    # Agents ai_response builds itself still hide these functions.
     tool_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
-    safe = _function(lambda: "safe", {"type": "object", "properties": {}}, name="safe")
-    confirm = _function(lambda: "confirm", {"type": "object", "properties": {}}, name="confirm")
-    confirm.requires_confirmation = True
-    policy = _function(
-        lambda: "policy",
-        {"type": "object", "properties": {}},
-        name="policy_approval",
-    )
-    workflow = _function(
-        lambda: "workflow",
-        {"type": "object", "properties": {}},
-        name="run_workflow",
-    )
-    assert tool_filter(safe) is True
-    assert tool_filter(confirm) is False
-    assert tool_filter(policy) is False
-    assert tool_filter(workflow) is False
+    confirm_again = _function(lambda: "confirm", empty_schema, name="confirm")
+    confirm_again.requires_confirmation = True
+    assert tool_filter(_function(lambda: "safe", empty_schema, name="safe")) is True
+    assert tool_filter(confirm_again) is False
+    assert tool_filter(_function(lambda: "policy", empty_schema, name="policy_approval")) is False
+    assert tool_filter(_function(lambda: "workflow", empty_schema, name="run_workflow")) is False
     assert contexts[0].tool_function_filter is None
     assert tooling.close is not None
     await tooling.close()
@@ -1602,7 +1612,7 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=SimpleNamespace(additional_context="", model=None)),
+        MagicMock(return_value=SimpleNamespace(additional_context="", model=None, tools=[])),
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", MagicMock())
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
@@ -1676,7 +1686,7 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
         return "answer"
 
     create_agent_mock = MagicMock(
-        side_effect=lambda *_args, **_kwargs: SimpleNamespace(additional_context="", model=None),
+        side_effect=lambda *_args, **_kwargs: SimpleNamespace(additional_context="", model=None, tools=[]),
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
@@ -1766,8 +1776,8 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
         ai_calls.append((turn, kwargs))
         return f"answer-{len(ai_calls)}"
 
-    first_agent = SimpleNamespace(additional_context="first base", model=None)
-    second_agent = SimpleNamespace(additional_context="second base", model=None)
+    first_agent = SimpleNamespace(additional_context="first base", model=None, tools=[])
+    second_agent = SimpleNamespace(additional_context="second base", model=None, tools=[])
     create_agent_mock = MagicMock(side_effect=(first_agent, second_agent))
     close_agent_mock = MagicMock()
     monkeypatch.setattr(
@@ -1844,7 +1854,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=SimpleNamespace(additional_context="base", model=None)),
+        MagicMock(return_value=SimpleNamespace(additional_context="base", model=None, tools=[])),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     tooling = await build_call_tools(
@@ -1928,7 +1938,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=SimpleNamespace(additional_context="base context", model=None)),
+        MagicMock(return_value=SimpleNamespace(additional_context="base context", model=None, tools=[])),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(
