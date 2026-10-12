@@ -169,6 +169,7 @@ def test_subagent_participant_requires_prompt_or_profile() -> None:
     "participant",
     [
         {"id": "writer", "kind": "subagent", "system_prompt": "P", "tools": ["file"], "model": "haiku"},
+        {"id": "writer", "kind": "subagent", "system_prompt": "P", "skills": ["research"]},
         {"id": "writer", "kind": "subagent", "profile": "critic"},
     ],
 )
@@ -182,6 +183,7 @@ def test_subagent_participant_accepts_inline_fields_or_a_profile(participant: di
     [
         {"id": "writer", "profile": "critic", "system_prompt": "P"},
         {"id": "writer", "profile": "critic", "tools": []},
+        {"id": "writer", "profile": "critic", "skills": []},
         {"id": "writer", "kind": "ephemeral_agent", "name": "Writer", "role": "Writes"},
     ],
 )
@@ -189,6 +191,13 @@ def test_profile_excludes_inline_fields_and_the_retired_kind_is_rejected(partici
     """A profile participant cannot add inline fields, and new specs cannot use the retired ephemeral kind."""
     with pytest.raises(DynamicWorkflowError):
         validate_workflow_spec(_spec(participants=[participant]))
+
+
+@pytest.mark.parametrize("skills", ["research", [""], [1]])
+def test_subagent_participant_skills_must_be_skill_names(skills: object) -> None:
+    """A participant's skills are a list of skill names."""
+    with pytest.raises(DynamicWorkflowError, match="field 'skills' must be a list of non-empty strings"):
+        validate_workflow_spec(_spec(participants=[{"id": "writer", "system_prompt": "P", "skills": skills}]))
 
 
 def test_participant_tools_must_be_granted_by_permissions() -> None:

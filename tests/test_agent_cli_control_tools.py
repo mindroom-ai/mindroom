@@ -817,7 +817,6 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     assert binding.catalog is catalog
     assert materialized == [True]
     await catalog.close()
-    bind_mcp_server_manager(None)
     sync_mcp_tool_registry(None)
     await manager.shutdown()
 

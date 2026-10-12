@@ -29,6 +29,7 @@ Matrix sync callback
 | Module | Purpose |
 |--------|---------|
 | `bounded_bytes.py` | Shared asynchronous and synchronous byte collection that rejects overflowing chunks before buffering them |
+| `origins.py` | Shared browser-origin normalization and allowlist validation for dashboard auth, CORS, Connections same-origin checks, the Computers allowlist, and MCP gateway origins |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
@@ -181,6 +182,10 @@ Matrix sync callback
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
+| `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
+| `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
+| `budgets/monitor.py` | Background spend refresh and the per-reply decision to use the fallback model |
+| `config/budgets.py` | Opt-in per-user monthly caps and fallback model |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
@@ -198,7 +203,7 @@ Matrix sync callback
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
-| `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool subset, `subagents/<name>.md` workspace profiles, and the caller tool-subset check |
+| `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool and skill subsets, `subagents/<name>.md` workspace profiles, and the caller tool and skill checks |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `credentials/manager.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
@@ -243,6 +248,8 @@ Matrix sync callback
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
 | `api/request_body_limit.py` | Pure ASGI middleware answering 413 for dashboard API request bodies over 16 MiB, except knowledge uploads |
+| `api/validation_errors.py` | 422 handler for the dashboard API and sandbox runner that returns FastAPI's validation error detail without the rejected request values |
+| `api/budgets.py` | Dashboard route reporting budget settings and month-to-date spend from the runtime's budget monitor |
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |

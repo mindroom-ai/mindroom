@@ -1,4 +1,4 @@
-"""Execute one native Chroma read, then release all native memory by exiting."""
+"""Wait idle for one native Chroma read, execute it, then release all native memory by exiting."""
 
 from __future__ import annotations
 
@@ -68,20 +68,24 @@ def _read(request: ReadRequest) -> ReadResult:
         return ReadResult(exists=True, documents=[ReadDocument.from_document(document) for document in documents])
 
 
-def _main(*, timeout: float = 30.0) -> None:
-    """Read one JSON request from stdin and return one JSON result on stdout."""
-    if not math.isfinite(timeout) or timeout <= 0:
-        message = "Knowledge reader deadline must be finite and positive"
-        raise ValueError(message)
-    # The kernel terminates even GIL-blocked native code after the parent dies.
-    signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    signal.setitimer(signal.ITIMER_REAL, timeout)
+def _main() -> None:
+    """Idle until stdin delivers a deadline line and one JSON request, then write one JSON result."""
     # Redirect the descriptor too: native code and preconfigured log handlers
     # may retain the original stdout object, bypassing redirect_stdout.
     output = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-    request_payload = sys.stdin.buffer.read(MAX_FRAME_BYTES + 1)
     with output:
+        deadline = sys.stdin.buffer.readline()
+        if not deadline:
+            return  # The parent exited.
+        timeout = float(deadline)
+        if not math.isfinite(timeout) or timeout <= 0:
+            message = "Knowledge reader deadline must be finite and positive"
+            raise ValueError(message)
+        # The kernel terminates even GIL-blocked native code after the parent dies.
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        request_payload = sys.stdin.buffer.read(MAX_FRAME_BYTES + 1)
         try:
             if len(request_payload) > MAX_FRAME_BYTES:
                 message = "Knowledge read request exceeds transport size limit"
@@ -98,4 +102,9 @@ def _main(*, timeout: float = 30.0) -> None:
 
 
 if __name__ == "__main__":
-    _main(timeout=float(sys.argv[1]) if len(sys.argv) > 1 else 30.0)
+    _main()
+    # The result is delivered and exit releases all native memory, so skip the
+    # interpreter teardown (about 0.1 s with Chroma loaded) that the parent waits for.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

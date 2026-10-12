@@ -446,6 +446,7 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
             config=config,
             runtime_paths=runtime_paths,
             depth=0,
+            budget_monitor=None,
         )
         result = await run_delegated_child_response(
             child,
@@ -481,6 +482,7 @@ async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> Non
             config=config,
             runtime_paths=runtime_paths,
             depth=0,
+            budget_monitor=None,
         )
         await run_delegated_child_response(
             child,

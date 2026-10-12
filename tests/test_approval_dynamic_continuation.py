@@ -27,7 +27,6 @@ from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
-from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.message_target import MessageTarget
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import (
@@ -51,21 +50,13 @@ from tests.conftest import bind_runtime_paths, make_turn_context, unwrap_extract
 from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
     from pathlib import Path
 
     from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
     from mindroom.response_turn import ResponseTurnContext
-
-
-@pytest.fixture(autouse=True)
-def _isolate_mcp_binding() -> Iterator[None]:
-    """Built-in tool continuations must not inherit another test's MCP configuration."""
-    bind_mcp_server_manager(None)
-    yield
-    bind_mcp_server_manager(None)
 
 
 def _call(name: str, call_id: str, **arguments: object) -> ModelResponse:

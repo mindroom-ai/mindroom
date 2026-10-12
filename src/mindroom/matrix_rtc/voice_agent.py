@@ -37,8 +37,9 @@ if TYPE_CHECKING:
         FunctionToolsExecutedEvent,
         SessionUsageUpdatedEvent,
         SpeechCreatedEvent,
+        UserStateChangedEvent,
     )
-    from livekit.agents.voice.io import AudioInput
+    from livekit.agents.voice.io import AudioInput, AudioOutput
     from livekit.agents.voice.speech_handle import SpeechHandle
 
     from mindroom.matrix_rtc.call_tools import CallAgentResponse
@@ -56,6 +57,12 @@ _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
 _CALL_TURN_CORRELATION_KEY = "mindroom_call_turn_id"
+#: GPT-Live streams speech in real time with a normal lead of one 100 ms delta,
+#: so an event-loop stall leaves the speech it held back queued to play late.
+#: When the caller starts talking over more than this much queued speech, the
+#: queue is discarded so they hear the model react instead of the late speech.
+#: Up to this much stays for GPT-Live to finish or yield on its own.
+_LIVE_OUTPUT_MAX_QUEUED_S = 0.5
 
 
 class _AudioFrameStream:
@@ -436,7 +443,6 @@ class RealtimeVoiceBridge:
         self._realtime_usage: RealtimeCallUsage | None = None
         self._saved_realtime_usage: RealtimeCallUsage | None = None
         self._record_realtime_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
-        self._reported_error_notices: set[str] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
 
@@ -561,6 +567,8 @@ class RealtimeVoiceBridge:
         if isinstance(options, CascadedVoiceAgentOptions):
             private_sync_close = await _attach_private_transcript_synchronizer(session)
             self._owned_speech_resource_closers += (private_sync_close,)
+        elif isinstance(options, LiveVoiceAgentOptions):
+            _drop_live_backlog_on_caller_speech(session)
 
     def _log_media_snapshot(self) -> None:
         """Log local publications and remote subscription state for call diagnostics."""
@@ -671,11 +679,7 @@ class RealtimeVoiceBridge:
         def _on_error(event: ErrorEvent) -> None:
             if self._session is not session:
                 return
-            notice = _describe_voice_error(event)
-            if notice in self._reported_error_notices:
-                return
-            self._reported_error_notices.add(notice)
-            on_error(notice)
+            on_error(_describe_voice_error(event))
 
         session.on("error", _on_error)
 
@@ -1002,18 +1006,23 @@ def _build_mindroom_llm(
     return _MindRoomLLM()
 
 
+def _session_audio_output(session: AgentSession) -> AudioOutput:
+    """Return the RoomIO audio output attached by ``session.start()``."""
+    audio_output = session.output.audio
+    if audio_output is None:
+        msg = "Voice session has no audio output"
+        raise RuntimeError(msg)
+    return audio_output
+
+
 async def _attach_private_transcript_synchronizer(
     session: AgentSession,
 ) -> Callable[[], Awaitable[None]]:
     """Sync assistant playout text without publishing transcripts to the SFU."""
     from livekit.agents.voice.transcription import TranscriptSynchronizer  # noqa: PLC0415
 
-    audio_output = session.output.audio
-    if audio_output is None:
-        msg = "Cascaded voice session has no audio output to synchronize"
-        raise RuntimeError(msg)
     synchronizer = TranscriptSynchronizer(
-        next_in_chain_audio=audio_output,
+        next_in_chain_audio=_session_audio_output(session),
         next_in_chain_text=None,
     )
     try:
@@ -1023,6 +1032,61 @@ async def _attach_private_transcript_synchronizer(
         await synchronizer.aclose()
         raise
     return synchronizer.aclose
+
+
+def _drop_live_backlog_on_caller_speech(session: AgentSession) -> None:
+    """Discard GPT-Live speech that a stall left queued once the caller talks over it."""
+    from livekit.agents.voice.io import AudioOutput, AudioOutputCapabilities  # noqa: PLC0415
+
+    class _LiveOutputBacklog(AudioOutput):
+        def __init__(self, audio_output: AudioOutput) -> None:
+            super().__init__(
+                label="MindRoomLiveOutputBacklog",
+                capabilities=AudioOutputCapabilities(pause=True),
+                next_in_chain=audio_output,
+                sample_rate=audio_output.sample_rate,
+            )
+            # The base class may put a proxy in front of the sink; use the chain it built.
+            self._sink = cast("AudioOutput", self.next_in_chain)
+            # When the audio already handed to the sink finishes playing at real-time pace.
+            self._playout_end = 0.0
+            self._capturing = False
+            # RoomIO discards the rest of a segment cleared before its flush, so those frames never play.
+            self._segment_cleared = False
+
+        async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+            await super().capture_frame(frame)
+            self._capturing = True
+            await self._sink.capture_frame(frame)
+            if not self._segment_cleared:
+                self._playout_end = max(self._playout_end, time.monotonic()) + frame.duration
+
+        def flush(self) -> None:
+            super().flush()
+            self._capturing = False
+            self._segment_cleared = False
+            self._sink.flush()
+
+        def clear_buffer(self) -> None:
+            self._playout_end = 0.0
+            self._segment_cleared = self._capturing
+            self._sink.clear_buffer()
+
+        def drop_backlog(self) -> None:
+            queued = self._playout_end - time.monotonic()
+            if queued > _LIVE_OUTPUT_MAX_QUEUED_S:
+                self.clear_buffer()
+                logger.warning("call_output_backlog_dropped", dropped_ms=round(queued * 1000))
+
+    output = _LiveOutputBacklog(_session_audio_output(session))
+    session.output.audio = output
+
+    # LiveKit reports this when GPT-Live starts hearing the caller, even while the model keeps talking.
+    def on_user_state_changed(event: UserStateChangedEvent) -> None:
+        if event.new_state == "speaking":
+            output.drop_backlog()
+
+    session.on("user_state_changed", on_user_state_changed)
 
 
 def _latest_user_transcript(chat_ctx: ChatContext) -> str:

@@ -83,6 +83,7 @@ alert if  median(metric) over 10 minutes > 20
 ```
 
 When it fires, look for `event_loop_stall_detected` and `event_loop_stall_ongoing` records, which include the blocking stack when one stall exceeds `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`).
+Every stall above `MINDROOM_EVENT_LOOP_STALL_STACK_THRESHOLD_SECONDS` (default `0.25`, `0` or a negative value disables) also logs one `event_loop_stall_stack` record with the blocking stack and the stall's `lag_ms` once it ends, at most once every 10 seconds.
 Compare the frequency of `event_loop_gc_collection` records, which report garbage collections slower than 50 ms.
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
 Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables stall detection and this summary.
@@ -161,5 +162,6 @@ To find what grows the primary process's memory, set `MINDROOM_HEAP_PROBE_INTERV
 MindRoom then logs one `heap_type_probe` event per interval with the 25 most common object types and their counts, resident memory (`rss_bytes`), allocator totals (`arena_bytes`, `arena_in_use_bytes`, `arena_free_bytes`, `mmap_bytes`), and `python_allocated_blocks`.
 Resident memory that grows while `arena_in_use_bytes` plus `mmap_bytes` and `python_allocated_blocks` stay flat suggests freed memory the allocator keeps.
 Growth in those suggests live objects, which the type histogram may not show because it does not count strings, bytes, or numbers.
+The histogram leaves out the objects that exist before agents start and reports only their count as `frozen_objects`, so it shows what the running agents created.
 Each probe briefly pauses the event loop, so prefer intervals of several minutes on large processes.
 Unset or `0` disables the probe (the default), and any other value below `60` fails startup.

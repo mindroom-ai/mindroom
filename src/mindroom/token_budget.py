@@ -75,9 +75,14 @@ def estimate_compaction_input_tokens(
     return approximate_o200k_tokens(value)
 
 
+def o200k_encoding() -> tiktoken.Encoding:
+    """Return the shared o200k_base encoding; building it on first use takes about 300 ms."""
+    return tiktoken.get_encoding("o200k_base")
+
+
 def approximate_o200k_tokens(value: str) -> int:
     """Approximate token count with the o200k_base encoding."""
-    return len(tiktoken.get_encoding("o200k_base").encode(value, disallowed_special=()))
+    return len(o200k_encoding().encode(value, disallowed_special=()))
 
 
 def compute_compaction_input_budget(

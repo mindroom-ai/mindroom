@@ -76,6 +76,7 @@ from mindroom.workers.models import WorkerReadyProgress
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
@@ -2187,7 +2188,7 @@ class TestStreamingBehavior:
                         pipeline_timing=pipeline_timing,
                     ),
                 ),
-                timeout=0.5,
+                timeout=SETTLE_TIMEOUT_SECONDS,
             )
 
         assert event_id == "$response"

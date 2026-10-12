@@ -75,6 +75,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
 | `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
+| `budgets` | Per-user monthly spending caps and the fallback model | [Budgets](../budgets.md) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](../matrix.md#matrix-sync) |
 | `event_journal` | Storage for the Matrix event journal | [Event Journal](../deployment/storage.md#event-journal) |

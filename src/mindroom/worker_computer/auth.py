@@ -1,19 +1,19 @@
 """Computer-specific Matrix OpenID verification and exact browser origins."""
 
-import ipaddress
 import json
-from contextlib import suppress
 from typing import Literal
-from urllib.parse import urlsplit
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
+from mindroom.origins import parse_browser_origin
 from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.worker_computer.sessions import ComputerError
+
+_CAPACITOR_ORIGIN = "capacitor://localhost"
 
 
 class MatrixOpenIDToken(BaseModel):
@@ -32,37 +32,13 @@ def computer_origins(paths: RuntimePaths) -> tuple[str, ...]:
         origins = json.loads(paths.env_value(COMPUTER_ALLOWED_ORIGINS_ENV, default="[]") or "[]")
         if not isinstance(origins, list):
             return ()
-        for origin in origins:
-            if not isinstance(origin, str) or any(character.isspace() or ord(character) < 32 for character in origin):
-                return ()
-            # The bundled iOS app has a fixed custom-scheme origin. Accept only
-            # this literal, never arbitrary capacitor origins or opaque "null".
-            if origin == "capacitor://localhost":
-                continue
-            parsed = urlsplit(origin)
-            hostname = parsed.hostname
-            port = parsed.port  # Validate malformed and out-of-range ports.
-            loopback = hostname == "localhost"
-            if hostname and not loopback:
-                with suppress(ValueError):
-                    loopback = ipaddress.ip_address(hostname).is_loopback
-            if (
-                parsed.scheme not in {"http", "https"}
-                or not parsed.netloc
-                or not hostname
-                or (parsed.scheme == "http" and not loopback)
-                or (port is None and parsed.netloc.endswith(":"))
-                or parsed.username is not None
-                or parsed.password is not None
-                or parsed.path
-                or parsed.query
-                or parsed.fragment
-                or "*" in origin
-            ):
-                return ()
-    except (ValueError, TypeError):
+        if not all(isinstance(origin, str) for origin in origins):
+            return ()
+        # The bundled iOS app has a fixed custom-scheme origin. Accept only
+        # this literal, never arbitrary capacitor origins or opaque "null".
+        return tuple(origin if origin == _CAPACITOR_ORIGIN else parse_browser_origin(origin) for origin in origins)
+    except ValueError:
         return ()
-    return tuple(origins)
 
 
 async def verify_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:

@@ -85,6 +85,7 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
         config=config,
         runtime_paths=paths,
         depth=0,
+        budget_monitor=None,
     )
     storage = create_session_storage("leader", config, paths, owner)
     executions = 0

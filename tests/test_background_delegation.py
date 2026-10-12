@@ -949,7 +949,16 @@ async def test_early_child_failure_retains_liveness_through_settlement(
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+    child = prepare_child_turn(
+        "leader",
+        "code",
+        "task",
+        owner=owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+    )
     settling, release = asyncio.Event(), asyncio.Event()
     original_interrupt = delegation_execution.interrupt_child
 
@@ -1383,7 +1392,16 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+    child = prepare_child_turn(
+        "leader",
+        "code",
+        "task",
+        owner=owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+    )
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
         msg = "primary execution failed"
@@ -1433,7 +1451,16 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+    child = prepare_child_turn(
+        "leader",
+        "code",
+        "task",
+        owner=owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+    )
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
         msg = "primary execution failed"
@@ -1484,7 +1511,16 @@ async def test_native_job_source_survives_restart(
         _delegate_runtime_context(config, paths, execution_identity=owner),
         membership_turn_id=source_event_id,
     )
-    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+    child = prepare_child_turn(
+        "leader",
+        "code",
+        "task",
+        owner=owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+    )
     runtime = await tool_job_runtime(tmp_path)
 
     async def completed() -> BackgroundOutcome:

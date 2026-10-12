@@ -956,11 +956,8 @@ def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_p
             return []
 
     bind_mcp_server_manager(_FakeMCPManager())  # type: ignore[arg-type]
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            results = [_tool_payload(result) for result in executor.map(manager.load_tool, ("mcp_demo", "shell"))]
-    finally:
-        bind_mcp_server_manager(None)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [_tool_payload(result) for result in executor.map(manager.load_tool, ("mcp_demo", "shell"))]
 
     assert {payload["status"] for payload in results} == {"loaded", "function_name_collision"}
     assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") in (

@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -24,6 +25,7 @@ from mindroom.api.sandbox_runner_scripts import (
     prepare_script_worker_before_serving,
 )
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
+from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.worker_computer import router as worker_computer_router
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope
@@ -97,7 +99,11 @@ class _RunnerTokenMiddleware:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="MindRoom Sandbox Runner", lifespan=_lifespan)
+app = FastAPI(
+    title="MindRoom Sandbox Runner",
+    lifespan=_lifespan,
+    exception_handlers={RequestValidationError: validation_error_response},
+)
 app.add_middleware(_RunnerTokenMiddleware)
 app.include_router(sandbox_runner_router)
 app.include_router(worker_computer_router)

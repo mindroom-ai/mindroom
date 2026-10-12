@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import socket
 import threading
 import time
@@ -66,10 +67,10 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -4401,15 +4402,21 @@ async def test_cancelled_reload_preserves_completed_durable_and_broker_revocatio
 
 
 @pytest.mark.asyncio
-async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall_deadline(tmp_path: Path) -> None:
+async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A deadline cannot return while an accepted durable revocation is still running."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     _stored_run(store, runtime_paths)
     broker_revocations: list[str] = []
+    accepted = threading.Event()
+    release = threading.Event()
 
-    def slow_request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
-        time.sleep(0.2)
+    def held_request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        accepted.set()
+        release.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return store.request_cancel(run_id, reason=reason)
 
     async def revoke(run_id: str, *, reason: str) -> ScriptRunRecord:
@@ -4425,22 +4432,50 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         manager=SimpleNamespace(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
-            request_revocation=slow_request_revocation,
+            request_revocation=held_request_revocation,
             revoke=revoke,
             reconcile_durable=AsyncMock(),
         ),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: current,
         worker_lease_provider=lambda _locator: None,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=0.05,
     )
-    started = asyncio.get_running_loop().time()
+    boundaries: list[asyncio.Task[None]] = []
+    wait_for = asyncio.wait_for
 
-    with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
-        await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+    async def deadline_from_acceptance(awaitable: Awaitable[object], timeout: float | None) -> object:  # noqa: ASYNC109
+        if not (inspect.iscoroutine(awaitable) and awaitable.cr_code.co_name == "apply_update_boundary"):
+            return await wait_for(awaitable, timeout)
+        boundary = asyncio.ensure_future(awaitable)
+        boundaries.append(boundary)
+        # The reload's pass deadline starts only once the revocation is accepted, however slow the runner.
+        assert await asyncio.to_thread(accepted.wait, SETTLE_TIMEOUT_SECONDS), "the reload never accepted a revocation"
+        return await wait_for(boundary, timeout)
 
-    assert asyncio.get_running_loop().time() - started >= 0.15
-    assert store.get_run("run-1").cancel_requested_at is not None
+    monkeypatch.setattr(asyncio, "wait_for", deadline_from_acceptance)
+
+    async def release_after_the_deadline() -> None:
+        # The expired deadline is cancelling the reload while the accepted revocation still holds it.
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not (boundaries and boundaries[0].cancelling()):  # noqa: ASYNC110
+                await asyncio.sleep(0.005)
+        # Give the cancellation loop turns to propagate; only the shield keeps the reload waiting through them.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not boundaries[0].done(), "the reload stopped waiting for its accepted revocation"
+        release.set()
+
+    releaser = asyncio.create_task(release_after_the_deadline())
+    try:
+        with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
+            await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+        # The accepted revocation finished before the reload returned.
+        assert store.get_run("run-1").cancel_requested_at is not None
+    finally:
+        release.set()
+        await releaser
+
     assert broker_revocations == []
 
 

@@ -21,6 +21,7 @@ from mindroom.path_confinement import open_directory_within_root, open_regular_f
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
     from typing import TextIO
 
@@ -31,6 +32,24 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _TRANSCRIPT_DIRNAME = "calls"
+# Speech providers can close a transcript item mid-sentence, so the next one may start with punctuation.
+_GLUED_PUNCTUATION = tuple(",.;:!?…)]}")
+
+
+def _spoken_continuation(fragment: str) -> str:
+    """Return one normalized, non-empty speech fragment prefixed for appending to the same speaker's turn."""
+    return fragment if fragment.startswith(_GLUED_PUNCTUATION) else f" {fragment}"
+
+
+def merge_spoken_turns(turns: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Join consecutive normalized, non-empty fragments from the same speaker into one turn."""
+    merged: list[tuple[str, str]] = []
+    for role, text in turns:
+        if merged and merged[-1][0] == role:
+            merged[-1] = (role, merged[-1][1] + _spoken_continuation(text))
+        else:
+            merged.append((role, text))
+    return merged
 
 
 def _new_call_transcript_path(base: Path, *, room_id: str, started_at: datetime) -> Path:
@@ -90,6 +109,7 @@ class CallTranscript:
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
     _header_written: bool = field(default=False, init=False)
+    _open_speaker: str | None = field(default=None, init=False)
     _flush_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     @classmethod
@@ -123,13 +143,23 @@ class CallTranscript:
         )
 
     def record(self, speaker: str, text: str) -> None:
-        """Record one finalized conversation turn (safe from sync callbacks)."""
-        text = text.strip()
+        """Record one finalized transcript item (safe from sync callbacks).
+
+        Consecutive items from the same speaker extend one turn, and its line stays open in the file until the turn ends.
+        """
+        text = " ".join(text.split())
         if not text:
             return
-        self._spoken.append((speaker, text))
-        stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
-        self._pending.append(f"- `{stamp}` **{speaker}**: {text}\n")
+        if self._open_speaker == speaker:
+            continuation = _spoken_continuation(text)
+            self._spoken[-1] = (speaker, self._spoken[-1][1] + continuation)
+            self._pending.append(continuation)
+        else:
+            self._end_open_line()
+            self._spoken.append((speaker, text))
+            stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
+            self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
+            self._open_speaker = speaker
         self._schedule_flush()
 
     @property
@@ -141,9 +171,15 @@ class CallTranscript:
         """Record one realtime tool-execution round without counting it as speech."""
         if not tool_names:
             return
+        self._end_open_line()
         stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
         self._pending.append(f"- `{stamp}` _tools used: {', '.join(tool_names)}_\n")
         self._schedule_flush()
+
+    def _end_open_line(self) -> None:
+        if self._open_speaker is not None:
+            self._pending.append("\n")
+            self._open_speaker = None
 
     def _schedule_flush(self) -> None:
         if self._flush_task is not None and not self._flush_task.done():
@@ -200,6 +236,7 @@ class CallTranscript:
         """Flush remaining turns and store a memory reference for the call."""
         ended_at = datetime.now(tz=UTC)
         duration_minutes = max(1, round((ended_at - self.started_at).total_seconds() / 60))
+        self._end_open_line()
         try:
             await self._flush()
         except OSError as error:

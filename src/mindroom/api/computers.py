@@ -76,7 +76,7 @@ class _ComputerRoute(APIRoute):
             except ComputerError as error:
                 response = JSONResponse({"detail": error.detail}, status_code=error.status_code)
             except RequestValidationError:
-                # FastAPI's default validation response echoes input, including credentials.
+                # These requests carry credentials, so a malformed one gets no validation details.
                 response = JSONResponse({"detail": "Invalid computer request."}, status_code=401)
             except HTTPException as error:
                 response = JSONResponse({"detail": "Computer runtime is unavailable."}, status_code=error.status_code)

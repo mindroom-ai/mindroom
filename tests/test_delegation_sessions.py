@@ -180,6 +180,7 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
         source_name="critic",
         system_prompt="You are a critic {x}.",
         tools=("file",),
+        skills=("research",),
     )
     child = _self_child(config, owner, persona)
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
@@ -195,6 +196,27 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
     ).children == [
         child,
     ]
+
+
+@pytest.mark.asyncio
+async def test_persona_snapshot_without_skills_reads_as_skill_less(tmp_path: Path) -> None:
+    """A persona saved before authored skills existed keeps running without skills, as it did then."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    child = _self_child(config, owner, SubagentPersona(source_kind="inline", source_name="", system_prompt="P"))
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
+    payload = json.loads(record.read_text())
+    del payload["child"]["persona"]["skills"]
+    record.write_text(json.dumps(payload))
+
+    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+    parent_state = DelegationState.from_metadata({DELEGATION_STATE_KEY: {"children": [payload["child"]]}})
+
+    assert restored.persona is not None
+    assert restored.persona.skills == ()
+    assert parent_state.children[0].persona == restored.persona
 
 
 @pytest.mark.asyncio

@@ -363,6 +363,28 @@ async def test_script_gateway_rejects_oversized_request_before_broker(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_script_gateway_rejects_a_non_finite_field_without_echoing_it() -> None:
+    """A rejected NaN, which JSON responses cannot render, gets a 422 that does not repeat the body."""
+    broker = _GatewayBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            content=json.dumps({**_payload(), "run_id": float("nan")}),
+            headers={"Authorization": "Bearer secret-token", "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [{"type": "string_type", "loc": ["run_id"], "msg": "Input should be a valid string"}],
+    }
+    assert broker.submitted is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("extra_bytes", [0, 1], ids=["exact_limit", "overflow"])
 async def test_script_gateway_bounds_chunked_requests_without_content_length(extra_bytes: int) -> None:
     """Streamed calls obey the 64 KiB cap before broker admission, including at the boundary."""

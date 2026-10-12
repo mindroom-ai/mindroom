@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,8 +18,9 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import router as agent_cli_router
-from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
+from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
+from mindroom.api.budgets import router as budgets_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
 from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
@@ -50,6 +52,7 @@ from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
 from mindroom.api.usage_export import close_usage_export_runner
+from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
@@ -63,6 +66,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
+from mindroom.origins import normalized_origin
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.runtime_state import get_runtime_state
 from mindroom.usage.legacy_usage_storage import migrate_usage_storage
@@ -638,8 +642,8 @@ def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
         dict.fromkeys(
             origin
             for origin in (
-                public_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
-                public_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+                normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                normalized_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
             )
             if origin is not None
         ),
@@ -689,6 +693,7 @@ app = FastAPI(
     docs_url=_api_docs["docs_url"],
     redoc_url=_api_docs["redoc_url"],
     openapi_url=_api_docs["openapi_url"],
+    exception_handlers={RequestValidationError: validation_error_response},
 )
 initialize_api_app(app, _runtime_paths)
 # Added before CORS, so a 413 still carries the dashboard's CORS headers.
@@ -773,6 +778,7 @@ app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(usage_router)  # Routes require dashboard, signed personal, or dedicated service authentication.
+app.include_router(budgets_router, dependencies=[Depends(verify_user)])
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)

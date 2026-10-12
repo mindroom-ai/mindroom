@@ -21,12 +21,24 @@ _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
 
 @dataclass(frozen=True)
 class SubagentPersona:
-    """The authored presentation of one child: its authored prompt and optional tool subset."""
+    """The authored presentation of one child: its authored prompt and optional tool and skill subsets."""
 
     source_kind: PersonaSourceKind
     source_name: str
     system_prompt: str
     tools: tuple[str, ...] | None = None
+    skills: tuple[str, ...] | None = None
+
+    @property
+    def kept_skills(self) -> tuple[str, ...] | None:
+        """Return the caller skills this persona keeps, or None for every one.
+
+        Like knowledge search, skills follow an explicit tool list: a persona that lists tools but
+        no skills keeps none, so a child narrowed to a few tools never gains skill functions.
+        """
+        if self.skills is None and self.tools is not None:
+            return ()
+        return self.skills
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> SubagentPersona:
@@ -37,13 +49,18 @@ class SubagentPersona:
             data["system_prompt"],
             data["tools"],
         )
+        # LEGACY_COMPAT: Authored subagent personas persisted without skills.
+        # Legacy format: Persona snapshots in parent delegation state and subagent session records omitted skills; from v2026.10.236 every authored child ran without skills, while v2026.10.231 through v2026.10.235 still loaded caller skills without listing them, as functions for a child without a tool list and as documents for a minimal child.
+        # Last legacy release: v2026.10.245; replacement: the next release persists each persona's skills, null keeping every caller skill.
+        # Handling: An absent skills field reads as no skills, matching the latest legacy releases, so retained authored children and their follow-ups keep running without skills.
+        # Coverage: tests/test_delegation_sessions.py::test_persona_snapshot_without_skills_reads_as_skill_less.
+        skills = data.get("skills", ())
         if (
             source_kind not in _SOURCE_KINDS
             or not isinstance(source_name, str)
             or not isinstance(system_prompt, str)
-            or not (
-                tools is None or (isinstance(tools, (list, tuple)) and all(isinstance(tool, str) for tool in tools))
-            )
+            or not _optional_names(tools)
+            or not _optional_names(skills)
         ):
             msg = "Invalid subagent persona snapshot"
             raise TypeError(msg)
@@ -52,7 +69,12 @@ class SubagentPersona:
             source_name=source_name,
             system_prompt=system_prompt,
             tools=None if tools is None else tuple(cast("list[str] | tuple[str, ...]", tools)),
+            skills=None if skills is None else tuple(cast("list[str] | tuple[str, ...]", skills)),
         )
+
+
+def _optional_names(value: object) -> bool:
+    return value is None or (isinstance(value, (list, tuple)) and all(isinstance(name, str) for name in value))
 
 
 @dataclass
@@ -82,6 +104,8 @@ class DelegationChild:
     # Handling: The dataclass default reads an absent mode as standard, so retained children and follow-ups keep their behavior.
     # Coverage: tests/test_delegation_minimal_mode.py::test_child_snapshot_without_mode_continues_in_standard_mode.
     agent_mode: AgentMode = "standard"
+    # The model the child was asked to use before the requester's budget picked the one it runs on.
+    requested_model_name: str | None = None
     # LEGACY_COMPAT: Delegated children persisted without a persona.
     # Legacy format: Parent delegation state and subagent session records omitted persona; every child ran its configured prompt.
     # Last legacy release: v2026.10.230; replacement: the next release persists each child's authored persona or null.

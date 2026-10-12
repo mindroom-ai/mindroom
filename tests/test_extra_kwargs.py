@@ -50,6 +50,7 @@ from mindroom.providers.claude_prompt_cache import (
 from mindroom.providers.model_loading import get_model_instance
 from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.startup_errors import PermanentStartupError
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 
 def _config_with_runtime_paths(
@@ -1862,7 +1863,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
 
     def blocking_prepare(_model: object, request_kwargs: dict[str, object]) -> dict[str, object]:
         setup_started.set()
-        assert allow_setup.wait(2.0)
+        assert allow_setup.wait(SETTLE_TIMEOUT_SECONDS)
         setup_finished.set()
         return request_kwargs
 
@@ -1888,7 +1889,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
 
     setup_task = asyncio.create_task(consume_stream())
     try:
-        assert await asyncio.to_thread(setup_started.wait, 2.0)
+        assert await asyncio.to_thread(setup_started.wait, SETTLE_TIMEOUT_SECONDS)
         if not cancel_before_setup:
             for _ in range(cancel_count):
                 setup_task.cancel()
@@ -1896,8 +1897,8 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         with pytest.raises(asyncio.CancelledError):
             await setup_task
 
-        assert await asyncio.to_thread(setup_finished.wait, 2.0)
-        assert await asyncio.to_thread(request_created.wait, 2.0)
+        assert await asyncio.to_thread(setup_finished.wait, SETTLE_TIMEOUT_SECONDS)
+        assert await asyncio.to_thread(request_created.wait, SETTLE_TIMEOUT_SECONDS)
         assert setup_task.cancelling() == cancel_count
         assert len(request_coroutines) == 1
         assert inspect.getcoroutinestate(request_coroutines[0]) == inspect.CORO_CLOSED

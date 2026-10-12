@@ -1191,6 +1191,7 @@ async def _send_metered_turns(
                         runtime_paths=paths,
                         agent_reply_memberships=AgentReplyMembershipIndex(),
                         config_provider=lambda: config,
+                        budget_monitor=None,
                     ),
                 )
                 if api_requests

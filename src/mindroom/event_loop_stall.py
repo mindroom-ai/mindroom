@@ -12,6 +12,11 @@ where external profilers such as py-spy cannot attach.
 Minute summaries retain the scheduled and observed UTC times of the worst
 heartbeat delay. Stack captures share a cooldown across separate stalls;
 suppressed captures still emit brief detection and recovery records.
+
+Every stall above ``MINDROOM_EVENT_LOOP_STALL_STACK_THRESHOLD_SECONDS``
+(default 0.25 s) also gets one ``event_loop_stall_stack`` record: the stack
+is sampled while the loop is still blocked and logged with the stall's total
+lag once the heartbeat recovers, at most once per cooldown.
 """
 
 from __future__ import annotations
@@ -40,6 +45,9 @@ logger = get_logger(__name__)
 
 _EVENT_LOOP_STALL_THRESHOLD_ENV = "MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS"
 _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS = 5.0
+_EVENT_LOOP_STALL_STACK_ENV = "MINDROOM_EVENT_LOOP_STALL_STACK_THRESHOLD_SECONDS"
+_DEFAULT_EVENT_LOOP_STALL_STACK_SECONDS = 0.25
+_STALL_STACK_COOLDOWN_SECONDS = 10.0
 _HEARTBEAT_INTERVAL_SECONDS = 0.05
 _SCHEDULER_LAG_WINDOW_SECONDS = 60.0
 _REPEAT_LOG_INTERVAL_SECONDS = 30.0
@@ -59,6 +67,13 @@ def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
     if not raw:
         return _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS
     return float(raw)
+
+
+def _event_loop_stall_stack_seconds(runtime_paths: RuntimePaths) -> float | None:
+    """Return the sub-second stack-sampling threshold; zero or negative disables sampling."""
+    raw = (runtime_paths.env_value(_EVENT_LOOP_STALL_STACK_ENV) or "").strip()
+    seconds = float(raw) if raw else _DEFAULT_EVENT_LOOP_STALL_STACK_SECONDS
+    return seconds if seconds > 0 else None
 
 
 def _truncate_stack(stack: str) -> str:
@@ -96,6 +111,16 @@ class _Heartbeat:
 
 
 @dataclass(frozen=True, slots=True)
+class _ShortStall:
+    """One stall above the stack threshold, held until its heartbeat recovers."""
+
+    beat: float
+    """Monotonic time of the last heartbeat before the stall."""
+    diagnostics: dict[str, object] | None
+    """Stack evidence sampled mid-stall, or None when the cooldown suppressed it."""
+
+
+@dataclass(frozen=True, slots=True)
 class _GcCollection:
     """Scalar collection evidence retained until the watcher can report it."""
 
@@ -119,6 +144,7 @@ class EventLoopStallDetector:
         heartbeat_interval_seconds: float = _HEARTBEAT_INTERVAL_SECONDS,
         repeat_log_interval_seconds: float = _REPEAT_LOG_INTERVAL_SECONDS,
         poll_interval_seconds: float | None = None,
+        stack_threshold_seconds: float | None = _DEFAULT_EVENT_LOOP_STALL_STACK_SECONDS,
     ) -> None:
         """Configure thresholds; ``start()`` arms the heartbeat and thread."""
         if not math.isfinite(heartbeat_interval_seconds) or heartbeat_interval_seconds <= 0:
@@ -127,13 +153,21 @@ class EventLoopStallDetector:
         self.threshold_seconds = threshold_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.repeat_log_interval_seconds = repeat_log_interval_seconds
-        self.poll_interval_seconds = poll_interval_seconds or max(min(1.0, threshold_seconds / 2), 0.01)
+        self.stack_threshold_seconds = stack_threshold_seconds
+        default_poll_interval_seconds = max(min(1.0, threshold_seconds / 2), 0.01)
+        if stack_threshold_seconds is not None:
+            # Poll several times per short stall so its stack is sampled while the loop is blocked.
+            default_poll_interval_seconds = min(default_poll_interval_seconds, max(stack_threshold_seconds / 5, 0.01))
+        self.poll_interval_seconds = poll_interval_seconds or default_poll_interval_seconds
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread_ident: int | None = None
         self._heartbeat_handle: asyncio.TimerHandle | None = None
         self._heartbeat = _Heartbeat(monotonic_seconds=0.0, process_cpu_seconds=0.0)
         self._stalled_beat: float | None = None
         self._next_repeat_log: float = 0.0
+        self._short_stall: _ShortStall | None = None
+        self._next_short_stall_stack: float = 0.0
+        self._suppressed_short_stall_stacks = 0
         self._scheduler_lag_samples: deque[tuple[float, float, float]] = deque(
             maxlen=max(1, math.ceil(_SCHEDULER_LAG_WINDOW_SECONDS / heartbeat_interval_seconds)),
         )
@@ -172,6 +206,7 @@ class EventLoopStallDetector:
             "event_loop_stall_detector_started",
             threshold_seconds=self.threshold_seconds,
             heartbeat_interval_seconds=self.heartbeat_interval_seconds,
+            stack_threshold_seconds=self.stack_threshold_seconds,
         )
 
     def stop(self) -> None:
@@ -390,6 +425,40 @@ class EventLoopStallDetector:
             **diagnostics,
         )
 
+    def _observe_short_stall(self, now: float, last_beat: float) -> None:
+        """Sample the loop stack during a short stall and log it once the heartbeat recovers.
+
+        The stack must be formatted mid-stall because a live frame's line number
+        moves on as soon as the loop resumes. The total lag is known only after
+        the late heartbeat runs, so one record carries both.
+        """
+        assert self.stack_threshold_seconds is not None
+        stall = self._short_stall
+        if stall is not None and last_beat != stall.beat:
+            self._short_stall = None
+            if stall.diagnostics is not None:
+                logger.warning(
+                    "event_loop_stall_stack",
+                    lag_ms=elapsed_ms_between(stall.beat + self.heartbeat_interval_seconds, last_beat),
+                    threshold_ms=elapsed_ms_between(0.0, self.stack_threshold_seconds),
+                    **stall.diagnostics,
+                )
+        lag_seconds = now - last_beat - self.heartbeat_interval_seconds
+        if self._short_stall is not None or lag_seconds <= self.stack_threshold_seconds:
+            return
+        if now < self._next_short_stall_stack:
+            self._suppressed_short_stall_stacks += 1
+            self._short_stall = _ShortStall(beat=last_beat, diagnostics=None)
+            return
+        self._next_short_stall_stack = now + _STALL_STACK_COOLDOWN_SECONDS
+        diagnostics: dict[str, object] = {
+            "stack_lag_ms": elapsed_ms_between(0.0, lag_seconds),
+            "stack": self._loop_thread_stack(sys._current_frames()),
+            "suppressed_count": self._suppressed_short_stall_stacks,
+        }
+        self._suppressed_short_stall_stacks = 0
+        self._short_stall = _ShortStall(beat=last_beat, diagnostics=diagnostics)
+
     def _watch(self) -> None:
         """Poll the heartbeat off-loop and log stalls with the blocking stack."""
         while not self._stop_event.wait(self.poll_interval_seconds):
@@ -398,6 +467,8 @@ class EventLoopStallDetector:
             self._report_scheduler_lag(now)
             heartbeat = self._heartbeat
             last_beat = heartbeat.monotonic_seconds
+            if self.stack_threshold_seconds is not None:
+                self._observe_short_stall(now, last_beat)
             if self._stalled_beat is not None and last_beat != self._stalled_beat:
                 self._note_stall_ended(last_beat)
             if now - last_beat > self.threshold_seconds:
@@ -415,6 +486,9 @@ def start_event_loop_stall_detector(runtime_paths: RuntimePaths) -> EventLoopSta
     if threshold_seconds <= 0:
         logger.info("event_loop_stall_detector_disabled", env_var=_EVENT_LOOP_STALL_THRESHOLD_ENV)
         return None
-    detector = EventLoopStallDetector(threshold_seconds=threshold_seconds)
+    detector = EventLoopStallDetector(
+        threshold_seconds=threshold_seconds,
+        stack_threshold_seconds=_event_loop_stall_stack_seconds(runtime_paths),
+    )
     detector.start()
     return detector

@@ -64,6 +64,7 @@ run_subagent(
     minimal: bool = False,
     system_prompt: str | None = None,
     tools: list[str] | None = None,
+    skills: list[str] | None = None,
     profile: str | None = None,
 ) -> str
 continue_subagent(subagent_id: str, message: str) -> str
@@ -117,14 +118,15 @@ Common errors:
 An agent whose own name is in `delegate_to` can write the prompt of a fresh copy of itself in place of its configured identity and instructions.
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
+Pass `skills` with a subset of the caller's skill names, or `skills=[]` for none; omitting `skills` keeps all of the caller's skills only when `tools` is omitted too, so a child with a `tools` list has only the skills it names.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
-The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories and skills are left out; a child with a `tools` list also has no knowledge search, though it can still read file-mode knowledge bases with its file tools.
+The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories are left out; a child with a `tools` list also has no knowledge search, though it can still read file-mode knowledge bases with its file tools.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](https://docs.mindroom.chat/configuration/history/), the summary of its earlier turns.
 [Minimal subagents](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) describes what a minimal authored subagent, started with `minimal=True` or a profile's `mode: minimal`, needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
-An authored subagent whose `tools` include `delegate` can author further copies only within those tools, a copy without `tools` inherits them except `delegate` at the maximum depth, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
+An authored subagent with `delegate` can author further copies only within its own `tools` and `skills` lists: a copy that omits `tools` inherits its tools, except `delegate` at the maximum depth, a copy that omits both also inherits its skills, and an authored subagent with either list cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools and skills.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
-A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools.
+A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, and a kept configured skill can run its scripts.
 
 ```python
 run_subagent(
@@ -150,16 +152,17 @@ You are a hostile reviewer.
 Find the three most serious risks in the proposal you are given, each with evidence.
 ```
 
-`description` is required, `tools`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
-An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt` or `tools`.
+`description` is required, `tools`, `skills`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
+An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt`, `tools`, or `skills`.
 Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters, and each file is limited to 64 KiB.
 On the agent's next run, its `run_subagent` tool lists every profile with its description and every invalid profile with the reason, or, when that list would exceed 2,000 characters, only a note to list `subagents/` itself.
 A subagent keeps the persona it started with, so editing or deleting a profile affects only subagents started afterwards.
 
 Authoring errors:
 
-- `Cannot author a subagent for '<name>': system_prompt, tools, and profile apply only to yourself.` - authoring applies only to the caller's own copy.
+- `Cannot author a subagent for '<name>': system_prompt, tools, skills, and profile apply only to yourself.` - authoring applies only to the caller's own copy.
 - `Cannot delegate: unknown tool '<entry>'. Your tools: ...` - `tools` names a toolkit or function the caller does not have.
+- `Cannot delegate: unknown skill '<name>'. Your skills: ...` - `skills` names a skill the caller does not have.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
 - `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
@@ -173,7 +176,7 @@ Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mind
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
-For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
+For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, skills, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
 These files are audit exports that MindRoom never reads, so editing or deleting them does not affect the delegation.
 
 ## Background jobs
@@ -349,11 +352,12 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
-  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `model`, and `mode`.
+  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads or runs a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     A participant used by several steps continues one session.
-    Each run uses the prompt, tools, and model its participants had when the run started, even if a profile changes during the run.
+    Each run uses the prompt, tools, skills, and model its participants had when the run started, even if a profile changes during the run.
     Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
   - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
     It runs with its configured model and without tools, skills, knowledge, durable state, or context files.

@@ -1,4 +1,9 @@
-"""Run each native knowledge read in a bounded, short-lived child process."""
+"""Run each native knowledge read in a bounded, single-use child process.
+
+Every child serves one read and exits, which releases all native memory. One
+idle child is kept warm, so a read does not wait for interpreter startup and
+native imports; each read starts its successor once it is over.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +12,9 @@ import os
 import signal
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
-from threading import BoundedSemaphore
+from threading import BoundedSemaphore, Lock
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge.read_protocol import (
@@ -25,8 +31,13 @@ if TYPE_CHECKING:
 # TODO: Remove this read subprocess workaround after pinning a Chroma release containing
 # https://github.com/chroma-core/chroma/pull/7692 and verifying lock waits no longer stall the application.
 
+_READ_CAPACITY = 4
 # Avoid turning simultaneous searches into unbounded native index copies.
-_read_slots = BoundedSemaphore(4)
+_read_slots = BoundedSemaphore(_READ_CAPACITY)
+# Async reads wait on child pipes here, never in the shared default executor.
+_exchange_threads = ThreadPoolExecutor(_READ_CAPACITY, thread_name_prefix="knowledge-read")
+_warm_reader_lock = Lock()
+_warm_reader: subprocess.Popen[bytes] | None = None
 _CHILD_ENV_KEYS = (
     "PATH",
     "HOME",
@@ -41,19 +52,25 @@ _CHILD_ENV_KEYS = (
 )
 
 
-def _encode_request(request: ReadRequest) -> bytes:
+def _encode_request(request: ReadRequest, timeout: float) -> bytes:
+    """Frame the child's deadline as the first line, ahead of the JSON request."""
     payload = request_adapter.dump_json(request)
     if len(payload) > MAX_FRAME_BYTES:
         message = "Knowledge read request exceeds transport size limit"
         raise ValueError(message)
-    return payload
+    return f"{timeout!r}\n".encode() + payload
 
 
-def _decode_result(payload: bytes) -> ReadResult:
-    if len(payload) > MAX_FRAME_BYTES:
+def _decode_result(output: bytes, returncode: int) -> ReadResult:
+    if returncode == -signal.SIGALRM:
+        message = "Knowledge read timed out"
+        raise TimeoutError(message)
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, "knowledge read worker", output=output)
+    if len(output) > MAX_FRAME_BYTES:
         message = "Knowledge read result exceeds transport size limit"
         raise RuntimeError(message)
-    result = result_adapter.validate_json(payload)
+    result = result_adapter.validate_json(output)
     if result.error_type is not None:
         message = f"Knowledge read failed ({result.error_type})"
         raise RuntimeError(message)
@@ -64,6 +81,63 @@ def _child_environment() -> dict[str, str]:
     env = {name: os.environ[name] for name in _CHILD_ENV_KEYS if name in os.environ}
     env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", TOKIO_WORKER_THREADS="2")
     return env
+
+
+def _spawn_reader() -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [sys.executable, "-m", "mindroom.knowledge.read_worker"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=_child_environment(),
+        # An idle warm child must not receive the terminal's Ctrl+C; the parent owns its lifetime.
+        start_new_session=True,
+    )
+
+
+@contextmanager
+def _reader() -> Iterator[subprocess.Popen[bytes]]:
+    """Hand out the warm child, or a new one, then warm the next read's child.
+
+    Warming starts only after this read, so the successor's imports never compete with it for CPU.
+    """
+    global _warm_reader
+    with _warm_reader_lock:
+        reader, _warm_reader = _warm_reader, None
+    if reader is None:
+        reader = _spawn_reader()
+    try:
+        yield reader
+    finally:
+        with _warm_reader_lock:
+            if _warm_reader is None:
+                _warm_reader = _spawn_reader()
+
+
+def _exchange(
+    reader: subprocess.Popen[bytes],
+    payload: bytes | None,
+    timeout: float | None = None,
+) -> tuple[bytes, int]:
+    """Send one framed request, or none to discard the child; return only after reaping it."""
+    with reader:
+        if payload is None:
+            reader.kill()
+        try:
+            output, _ = reader.communicate(payload, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            reader.kill()
+            message = "Knowledge read timed out"
+            raise TimeoutError(message) from exc
+    return output, reader.returncode
+
+
+def _discard_warm_reader() -> None:
+    """Kill and reap the idle child so tests start from a cold reader; it holds no request, lease, or native index."""
+    global _warm_reader
+    with _warm_reader_lock:
+        reader, _warm_reader = _warm_reader, None
+    if reader is not None:
+        _exchange(reader, None)
 
 
 @contextmanager
@@ -79,27 +153,10 @@ def _read_slot() -> Iterator[None]:
 
 
 def read_chroma(request: ReadRequest, *, timeout: float = 30.0) -> ReadResult:
-    """Run off the event loop; subprocess.run kills and reaps a timed-out child."""
-    payload = _encode_request(request)
-    with _read_slot():
-        try:
-            completed = subprocess.run(
-                [sys.executable, "-m", "mindroom.knowledge.read_worker", str(timeout)],
-                input=payload,
-                stdout=subprocess.PIPE,
-                env=_child_environment(),
-                timeout=timeout,
-                check=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            if exc.returncode != -signal.SIGALRM:
-                raise
-            message = "Knowledge read timed out"
-            raise TimeoutError(message) from exc
-        except subprocess.TimeoutExpired as exc:
-            message = "Knowledge read timed out"
-            raise TimeoutError(message) from exc
-        return _decode_result(completed.stdout)
+    """Run off the event loop; a child that outlives the deadline is killed and reaped."""
+    payload = _encode_request(request, timeout)
+    with _read_slot(), _reader() as reader:
+        return _decode_result(*_exchange(reader, payload, timeout))
 
 
 @asynccontextmanager
@@ -118,68 +175,31 @@ async def read_chroma_async(
     *,
     timeout: float = 30.0,  # noqa: ASYNC109 - The transport owns the child's bounded lifetime.
 ) -> ReadResult:
-    """Overlap child imports with parent preparation under one request deadline."""
+    """Let a still-starting child finish its imports during parent preparation, under one deadline."""
     try:
         async with asyncio.timeout(timeout), _read_slot_async():
-            process = await _start_read_process(timeout=timeout)
-            try:
-                request = await prepare_request()
-                output, _ = await process.communicate(_encode_request(request))
-                if process.returncode == -signal.SIGALRM:
-                    message = "Knowledge read timed out"
-                    raise TimeoutError(message)
-                if process.returncode:
-                    raise subprocess.CalledProcessError(process.returncode, "knowledge read worker", output=output)
-                return _decode_result(output)
-            finally:
-                await _cleanup_read_process(process)
+            with _reader() as reader:
+                try:
+                    payload = _encode_request(await prepare_request(), timeout)
+                except BaseException:
+                    await _exchange_async(reader, None)
+                    raise
+                return _decode_result(*await _exchange_async(reader, payload))
     except TimeoutError as exc:
         message = "Knowledge read timed out"
         raise TimeoutError(message) from exc
 
 
-async def _start_read_process(*, timeout: float) -> asyncio.subprocess.Process:  # noqa: ASYNC109
-    """Keep interrupted startup owned until its child can be killed and reaped."""
-    startup = asyncio.create_task(
-        asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "mindroom.knowledge.read_worker",
-            str(timeout),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            env=_child_environment(),
-        ),
-    )
+async def _exchange_async(reader: subprocess.Popen[bytes], payload: bytes | None) -> tuple[bytes, int]:
+    """Exchange off-loop; cancellation kills the child but keeps capacity until it is reaped."""
+    exchange = asyncio.wrap_future(_exchange_threads.submit(_exchange, reader, payload))
     cancelled = False
-    while not startup.done():
+    while not exchange.done():
         try:
-            await asyncio.shield(startup)
+            await asyncio.wait([exchange])
         except asyncio.CancelledError:
             cancelled = True
-        except Exception:
-            if not cancelled:
-                raise
-    if cancelled:
-        try:
-            if not startup.cancelled() and startup.exception() is None:
-                await _cleanup_read_process(startup.result())
-        finally:
-            raise asyncio.CancelledError
-    return startup.result()
-
-
-async def _cleanup_read_process(process: asyncio.subprocess.Process) -> None:
-    """Drain pipes and reap before releasing capacity, even under repeated cancellation."""
-    if process.returncode is None:
-        process.kill()
-    cleanup = asyncio.create_task(process.communicate())
-    cancelled = False
-    while not cleanup.done():
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            cancelled = True
-    cleanup.result()
+            reader.kill()
     if cancelled:
         raise asyncio.CancelledError
+    return exchange.result()
