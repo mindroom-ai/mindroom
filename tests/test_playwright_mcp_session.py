@@ -324,7 +324,7 @@ setInterval(()=>{},1000);
         # Birth spans the Python supervisor, Node, and its grandchild. Loaded CI
         # runners have stalled it past 5 seconds, so only a hang should fail here.
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            while not pidfile.exists():
+            while not (pidfile.exists() and pidfile.read_text()):
                 assert not session._actor_task.done(), "Fixture actor exited before child readiness"
                 await asyncio.sleep(0.01)
         pid = int(pidfile.read_text())

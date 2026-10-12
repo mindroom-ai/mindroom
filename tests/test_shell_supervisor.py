@@ -367,8 +367,9 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
         )
         handle = _extract_handle(result)
         try:
+            # The leader creates the pid file before writing it, so wait for its content.
             for _ in range(100):
-                if child_path.exists():
+                if child_path.exists() and child_path.read_text():
                     break
                 await asyncio.sleep(0.01)
             assert child_path.exists()
@@ -1103,7 +1104,7 @@ async def test_finished_script_kills_same_group_descendants(
     child_pid: int | None = None
     try:
         for _ in range(40):
-            if child_pid_path.exists():
+            if child_pid_path.exists() and child_pid_path.read_text(encoding="utf-8"):
                 break
             await asyncio.sleep(0.05)
         child_pid = int(child_pid_path.read_text(encoding="utf-8"))
