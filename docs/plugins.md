@@ -335,6 +335,7 @@ See [Security Posture](architecture/security-posture.md#file-access) for how eac
 | `requires_primary_runtime` | bool | `False` | Never route the tool to a worker, even when `worker_tools` lists it |
 | `consumes_workspace_paths` | bool | `False` | The tool opens workspace files by path; when it runs in a worker, attachments are saved to the worker workspace so the tool can open them |
 | `requires_room_context` | bool | `False` | The tool needs a live Matrix room, so it is hidden where none exists, such as the MCP gateway, the OpenAI-compatible API, and room-less runs, and it always runs in the primary runtime |
+| `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](tools/index.md#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose injected `agent` parameter is unused and can receive `None` in a worker |

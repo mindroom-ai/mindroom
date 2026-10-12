@@ -14572,6 +14572,7 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `requires_primary_runtime` | bool | `False` | Never route the tool to a worker, even when `worker_tools` lists it |
 | `consumes_workspace_paths` | bool | `False` | The tool opens workspace files by path; when it runs in a worker, attachments are saved to the worker workspace so the tool can open them |
 | `requires_room_context` | bool | `False` | The tool needs a live Matrix room, so it is hidden where none exists, such as the MCP gateway, the OpenAI-compatible API, and room-less runs, and it always runs in the primary runtime |
+| `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose injected `agent` parameter is unused and can receive `None` in a worker |
@@ -16224,7 +16225,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 - One saved selection applies to all of a user's MCP clients and changes no other user's selection or connections.
 - Removing an agent or tool still works when stored data exceeds a lowered storage quota.
 
-Tools that share a service connection share its OAuth controls, and room-dependent tools are labeled **MindRoom only** and are not exposed.
+Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 
