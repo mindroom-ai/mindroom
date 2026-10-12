@@ -169,6 +169,16 @@ def _self_child(
     )
 
 
+@pytest.mark.parametrize("field", ["tools", "skills", "knowledge"])
+@pytest.mark.parametrize("value", ["docs", [1]])
+def test_persona_snapshot_with_malformed_names_is_rejected(field: str, value: object) -> None:
+    """A snapshot whose name lists are not lists of strings is refused rather than read as characters."""
+    snapshot = {"source_kind": "inline", "source_name": "", "system_prompt": "P", "tools": None, field: value}
+
+    with pytest.raises(TypeError, match="Invalid subagent persona snapshot"):
+        SubagentPersona.from_dict(snapshot)
+
+
 @pytest.mark.asyncio
 async def test_persona_round_trips_through_session_record(tmp_path: Path) -> None:
     """A retained handle rebuilds the exact authored persona after a reload."""

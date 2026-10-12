@@ -562,6 +562,44 @@ def test_cap_from_a_parent_listing_only_tools_admits_no_knowledge(tmp_path: Path
     assert refused == "Cannot delegate: unknown knowledge base 'docs'. Your knowledge bases: none."
 
 
+def test_copy_that_omits_everything_inherits_its_parents_tools_skills_and_knowledge(tmp_path: Path) -> None:
+    """Inheriting the parent's tools must not turn its inherited skills and knowledge into an empty explicit list."""
+    cap = SubagentPersona(
+        source_kind="inline",
+        source_name="",
+        system_prompt="P",
+        tools=("file",),
+        skills=("research",),
+        knowledge=("docs",),
+    )
+
+    request = _resolve(tmp_path, system_prompt="Q", cap=cap)
+
+    assert isinstance(request, PersonaRequest)
+    assert request.persona is not None
+    assert (request.persona.tools, request.persona.skills, request.persona.knowledge) == (
+        ("file",),
+        ("research",),
+        ("docs",),
+    )
+
+
+def test_copy_of_a_parent_searching_no_knowledge_searches_none(tmp_path: Path) -> None:
+    """A parent that names no knowledge bases passes that on to a copy that omits knowledge."""
+    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", knowledge=())
+
+    request = _resolve(tmp_path, system_prompt="Q", cap=cap)
+
+    assert isinstance(request, PersonaRequest)
+    assert request.persona is not None
+    assert request.persona.knowledge == ()
+
+
+def test_knowledge_without_a_prompt_or_profile_is_refused(tmp_path: Path) -> None:
+    """Naming knowledge bases authors a copy, so it needs a prompt instead of starting a configured copy."""
+    assert _resolve(tmp_path, knowledge=["docs"]) == "Cannot delegate: system_prompt must be a non-empty string."
+
+
 def test_inline_persona_reads_knowledge() -> None:
     """Knowledge bases are optional, deduplicated names, and an empty list means no knowledge search."""
     assert inline_persona("P", None, None, None).knowledge is None
