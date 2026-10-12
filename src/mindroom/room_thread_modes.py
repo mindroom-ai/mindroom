@@ -48,12 +48,7 @@ def resolve_room_thread_mode_override(runtime_paths: RuntimePaths, room_id: str 
     if room_id is None:
         return None
     record = _load_overrides(_store_path(runtime_paths)).get(room_id)
-    if record is None:
-        return None
-    mode = record["mode"]
-    if mode not in _VALID_ROOM_THREAD_MODES:
-        return None
-    return cast("RoomThreadMode", mode)
+    return None if record is None else cast("RoomThreadMode", record["mode"])
 
 
 def set_room_thread_mode_override(
