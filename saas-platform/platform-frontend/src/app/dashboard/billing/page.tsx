@@ -301,7 +301,7 @@ export default function BillingPage() {
             </p>
             <button
               onClick={() => window.location.href = '/dashboard/billing/upgrade'}
-              className="text-brand-700 hover:text-brand-800 font-medium"
+              className="text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200 font-medium"
             >
               {activePlanTier ? 'Upgrade Plan →' : 'Choose a plan →'}
             </button>
@@ -324,7 +324,7 @@ export default function BillingPage() {
                   key={key}
                   className={`border rounded-lg p-4 ${
                     isCurrentPlan
-                      ? 'border-brand-600 bg-brand-50 dark:bg-brand-900/20'
+                      ? 'border-brand-600 bg-brand-50 dark:border-brand-400 dark:bg-brand-900/20'
                       : downgrade
                       ? 'border-gray-200 dark:border-gray-700 opacity-50'
                       : 'border-gray-200 dark:border-gray-700 hover:border-brand-300 dark:hover:border-brand-700'
@@ -363,7 +363,7 @@ export default function BillingPage() {
         <div className="mt-4 text-center">
           <button
             onClick={() => window.location.href = '/dashboard/billing/upgrade'}
-            className="text-sm text-brand-700 hover:text-brand-800 font-medium"
+            className="text-sm text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200 font-medium"
           >
             View all plans and billing options →
           </button>

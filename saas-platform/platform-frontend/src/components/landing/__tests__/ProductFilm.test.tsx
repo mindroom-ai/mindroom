@@ -21,7 +21,7 @@ describe('ProductFilm', () => {
     expect(screen.getByRole('button', { name: 'Play the MindRoom film' })).toBeInTheDocument()
   })
 
-  it('starts the film and hands over to the player controls when the play button is pressed', () => {
+  it('starts playback when the play button is pressed', () => {
     ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
     const play = jest.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
     render(<ProductFilm />)
@@ -57,12 +57,13 @@ describe('ProductFilm', () => {
     play.mockRestore()
   })
 
-  it('draws the play button focus ring inside the rounded frame', () => {
+  it('draws the play button and player focus rings inside the rounded frame', () => {
     ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
     render(<ProductFilm />)
 
-    // The frame clips overflow, so an outside ring would be invisible.
+    // The frame clips overflow, so a ring drawn outside either element would be invisible.
     expect(screen.getByRole('button', { name: 'Play the MindRoom film' })).toHaveClass('focus-visible:outline-offset-[-6px]')
+    expect(film()).toHaveClass('focus-visible:outline-offset-[-6px]')
   })
 
   it('shows the player controls once the film plays', () => {

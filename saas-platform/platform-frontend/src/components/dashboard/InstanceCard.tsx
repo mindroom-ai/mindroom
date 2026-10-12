@@ -109,7 +109,7 @@ export function InstanceCard({
       <Card>
         <CardHeader>MindRoom Instance</CardHeader>
         <div className="flex justify-center py-8">
-          <Loader2 className="w-8 h-8 animate-spin text-brand-600" aria-label="Loading subscription" />
+          <Loader2 className="w-8 h-8 animate-spin text-brand-600 dark:text-brand-400" aria-label="Loading subscription" />
         </div>
       </Card>
     )

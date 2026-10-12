@@ -15,6 +15,8 @@ const FILMS = {
     poster: 'https://github.com/user-attachments/assets/7c8011bd-22b7-4795-8d4d-ab2864c7b118',
   },
 }
+// Both films run 49 seconds; update this with them.
+const FILM_LENGTH = '0:49'
 
 export function ProductFilm() {
   const { isDarkMode } = useDarkMode()
@@ -42,7 +44,7 @@ export function ProductFilm() {
         preload="none"
         aria-label="MindRoom product film"
         onPlay={() => setStartedFilm(film)}
-        className="block aspect-video w-full"
+        className="block aspect-video w-full focus-visible:outline-offset-[-6px]"
       />
       {!started && (
         <button
@@ -59,7 +61,7 @@ export function ProductFilm() {
               <Play className="h-4 w-4 translate-x-px fill-current" />
             </span>
             Play the MindRoom film
-            <span aria-hidden="true" className="font-normal opacity-80">0:49</span>
+            <span aria-hidden="true" className="font-normal opacity-80">{FILM_LENGTH}</span>
           </span>
         </button>
       )}

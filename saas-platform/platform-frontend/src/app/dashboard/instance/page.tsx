@@ -133,7 +133,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
         return <CheckCircle className="w-5 h-5 text-green-500" />
       case 'provisioning':
       case 'restarting':
-        return <Loader2 className="w-5 h-5 text-brand-600 animate-spin" />
+        return <Loader2 className="w-5 h-5 text-brand-600 dark:text-brand-400 animate-spin" />
       case 'stopped':
       case 'deprovisioned':
         return <Clock className="w-5 h-5 text-yellow-500" />
@@ -173,7 +173,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
   if (loading || (!instance && subscriptionLoading)) {
     return (
       <div className="flex items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 animate-spin text-brand-600" />
+        <Loader2 className="w-8 h-8 animate-spin text-brand-600 dark:text-brand-400" />
       </div>
     )
   }
@@ -236,8 +236,8 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
               <span className={`
                 font-medium capitalize
                 ${instance.status === 'running' ? 'text-green-600' : ''}
-                ${instance.status === 'provisioning' ? 'text-brand-700' : ''}
-                ${instance.status === 'restarting' ? 'text-brand-700' : ''}
+                ${instance.status === 'provisioning' ? 'text-brand-700 dark:text-brand-300' : ''}
+                ${instance.status === 'restarting' ? 'text-brand-700 dark:text-brand-300' : ''}
                 ${instance.status === 'stopped' ? 'text-yellow-600' : ''}
                 ${instance.status === 'deprovisioned' ? 'text-gray-600' : ''}
                 ${instance.status === 'failed' ? 'text-red-600' : ''}
@@ -253,7 +253,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
 
           {/* Action Buttons */}
           {instance.status === 'restarting' && (
-            <div className="flex items-center gap-2 text-brand-700">
+            <div className="flex items-center gap-2 text-brand-700 dark:text-brand-300">
               <Loader2 className="w-4 h-4 animate-spin" />
               <span className="text-sm font-medium">Restarting...</span>
             </div>

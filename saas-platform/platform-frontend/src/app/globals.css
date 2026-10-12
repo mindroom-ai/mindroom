@@ -57,12 +57,12 @@ body {
   /* Browser surfaces carry the brand too: selection, focus, form accents, and scrollbars. */
   :root {
     accent-color: var(--color-brand-600);
-    scrollbar-color: color-mix(in oklab, var(--color-brand-900) 28%, transparent) transparent;
+    scrollbar-color: color-mix(in oklab, var(--color-brand-900) 55%, transparent) transparent;
   }
 
   .dark {
     accent-color: var(--color-brand-400);
-    scrollbar-color: color-mix(in oklab, var(--color-brand-300) 30%, transparent) transparent;
+    scrollbar-color: color-mix(in oklab, var(--color-brand-300) 50%, transparent) transparent;
   }
 
   ::selection {

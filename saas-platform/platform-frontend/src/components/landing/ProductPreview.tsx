@@ -1,23 +1,18 @@
-import { ArrowLeft, Check, ChevronDown, Mic, Pause, Plus, SendHorizontal, Wrench } from 'lucide-react'
+import { ArrowLeft, ChevronDown, Mic, Pause, Plus, SendHorizontal, Wrench } from 'lucide-react'
 import { AgentAvatar, type AvatarName } from '@/components/landing/AgentAvatar'
 
-const rooms: { name: string; topic: string; avatar: AvatarName; unread?: number; active?: boolean }[] = [
-  { name: "Maya's Desk", topic: 'Private workspace with Mind', avatar: 'mind', active: true },
-  { name: 'Launch War Room', topic: 'Q4 instrument launch', avatar: 'router', unread: 3 },
-  { name: 'Home', topic: 'Lights, locks, and heating', avatar: 'home' },
-  { name: 'Kitchen', topic: 'Dinners and groceries', avatar: 'general', unread: 1 },
+const rooms: { name: string; avatar: AvatarName; unread?: number; active?: boolean }[] = [
+  { name: "Maya's Desk", avatar: 'mind', active: true },
+  { name: 'Launch War Room', avatar: 'router', unread: 3 },
+  { name: 'Home', avatar: 'home' },
+  { name: 'Kitchen', avatar: 'general', unread: 1 },
 ]
 
-const agents: { name: string; avatar: AvatarName; status: string; waiting?: boolean }[] = [
-  { name: 'Mind', avatar: 'mind', status: 'Waiting for you', waiting: true },
-  { name: 'Email', avatar: 'email', status: 'Drafting a reply' },
-  { name: 'Research', avatar: 'research', status: 'Idle' },
-]
-
-const trace: { tool: string; done: boolean }[] = [
-  { tool: 'search_email', done: true },
-  { tool: 'check_calendar', done: true },
-  { tool: 'create_event', done: false },
+// Only panels MindRoom Chat has: the room list, the thread, and the member list.
+const agentMembers: { name: string; avatar: AvatarName }[] = [
+  { name: 'Mind', avatar: 'mind' },
+  { name: 'Email', avatar: 'email' },
+  { name: 'Research', avatar: 'research' },
 ]
 
 const panelLabelClass = 'text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400'
@@ -43,7 +38,7 @@ export function ProductPreview() {
       </div>
 
       <div className="grid md:grid-cols-[200px_minmax(0,1fr)] lg:grid-cols-[220px_minmax(0,1fr)_230px]">
-        <aside className="hidden border-r border-gray-950/8 bg-gray-50/60 p-3 dark:border-white/8 dark:bg-white/[0.02] md:block">
+        <div className="hidden border-r border-gray-950/8 bg-gray-50/60 p-3 dark:border-white/8 dark:bg-white/[0.02] md:block">
           <div className={`px-2 pb-2 pt-1 ${panelLabelClass}`}>Rooms</div>
           <ul className="space-y-0.5">
             {rooms.map((room) => (
@@ -52,11 +47,8 @@ export function ProductPreview() {
                 className={`flex items-center gap-2.5 rounded-lg px-2 py-2 ${room.active ? 'bg-brand-100 dark:bg-brand-400/12' : ''}`}
               >
                 <AgentAvatar name={room.avatar} size={28} />
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate text-[13px] font-semibold ${room.active ? 'text-brand-800 dark:text-brand-200' : 'text-gray-800 dark:text-gray-200'}`}>
-                    {room.name}
-                  </div>
-                  <div className="truncate text-xs text-gray-600 dark:text-gray-400">{room.topic}</div>
+                <div className={`min-w-0 flex-1 truncate text-[13px] font-semibold ${room.active ? 'text-brand-800 dark:text-brand-200' : 'text-gray-800 dark:text-gray-200'}`}>
+                  {room.name}
                 </div>
                 {room.unread && (
                   <span className="rounded-full bg-brand-600 px-1.5 text-xs font-semibold leading-4 text-white dark:bg-brand-400 dark:text-brand-950">
@@ -66,9 +58,9 @@ export function ProductPreview() {
               </li>
             ))}
           </ul>
-        </aside>
+        </div>
 
-        <section className="flex min-w-0 flex-col">
+        <div className="flex min-w-0 flex-col">
           <div className="flex items-center gap-3 border-b border-gray-950/8 px-4 py-3 dark:border-white/8">
             <AgentAvatar name="mind" size={32} />
             <div className="min-w-0">
@@ -139,38 +131,25 @@ export function ProductPreview() {
             <Mic className="h-4 w-4" />
             <SendHorizontal className="h-4 w-4 text-brand-600 dark:text-brand-400" />
           </div>
-        </section>
+        </div>
 
-        <aside className="hidden border-l border-gray-950/8 p-4 dark:border-white/8 lg:block">
-          <div className={panelLabelClass}>Agents in this room</div>
+        <div className="hidden border-l border-gray-950/8 p-4 dark:border-white/8 lg:block">
+          <div className={panelLabelClass}>Members</div>
           <ul className="mt-3 space-y-2.5">
-            {agents.map((agent) => (
+            <li className="flex items-center gap-2.5">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-amber-200 to-rose-300 text-xs font-bold text-rose-950">
+                MC
+              </span>
+              <span className="text-[13px] font-semibold text-gray-900 dark:text-white">Maya Chen</span>
+            </li>
+            {agentMembers.map((agent) => (
               <li key={agent.name} className="flex items-center gap-2.5">
                 <AgentAvatar name={agent.avatar} size={28} />
-                <div className="min-w-0">
-                  <div className="text-[13px] font-semibold text-gray-900 dark:text-white">{agent.name}</div>
-                  <div className={`flex items-center gap-1.5 text-xs ${agent.waiting ? 'text-amber-700 dark:text-amber-300' : 'text-gray-600 dark:text-gray-400'}`}>
-                    <span className={`h-1.5 w-1.5 rounded-full ${agent.waiting ? 'bg-amber-500' : 'bg-gray-300 dark:bg-gray-600'}`} />
-                    {agent.status}
-                  </div>
-                </div>
+                <span className="text-[13px] font-semibold text-gray-900 dark:text-white">{agent.name}</span>
               </li>
             ))}
           </ul>
-          <div className={`mt-6 ${panelLabelClass}`}>Run trace</div>
-          <ol className="mt-3 space-y-2">
-            {trace.map((step) => (
-              <li key={step.tool} className="flex items-center gap-2 font-mono text-xs text-gray-600 dark:text-gray-300">
-                {step.done ? (
-                  <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                ) : (
-                  <Pause className="h-3.5 w-3.5 text-amber-600 dark:text-amber-300" />
-                )}
-                {step.tool}
-              </li>
-            ))}
-          </ol>
-        </aside>
+        </div>
       </div>
     </div>
   )

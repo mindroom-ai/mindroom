@@ -15,4 +15,13 @@ describe('ProductPreview', () => {
     expect(preview.getByText('Approve')).toBeInTheDocument()
     expect(preview.getByText('Deny')).toBeInTheDocument()
   })
+
+  it('pictures only panels MindRoom Chat has: rooms, the thread, and the member list', () => {
+    render(<ProductPreview />)
+
+    const preview = within(screen.getByRole('img', { name: /MindRoom Chat/ }))
+    expect(preview.getByText('Members')).toBeInTheDocument()
+    expect(preview.queryByText('Run trace')).not.toBeInTheDocument()
+    expect(preview.queryByText('Agents in this room')).not.toBeInTheDocument()
+  })
 })

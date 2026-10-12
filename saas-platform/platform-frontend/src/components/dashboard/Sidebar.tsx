@@ -66,7 +66,7 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
   // Extract common logo with dark mode support
   const logo = (
     <Link href="/dashboard" className="flex items-center gap-2">
-      <MindRoomLogo className="text-brand-600" size={32} />
+      <MindRoomLogo size={32} />
       <span className="text-xl font-bold dark:text-white">MindRoom</span>
     </Link>
   )
