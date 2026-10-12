@@ -83,8 +83,6 @@ def test_store_roundtrip(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -122,8 +120,6 @@ def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -142,8 +138,6 @@ def test_store_prunes_oldest_entries(tmp_path: Path, monkeypatch: pytest.MonkeyP
             runtime_paths,
             thread_id=f"$thread-{index}:localhost",
             model_name="large",
-            room_id=ROOM_ID,
-            set_by="@user:localhost",
             entity_names=("test_agent",),
             config=config,
         )
@@ -162,8 +156,6 @@ def test_store_invalidates_cached_records_when_mtime_changes(tmp_path: Path) -> 
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -187,8 +179,6 @@ def test_resolve_runtime_model_prefers_thread_override(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -226,8 +216,6 @@ def test_resolve_runtime_model_thread_override_beats_room_override(
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -250,8 +238,6 @@ def test_resolve_runtime_model_active_model_beats_thread_override(tmp_path: Path
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -275,8 +261,6 @@ def test_resolve_runtime_model_ignores_stale_thread_override(tmp_path: Path) -> 
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="removed-model",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -299,8 +283,6 @@ def test_resolve_runtime_model_without_thread_id_keeps_authored_model(tmp_path: 
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -414,8 +396,6 @@ def test_model_command_show(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -453,8 +433,6 @@ def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path, wri
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent", "removed_agent"),
         config=readded_config,
     )
@@ -572,6 +550,22 @@ def test_resolve_runtime_model_requires_runtime_paths_for_thread_id(tmp_path: Pa
         config.resolve_runtime_model(entity_name="test_agent", thread_id=THREAD_ID)
 
 
+def test_store_applies_records_that_name_their_room_and_setter(tmp_path: Path) -> None:
+    """Records stored with the thread's room and setter must keep applying."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = _store_path(runtime_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "model:test_agent": "large",
+        "room_id": ROOM_ID,
+        "set_by": "@user:localhost",
+        "set_at": "2026-07-09T00:00:00+00:00",
+    }
+    path.write_text(json.dumps({THREAD_ID: record}), encoding="utf-8")
+
+    assert _stored_model(runtime_paths, THREAD_ID) == "large"
+
+
 def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
     """Records with a non-string set_at must be dropped so prune sorting cannot fail."""
     config = _config_with_models(tmp_path)
@@ -589,8 +583,6 @@ def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -790,8 +782,6 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
         context.runtime_paths,
         thread_id=THREAD_ID,
         model_name="removed-model",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=context.config,
     )
@@ -895,8 +885,6 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path, display_nam
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )

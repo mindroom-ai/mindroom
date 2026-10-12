@@ -330,8 +330,6 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         runtime_paths,
         thread_id=thread_id,
         model_name="default",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("assistant",),
         config=config,
     )
@@ -426,8 +424,6 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         context.runtime_paths,
         thread_id=thread_id,
         model_name="default",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("assistant",),
         config=context.config,
     )

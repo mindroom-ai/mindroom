@@ -3,6 +3,7 @@
 # ruff: noqa: D103
 
 import fcntl
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,7 +26,7 @@ def test_default_mode_read_does_not_create_state(tmp_path: Path) -> None:
 
 def test_saved_mode_read_does_not_require_writable_storage(tmp_path: Path) -> None:
     paths, state_root = _paths(tmp_path)
-    agent_modes.set_agent_mode(paths, state_root, "agent", "session", "minimal", "alice")
+    agent_modes.set_agent_mode(paths, state_root, "agent", "session", "minimal")
     lock_path = tmp_path / "tracking" / "agents" / "agent" / "agent_modes.lock"
     lock_path.unlink()
     # A directory here rejects even root's attempts to open a new lock file.
@@ -41,7 +42,7 @@ def test_choices_stay_out_of_worker_mounted_state_roots(tmp_path: Path) -> None:
         fcntl.flock(held, fcntl.LOCK_EX)
         change = threading.Thread(
             target=agent_modes.set_agent_mode,
-            args=(paths, state_root, "agent", "session", "minimal", "alice"),
+            args=(paths, state_root, "agent", "session", "minimal"),
             daemon=True,
         )
         change.start()
@@ -57,7 +58,7 @@ def test_choices_stay_out_of_worker_mounted_state_roots(tmp_path: Path) -> None:
 def test_mode_override_scope_and_reset(tmp_path: Path) -> None:
     paths, state_root = _paths(tmp_path)
     private_root = tmp_path / "private_instances" / "scope" / "assistant"
-    agent_modes.set_agent_mode(paths, state_root, "assistant", "room-session", "minimal", "@alice:test")
+    agent_modes.set_agent_mode(paths, state_root, "assistant", "room-session", "minimal")
     assert agent_modes.resolve_agent_mode(paths, state_root, "assistant", "room-session") == "minimal"
     assert agent_modes.resolve_agent_mode(paths, state_root, "researcher", "room-session") == "standard"
     assert agent_modes.resolve_agent_mode(paths, state_root, "assistant", "thread-session") == "standard"
@@ -72,7 +73,7 @@ def test_concurrent_choices_preserve_other_sessions(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(
             pool.map(
-                lambda number: agent_modes.set_agent_mode(paths, state_root, "agent", str(number), "minimal", "alice"),
+                lambda number: agent_modes.set_agent_mode(paths, state_root, "agent", str(number), "minimal"),
                 range(40),
             ),
         )
@@ -83,17 +84,37 @@ def test_concurrent_choices_preserve_other_sessions(tmp_path: Path) -> None:
 
 def test_corrupt_mode_records_fail_to_standard(tmp_path: Path) -> None:
     paths, state_root = _paths(tmp_path)
-    agent_modes.set_agent_mode(paths, state_root, "agent", "session", "minimal", "alice")
+    agent_modes.set_agent_mode(paths, state_root, "agent", "session", "minimal")
     path = next(tmp_path.rglob("*.json"))
     path.write_text("{broken", encoding="utf-8")
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "session") == "standard"
-    agent_modes.set_agent_mode(paths, state_root, "agent", "session", "standard", "alice")
+    agent_modes.set_agent_mode(paths, state_root, "agent", "session", "standard")
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "session") == "standard"
 
 
 def test_mode_records_are_bounded(tmp_path: Path) -> None:
     paths, state_root = _paths(tmp_path)
     for number in range(1001):
-        agent_modes.set_agent_mode(paths, state_root, "agent", str(number), "minimal", "alice")
+        agent_modes.set_agent_mode(paths, state_root, "agent", str(number), "minimal")
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "0") == "standard"
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "1000") == "minimal"
+
+
+def test_records_load_with_or_without_a_stored_setter(tmp_path: Path) -> None:
+    """Choices stored without a setter apply, and choices stored with one still apply."""
+    paths, state_root = _paths(tmp_path)
+    path = agent_modes._path(paths, state_root)
+    path.parent.mkdir(parents=True)
+    records = {
+        agent_modes._key("agent", session): {
+            "agent": "agent",
+            "session": session,
+            "mode": "minimal",
+            "set_at": "2026-10-01T00:00:00+00:00",
+            **extra,
+        }
+        for session, extra in (("new", {}), ("old", {"set_by": "alice"}))
+    }
+    path.write_text(json.dumps(records), encoding="utf-8")
+    assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "new") == "minimal"
+    assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "old") == "minimal"

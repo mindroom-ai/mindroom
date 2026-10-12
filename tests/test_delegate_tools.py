@@ -883,8 +883,6 @@ class TestDelegateKnowledge:
                 runtime_paths,
                 thread_id="$thread",
                 model_name=thread_model_name,
-                room_id="!room:example.org",
-                set_by="@alice:example.org",
                 entity_names=("leader", "worker"),
                 config=config,
             )

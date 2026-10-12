@@ -67,7 +67,7 @@ def handle_mode_command(
         problems = minimal_mode_problems(config, runtime_paths, agent_name, identity)
         if problems:
             return render_minimal_mode_problems(agent_name, problems, runtime_paths)
-        set_agent_mode(runtime_paths, root, agent_name, target.session_id, "minimal", requester_id)
+        set_agent_mode(runtime_paths, root, agent_name, target.session_id, "minimal")
     elif action in {"standard", "reset"}:
         # Standard is the default, so choosing it keeps no record in the bounded store.
         clear_agent_mode(runtime_paths, root, agent_name, target.session_id)

@@ -134,8 +134,6 @@ class ThreadModelTools(Toolkit):
             context.runtime_paths,
             thread_id=thread_id,
             model_name=model_name,
-            room_id=context.room_id,
-            set_by=context.requester_id,
             entity_names=self._addressable_entities(context),
             config=context.config,
         )
