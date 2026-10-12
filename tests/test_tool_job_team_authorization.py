@@ -12,7 +12,7 @@ from agno.models.response import ModelResponse
 from agno.team import Team
 from agno.tools import Toolkit
 
-from mindroom.agents import apply_tool_approval_capability, team_job_controls
+from mindroom.agents import apply_tool_approval_capability, team_background_jobs
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
@@ -328,7 +328,7 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
     try:
         await start_job(runtime, "member", tool_name="report", depth=0, adapter={}, owner=member, operation=operation)
         await wait_for_status(runtime, "member", "completed")
-        controls = team_job_controls(config, paths, team)
+        controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
         assert isinstance(controls, JobTools)
         with tool_runtime_context(context):
             collected = str(await controls.job("collect"))
@@ -349,7 +349,7 @@ async def test_the_job_tool_never_asks_for_approval(tmp_path: Path) -> None:
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     try:
-        controls = team_job_controls(config, paths, team)
+        controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
         assert isinstance(controls, JobTools)
         job = controls.async_functions["job"]
         assert job.requires_confirmation is not True

@@ -14,7 +14,7 @@ from agno.models.response import ModelResponse
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agents import create_agent
+from mindroom.agents import create_agent, team_background_jobs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
@@ -230,6 +230,15 @@ def test_agent_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: 
     agent = create_agent("lead", config, paths, execution_identity=None, persist_runtime_state=False)
     assert agent.model is not None
     assert bool(vars(agent.model).get("_mindroom_tool_jobs")) is enabled
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_team_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
+    """A team's model, like an agent's, follows the effective feature setting."""
+    config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled))
+    model = DelegationModel(id="team")
+    assert team_background_jobs(model, config, test_runtime_paths(tmp_path), None) is None
+    assert bool(vars(model).get("_mindroom_tool_jobs")) is enabled
 
 
 def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tmp_path: Path) -> None:

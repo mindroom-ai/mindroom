@@ -1953,12 +1953,22 @@ def _job_controls(
     return None if controls is None else prepend_tool_hook_bridge(controls, tool_hook_bridge)
 
 
-def team_job_controls(
+def team_background_jobs(
+    model: Model,
     config: Config,
     runtime_paths: constants.RuntimePaths,
-    owner: ToolExecutionIdentity,
+    owner: ToolExecutionIdentity | None,
 ) -> Toolkit | None:
-    """Build a team leader's job toolkit, with background jobs on: the team owns, and collects, its members' jobs."""
+    """Let a team's calls run as background jobs, and return its leader's job controls.
+
+    The team owns the jobs its members start for it: its leader hears when they end and collects them.
+    """
+    if not background_tool_jobs_enabled(config, runtime_paths):
+        return None
+    install_tool_job_execution(model)
+    if owner is None:
+        return None
+    install_job_notice_hook(model, entity_name=owner.recipient)
     bridge = _build_agent_tool_hook_bridge(
         hook_registry=None,
         plugins=_load_agent_plugins(config, runtime_paths),
@@ -2366,5 +2376,5 @@ __all__ = [
     "get_agent_toolkit_names",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
-    "team_job_controls",
+    "team_background_jobs",
 ]

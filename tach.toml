@@ -3050,7 +3050,6 @@ depends_on = [
     "mindroom.thread_models",
     "mindroom.tool_call_budget",
     "mindroom.history.team_scope",
-    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.notices",
@@ -5728,7 +5727,7 @@ expose = [
     "get_agent_toolkit_names",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
-    "team_job_controls",
+    "team_background_jobs",
 ]
 from = ["mindroom.agents"]
 
@@ -8094,7 +8093,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.agents",
-    "mindroom.teams",
 ]
 
 [[modules]]
