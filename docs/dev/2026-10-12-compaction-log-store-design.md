@@ -1,7 +1,8 @@
 # Compaction log store
 
 Design note, October 12, 2026, written before any code.
-Revised the same day after design review round 1 (GPT-6 Astra: 2 blockers, 5 majors; Claude Opus 5.5: 3 majors) and round 2 (Astra: 2 blockers; Opus: 1 major).
+Revised the same day after design review round 1 (GPT-6 Astra: 2 blockers, 5 majors; Claude Opus 5.5: 3 majors) and round 2 (Astra: 2 blockers; Opus: 1 major), and round 3 (Astra: 2 blockers; Opus: 1 blocker, 1 major).
+Rounds 2 and 3 found gaps in the transaction contract (stale writes, fencing, retirement, team members), not flaws in the log model; both reviewers judged the design sound in round 3, so it was patched rather than replaced.
 Base: `origin/main` at `49d15f268`.
 It covers two PRs: PR A replaces `main`'s compaction archive with a log store and keeps `main`'s behavior, and a rework of #2798 then expresses mid-turn compaction on that store.
 
@@ -39,7 +40,7 @@ The user's direction: store each scope's history as one ordered, append-only log
   | `event_ids` | Matrix event ids the row's own folded content read, answered, or wrote; redaction matches these. |
   | `seen_event_ids` | Event ids the row's own folded content counts as seen. |
   | `legacy` | A content-free summary written before the archive existed. |
-  | `segment_run_id`, `segment` | Mid-turn only: the running run's id (its owner) and what the fold took out of it (the folded messages and the tool executions they hold, as Agno run JSON, plus the ids of the member runs attached so far, whose child rows already hold them). `NULL` in PR A. |
+  | `segment_run_id`, `segment` | Mid-turn only: the running run's id (its owner) and what the fold took out of it, as Agno run JSON: the folded messages, the tool executions they hold, and the member responses attached so far, taken from the live tree because Agno writes member rows only when the team run ends. `NULL` in PR A. |
   | `created_at` | Creation time. |
 
   Its key is `(after_run_index, id)`, so it sorts after the run at `after_run_index` and after earlier summary rows at the same position.
@@ -60,12 +61,14 @@ These rules keep I1:
    `main` allocates from run rows only, so deleting the newest runs would let a new run reuse an index a summary row sorts after, which hides it.
 3. A save that makes a stored non-visible row visible (an approval or CLI-approval continuation completing, an interrupted record replacing a cancelled run) moves that row to the end, with a fresh index from rule 2.
    This is the only reordering, and it puts the run where the model produced its answer: after the turns that happened while it waited.
-4. Every summary append is a compare-and-append: in one write transaction it checks that the scope's latest summary row is still the one its input was built on, that the newest run it covered still exists (which resolves `after_run_index` from its `run_id`), and that its segment owner is not in `<session_table>_removed_runs`, and otherwise writes nothing.
-   Retirement appends a barrier row instead of editing text in place, so it changes the latest row too.
-   A pre-reply chunk that loses the race ends that compaction as a failed chunk does; a mid-turn fold continues without compacting that request.
+4. Every summary append is a compare-and-append: in one write transaction it checks that the scope's latest summary row is still the one its input was built on, that every run it covered still exists with the `run_index` and status it was read with (the newest one resolves `after_run_index`), and that its segment owner is not in `<session_table>_removed_runs`, and otherwise writes nothing.
+   It computes the row's event sets from the covered rows as stored at that moment, so metadata written during the summary call, such as a reply's response event id, is not lost.
+   Retirement appends a barrier row, so it changes the latest row too.
+   A pre-reply chunk that loses the race ends that compaction as a failed chunk does; a mid-turn fold re-reads and folds once more, and if it loses again it fails like any failed fold.
 5. A save never changes a visible top-level row behind its scope's latest summary row, or a descendant of one: such a row is folded, its stored payload is what the summary rows' event sets describe, and a stale paused or completed copy written over it would replay folded content or hide provenance from redaction.
+   Rule 4 covers the window before the row is folded, rule 5 the time after.
    The write is dropped, usage included, since a folded run's usage is final; non-visible rows behind the summary stay writable, so skipped approvals still complete.
-6. A cut deletes a suffix of the log, so the remaining rows keep I1.
+6. A cut deletes a suffix of the log except barrier rows, so the remaining rows keep I1, and runs behind a barrier stay retired for good.
 
 Rule 3 is needed even for `main`'s behavior: an approval paused before newer turns and a compaction, then resumed, must replay after the summary, and on `main` it does because it stayed live while the newer turns were archived.
 Rules 3 and 5 together replace `main`'s resurrection guard: a folded row can be neither moved nor rewritten, and `main` likewise kept the archived payload and pruned any live copy.
@@ -97,7 +100,7 @@ It reuses Agno's deserialization and run-object cache; since step 2 of the migra
 The filter runs in SQL, so long conversations do not read their folded runs' `run_data` on every load.
 `session.summary` is set on every read from the owner scope's latest summary row, so it is no longer a cache that a stale session-row write can leave behind.
 Agno's `get_messages`, `num_history_runs`, and `num_history_messages`, and MindRoom's replay estimators and compaction selection, all see only these runs, as they see only live runs today.
-`get_run` still reads one row directly; its only caller, `skill_learning/runner.py`, looks a run up by id, so seeing a folded run there is harmless.
+`get_run` still reads one row directly: `skill_learning/runner.py` looks a run up by id, and `delegation/recovery.py` `cancel_approval_delegations` reads a paused run and writes it back, which rule 5 allows and the projection keeps consistent.
 `delegation/recovery.py` searches the loaded session instead, so it misses a child run a later compaction folded, as on `main`.
 
 ### Ordering key
@@ -118,20 +121,21 @@ A session therefore holds one top-level scope in practice; summary rows stay key
 
 ### Cut
 
-`cut(key)` deletes, in one transaction, every top-level run of the scope with a key at or after `key` together with its descendants, and every summary row of the scope with a key at or after `key`, and records every deleted owner in `<session_table>_removed_runs`: the deleted top-level runs and the `segment_run_id` of every deleted summary row, which also covers a running turn that has no stored row yet.
+`cut(key)` deletes, in one transaction, every top-level run of the scope with a key at or after `key` together with its descendants, and every summary row of the scope with a key at or after `key` except barrier rows, and records every deleted owner in `<session_table>_removed_runs`: the deleted top-level runs and the `segment_run_id` of every deleted summary row, which also covers a running turn that has no stored row yet.
 Deleting a summary row "restores" the runs it covered without moving anything: they follow the new latest summary, so they load and replay again, which is what `main`'s `roll_back_to` does by moving rows back.
+A barrier is never deleted, because the runs and summaries behind it were retired and their event sets are no longer checked for redaction, so they must never replay again; `main` reaches the same end by nulling every generation's text.
 
 A run is deleted whole: when a deleted owner, a run row or a segment owner, owns a segment on a row before `key` (a run that folded, paused, and folded again after newer turns), the cut moves to that row and repeats until no deleted owner owns an earlier segment.
 In PR A no row has a segment, so the closure never applies.
 
-A run insert whose `run_id` is in `<session_table>_removed_runs` writes no run row, inside the inserting statement, but still records the save's usage, because the provider calls behind it were made; the usage ledger already outlives deleted runs.
+A run insert whose `run_id` or `parent_run_id` is in `<session_table>_removed_runs` writes no run row, inside the inserting statement, but still records the save's usage, because the provider calls behind it were made; the usage ledger already outlives deleted runs.
 `main` guards only archived runs this way (tombstones plus reconcile), and its fuzz test already covers compact, redact, then a stale save of the redacted run; guarding every cut is the simpler and stronger rule.
 Retries and regenerations get fresh run ids (`ai_runtime.next_retry_run_id`), so the guard never blocks them.
 
 Edits and redactions share one cut-point search for the earliest element that holds the event; an edit matches what a run answered (its source ids), a redaction also what it read or wrote (its seen ids):
 
 - the first loaded top-level run that holds it, and
-- the earliest summary row after the latest barrier whose `event_ids` hold it; within that row's range (after the previous summary row, up to the row) the first run whose metadata holds it is the cut point, or the row itself when only its segment holds it.
+- the earliest summary row after the latest barrier whose `event_ids` hold it and whose range (after the previous summary row, up to the row) confirms it: the first run there whose own metadata holds it is the cut point, or the row itself when its segment's owner metadata holds it; when neither does, as for an edit of a message the range only read, the search continues with the next row.
 
 The range scan reads folded runs only when an event behind a summary is actually edited or redacted, which is rare.
 The existing loop that repeats until a pass removes nothing new stays, because a cut can bring older runs back into the candidate set.
@@ -191,14 +195,15 @@ The four filters of #2798 become one, not zero.
 Resetting accumulators does not work: the recorder's tool lists are replaced wholesale from the streaming tool tracker on every update (`ai_turn_state.py`), team interruption resynchronizes from the presentation tracker (`teams.py`), CLI recovery seeds its presentation from the paused trace (`agent_cli/cli_approval_recovery.py`), and Agno merges `tool_executions` back into `run_response.tools` (`agent/_response.py`).
 `run_response.tools` also stays untouched, because the final reply, the paused-approval message, and team traces render from it (`ai.py`, `teams.py`), and #2798 promises the visible reply lists every tool call.
 
-- `build_interrupted_replay_snapshot` leaves out every call the run's segments folded: tool-call ids in the segments' messages, the segments' tool executions, the tools of the member runs they name (from those child rows, recursively), and entries whose `parent_bash_call_id` is folded.
-- The recorder keeps the folded set each fold's commit returns; voice calls take `interrupted_snapshot()`, as #2798 does.
+- `build_interrupted_replay_snapshot` leaves out every call the run's segments folded: tool-call ids in the segments' messages, the segments' tool executions, the tools of the member responses they hold, recursively, and entries whose `parent_bash_call_id` is folded.
+- The recorder keeps the folded set each fold's commit returns, computed from the live tree the segment was taken from; voice calls take `interrupted_snapshot()`, as #2798 does.
 - CLI approval recovery rebuilds the set from the run's summary rows, so it also holds after a restart.
 - The `mindroom_mid_turn_generation` metadata key goes; the folded set comes from storage or the commit.
 
 ## Mid-turn compaction on the log (the #2798 rework)
 
-- Each fold reads, in its own transaction, the scope's latest summary row and the visible stored runs after it, excluding the running run, and seeds the summary from that row's text.
+- Each fold reads, in its own transaction, the scope's latest summary row and the visible stored runs after it, excluding the running run, and seeds the summary from that row's text; with no stored run and no summary row, its row sits at `-1`.
+- A first-turn fold creates the session row the summaries table cascades from, as `save_independent_usage(initial_session=...)` does, since Agno writes it only when the run ends.
   Agno's live session keeps every run it loaded at the start of the turn, so reading it again would summarize stored runs a first fold of the same turn already covered.
 - The fold builds its segment from the live request messages, because `RunOutput.messages` is not current inside Agno's model loop.
 - Its row's `after_run_index` is the newest stored run it covered, or the latest summary row's position when it covered none, so a run saved concurrently after the read sorts after the row and stays replayed.
@@ -234,7 +239,7 @@ Per session it writes one run order and the summary rows:
 4. Each generation becomes a summary row with its summary, model, and `created_at`, positioned after its last archived top-level run with `run_data`, or after the previous row when it archived none (tombstones never set a position); its event sets are the union of its archived runs' columns, including generations whose summaries were retired but whose runs kept `run_data`.
    Legacy generations become `legacy` rows at `-1` with their captured seen ids.
    Tombstones themselves are not carried over: step 1 already removed every stored copy, and no in-memory copy survives the restart that runs the migration.
-5. A database that never got the archive (state from v2026.9.314 or earlier) adopts its destructive-compaction state directly as `legacy` rows, with the existing metadata cleanup and the same step 1 for its tombstones.
+5. A database that never got the archive (state from v2026.9.314 or earlier) adopts its destructive-compaction state directly as `legacy` rows, with the existing metadata cleanup; steps 1 to 3 run for it too, with its tombstones in step 1, because the loader has no blob merge and its Agno 2 blob runs would otherwise vanish.
 6. The archive tables are dropped, with `history/archive.py` and `history/archive_schema.py`.
 
 Each format gets its own `LEGACY_COMPAT` marker; the archive's schema has one released shape, first tagged in v2026.9.315 (#2351, 2026-09-25), and its "Last legacy release" is the newest tag at merge time (today `v2026.10.268`), verified with `git tag --sort=-creatordate` before merging.
@@ -246,7 +251,7 @@ Each format gets its own `LEGACY_COMPAT` marker; the archive's schema has one re
 Unchanged rules, expressed on the log:
 
 - While a legacy row's summary is in force (it has text and no barrier follows it), an event it may contain (its captured seen ids, or a source the legacy summary consumed per `summary_depends_on_source`) cuts at that row; since it sits at `-1`, that removes every run and summary row of the scope, as `clear_to_legacy` does.
-- A cut for any other event that removes a loaded run holding the event, while a legacy summary is in force, retires the scope's summaries, as `retire_summaries` does: one barrier row is appended at the latest row's position, runs behind it stay stored but neither replay nor count as seen, and runs after it keep replaying.
+- A cut for any other event that removes a loaded run holding the event, while a legacy summary is in force, retires the scope's summaries, as `retire_summaries` does: one barrier row is appended at the latest row's position, runs behind it stay stored but neither replay nor count as seen, and runs after it keep replaying; since cuts never delete a barrier, a later cut cannot bring the retired summaries back.
   This holds whether the cut starts at that loaded run or earlier, at a folded run, because `main` decides from whether a live run holding the event went, before it consults the archive.
 - Readers take summary event sets only from rows after the latest barrier (a row with `NULL` text), which is `main`'s "cumulative until a generation without one"; a legacy row behind a barrier no longer has summary text in force.
 
@@ -282,13 +287,14 @@ Unchanged rules, expressed on the log:
 Failing tests first, at the owning seams: the summary-row module, `_ConversationSqliteDb` loading, `insert_run_row`, the redaction and edit cut, and the migration.
 
 - `tests/test_compaction_fuzz.py` moves to the log, with invariants for I1 (the latest row's text covers every visible run and segment before it), "compaction deletes and moves no run row", "loaded runs are exactly `main`'s live set", "replay is the latest summary plus later visible runs", "a cut removes exactly the elements at or after it, with descendants and the whole-run closure", and "a cut run never returns", over generated histories with interrupted chunks, paused and resumed approvals, stale saves, edits, and redactions, keeping the existing compact, redact, stale-save example.
-- Rule 2 after deleting the newest runs; rule 3 for an approval, a CLI approval, and an interrupted record, including its ordering; rule 4 when another append or a retirement commits first, the covered run is gone, or the owner was cut; rule 5 for a stale paused and then completed copy of a folded run, which never replays twice, and for a stale copy with older metadata, after which redaction still finds the original provenance.
+- Rule 2 after deleting the newest runs; rule 3 for an approval, a CLI approval, and an interrupted record, including its ordering; rule 4 when another append or a retirement commits first, a covered run is gone, overwritten by a stale paused copy, or moved past a new run during the summary call, or the owner was cut, and with a response event id linked during the summary call; rule 5 for a stale paused and then completed copy of a folded run, which never replays twice, and for a stale copy with older metadata, after which redaction still finds the original provenance.
 - The removed-run guard: a refused final save still records its usage; a segment owner with no stored row stays out after a cut and after retirement.
 - A cut racing a rule 3 move resolves its cut point inside its transaction.
 - Loading under a concurrent append and cut committed between the reads (deterministic interleaving).
-- Legacy: retirement when the event is held by both a folded run and a loaded run, and no retirement when only folded runs hold it; clearing requires a legacy row with text in force.
-- Edits: an edit of a run that pre-reply compaction folded cuts its summary.
+- Legacy: retirement when the event is held by both a folded run and a loaded run, and no retirement when only folded runs hold it; clearing requires a legacy row with text in force; after a retirement, a redaction of an event an older cancelled run read and an edit of a paused run's source bring back no retired text or run.
+- The removed-run guard drops a late team save's member rows too.
+- Edits: an edit of a run that pre-reply compaction folded cuts its summary; an edit of a message a folded range only read cuts nothing there.
 - The loader on agent, team, and `deserialize=False` reads, without mutating Agno's shared cached run objects.
-- Migration of real-shaped `main` databases: legacy, ordinary, barrier, retired-with-`run_data`, and tombstone generations, colliding live and archived indexes, a resurrected live copy of an archived and of a tombstoned run, blob residue of an archived run, an interrupted multi-chunk compaction with visible blob runs left, member runs, `NULL` `run_index` rows, a blob-only database without a runs table, and a session with two scopes; then every reader works after reopening.
-- In the rework: #2798's edit tests for a fold covering an older resumed run's input, a retried turn's second attempt folding the first, and a later bot-triggered turn's fold covering the edited turn (`tests/test_compaction_redaction.py`); a fold or chunk racing a retirement; two folds in one run, a pre-reply compaction committing during a long mid-turn run, a fold followed by a crash and by a delayed pre-fold save, the two-fold approval redaction from #2798's `tests/test_compaction_redaction.py`, retirement after a fold, interrupted records on all four paths (CLI recovery seeded from the paused trace, team member calls, a non-streaming final tool list), and run-local folds' usage.
+- Migration of a pre-archive database that still holds Agno 2 blob runs, and of real-shaped `main` databases: legacy, ordinary, barrier, retired-with-`run_data`, and tombstone generations, colliding live and archived indexes, a resurrected live copy of an archived and of a tombstoned run, blob residue of an archived run, an interrupted multi-chunk compaction with visible blob runs left, member runs, `NULL` `run_index` rows, a blob-only database without a runs table, and a session with two scopes; then every reader works after reopening.
+- In the rework: #2798's edit tests for a fold covering an older resumed run's input, a retried turn's second attempt folding the first, and a later bot-triggered turn's fold covering the edited turn (`tests/test_compaction_redaction.py`); a fold or chunk racing a retirement; two folds in one run, a pre-reply compaction committing during a long mid-turn run, a fold followed by a crash and by a delayed pre-fold save, the two-fold approval redaction from #2798's `tests/test_compaction_redaction.py`, retirement after a fold, interrupted records on all four paths (CLI recovery seeded from the paused trace, team member calls, a non-streaming final tool list), a team fold with members delegated in the current leg, then a stop and then a crash, with nested members and shell-child tools, and run-local folds' usage.
 - The full suite, pre-commit, and `uv run tach check --dependencies --interfaces`, and a live compaction run on two providers, including a redaction of compacted content.
