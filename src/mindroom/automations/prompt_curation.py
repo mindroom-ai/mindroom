@@ -21,7 +21,6 @@ from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomatio
 from mindroom.logging_config import get_logger
 from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
@@ -29,7 +28,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -99,18 +97,14 @@ def _curated_paths(config: Config, agent_name: str) -> list[str]:
 
 def _plan_curation(
     config: Config,
-    runtime_paths: RuntimePaths,
+    root: Path,
     agent_name: str,
     settings: PromptCurationAutomation,
 ) -> _CurationPlan | None:
-    """Return the plan for a due prompt, or None while the files are within the trigger.
+    """Return the plan for a due prompt over the file memory at ``root``, or None while the files are within the trigger.
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
-    # Automations only run for shared agents, which have no requester-private state.
-    root = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=None).file_memory_root
-    if root is None:
-        return None
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
@@ -221,7 +215,10 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         msg = f"prompt_curation cannot run the {ctx.entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     config, agent_name = ctx.config, ctx.agent_name
-    plan = _plan_curation(config, ctx.runtime_paths, agent_name, ctx.entry)
+    # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
+    if ctx.workspace is None:
+        return None
+    plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry)
     if plan is None:
         return None
     logger.info(

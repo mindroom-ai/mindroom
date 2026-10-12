@@ -103,6 +103,7 @@ class _Workspace:
                 entry=entry,
                 options={},
                 settings={},
+                requester_id=None,
                 workspace=self.root,
                 state_dir=automations_tracking_root(self.paths) / "mind",
             ),
