@@ -6884,7 +6884,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.knowledge.read_process"
-depends_on = ["mindroom.knowledge.read_protocol"]
+depends_on = ["mindroom.knowledge.read_protocol", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.knowledge.read_proxy"
@@ -6899,9 +6899,9 @@ depends_on = [
 path = "mindroom.knowledge.read_worker"
 depends_on = [
     "mindroom.knowledge.collection_lifetime",
-    "mindroom.redaction",
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.read_protocol",
+    "mindroom.logging_config",
 ]
 
 [[modules]]
