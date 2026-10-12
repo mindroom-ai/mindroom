@@ -68,7 +68,12 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any
         if waited.claim is None:
             # Another caller is reading this outcome now.
             continue
-        value, payload = await consume_tool_job(runtime, waited.job, waited.claim)
+        try:
+            value, payload = await consume_tool_job(runtime, waited.job, waited.claim)
+        except JobAccessError:
+            # Its claim is released, so a later collect reads it; the others still arrive now.
+            sections.append(f"`{job.job_id}` ({job.tool_name}) {job.status}: its result could not be read now")
+            continue
         if isinstance(value, ToolResult):
             collected.append(value)
             value = value.content

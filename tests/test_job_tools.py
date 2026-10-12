@@ -21,12 +21,13 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_outcome
 from mindroom.event_journal import ToolJobStore
+from mindroom.tool_jobs import consumption as consumption_module
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
@@ -581,6 +582,39 @@ async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
             assert (await lookup(runtime, job_id, owner=owner, depth=0)).consumed
         with tool_runtime_context(context):
             assert await tools.job("collect") == "No ended background jobs."
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_collect_reports_the_others_when_one_result_cannot_be_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result that cannot be read stays unacknowledged for a later collect, and the others still arrive."""
+    original = consumption_module.read_result_payload
+
+    async def read(runtime: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:
+        if job.job_id == "job_b":
+            msg = "Tool job result is not available."
+            raise JobAccessError(msg)
+        return await original(runtime, job)
+
+    monkeypatch.setattr(consumption_module, "read_result_payload", read)
+    response, runtime, _tools, owner, (storage, _context) = await _collect_in_a_run(
+        tmp_path,
+        {
+            "job_a": BackgroundOutcome("completed", "result a", result_payload=_payload("result a")),
+            "job_b": BackgroundOutcome("completed", "result b", result_payload=_payload("result b")),
+        },
+    )
+    try:
+        result = str(response.tools[0].result)
+        assert "result a" in result
+        assert "`job_b` (tool_job_b) completed: its result could not be read now" in result
+        assert (await lookup(runtime, "job_a", owner=owner, depth=0)).consumed
+        assert not (await lookup(runtime, "job_b", owner=owner, depth=0)).consumed
     finally:
         storage.close()
         await runtime.shutdown()
