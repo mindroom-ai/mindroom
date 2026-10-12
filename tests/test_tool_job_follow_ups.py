@@ -26,8 +26,9 @@ from mindroom.tool_jobs.follow_ups import (
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.conftest import install_generate_response_mock, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _envelope, _target
+from tests.bot_helpers import unique_room_send_responses
+from tests.conftest import install_generate_response_mock, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter
 from tests.test_response_turn import _continuation as _turn_continuation
 from tests.test_response_turn import _ctx as _turn_ctx
@@ -42,6 +43,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -316,12 +318,42 @@ async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: 
         )
         assert request.existing_event_id is None
         assert request.sources.pending_event_ids == ("job-follow-up:1",)
-        prepared = await runner._follow_up_under_lock(request)
-        assert prepared is not None
+        assert await runner._follow_up_due(request)
         # The turn's start note lists the jobs; its prompt asks for one collect.
-        assert prepared.prompt == bot.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
-        assert 'job(action="collect")' in prepared.prompt
-        assert prepared.response_envelope.body == prepared.prompt
+        assert request.prompt == bot.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
+        assert 'job(action="collect")' in request.prompt
+        assert request.response_envelope.body == request.prompt
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_follow_up_runs_a_model_turn_that_posts_its_reply(tmp_path: Path) -> None:
+    """The follow-up's turn reaches the model with its prompt and posts what the model answers."""
+    bot = _bot(tmp_path)
+    await bot._reply_runtime.start()
+    unique_room_send_responses(bot.client)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    runtime = await _runner_runtime(bot, tmp_path)
+    prompts: list[str] = []
+
+    async def stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+        prompts.append(str(kwargs["prompt"]))
+        yield "The job finished."
+
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
+        event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await runner._run_job_follow_up(event)
+        assert prompts == [bot.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")]
+        reply = await bot._reply_runtime.store.replies.for_sources(("job-follow-up:1",))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.COMPLETED
     finally:
         await runtime.shutdown()
 
@@ -344,7 +376,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
             claimed=asyncio.Event(),
             handoff=asyncio.Event(),
         )
-        assert await runner._follow_up_under_lock(request) is None
+        assert not await runner._follow_up_due(request)
         # Nothing claimed a reply for it, so its source settles.
         install_generate_response_mock(bot, AsyncMock(return_value=None))
         await runner._run_job_follow_up(event)
@@ -391,7 +423,7 @@ async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path) -> 
             claimed=asyncio.Event(),
             handoff=asyncio.Event(),
         )
-        assert await runner._follow_up_under_lock(request) is not None
+        assert await runner._follow_up_due(request)
     finally:
         await runtime.shutdown()
 
@@ -416,9 +448,8 @@ async def test_an_interrupted_job_gets_a_follow_up_saying_it_may_have_partly_run
             claimed=asyncio.Event(),
             handoff=asyncio.Event(),
         )
-        prepared = await runner._follow_up_under_lock(request)
         # The follow-up's start note says the interrupted job may have partly run.
-        assert prepared is not None
+        assert await runner._follow_up_due(request)
     finally:
         await runtime.shutdown()
 

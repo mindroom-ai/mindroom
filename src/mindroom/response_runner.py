@@ -3312,11 +3312,8 @@ class ResponseRunner:
         slot = current_slot()
         if slot is None:
             return request
-        if request.follow_up_key is not None:
-            follow_up = await self._follow_up_under_lock(request)
-            if follow_up is None:
-                return None
-            request = follow_up
+        if request.follow_up_key is not None and not await self._follow_up_due(request):
+            return None
         handle = await self.deps.replies.claim(
             delivery_id=request.response_envelope.source_event_id,
             sources=request.sources,
@@ -3504,20 +3501,15 @@ class ResponseRunner:
             return
         await self.deps.approval_store.settle(event.event_id)
 
-    async def _follow_up_under_lock(self, request: ResponseRequest) -> ResponseRequest | None:
-        """Decide under the conversation lock what a follow-up reports; ``None`` when a reply collected it all."""
+    async def _follow_up_due(self, request: ResponseRequest) -> bool:
+        """Decide under the conversation lock whether a follow-up still has jobs to report, which a reply may have collected."""
         assert request.follow_up_key is not None
         runtime = get_background_runtime(self.deps.runtime_paths)
-        jobs = () if runtime is None else follow_up_jobs(await ended_jobs(runtime, request.follow_up_key))
-        if not jobs:
-            # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
-            follow_up_id = request.response_envelope.source_event_id
-            reply = await self.deps.replies.store.replies.for_sources((follow_up_id,))
-            if reply is None or reply.terminal:
-                return None
-        # The turn's start note lists the jobs, as every turn's does.
-        prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
-        return replace(request, prompt=prompt, response_envelope=replace(request.response_envelope, body=prompt))
+        if runtime is not None and follow_up_jobs(await ended_jobs(runtime, request.follow_up_key)):
+            return True
+        # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
+        reply = await self.deps.replies.store.replies.for_sources((request.response_envelope.source_event_id,))
+        return reply is not None and not reply.terminal
 
     def _job_follow_up_request(
         self,
@@ -3527,8 +3519,9 @@ class ResponseRunner:
         claimed: asyncio.Event,
         handoff: asyncio.Event,
     ) -> ResponseRequest:
-        """Build the turn that reports a conversation's ended jobs in a new reply; its lock decides what it reports."""
-        envelope = follow_up_envelope(key, follow_up_id=follow_up_id, sender_id=self.deps.matrix_full_id, prompt="")
+        """Build the turn that reports a conversation's ended jobs in a new reply; its start note lists the jobs."""
+        prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
+        envelope = follow_up_envelope(key, follow_up_id=follow_up_id, sender_id=self.deps.matrix_full_id, prompt=prompt)
 
         async def mark_claimed() -> None:
             claimed.set()
