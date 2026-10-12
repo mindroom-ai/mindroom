@@ -8,7 +8,7 @@
 > true only of the prototype.
 >
 > **For what the journal actually guarantees today, read
-> [`docs/dev/matrix-event-journal-contracts.md`](../matrix-event-journal-contracts.md).**
+> [`docs/architecture/matrix-event-journal-contracts.md`](../../architecture/matrix-event-journal-contracts.md).**
 > Nothing below should be quoted as current behaviour without checking it
 > against the code first.
 

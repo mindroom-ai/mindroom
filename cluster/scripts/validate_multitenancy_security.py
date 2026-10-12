@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate multi-tenancy security fixes.
 
-This script verifies that the security issues identified in SECURITY_REVIEW_02_MULTITENANCY.md
+This script verifies that the security issues identified in docs/dev/security/2025-09-11-security-review-02-multitenancy.md
 have been properly addressed.
 """
 
@@ -139,7 +139,7 @@ def check_migrations() -> list[tuple[bool, str]]:
 def main() -> None:  # noqa: PLR0915
     """Run all security validation checks."""
     console.print("\n[bold]Multi-Tenancy Security Validation[/bold]\n", style="blue")
-    console.print("Validating fixes for SECURITY_REVIEW_02_MULTITENANCY.md issues...\n")
+    console.print("Validating fixes for docs/dev/security/2025-09-11-security-review-02-multitenancy.md issues...\n")
 
     # Create results table
     table = Table(title="Security Validation Results")

@@ -1,6 +1,6 @@
 """Tests for multi-tenancy security and data isolation.
 
-These tests verify that the security fixes from SECURITY_REVIEW_02_MULTITENANCY.md
+These tests verify that the security fixes from docs/dev/security/2025-09-11-security-review-02-multitenancy.md
 properly isolate tenant data and prevent cross-tenant access.
 """
 

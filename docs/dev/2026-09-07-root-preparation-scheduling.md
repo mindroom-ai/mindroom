@@ -259,7 +259,7 @@ Installed producer and consumer source hashes still match the tested commits; bo
 The subsequent exact-startup trace identifies the agent-wide handled-turn ledger lock as the critical serialization point.
 At baseline, it remained held across unrelated admission and settlement work in the shared writer queue.
 Nio commit stalls overlap these waits and are not additional wall time to sum into them.
-The [ledger ownership design](ledger-write-ownership.md) records the correlated 50/100/200 traces, calibrated py-spy samples, rejected unsafe prototype, conflict rules and final controls.
+The [ledger ownership design](2026-09-07-ledger-write-ownership.md) records the correlated 50/100/200 traces, calibrated py-spy samples, rejected unsafe prototype, conflict rules and final controls.
 
 MindRoom `5502b1177` reserves conflicting event identities through commit or rollback while allowing unrelated turns to await their own writes concurrently.
 It retains both durable pending-turn writes, existing backend transactions, eight preparation slots and FULL durability.

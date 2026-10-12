@@ -11,7 +11,7 @@ Runtime resolvers consume only the membership schema, so ingress, room reconcili
 
 **Tech Stack:** Python 3.13, Pydantic v2, Matrix/Nio, Typer, pytest, YAML
 
-**Spec:** `docs/dev/membership-based-access-schema-plan.md#design`
+**Spec:** `docs/dev/2026-08-28-membership-based-access-schema-plan.md#design`
 
 ## Global Constraints
 

@@ -112,4 +112,4 @@ The platform is trending in the right direction—major blockers are resolved an
 ---
 
 *For detailed findings, see individual SECURITY_REVIEW_[01-12]_*.md documents*
-*For action items, see SECURITY_ACTION_PLAN.md*
+*For action items, see 2025-09-11-security-action-plan.md*

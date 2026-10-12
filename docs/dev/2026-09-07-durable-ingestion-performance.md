@@ -1,7 +1,7 @@
 # Durable ingestion performance evidence
 
 This is the entry point for the September 2026 producer/consumer investigation.
-Use it with the [ledger ownership and measured results](ledger-write-ownership.md) and the producer's `docs/design/durable-sync.md` and `docs/design/durable-sync-plan.md` in `mindroom-nio`.
+Use it with the [ledger ownership and measured results](2026-09-07-ledger-write-ownership.md) and the producer's `docs/design/durable-sync.md` and `docs/design/durable-sync-plan.md` in `mindroom-nio`.
 Those documents define the retained guarantees and supersede the retired ingestion-engine plans.
 The benchmark result is 200 concurrent conversations with one responder account, three syncing principals and a synthetic model; it does not qualify 200 independent agents or 1,000 concurrent replies.
 
@@ -33,7 +33,7 @@ It includes exact historical native libraries, the earlier trace-child variant r
 `MANIFEST.sha256` checks every packaged file; the companion archive checksum verifies the package itself.
 The archive is retained in the capacity workspace, not hosted in this Git repository.
 Raw application logs, synthetic database files and server state remain in their original evidence directories; they are not needed for the packaged metadata analysis.
-The tracked [measurement summary](durable-ingestion-performance-results.json) preserves the key numeric results, source revisions and run mappings independently of the archive.
+The tracked [measurement summary](2026-09-07-durable-ingestion-performance-results.json) preserves the key numeric results, source revisions and run mappings independently of the archive.
 
 | Latest run | Driver directory under `durable-sync-kernel` | Separate evidence directory under `durable-sync-kernel` |
 | --- | --- | --- |
@@ -80,7 +80,7 @@ The exact native/source probe variants used by the two valid traces are mapped i
 The follow-up tested skipping duplicate fresh-claim device binding and then combining live enqueue/claim, adding two and 84 cumulative net production lines respectively.
 The candidates passed focused correctness checks and all 200-root capacity predicates, but did not establish a repeatable startup-tail benefit against normal controls.
 Both are withdrawn: zero retained production lines, dependencies or guarantee changes.
-The [ledger decision](ledger-write-ownership.md#measured-outcome-withdraw-both-candidates) and tracked JSON retain the median/p95 results, source revisions and limitations.
+The [ledger decision](2026-09-07-ledger-write-ownership.md#measured-outcome-withdraw-both-candidates) and tracked JSON retain the median/p95 results, source revisions and limitations.
 
 | Run | Driver directory under `durable-sync-kernel` | Evidence directory |
 | --- | --- | --- |

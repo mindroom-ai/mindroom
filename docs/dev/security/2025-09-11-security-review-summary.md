@@ -1,7 +1,7 @@
 # MindRoom Security Review Summary
 
 > **Audit note (2026-03-18):** References in this summary may be stale as individual review docs have been updated independently.
-> Cross-reference with SECURITY_REVIEW_*.md files and SECURITY_ACTION_PLAN.md for current status.
+> Cross-reference with SECURITY_REVIEW_*.md files and 2025-09-11-security-action-plan.md for current status.
 > This is a historical repository review, not a deployment attestation; unresolved findings require fresh validation before production decisions.
 
 **Original review date:** September 12, 2025
@@ -62,8 +62,8 @@ Open or unverified work includes injection and input validation, secrets lifecyc
 
 ## References
 
-- Plans and rollups: [action plan](SECURITY_ACTION_PLAN.md), [executive summary](SECURITY_EXECUTIVE_SUMMARY.md), [checklist](SECURITY_REVIEW_CHECKLIST.md), and [findings](SECURITY_REVIEW_FINDINGS.md).
-- Category reviews: [01 auth](SECURITY_REVIEW_01_AUTH.md), [02 multitenancy](SECURITY_REVIEW_02_MULTITENANCY.md), [03 secrets](SECURITY_REVIEW_03_SECRETS.md), [04 injection](SECURITY_REVIEW_04_INJECTION.md), [05 tokens](SECURITY_REVIEW_05_TOKENS.md), [06 infrastructure](SECURITY_REVIEW_06_INFRASTRUCTURE.md), [07 data protection](SECURITY_REVIEW_07_DATA_PROTECTION.md), [08 dependencies](SECURITY_REVIEW_08_DEPENDENCIES.md), [09 error handling](SECURITY_REVIEW_09_ERROR_HANDLING.md), [10 API security](SECURITY_REVIEW_10_API_SECURITY.md), [11 monitoring](SECURITY_REVIEW_11_MONITORING.md), and [12 frontend](SECURITY_REVIEW_12_FRONTEND.md).
+- Plans and rollups: [action plan](2025-09-11-security-action-plan.md), [executive summary](2025-09-11-security-executive-summary.md), [checklist](2025-09-11-security-review-checklist.md), and [findings](2025-09-11-security-review-findings.md).
+- Category reviews: [01 auth](2025-09-11-security-review-01-auth.md), [02 multitenancy](2025-09-11-security-review-02-multitenancy.md), [03 secrets](2025-09-11-security-review-03-secrets.md), [04 injection](2025-09-11-security-review-04-injection.md), [05 tokens](2025-09-11-security-review-05-tokens.md), [06 infrastructure](2025-09-11-security-review-06-infrastructure.md), [07 data protection](2025-09-11-security-review-07-data-protection.md), [08 dependencies](2025-09-11-security-review-08-dependencies.md), [09 error handling](2025-09-11-security-review-09-error-handling.md), [10 API security](2025-09-11-security-review-10-api-security.md), [11 monitoring](2025-09-11-security-review-11-monitoring.md), and [12 frontend](2025-09-11-security-review-12-frontend.md).
 
 ## Risk Assessment
 

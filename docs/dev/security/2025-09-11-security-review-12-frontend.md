@@ -7,7 +7,7 @@
 **Review Date:** 2025-09-11
 **Updated:** 2025-09-17
 **Reviewer:** Claude Code Security Analysis
-**Scope:** Frontend Security (Category 12 from SECURITY_REVIEW_CHECKLIST.md)
+**Scope:** Frontend Security (Category 12 from 2025-09-11-security-review-checklist.md)
 **Application:** MindRoom SaaS Platform Frontend (Next.js 15)
 
 ## Executive Summary

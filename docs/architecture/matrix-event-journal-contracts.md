@@ -15,7 +15,7 @@ One shared database backend may hold several principals, but runtime code receiv
 Ordinary operations such as `admit`, `pending`, `settle`, `load_conversation`, membership changes, and response delivery take their principal from the bound view.
 Inbound envelopes and conversation keys also omit it, because the bound store supplies it.
 This is what stops a caller from reading or settling another bot's rows by accident.
-Internal approval coordination explicitly spans router-owned cards and responder-owned continuations through validated exact-call relationships; see [the approval coordination boundary](../architecture/matrix-event-journal-security.md#principal-binding).
+Internal approval coordination explicitly spans router-owned cards and responder-owned continuations through validated exact-call relationships; see [the approval coordination boundary](matrix-event-journal-security.md#principal-binding).
 
 ### Conversation identity storage
 

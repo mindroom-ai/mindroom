@@ -301,7 +301,7 @@ securityContext:
 1. 🔴 Verified rotation (and confirmation) for previously exposed API keys
 2. 🔴 Monitoring/alerting + incident response coverage
 3. 🔴 Infrastructure hardening (non-root pods, internal TLS decision)
-4. 🔴 Completion of outstanding High/Medium items in `SECURITY_REVIEW_CHECKLIST.md`
+4. 🔴 Completion of outstanding High/Medium items in `2025-09-11-security-review-checklist.md`
 
 Re-run this action plan after the above are delivered.
 

@@ -261,7 +261,7 @@ Reply-completion measurements additionally include approximately 60 seconds of s
 
 The next investigation resolves most of the previously unidentified writer waiting to CPython GIL acquisition.
 It uses MindRoom `e276982fdbd3f58b8d471376c417767654819da4` and Nio `ce18a1fed0a592b93b789de4480ac3e61e8c3145`, without changing either production source tree.
-The [performance evidence index](durable-ingestion-performance.md) records reproduction commands, source provenance, artifact locations and earlier decisions.
+The [performance evidence index](2026-09-07-durable-ingestion-performance.md) records reproduction commands, source provenance, artifact locations and earlier decisions.
 
 ### Reply transaction boundaries
 
@@ -404,7 +404,7 @@ Both implementations are withdrawn and the production source, tests and whitelis
 The previously retained ledger-concurrency improvement remains intact; no durability or ownership guarantee changes.
 Do not repeat these candidates without a new workload or evidence that changes the decision; this bounded trial is complete, and 1,000 replies remain unqualified.
 
-Exact revisions, run directories, metrics and result checksums are tracked in `durable-ingestion-performance-results.json` under `delivery_transaction_trial`.
+Exact revisions, run directories, metrics and result checksums are tracked in `2026-09-07-durable-ingestion-performance-results.json` under `delivery_transaction_trial`.
 The persistent `durable-sync-kernel/delivery-transactions` directory contains test logs, all three new control logs, the comparison helper and its output.
 The evidence index records the reproduction addendum.
 

@@ -1,6 +1,6 @@
 # MindRoom Security Review Checklist
 
-> **Audit note (2026-03-18):** Some checked items in this checklist contradict the status reported in individual SECURITY_REVIEW_*.md documents and SECURITY_ACTION_PLAN.md.
+> **Audit note (2026-03-18):** Some checked items in this checklist contradict the status reported in individual SECURITY_REVIEW_*.md documents and 2025-09-11-security-action-plan.md.
 > Known inconsistencies: default password removal is marked done here while secrets rotation is still pending, and monitoring items are unchecked here although Prometheus metric and alert-rule manifests exist.
 > Treat the individual review docs as the more detailed source of truth.
 > This is a historical checklist, not a live deployment attestation.
