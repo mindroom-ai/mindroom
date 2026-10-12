@@ -387,8 +387,29 @@ def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
     assert tables == set()
 
 
-def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Path) -> None:
-    """A real 2.6.12 database is read as-is; deleting a legacy run scrubs it from the blob, saves append rows."""
+def _blob(db_path: Path) -> object:
+    connection = sqlite3.connect(db_path)
+    try:
+        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
+    finally:
+        connection.close()
+    return blob
+
+
+def _set_blob(db_path: Path, legacy_runs: list[object]) -> None:
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
+            (json.dumps(json.dumps(legacy_runs)),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_agno_2_blob_runs_become_rows_once(tmp_path: Path) -> None:
+    """A real 2.6.12 database's blob runs become run rows in blob order when it opens; the blob is cleared."""
     db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
 
     storage = _storage(tmp_path)
@@ -396,33 +417,90 @@ def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Pat
         loaded = get_agent_session(storage, "session-1")
         assert loaded is not None
         assert [run.run_id for run in loaded.runs or []] == ["run-1", "run-2", "run-3"]
+        assert _run_rows(db_path) == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
+        assert _blob(db_path) is None
         replace_runs(storage, loaded, [run for run in loaded.runs or [] if run.run_id != "run-2"])
-        after_delete = _loaded_run_ids(storage, "session-1")
         save_runs(storage, loaded, [_run("session-1", "run-4")])
-        after_save = _loaded_run_ids(storage, "session-1")
     finally:
         storage.close()
 
-    # A restart must not resurrect the deleted legacy run through the blob merge.
     storage = _storage(tmp_path)
     try:
         after_restart = _loaded_run_ids(storage, "session-1")
     finally:
         storage.close()
 
-    assert after_delete == ["run-1", "run-3"]
-    assert after_save == ["run-1", "run-3", "run-4"]
     assert after_restart == ["run-1", "run-3", "run-4"]
-    assert _run_rows(db_path) == [("run-4", 0)]
+    assert _run_rows(db_path) == [("run-1", 0), ("run-3", 2), ("run-4", 3)]
     connection = sqlite3.connect(db_path)
     try:
-        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
         connection.close()
-    assert [run["run_id"] for run in json.loads(blob)] == ["run-1", "run-3"]
     # Opening a pre-existing file must not let agno's connect listener switch it to WAL.
     assert journal_mode == ("delete",)
+
+
+def test_blob_runs_keep_the_order_agno_read_them_in(tmp_path: Path) -> None:
+    """Blob order with table copies substituted, then table-only rows, as Agno's merge returned them."""
+    template = _storage(tmp_path / "template")
+    try:
+        seed_session(template, _session("session-1", ["template"]))
+    finally:
+        template.close()
+    connection = sqlite3.connect(tmp_path / "template" / "sessions" / "code.db")
+    try:
+        (runs_ddl,) = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'code_sessions_runs'",
+        ).fetchone()
+    finally:
+        connection.close()
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(runs_ddl)
+        for run_id, run_index, content in (("run-9", 0, "table only"), ("run-2", 1, "table copy")):
+            run = {"run_id": run_id, "agent_id": "code", "session_id": "session-1", "status": "COMPLETED"}
+            connection.execute(
+                "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, status, run_index, "
+                "run_data, created_at) VALUES (?, 'session-1', 'agent', 'code', 'COMPLETED', ?, ?, 1700000009)",
+                (run_id, run_index, json.dumps({**run, "content": content})),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    try:
+        loaded = get_agent_session(storage, "session-1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["run-1", "run-2", "run-3", "run-9"]
+    assert loaded.runs[1].content == "table copy"
+    assert _run_rows(db_path) == [("run-1", 0), ("run-2", 1), ("run-3", 2), ("run-9", 3)]
+
+
+def test_blob_entries_without_a_string_run_id_are_dropped(tmp_path: Path) -> None:
+    """Only entries a read could address by id become rows; member entries keep their parent."""
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    _set_blob(
+        db_path,
+        [
+            {"run_id": "team1", "agent_id": "code", "session_id": "session-1"},
+            {"session_id": "session-1", "parent_run_id": "team1"},
+            {"run_id": 7, "parent_run_id": ["team1"]},
+            {"run_id": None, "parent_run_id": None},
+            "not a dict",
+            {"run_id": "m1", "agent_id": "helper", "session_id": "session-1", "parent_run_id": "team1"},
+        ],
+    )
+
+    _storage(tmp_path).close()
+
+    assert _run_rows(db_path) == [("team1", 0), ("m1", 1)]
+    assert _blob(db_path) is None
 
 
 def test_failed_run_writes_leave_the_session_as_loaded() -> None:
@@ -439,44 +517,6 @@ def test_failed_run_writes_leave_the_session_as_loaded() -> None:
         replace_runs(storage, session, original_runs[:1])
 
     assert session.runs == original_runs
-
-
-def test_delete_runs_scrubs_the_legacy_blob_in_the_same_transaction(tmp_path: Path) -> None:
-    """A refused blob rewrite must roll back the row deletion; both land or neither does."""
-    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
-
-    storage = _storage(tmp_path)
-    try:
-        loaded = get_agent_session(storage, "session-1")
-        assert loaded is not None
-        save_runs(storage, loaded, [_run("session-1", "run-4")])
-        # A trigger stands in for any failure of the blob rewrite.
-        connection = sqlite3.connect(db_path)
-        try:
-            connection.execute(
-                "CREATE TRIGGER refuse_blob_rewrite BEFORE UPDATE OF runs ON code_sessions "
-                "BEGIN SELECT RAISE(ABORT, 'blob rewrite refused'); END",
-            )
-            connection.commit()
-        finally:
-            connection.close()
-        with pytest.raises(Exception, match="blob rewrite refused"):
-            storage.delete_runs(["run-1", "run-4"])
-        after_refusal = _loaded_run_ids(storage, "session-1")
-        connection = sqlite3.connect(db_path)
-        try:
-            connection.execute("DROP TRIGGER refuse_blob_rewrite")
-            connection.commit()
-        finally:
-            connection.close()
-        storage.delete_runs(["run-1", "run-4"])
-        after_delete = _loaded_run_ids(storage, "session-1")
-    finally:
-        storage.close()
-
-    assert after_refusal == ["run-1", "run-2", "run-3", "run-4"]
-    assert after_delete == ["run-2", "run-3"]
-    assert _run_rows(db_path) == []
 
 
 def test_save_runs_refuses_a_run_object_loaded_from_the_session() -> None:
@@ -519,39 +559,6 @@ def test_deleting_a_team_run_takes_its_member_rows_along(tmp_path: Path) -> None
     assert after_direct_delete.runs == []
 
 
-def test_delete_runs_scrubs_legacy_blob_descendants_too(tmp_path: Path) -> None:
-    """A 2.x blob can hold member entries under a team run; scrubbing the parent scrubs them."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    legacy_runs = [
-        {"run_id": "team1", "session_id": "s1"},
-        {"run_id": "m1", "session_id": "s1", "parent_run_id": "team1"},
-        {"run_id": "team2", "session_id": "s1"},
-    ]
-    connection = sqlite3.connect(create_agno_2_sessions_db(db_path))
-    try:
-        connection.execute(
-            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
-            (json.dumps(json.dumps(legacy_runs)),),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    try:
-        storage.delete_runs(["team1"])
-    finally:
-        storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
-    finally:
-        connection.close()
-    assert [run["run_id"] for run in json.loads(blob)] == ["team2"]
-
-
 def test_runs_without_removes_every_descendant() -> None:
     """Grandchildren leave with their root even when stored before it."""
     runs = [
@@ -571,42 +578,6 @@ def test_runs_without_drops_a_child_that_has_no_run_id() -> None:
     other = RunOutput(run_id="other", agent_id="code", session_id="t1")
 
     assert runs_without([root, orphan_child, other], ["root"]) == [other]
-
-
-def test_delete_runs_tolerates_malformed_legacy_blob_entries(tmp_path: Path) -> None:
-    """Entries with missing or non-string ids never match; they are carried along, not crashed on."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    legacy_runs = [
-        {"run_id": "team1", "session_id": "s1"},
-        {"session_id": "s1", "parent_run_id": "team1"},
-        {"run_id": 7, "parent_run_id": ["team1"]},
-        {"run_id": None, "parent_run_id": None},
-        "not a dict",
-        {"run_id": "keep", "parent_run_id": {"nested": True}},
-    ]
-    connection = sqlite3.connect(create_agno_2_sessions_db(db_path))
-    try:
-        connection.execute(
-            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
-            (json.dumps(json.dumps(legacy_runs)),),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    try:
-        storage.delete_runs(["team1"])
-    finally:
-        storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
-    finally:
-        connection.close()
-    assert json.loads(blob) == legacy_runs[2:]
 
 
 def test_cache_diagnostics_count_history_without_retaining_closed_adapters(

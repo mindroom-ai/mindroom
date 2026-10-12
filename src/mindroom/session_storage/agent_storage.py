@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
+from agno.db.utils import deserialize_session
 from agno.learn import LearningMachine
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -23,7 +24,7 @@ from sqlalchemy import Engine, create_engine, event, select
 from sqlalchemy.dialects.sqlite import insert
 
 from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.history.legacy_compaction_state import migrate_compaction_database
+from mindroom.history.legacy_compaction_state import migrate_compaction_database, migrate_to_summary_rows
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage import (
@@ -32,7 +33,7 @@ from mindroom.session_storage import (
     agno_compat_session_persistence,
     agno_compat_sqlite,
 )
-from mindroom.session_storage.legacy_session_storage import drop_run_tool_schemas, scrub_legacy_run_blobs
+from mindroom.session_storage.legacy_session_storage import drop_run_tool_schemas
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.storage import project_usage, usage_table_sql, usage_upsert_sql
@@ -232,6 +233,8 @@ def _create_sqlite_state_storage(
             db_file=db_file,
             db_engine=create_state_engine(db_file),
         )
+        if subdir == "sessions":
+            migrate_to_summary_rows(database)
         agno_compat_session_persistence._register_sync_session_storage(
             database,
             db_file=db_file,
@@ -381,16 +384,23 @@ class _ConversationSqliteDb(SqliteDb):
     ) -> Session | dict[str, Any] | None:
         """Read a canonical conversation session without treating its requester as its owner.
 
-        ``runs_limit`` is ignored: MindRoom's history layer (compaction, replay,
-        redaction) reasons over the whole run list.
+        The session holds the runs after its scope's latest summary row, every
+        non-visible run, and their descendants, read with the session row in one
+        snapshot. ``runs_limit`` is ignored: MindRoom's history layer
+        (compaction, replay, redaction) reasons over those runs.
         """
         del user_id, runs_limit
-        session = super().get_session(
-            session_id=session_id,
-            session_type=session_type,
-            user_id=None,
-            deserialize=deserialize,
-        )
+        read = agno_compat_sqlite.read_conversation(self, session_id)
+        if read is None:
+            return None
+        session_raw = read.session_row
+        cached_runs = deserialize and session_raw.get("session_type") == SessionType.AGENT.value
+        session_raw["runs"] = None if cached_runs else [json.loads(run_data) for _run_id, run_data in read.run_rows]
+        if not deserialize:
+            return session_raw
+        session = deserialize_session(session_type, session_raw)
+        if cached_runs:
+            session.runs = self._run_object_cache.runs_from_rows(session_id, read.run_rows)  # type: ignore[union-attr]
         if isinstance(session, (AgentSession, TeamSession)):
             agno_compat_session_metrics.seed_accounted_usage(session)
             drop_run_tool_schemas(session.runs or [])
@@ -432,34 +442,30 @@ class _ConversationSqliteDb(SqliteDb):
         """Delete a run subtree and its legacy representations atomically."""
         if not run_ids:
             return
-        with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table, sessions_table):
-            delete_run_subtrees(sess, runs_table, sessions_table, run_ids)
+        with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table):
+            delete_run_subtrees(sess, runs_table, run_ids)
 
 
 def delete_run_subtrees(
     transaction: OrmSession,
     runs_table: Table | None,
-    sessions_table: Table | None,
     run_ids: Collection[str],
 ) -> None:
-    """Delete runs, their member-run descendants, and retained legacy copies in the caller's transaction."""
+    """Delete runs and their member-run descendants in the caller's transaction."""
     wanted = {run_id for run_id in run_ids if run_id}
-    if not wanted:
+    if not wanted or runs_table is None:
         return
-    if runs_table is not None:
-        # Team member runs are rows whose parent_run_id is the team run; a
-        # deleted run takes its whole subtree along, as agno's own
-        # session-level delete cascades do.
-        frontier = list(wanted)
-        while frontier:
-            children = transaction.execute(
-                select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
-            ).scalars()
-            frontier = [child for child in children if child not in wanted]
-            wanted.update(frontier)
-        transaction.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
-    if sessions_table is not None:
-        scrub_legacy_run_blobs(transaction, sessions_table, wanted)
+    # Team member runs are rows whose parent_run_id is the team run; a
+    # deleted run takes its whole subtree along, as agno's own
+    # session-level delete cascades do.
+    frontier = list(wanted)
+    while frontier:
+        children = transaction.execute(
+            select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
+        ).scalars()
+        frontier = [child for child in children if child not in wanted]
+        wanted.update(frontier)
+    transaction.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
 
 
 def runs_without(

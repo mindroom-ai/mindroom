@@ -9,13 +9,18 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.archive_schema import archive_schema_sql, archive_table_names
+from mindroom.history.summary_rows_schema import summary_rows_schema_sql, summary_rows_table_names
 from mindroom.history.types import HistoryScope
-from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
+from mindroom.session_storage import agno_compat_sqlite
+from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json, materialize_legacy_run_blobs
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Collection
     from pathlib import Path
+
+    from agno.db.sqlite import SqliteDb
+    from sqlalchemy import Connection
 
 # LEGACY_COMPAT: Destructive compaction state without an archive.
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
@@ -58,6 +63,28 @@ def migrate_compaction_database(path: Path, session_table: str) -> None:
     finally:
         # close rolls back both DDL and rows on interruption, leaving migration retryable.
         connection.close()
+
+
+def migrate_to_summary_rows(db: SqliteDb) -> None:
+    """Create the summary-row tables once, first giving every stored run a position in the conversation log."""
+    session_table = db.session_table_name
+    with db.db_engine.connect() as connection:
+        if not _needs_summary_rows(connection, session_table):
+            return
+        # Created before the write lock: Agno creates it on its own connection.
+        runs = agno_compat_sqlite.owned_table(db, "runs")
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        # Another startup may have finished while this connection waited for its write lock.
+        if _needs_summary_rows(connection, session_table):
+            materialize_legacy_run_blobs(connection, runs, session_table)
+            for statement in summary_rows_schema_sql(session_table):
+                connection.exec_driver_sql(statement)
+        connection.commit()
+
+
+def _needs_summary_rows(connection: Connection, session_table: str) -> bool:
+    tables = {name for (name,) in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    return session_table in tables and summary_rows_table_names(session_table)[0] not in tables
 
 
 def _needs_migration(connection: sqlite3.Connection, session_table: str) -> bool:

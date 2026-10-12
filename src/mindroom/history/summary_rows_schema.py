@@ -1,0 +1,45 @@
+"""Table layout of the conversation log's summary rows, shared by storage reads, run writes, and migrations.
+
+A scope's history is Agno's runs table in ``run_index`` order with summary rows
+positioned between its runs. Each summary row sorts right after the run whose
+``run_index`` it records; replay is the scope's latest summary row plus the runs
+after it. Removed run ids keep a run a cut deleted from being written again.
+
+It stays free of storage and runtime imports so ``session_storage`` can use it.
+"""
+
+from __future__ import annotations
+
+from mindroom.usage.storage import quote_identifier
+
+NON_VISIBLE_RUN_STATUSES = ("PAUSED", "CANCELLED", "ERROR")
+
+
+def summary_rows_table_names(session_table: str) -> tuple[str, str]:
+    """Return the unquoted summary-row and removed-run table names beside ``session_table``."""
+    return f"{session_table}_summaries", f"{session_table}_removed_runs"
+
+
+def summary_rows_schema_sql(session_table: str) -> tuple[str, ...]:
+    """Return the idempotent DDL that creates both tables beside ``session_table``."""
+    summaries, removed_runs = (quote_identifier(name) for name in summary_rows_table_names(session_table))
+    sessions = quote_identifier(session_table)
+    return (
+        # The large ``segment`` comes last so scans of the small columns skip its overflow pages.
+        f"CREATE TABLE IF NOT EXISTS {summaries} (id INTEGER PRIMARY KEY, "
+        f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE, "
+        "scope_key TEXT NOT NULL, after_run_index INTEGER NOT NULL, summary TEXT, summary_model TEXT, "
+        "event_ids TEXT NOT NULL DEFAULT '[]', seen_event_ids TEXT NOT NULL DEFAULT '[]', "
+        "legacy INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, segment_run_id TEXT, segment TEXT)",
+        f"CREATE INDEX IF NOT EXISTS {quote_identifier(session_table + '_summaries_scope')} "
+        f"ON {summaries} (session_id, scope_key, id)",
+        f"CREATE TABLE IF NOT EXISTS {removed_runs} (run_id TEXT PRIMARY KEY, "
+        f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE)",
+        f"CREATE INDEX IF NOT EXISTS {quote_identifier(session_table + '_removed_runs_session')} "
+        f"ON {removed_runs} (session_id)",
+    )
+
+
+def run_scope_key_sql(alias: str) -> str:
+    """Return the SQL expression for a runs-table row's ``HistoryScope.key``."""
+    return f"CASE WHEN {alias}.run_type = 'team' THEN 'team:' || {alias}.team_id ELSE 'agent:' || {alias}.agent_id END"

@@ -953,9 +953,9 @@ depends_on = [
     "mindroom.session_storage.agno_compat_session_persistence",
     "mindroom.constants",
     "mindroom.history.legacy_compaction_state",
-    "mindroom.session_storage.legacy_session_storage",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.runtime_resolution",
+    "mindroom.session_storage.legacy_session_storage",
     "mindroom.session_storage.preflight",
     "mindroom.usage.storage",
 ]
@@ -1012,7 +1012,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.session_storage.legacy_session_storage"
-depends_on = []
+depends_on = ["mindroom.usage.storage"]
 visibility = [
     "mindroom.usage.legacy_usage_storage",
     "mindroom.session_storage.agent_storage",
@@ -2615,6 +2615,11 @@ depends_on = ["mindroom.usage.storage"]
 visibility = ["mindroom.history.archive", "mindroom.history.legacy_compaction_state"]
 
 [[modules]]
+path = "mindroom.history.summary_rows_schema"
+depends_on = ["mindroom.usage.storage"]
+visibility = ["mindroom.history.legacy_compaction_state", "mindroom.session_storage.agno_compat_sqlite"]
+
+[[modules]]
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.session_storage.agent_storage",
@@ -2632,7 +2637,9 @@ path = "mindroom.history.legacy_compaction_state"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.archive_schema",
+    "mindroom.history.summary_rows_schema",
     "mindroom.history.types",
+    "mindroom.session_storage.agno_compat_sqlite",
     "mindroom.session_storage.legacy_session_storage",
     "mindroom.usage.storage",
 ]
@@ -7992,8 +7999,8 @@ expose = ["install_model_call_cap"]
 
 [[modules]]
 path = "mindroom.session_storage.agno_compat_sqlite"
-depends_on = ["mindroom.usage.storage"]
-visibility = ["mindroom.session_storage.agent_storage", "mindroom.history.archive"]
+depends_on = ["mindroom.history.summary_rows_schema", "mindroom.usage.storage"]
+visibility = ["mindroom.session_storage.agent_storage", "mindroom.history.archive", "mindroom.history.legacy_compaction_state"]
 
 [[interfaces]]
 from = ["mindroom.session_storage.agno_compat_sqlite"]
@@ -8003,6 +8010,7 @@ expose = [
     "insert_run_row",
     "upsert_run_at_end",
     "run_deletion_transaction",
+    "read_conversation",
     "cached_run_counts",
 ]
 
@@ -8699,7 +8707,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = []
-visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.agno_compat_run_messages", "mindroom.session_storage.agno_compat_sqlite", "mindroom.helper_usage", "mindroom.history.archive", "mindroom.history.archive_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage"]
+visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.agno_compat_run_messages", "mindroom.session_storage.agno_compat_sqlite", "mindroom.helper_usage", "mindroom.history.archive", "mindroom.history.archive_schema", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.session_storage.legacy_session_storage", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"

@@ -81,7 +81,7 @@ def archive_runs(
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
     archived = [(run.run_id, run) for run in runs if run.run_id]
-    with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table, sessions_table):
+    with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table):
         connection = transaction.connection()
         _ensure_tables(connection, db)
         compaction_id = connection.exec_driver_sql(
@@ -107,7 +107,7 @@ def archive_runs(
                     for run_id, run in archived
                 ],
             )
-        delete_run_subtrees(transaction, runs_table, sessions_table, [run_id for run_id, _ in archived])
+        delete_run_subtrees(transaction, runs_table, [run_id for run_id, _ in archived])
 
 
 # LEGACY_COMPAT: Content-free generations for history compacted before the archive existed.
@@ -161,10 +161,10 @@ def clear_to_legacy(
     """
     db = _sqlite(storage)
     compactions, _ = _table_names(db)
-    with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table, sessions_table):
+    with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table):
         connection = transaction.connection()
         _ensure_tables(connection, db)
-        delete_run_subtrees(transaction, runs_table, sessions_table, live_run_ids)
+        delete_run_subtrees(transaction, runs_table, live_run_ids)
         archive_era = [
             generation_id
             for (generation_id,) in connection.exec_driver_sql(
@@ -328,7 +328,7 @@ def roll_back_to(
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
     runs = agno_compat_sqlite.owned_table(db, "runs")
-    with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table, sessions_table):
+    with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table):
         connection = transaction.connection()
         _ensure_tables(connection, db)
         earlier = [
@@ -342,7 +342,7 @@ def roll_back_to(
         # Member runs are archived with their team run and may precede it; the hit's own
         # members go with the hit.
         restored = runs_without(earlier, [hit.run_id])
-        delete_run_subtrees(transaction, runs_table, sessions_table, live_run_ids)
+        delete_run_subtrees(transaction, runs_table, live_run_ids)
         rolled_back = [
             generation_id
             for (generation_id,) in connection.exec_driver_sql(
