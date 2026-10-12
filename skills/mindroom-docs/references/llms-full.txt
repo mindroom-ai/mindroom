@@ -18393,6 +18393,12 @@ Compare the frequency of `event_loop_gc_collection` records, which report garbag
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
 Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables stall detection and this summary.
 
+A full garbage collection pauses the event loop for longer as the heap grows.
+Once the primary first reports ready, it raises Python's young-generation garbage-collection threshold from 2,000 to 50,000 and logs one `gc_threshold_raised` record, so full collections run less often.
+Young and middle collections then also run less often but each takes tens to hundreds of milliseconds, so more of them appear as `event_loop_gc_collection` records, and peak memory can rise slightly.
+A full collection is not shorter, because it still walks the whole heap.
+Set `MINDROOM_GC_TUNING=0` in the process environment or the `.env` file next to `config.yaml` to keep Python's default collector settings.
+
 ### `matrix_sync_stall_diagnostics`
 
 Logged when one agent, team, or router goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.

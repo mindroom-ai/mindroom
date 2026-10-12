@@ -3080,6 +3080,14 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _restore_gc_thresholds() -> Generator[None, None, None]:
+    """Keep the primary's raised GC threshold from leaking into later tests."""
+    thresholds = gc.get_threshold()
+    yield
+    gc.set_threshold(*thresholds)
+
+
+@pytest.fixture(autouse=True)
 def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, None, None]:
     """Keep the process-global oversized streaming-edit cadence isolated per test, even when one fails."""
     _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
