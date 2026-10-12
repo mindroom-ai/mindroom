@@ -66,6 +66,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Tools > Tool Catalog | Messaging & Social | `tools/messaging-and-social.md` | `tools/messaging-and-social/index.md` | `page__tools__messaging-and-social__index.md` |
 | Tools > Tool Catalog | Project Management | `tools/project-management.md` | `tools/project-management/index.md` | `page__tools__project-management__index.md` |
 | Tools > Tool Catalog | Atlassian Cloud | `tools/atlassian.md` | `tools/atlassian/index.md` | `page__tools__atlassian__index.md` |
+| Tools > Tool Catalog | Microsoft 365 | `tools/microsoft-365.md` | `tools/microsoft-365/index.md` | `page__tools__microsoft-365__index.md` |
 | Tools > Tool Catalog | Calendar & Tasks | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
 | Tools > Tool Catalog | Mem0 & Zep | `tools/memory-and-storage.md` | `tools/memory-and-storage/index.md` | `page__tools__memory-and-storage__index.md` |
 | Tools > Tool Catalog | Agent Orchestration | `tools/agent-orchestration.md` | `tools/agent-orchestration/index.md` | `page__tools__agent-orchestration__index.md` |
