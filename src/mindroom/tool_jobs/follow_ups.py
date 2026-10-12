@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 # How many follow-ups run in a row in a conversation without a human message; after that, results wait for one.
-FOLLOW_UP_LIMIT = 20
+_FOLLOW_UP_LIMIT = 20
 
 
 def _digest(text: str) -> str:
@@ -106,5 +106,11 @@ def follow_up_envelope(key: ConversationKey, *, follow_up_id: str, sender_id: st
 
 
 def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
-    """Return the ended jobs a follow-up reports: every one but a cancellation, which needs no message of its own."""
-    return tuple(job for job in jobs if job.status != "cancelled")
+    """Return the ended jobs a follow-up reports.
+
+    A cancellation needs no message of its own, and a job a chain of follow-ups at the limit started waits for a
+    human message, without holding back the others.
+    """
+    return tuple(
+        job for job in jobs if job.status != "cancelled" and follow_up_streak(job.source_event_id) < _FOLLOW_UP_LIMIT
+    )

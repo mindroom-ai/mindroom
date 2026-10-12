@@ -21,7 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
-from mindroom.tool_jobs.follow_ups import FOLLOW_UP_LIMIT, follow_up_event_id, follow_up_jobs, follow_up_streak
+from mindroom.tool_jobs.follow_ups import follow_up_event_id, follow_up_jobs, follow_up_streak
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.publication import JobStatePublisher
@@ -359,12 +359,8 @@ class ToolJobRuntimeCoordinator:
             bot = self.bot_provider(key.recipient)
             if not jobs or bot is None:
                 continue
-            streaks = {job.job_id: follow_up_streak(job.source_event_id) for job in jobs}
-            # A job a chain at the limit started waits for a human message; it holds back no other job.
-            reported = [job for job in jobs if streaks[job.job_id] < FOLLOW_UP_LIMIT]
-            if not reported:
-                continue
-            follow_up_id = follow_up_event_id(key, reported, 1 + max(streaks[job.job_id] for job in reported))
+            streak = 1 + max(follow_up_streak(job.source_event_id) for job in jobs)
+            follow_up_id = follow_up_event_id(key, jobs, streak)
             due.add(follow_up_id)
             if follow_up_id in self._admitted_follow_ups:
                 continue

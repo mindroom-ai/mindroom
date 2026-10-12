@@ -19,7 +19,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt, TurnSinks, run_blocking_response_turn
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
-    FOLLOW_UP_LIMIT,
+    _FOLLOW_UP_LIMIT,
     follow_up_envelope,
     follow_up_event,
     follow_up_event_id,
@@ -200,12 +200,12 @@ async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp
     owner = job_owner()
     key = _key(owner)
     try:
-        last = follow_up_event_id(key, [], FOLLOW_UP_LIMIT)
+        last = follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
         await _ended(runtime, "from_the_last", BackgroundOutcome("completed", "a"), source_event_id=last)
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_not_awaited()
 
-        before = follow_up_event_id(key, [], FOLLOW_UP_LIMIT - 1)
+        before = follow_up_event_id(key, [], _FOLLOW_UP_LIMIT - 1)
         other = replace(owner, requester_id="@bob:example.org")
         await _ended(
             runtime,
@@ -226,7 +226,7 @@ async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp
             call.args[0].requester_id: follow_up_streak(call.args[1])
             for call in bot.admit_job_follow_up.await_args_list
         }
-        assert streaks == {"@bob:example.org": FOLLOW_UP_LIMIT, "@carol:example.org": 1}
+        assert streaks == {"@bob:example.org": _FOLLOW_UP_LIMIT, "@carol:example.org": 1}
     finally:
         await runtime.shutdown()
 
@@ -266,7 +266,7 @@ async def test_a_capped_job_does_not_hold_back_a_later_one(tmp_path: Path) -> No
     bot.journal_principal = MagicMock(return_value=principal)
     key = _key(job_owner())
     try:
-        last = follow_up_event_id(key, [], FOLLOW_UP_LIMIT)
+        last = follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
         await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last)
         await _ended(runtime, "fresh", BackgroundOutcome("completed", "b"), source_event_id="$human")
         await coordinator._admit_follow_ups(runtime)
@@ -445,6 +445,31 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
         install_generate_response_mock(bot, AsyncMock(return_value=None))
         await runner._run_job_follow_up(event)
         assert not await bot.journal_principal().is_pending("job-follow-up:1")
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_follow_up_is_not_due_for_jobs_past_the_limit(tmp_path: Path) -> None:
+    """Under the lock, a follow-up whose own job was collected does not report jobs the limit holds back."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    runtime = await _runner_runtime(bot, tmp_path)
+    try:
+        await _ended(
+            runtime,
+            "capped",
+            BackgroundOutcome("completed", "done"),
+            owner=_runner_owner(key),
+            source_event_id=follow_up_event_id(key, [], _FOLLOW_UP_LIMIT),
+        )
+        request = runner._job_follow_up_request(
+            key,
+            "job-follow-up:1",
+            claimed=asyncio.Event(),
+            handoff=asyncio.Event(),
+        )
+        assert not await runner._follow_up_due(request)
     finally:
         await runtime.shutdown()
 
