@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import inspect
 import json
 from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
@@ -17,7 +18,7 @@ from functools import partial
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
@@ -156,7 +157,7 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
 )
-from mindroom.teams import _TeamStreamPresentation
+from mindroom.teams import _TeamStreamPresentation, continue_paused_team_run
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
@@ -4107,7 +4108,9 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     body = "🤝 **Team Response** (General):\n\n**General**: The report is clean."
 
-    async def continue_team(*, progress: ProgressPublisher | None, **_kwargs: object) -> CompletedApprovalRun:
+    async def continue_team(*, progress: ProgressPublisher | None, **kwargs: object) -> CompletedApprovalRun:
+        # The runner's call must fit the real function, not only this fake.
+        inspect.signature(continue_paused_team_run).bind(progress=progress, **kwargs)
         assert progress is not None
         await progress(StructuredStreamChunk(content=body))
         return CompletedApprovalRun(response_text=body, metadata_content={})
@@ -5012,7 +5015,10 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_mode="coordinate",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
-    continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
+    continued = create_autospec(
+        continue_paused_team_run,
+        return_value=CompletedApprovalRun(response_text="done", metadata_content={}),
+    )
 
     with (
         patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
