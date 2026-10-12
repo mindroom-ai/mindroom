@@ -547,9 +547,9 @@ def resolve_unscoped_worker_key(
     identity = execution_identity
     tenant_key = normalize_worker_key_part(
         tenant_id
-        or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
+        or (identity.tenant_id if identity is not None else None)
         or account_id
-        or (identity.account_id if identity is not None and identity.account_id is not None else None)
+        or (identity.account_id if identity is not None else None)
         or "default",
     )
     effective_agent_name = normalize_worker_key_part(agent_name)
