@@ -1,8 +1,8 @@
 """Agent-authored subagent personas and the workspace profile files that store them.
 
 A persona replaces only a child's presentation, its system prompt, visible
-tools, and skills; the child keeps the caller's own principal, so it never
-reaches more than the caller can.
+tools, skills, and searched knowledge bases; the child keeps the caller's own
+principal, so it never reaches more than the caller can.
 """
 
 from __future__ import annotations

@@ -705,6 +705,15 @@ async def test_authored_skills_are_checked_against_the_callers_skills(
     assert harness.session_child()["persona"]["skills"] == ["research"]
 
 
+def _knowledge_config() -> Config:
+    """Give the leader the semantic bases docs and faq and the files-mode base notes; wiki belongs to no agent."""
+    config = _config(knowledge_bases=("docs", "faq"))
+    config.knowledge_bases["wiki"] = KnowledgeBaseConfig(path="./wiki")
+    config.knowledge_bases["notes"] = KnowledgeBaseConfig(path="./notes", mode="files")
+    config.agents["leader"].knowledge_bases.append("notes")
+    return config
+
+
 def _native_resolver(
     tmp_path: Path,
     config: Config,
@@ -747,11 +756,7 @@ async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_native_authoring_checks_names_and_inherits_knowledge(tmp_path: Path) -> None:
     """The native path checks named knowledge bases against the caller's own and keeps them, and a copy inherits its parent's."""
-    config = _config(knowledge_bases=("docs", "faq"))
-    config.knowledge_bases["wiki"] = KnowledgeBaseConfig(path="./wiki")
-    config.knowledge_bases["notes"] = KnowledgeBaseConfig(path="./notes", mode="files")
-    config.agents["leader"].knowledge_bases.append("notes")
-    base, resolve = _native_resolver(tmp_path, config)
+    base, resolve = _native_resolver(tmp_path, _knowledge_config())
 
     refused = await resolve(base, knowledge=["wiki"])
     refused_files = await resolve(base, knowledge=["notes"])
@@ -774,7 +779,7 @@ async def test_authored_knowledge_narrows_the_childs_knowledge_bases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A named knowledge base must be one of the caller's, and the child resolves only the bases it keeps."""
-    harness = _Harness(tmp_path, monkeypatch, _config(knowledge_bases=("docs", "faq")))
+    harness = _Harness(tmp_path, monkeypatch, _knowledge_config())
     requested: list[tuple[str, ...] | None] = []
     resolve = ai_module.resolve_agent_knowledge_access_async
 
@@ -785,8 +790,12 @@ async def test_authored_knowledge_narrows_the_childs_knowledge_bases(
     monkeypatch.setattr(ai_module, "resolve_agent_knowledge_access_async", recording_resolve)
 
     refused = await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", knowledge=["wiki"]))
+    refused_files = await harness.run(
+        harness.toolkit.run_subagent(task="Read.", system_prompt="P", knowledge=["notes"]),
+    )
     await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["file"], knowledge=["faq"]))
 
     assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
+    assert refused_files == "Cannot delegate: unknown knowledge base 'notes'. Your knowledge bases: docs, faq."
     assert requested == [("faq",)]
     assert harness.session_child()["persona"]["knowledge"] == ["faq"]

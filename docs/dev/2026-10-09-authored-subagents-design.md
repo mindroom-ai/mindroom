@@ -77,7 +77,7 @@ Find the three most serious risks in the proposal you are given.
 Return each risk with evidence and a suggested test.
 ```
 
-Frontmatter accepts only `description`, which is required, and the optional `tools`, `model`, and `mode`; a missing description or any other key makes the profile invalid.
+Frontmatter accepts only `description`, which is required, and the optional `tools`, `skills`, `knowledge`, `model`, and `mode`; a missing description or any other key makes the profile invalid.
 The persona's `system_prompt` is the body after the closing `---` line with surrounding whitespace stripped, split by the same `parse_skill_markdown` helper workspace skills use, and an empty body makes the profile invalid.
 
 ### Discovery and limits

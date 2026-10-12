@@ -553,6 +553,15 @@ def test_cap_from_a_parent_listing_only_tools_admits_no_skills(tmp_path: Path) -
     assert refused == "Cannot delegate: unknown skill 'research'. Your skills: none."
 
 
+def test_cap_from_a_parent_listing_only_tools_admits_no_knowledge(tmp_path: Path) -> None:
+    """A parent that lists tools but no knowledge searches none, so a copy it authors cannot name any."""
+    cap = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
+
+    refused = _resolve(tmp_path, system_prompt="Q", knowledge=["docs"], cap=cap)
+
+    assert refused == "Cannot delegate: unknown knowledge base 'docs'. Your knowledge bases: none."
+
+
 def test_inline_persona_reads_knowledge() -> None:
     """Knowledge bases are optional, deduplicated names, and an empty list means no knowledge search."""
     assert inline_persona("P", None, None, None).knowledge is None

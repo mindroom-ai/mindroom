@@ -1929,7 +1929,8 @@ def create_agent(
             dynamic tool state.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
-        knowledge: Optional shared knowledge base instance for RAG-enabled agents.
+        knowledge: Optional shared knowledge base instance for RAG-enabled agents; for a persona, callers resolve
+            it narrowed to the persona's kept knowledge bases.
         history_storage: Optional already-open session storage to reuse for this agent.
         active_model_name: Optional runtime-selected model name overriding the configured model.
         include_interactive_questions: Whether to include the interactive
