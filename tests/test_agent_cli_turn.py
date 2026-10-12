@@ -1,6 +1,6 @@
 """Queue admission and canonical nested shell progress in one real live turn."""
 
-# ruff: noqa: D103, ANN001, ANN003, ANN202, ARG001, PLR0915, ASYNC110
+# ruff: noqa: D103, ANN001, ANN202, ARG001, PLR0915, ASYNC110
 from __future__ import annotations
 
 import asyncio
@@ -970,11 +970,11 @@ async def test_write_failure_prevents_shell_and_inner_effects(
         ],
     )
 
-    def fail(**kwargs) -> Never:
+    def fail(*_args: object, **_kwargs: object) -> Never:
         msg = "database unavailable"
         raise OSError(msg)
 
-    monkeypatch.setattr(catalog.agent.db, "upsert_run", fail)
+    monkeypatch.setattr(catalog.agent.db, "save_run_row", fail)
     async with response_cli_lifetime() as lifetime:
         lifetime.bind_provider(owner.checkpoint, function)
         calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})

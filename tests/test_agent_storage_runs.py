@@ -18,6 +18,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from sqlalchemy import event
 
 from mindroom.session_storage.agent_storage import (
     create_state_storage,
@@ -857,3 +858,131 @@ def test_cache_diagnostics_ignore_read_finishing_after_close(
             resume_report.set()
             read.result(timeout=5)
             storage.close()
+
+
+def test_a_concurrent_writer_cannot_land_between_the_index_read_and_the_insert(tmp_path: Path) -> None:
+    """A run save holds the write lock from its rule reads through its insert, so two saves never share an index."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    errors: list[str] = []
+
+    def write_during_index_read(_conn: object, _cursor: object, statement: str, *_args: object) -> None:
+        if "SELECT MAX(COALESCE" not in statement:
+            return
+        writer = sqlite3.connect(db_path, timeout=0)
+        try:
+            writer.execute(
+                "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, status, run_index, run_data, "
+                "created_at) VALUES ('raced', 's1', 'agent', 'code', 'COMPLETED', 1, '{}', 1700000000)",
+            )
+            writer.commit()
+        except sqlite3.OperationalError as error:
+            errors.append(str(error))
+        finally:
+            writer.close()
+
+    try:
+        seed_session(
+            storage,
+            AgentSession(session_id="s1", agent_id="code", runs=[_status_run("r0", RunStatus.completed)]),
+        )
+        event.listen(storage.db_engine, "before_cursor_execute", write_during_index_read)
+        try:
+            storage.upsert_run(_status_run("r1", RunStatus.completed), session_id="s1")
+        finally:
+            event.remove(storage.db_engine, "before_cursor_execute", write_during_index_read)
+    finally:
+        storage.close()
+
+    assert errors == ["database is locked"]
+    assert _run_rows(db_path) == [("r0", 0), ("r1", 1)]
+
+
+def test_a_refused_save_leaves_the_loaded_session_as_stored(tmp_path: Path) -> None:
+    """save_runs swaps in only the runs it wrote: a folded copy stays out, a removed one leaves the session."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [_status_run(f"r{index}", RunStatus.completed) for index in range(3)]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        _summary_after(db_path, "r0")
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('r2', 's1')")
+        loaded = get_agent_session(storage, "s1")
+        assert loaded is not None
+        save_runs(
+            storage,
+            loaded,
+            [
+                _status_run("r0", RunStatus.completed, content="stale folded copy"),
+                _status_run("r1", RunStatus.completed, content="written"),
+                _status_run("r2", RunStatus.completed, content="removed"),
+            ],
+        )
+    finally:
+        storage.close()
+
+    assert [(run.run_id, run.content) for run in loaded.runs or []] == [("r1", "written")]
+
+
+def test_a_first_save_of_a_member_under_a_folded_run_is_refused(tmp_path: Path) -> None:
+    """A member row never seen before is as final as the folded team run it belongs to."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        team_run = TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed)
+        seed_session(storage, TeamSession(session_id="s1", team_id="eng", runs=[team_run]))
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+                "SELECT 's1', 'team:eng', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = 't0'",
+            )
+        storage.upsert_run(
+            RunOutput(run_id="m-new", agent_id="helper", session_id="s1", parent_run_id="t0"),
+            session_id="s1",
+        )
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "m-new") is None
+
+
+def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_on_completion(tmp_path: Path) -> None:
+    """Only visible folded runs freeze; a paused team approval's members still save and the team run then moves."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    member = RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="before")
+    try:
+        seed_session(
+            storage,
+            TeamSession(
+                session_id="s1",
+                team_id="eng",
+                runs=[
+                    member,
+                    TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.paused),
+                    TeamRunOutput(run_id="t1", team_id="eng", session_id="s1", status=RunStatus.completed),
+                ],
+            ),
+        )
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+                "SELECT 's1', 'team:eng', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = 't1'",
+            )
+        storage.upsert_run(
+            RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="after"),
+            session_id="s1",
+        )
+        storage.upsert_run(
+            TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed),
+            session_id="s1",
+        )
+        loaded = get_team_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert json.loads(_stored_run(db_path, "m0")[2])["content"] == "after"
+    assert _stored_run(db_path, "t0")[0] == 3
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["m0", "t0"]

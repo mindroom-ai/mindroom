@@ -8,7 +8,7 @@ import time
 import weakref
 from contextlib import nullcontext
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from agno.db.base import BaseDb, SessionType
@@ -415,7 +415,18 @@ class _ConversationSqliteDb(SqliteDb):
     ) -> None:
         """Save a sanitized run, capturing provider usage unless this is a conversation rewrite."""
         del run_index
-        agno_compat_sqlite.upsert_run_at_end(
+        self.save_run_row(run, session_id=session_id, user_id=user_id, record_usage=record_usage)
+
+    def save_run_row(
+        self,
+        run: _PersistedRun,
+        *,
+        session_id: str,
+        user_id: str | None,
+        record_usage: bool,
+    ) -> Literal["written", "removed", "frozen"]:
+        """Save a sanitized run and report whether the conversation log's insertion rules wrote its row."""
+        return agno_compat_sqlite.upsert_run_at_end(
             self,
             _run_without_prompt_messages(run, self._prompt_roles),
             session_id=session_id,
@@ -510,15 +521,24 @@ def save_runs(
     if any(id(run) in loaded for run in runs):
         msg = "save_runs received a run object loaded from the session; edit a copy instead"
         raise ValueError(msg)
+    outcomes: dict[str, Literal["written", "removed", "frozen"]] = {}
     for run in runs:
         if isinstance(storage, _ConversationSqliteDb):
-            storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id, record_usage=False)
+            outcome = storage.save_run_row(run, session_id=session.session_id, user_id=run.user_id, record_usage=False)
         else:
             storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
-    replacements: dict[str, RunOutput | TeamRunOutput] = {run.run_id: run for run in runs if run.run_id}
+            outcome = "written"
+        if run.run_id:
+            outcomes[run.run_id] = outcome
+    # Only written runs replace the session's copies; a cut run leaves it, a folded one stays as stored.
+    replacements: dict[str, RunOutput | TeamRunOutput] = {
+        run.run_id: run for run in runs if run.run_id and outcomes[run.run_id] == "written"
+    }
     merged: list[Any] = []
     for existing in session.runs or []:
         run_id = existing.run_id if isinstance(existing, (RunOutput, TeamRunOutput)) else None
+        if run_id and outcomes.get(run_id) == "removed":
+            continue
         merged.append(replacements.pop(run_id, existing) if run_id else existing)
     merged.extend(replacements.values())
     session.runs = merged

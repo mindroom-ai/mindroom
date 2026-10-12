@@ -125,7 +125,7 @@ def insert_run_row(
         is not None
     ):
         return "removed"
-    if _is_folded(connection, runs_name, summaries, row["run_id"]):
+    if _is_folded(connection, runs_name, summaries, row["run_id"], row["parent_run_id"]):
         return "frozen"
     row["run_index"] = connection.exec_driver_sql(
         f"SELECT MAX(COALESCE((SELECT MAX(run_index) FROM {runs_name} WHERE session_id = ?), -1), "  # noqa: S608
@@ -157,19 +157,23 @@ def insert_run_row(
     ).one()
 
 
-def _is_folded(connection: Connection, runs: str, summaries: str, run_id: str) -> bool:
-    """Return whether a stored run, or the top-level run it belongs to, is visible and behind its scope's latest summary row."""
+def _is_folded(connection: Connection, runs: str, summaries: str, run_id: str, parent_run_id: str | None) -> bool:
+    """Return whether a run, or the top-level run it belongs to, is visible and behind its scope's latest summary row.
+
+    The chain starts at the stored run and at the parent the save names, so a member row seen for the
+    first time is as final as the folded team run it belongs to.
+    """
     hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
     return (
         connection.exec_driver_sql(
             "WITH RECURSIVE chain(run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id) "  # noqa: S608
             f"AS (SELECT run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id FROM {runs} "
-            "WHERE run_id = ? UNION SELECT run.run_id, run.parent_run_id, run.run_index, run.status, run.run_type, "
+            "WHERE run_id IN (?, ?) UNION SELECT run.run_id, run.parent_run_id, run.run_index, run.status, run.run_type, "
             f"run.agent_id, run.team_id, run.session_id FROM {runs} AS run JOIN chain ON run.run_id = chain.parent_run_id) "
             f"SELECT 1 FROM chain AS top WHERE top.parent_run_id IS NULL AND top.status NOT IN ({hidden}) "
             f"AND top.run_index <= (SELECT row.after_run_index FROM {summaries} AS row WHERE row.session_id = top.session_id "
             f"AND row.scope_key = {run_scope_key_sql('top')} ORDER BY row.id DESC LIMIT 1)",
-            (run_id,),
+            (run_id, parent_run_id),
         ).first()
         is not None
     )
@@ -182,8 +186,12 @@ def upsert_run_at_end(
     session_id: str,
     user_id: str | None,
     record_usage: bool = True,
-) -> None:
-    """Save the run and optional usage in one transaction, preserving Agno's row/index semantics."""
+) -> Literal["written", "removed", "frozen"]:
+    """Save the run and optional usage in one transaction, under the conversation log's insertion rules.
+
+    Returns whether the run row was written, refused because a cut removed the run, or refused
+    because the run is folded behind its scope's latest summary row.
+    """
     runs = owned_table(db, "runs")
     with db.Session() as transaction, transaction.begin():
         connection = transaction.connection()
@@ -199,9 +207,10 @@ def upsert_run_at_end(
             user_id=user_id,
             session_table=db.session_table_name,
         )
+        outcome: Literal["written", "removed", "frozen"] = stored if isinstance(stored, str) else "written"
         if not record_usage or stored == "frozen":
             # A folded run's usage is final; a stale copy must not replace it.
-            return
+            return outcome
         if stored == "removed":
             # The provider calls behind a save of a cut run were made; the ledger outlives deleted runs.
             run_data = cast("dict[str, Any]", run) if isinstance(run, dict) else run.to_dict()
@@ -216,6 +225,7 @@ def upsert_run_at_end(
             usage_upsert_sql(db.session_table_name),
             (session_id, run_id, json.dumps(project_usage(payload_run))),
         )
+    return outcome
 
 
 @contextmanager
