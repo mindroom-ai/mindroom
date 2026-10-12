@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom.config.agent import TeamConfig
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
@@ -29,6 +30,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_ru
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import install_generate_response_mock, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter
 from tests.test_response_turn import _continuation as _turn_continuation
@@ -399,6 +401,25 @@ async def test_a_follow_up_runs_a_model_turn_that_posts_its_reply(tmp_path: Path
         assert reply.state is rl.ReplyState.COMPLETED
     finally:
         await runtime.shutdown()
+
+
+async def test_a_teams_follow_up_runs_as_the_team(tmp_path: Path) -> None:
+    """A configured team answers its follow-up with its members and mode, as the entity that owns their jobs."""
+    bot = _bot(tmp_path)
+    bot.config.teams["crew"] = TeamConfig(display_name="Crew", role="Crew", agents=["general"], mode="collaborate")
+    persist_entity_accounts(bot.config, bot.runtime_paths)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps = replace(runner.deps, agent_name="crew")
+    team_response = AsyncMock(return_value=None)
+    key = replace(_runner_key(bot), recipient="crew")
+    request = runner._job_follow_up_request(key, "job-follow-up:1", claimed=asyncio.Event(), handoff=asyncio.Event())
+    with patch.object(runner, "generate_team_response_helper", team_response):
+        await runner._generate_job_follow_up(request)
+    team_response.assert_awaited_once()
+    assert team_response.await_args.args == (request,)
+    members = team_response.await_args.kwargs["team_agents"]
+    assert [member.full_id for member in members] == ["@mindroom_general:localhost"]
+    assert team_response.await_args.kwargs["team_mode"] == "collaborate"
 
 
 async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collected(tmp_path: Path) -> None:
