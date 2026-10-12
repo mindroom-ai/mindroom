@@ -13,7 +13,7 @@ import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.attachments import load_attachment, register_local_attachment
+from mindroom.attachments.storage import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig

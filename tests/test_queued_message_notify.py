@@ -26,7 +26,6 @@ from structlog.testing import capture_logs
 
 from mindroom import ai_runtime
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
@@ -87,6 +86,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan

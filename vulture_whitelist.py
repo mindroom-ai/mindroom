@@ -316,11 +316,11 @@ _._validate_connection  # Pydantic validator (src/mindroom/config/voice.py)
 # vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
-_.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
-_.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
+_.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
+_.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
 _.external_execution_silent  # Agno suppresses the internal delegation wait message (src/mindroom/agents.py)
 _.external_execution_required  # Agno reads the retained tool pause flags (src/mindroom/delegation/execution.py, src/mindroom/delegation/recovery.py)
-_enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
+_enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/session_storage/agent_storage.py)
 
 export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)
 

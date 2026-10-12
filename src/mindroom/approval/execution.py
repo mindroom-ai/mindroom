@@ -25,7 +25,6 @@ from mindroom import ai_runtime
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
 from mindroom.agent_cli.minimal_agent import MinimalAgent
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
@@ -57,6 +56,7 @@ from mindroom.response_turn import (
     apply_local_approval_decisions,
     paused_attempt_from_response,
 )
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,

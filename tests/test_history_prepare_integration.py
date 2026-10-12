@@ -16,7 +16,6 @@ from agno.run.agent import RunOutput
 from agno.session.summary import SessionSummary
 from defusedxml.ElementTree import fromstring
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
@@ -39,6 +38,7 @@ from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
     FakeModel,

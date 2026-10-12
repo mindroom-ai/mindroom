@@ -15,11 +15,11 @@ from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 from openai import AsyncOpenAI
 
-from mindroom import agno_compat_session_persistence as persistence
 from mindroom.agent_cli.lifetime import current_cli_lifetime
-from mindroom.agent_storage import get_agent_session
 from mindroom.ai import stream_agent_response
 from mindroom.providers.openai_models import MindRoomOpenAIChat
+from mindroom.session_storage import agno_compat_session_persistence as persistence
+from mindroom.session_storage.agent_storage import get_agent_session
 from tests.bot_helpers import AgentBotTestBase
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.test_participation_disabled import _provider_response

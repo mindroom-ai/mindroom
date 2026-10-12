@@ -24,7 +24,7 @@ from mindroom.approval.manager import initialize_approval_store
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.approval.transport import ApprovalMatrixTransport
-from mindroom.attachments import wait_for_attachment_cleanup_tasks
+from mindroom.attachments.storage import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.budgets.monitor import BudgetMonitor

@@ -27,7 +27,6 @@ from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
 from mindroom import constants
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
@@ -52,6 +51,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_record import (
     PreparedVoiceSource,

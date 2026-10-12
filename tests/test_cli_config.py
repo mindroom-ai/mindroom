@@ -128,7 +128,7 @@ def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
         "mindroom.config.main",
         "mindroom.history",
         "mindroom.history.runtime",
-        "mindroom.agent_storage",
+        "mindroom.session_storage.agent_storage",
         "agno",
         "sqlalchemy",
         "agno.db.sqlite.async_sqlite",

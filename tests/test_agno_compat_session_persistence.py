@@ -31,12 +31,12 @@ from agno.session.workflow import WorkflowSession
 from agno.team import Team
 from agno.team import _session as team_session_module
 
-from mindroom import agent_storage
-from mindroom import agno_compat_session_persistence as persistence_patch
-from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.session_storage import agent_storage
+from mindroom.session_storage import agno_compat_session_persistence as persistence_patch
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from tests.conftest import seed_session, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -168,9 +168,9 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
 from importlib import import_module
 from pathlib import Path
 
-patch = import_module("mindroom.agno_compat_session_persistence")
+patch = import_module("mindroom.session_storage.agno_compat_session_persistence")
 patch.version = lambda _distribution: "0.0.0"
-storage_module = import_module("mindroom.agent_storage")
+storage_module = import_module("mindroom.session_storage.agent_storage")
 try:
     storage_module.create_state_storage("version-check", Path("unused-state-root"), subdir="sessions", session_table="sessions")
 except RuntimeError as error:

@@ -9,8 +9,8 @@ from agno.metrics import RunMetrics
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage, save_independent_usage
 from mindroom.api import config_lifecycle
+from mindroom.session_storage.agent_storage import create_state_storage, save_independent_usage
 from tests.api.test_private_usage_api import _client as _private_client
 from tests.api.test_usage_service_auth import (
     _initialize_usage_runtime,

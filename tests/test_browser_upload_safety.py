@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from playwright.async_api import async_playwright
 
-from mindroom.attachments import register_local_attachment
+from mindroom.attachments.storage import register_local_attachment
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools, _BrowserProfileState, _BrowserTabState, _copy_within_limit
 from mindroom.message_target import MessageTarget

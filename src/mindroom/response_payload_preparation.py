@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.attachment_ids import merge_attachment_ids
+from mindroom.attachments.ids import merge_attachment_ids
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,

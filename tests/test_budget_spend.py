@@ -13,7 +13,6 @@ from agno.metrics import ModelMetrics, RunMetrics
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.budgets.pricing import price_table
 from mindroom.budgets.spend import _UnpricedModelUsage, collect_monthly_spend, month_bounds
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -21,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.providers.model_loading import get_model_instance
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
 from tests.conftest import seed_session
 

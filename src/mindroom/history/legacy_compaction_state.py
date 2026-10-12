@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.archive_schema import archive_schema_sql, archive_table_names
 from mindroom.history.types import HistoryScope
-from mindroom.legacy_session_storage import decode_persisted_session_json
+from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:

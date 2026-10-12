@@ -13,8 +13,8 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import attachments as attachments_module
-from mindroom.attachments import load_attachment
+from mindroom.attachments import storage as attachments_module
+from mindroom.attachments.storage import load_attachment
 from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.custom_tools import atlassian as atlassian_module
 from mindroom.custom_tools import atlassian_client

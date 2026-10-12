@@ -13,7 +13,6 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.delegation.lifecycle import (
     finish_child_turn,
     note_child_run_id,
@@ -25,6 +24,7 @@ from mindroom.delegation.recovery import _cancel_delegations, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.conftest import test_runtime_paths
 from tests.test_delegation_audit import _child, _config, _identity, _record_dir

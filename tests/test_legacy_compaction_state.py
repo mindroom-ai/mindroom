@@ -12,12 +12,12 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history import archive
 from mindroom.history.legacy_compaction_state import _legacy_tombstones
 from mindroom.history.storage import reconcile_compaction_state
 from mindroom.history.types import HistoryScope
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from tests.conftest import seed_session
 from tests.history_helpers import StoredGeneration, compaction_generations
 

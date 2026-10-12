@@ -15,7 +15,7 @@ from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.tools.function import FunctionExecutionResult, ToolResult
 
-from mindroom.agent_storage import run_session_storage_operation, save_runs
+from mindroom.session_storage.agent_storage import run_session_storage_operation, save_runs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

@@ -14,7 +14,6 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
 from mindroom import constants
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history import archive
 from mindroom.history.storage import (
     _read_scope_history_event_ids,
@@ -26,6 +25,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from tests.conftest import seed_session
 from tests.history_helpers import archived_content
 

@@ -11,7 +11,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -20,6 +19,7 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationState
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import entity_ids

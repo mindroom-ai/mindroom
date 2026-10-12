@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.tools.function import FunctionCall, ToolResult
 
-from mindroom.attachments import load_attachment, register_local_attachment
+from mindroom.attachments.storage import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths

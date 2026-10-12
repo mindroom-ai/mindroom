@@ -13,7 +13,7 @@ from unittest.mock import Mock
 import nio
 import pytest
 
-from mindroom.attachments import register_thread_history_media_attachments
+from mindroom.attachments.storage import register_thread_history_media_attachments
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,

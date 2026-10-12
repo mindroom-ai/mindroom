@@ -20,7 +20,6 @@ from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 from agno.tools.function import Function
 
-from mindroom.agent_storage import create_session_storage, create_state_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
@@ -37,6 +36,7 @@ from mindroom.history.types import (
     HistoryScopeState,
 )
 from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage, get_agent_session
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,

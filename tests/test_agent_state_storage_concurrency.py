@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
-from mindroom.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 
 if TYPE_CHECKING:
     from pathlib import Path

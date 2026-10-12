@@ -32,7 +32,6 @@ from mindroom.agent_cli.lifetime import cli_control_executions
 from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
-from mindroom.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.agno_participation import participation_model
 from mindroom.ai_run_metadata import (
     accumulate_model_request_metrics,
@@ -113,6 +112,7 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
+from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream

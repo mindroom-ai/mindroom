@@ -158,7 +158,7 @@ Matrix sync callback
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/monitor.py` | Background spend refresh and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in per-user monthly caps and fallback model |
-| `agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `session_storage/agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |
@@ -173,7 +173,7 @@ Matrix sync callback
 | `automations/dreaming.py` | The `dreaming` automation: changed-input agenda, per-run staging of `memory/`, proposal validation, the fresh-thread review, and batch-conflict apply with progress under `tracking/automations/` |
 | `config/automations.py` | Automation entries (built-in and plugin) and their validation |
 | `custom_tools/skill_manage.py` | Chat-time `skill_manage`, like Hermes' foreground tool, for agents that list it or learn skills |
-| `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
+| `session_storage/preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool and skill subsets, `subagents/<name>.md` workspace profiles, and the caller tool and skill checks |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
@@ -213,9 +213,9 @@ Matrix sync callback
 | `shell/supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
-| `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
-| `attachment_ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |
-| `attachment_media.py` | Convert attachment records to Agno media objects |
+| `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |
+| `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |
+| `attachments/media.py` | Convert attachment records to Agno media objects |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |

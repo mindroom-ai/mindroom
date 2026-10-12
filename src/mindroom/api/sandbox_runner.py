@@ -37,7 +37,7 @@ from mindroom.api.worker_responses import (
     SandboxWorkerListResponse,
     serialize_sandbox_worker_response,
 )
-from mindroom.attachment_ids import normalize_attachment_id
+from mindroom.attachments.ids import normalize_attachment_id
 from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials

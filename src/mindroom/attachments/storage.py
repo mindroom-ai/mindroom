@@ -22,13 +22,11 @@ from uuid import uuid4
 
 import nio
 
-from .atomic_file import atomic_write_bytes_at, atomic_write_file_at
-from .attachment_ids import normalize_attachment_id
-from .background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
-from .constants import ATTACHMENT_IDS_KEY
-from .legacy_attachments import legacy_attachment_source, open_legacy_attachment_source
-from .logging_config import get_logger
-from .matrix.media import (
+from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
+from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.logging_config import get_logger
+from mindroom.matrix.media import (
     MATRIX_MEDIA_MSGTYPES,
     AudioMessageEvent,
     FileOrVideoMessageEvent,
@@ -45,13 +43,16 @@ from .matrix.media import (
     parse_matrix_media_dispatch_event_source,
     resolve_image_mime_type,
 )
-from .path_confinement import open_directory_within_root, open_regular_file_within_root
-from .timing import emit_elapsed_timing
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
+from mindroom.timing import emit_elapsed_timing
+
+from .ids import normalize_attachment_id
+from .legacy_attachments import legacy_attachment_source, open_legacy_attachment_source
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from .matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 

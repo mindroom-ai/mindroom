@@ -37,7 +37,6 @@ from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifet
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.approval import execution as approval_execution
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
@@ -51,6 +50,7 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (

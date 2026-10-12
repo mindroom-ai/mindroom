@@ -41,7 +41,6 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import get_agent_session
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt as approval_receipt
 from mindroom.approval.response import identify_approval_tools, require_ordered_pause_presentation
@@ -147,6 +146,7 @@ from mindroom.runtime_shutdown import (
     SYNC_RESTART_SHUTDOWN,
     RuntimeShutdownIntent,
 )
+from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.stop import SpanRegistry
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,

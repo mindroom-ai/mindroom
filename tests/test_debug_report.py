@@ -20,7 +20,6 @@ from typer.testing import CliRunner
 
 from mindroom import debug_report as debug_report_module
 from mindroom import llm_request_logging
-from mindroom.agent_storage import create_state_storage
 from mindroom.cli.debug_report import _resolve_sources
 from mindroom.cli.main import app
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
@@ -39,6 +38,7 @@ from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from mindroom.history.session_context import _team_scope_state_root
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system import tool_calls
 from mindroom.tool_system.worker_routing import (
     agent_state_root_path,
