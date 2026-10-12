@@ -844,8 +844,10 @@ agents:
 | `entry` | The agent's entry for this automation |
 | `options` | The entry's `options`, set per agent, read-only |
 | `settings` | The plugin's `settings`, set once per plugin, read-only |
-| `workspace` | The agent's workspace root, which may not exist yet; `None` for an agent without `memory_backend: file`, which has no workspace |
-| `state_dir` | The agent's automation state directory in MindRoom storage, outside the workspace; name your files after your automation and create the directory when you first write |
+| `requester_id` | For a [private agent](scheduling.md#automations), the requester whose instance this run maintains; `None` for a shared agent |
+| `execution_identity` | The identity that resolves that requester's instance, for helpers that take one; `None` for a shared agent |
+| `workspace` | The workspace root, which may not exist yet: a private agent's is the requester's private root; `None` for a shared agent without `memory_backend: file`, which has no workspace |
+| `state_dir` | The automation state directory of the agent, or of the requester's instance, in MindRoom storage outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees
 
@@ -861,5 +863,5 @@ For plugin code, MindRoom also guarantees:
 ### Helpers the built-ins use
 
 Agent workspaces can contain files worker code wrote, so read and write them without following links: `read_regular_file_within_root`, `write_file_within_root`, and `open_directory_within_root` from `mindroom.path_confinement` do that.
-To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths))` with `refresh_agent_memory_search` from `mindroom.memory`.
+To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths, ctx.execution_identity))` with `refresh_agent_memory_search` from `mindroom.memory`.
 [`prompt_curation.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/prompt_curation.py) and [`dreaming.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/dreaming.py) are complete examples: a single prompt with a re-check, and a proposal reviewed in a second thread before code applies it.

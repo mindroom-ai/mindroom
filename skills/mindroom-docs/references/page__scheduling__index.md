@@ -290,12 +290,14 @@ agents:
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
-- Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
+- A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](https://docs.mindroom.chat/personal-rooms/) with the agent.
+  Only the agent named by `personal_rooms.agent` can run automations as a private agent, its entries cannot set `room`, and it inherits only default entries without `room`.
+  A requester without a personal room, or whom the agent may no longer answer, is skipped.
 - The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
-- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- An agent, or each requester's instance of a private agent, runs one automation at a time; one that comes due meanwhile starts when the other ends.
 - A check that cannot read what it checks posts a warning in the room.
 - A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
