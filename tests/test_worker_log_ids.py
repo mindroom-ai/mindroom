@@ -58,20 +58,26 @@ def _is_logger(receiver: ast.expr) -> bool:
     return isinstance(receiver, ast.Attribute) and "log" in receiver.attr.lower()
 
 
+def _raw_key_log_calls(tree: ast.AST) -> list[ast.Call]:
+    """Return log calls that pass, or format, a raw worker key."""
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _LOG_METHODS
+        and _is_logger(node.func.value)
+        and _raw_worker_key_arguments(node)
+    ]
+
+
 def test_no_log_call_passes_a_raw_worker_key() -> None:
     """Every log call wraps a worker key in `worker_log_id` instead of logging it as is."""
-    offenders: list[str] = []
-    for path in sorted(_SOURCE_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-                continue
-            if node.func.attr not in _LOG_METHODS:
-                continue
-            if not _is_logger(node.func.value):
-                continue
-            if _raw_worker_key_arguments(node):
-                offenders.append(f"{path.relative_to(_SOURCE_ROOT)}:{node.lineno}")
+    offenders = [
+        f"{path.relative_to(_SOURCE_ROOT)}:{call.lineno}"
+        for path in sorted(_SOURCE_ROOT.rglob("*.py"))
+        for call in _raw_key_log_calls(ast.parse(path.read_text(encoding="utf-8")))
+    ]
 
     assert offenders == []
 
@@ -94,8 +100,7 @@ def test_no_error_message_or_thread_name_embeds_a_raw_worker_key() -> None:
             for value in node.values:
                 if not isinstance(value, ast.FormattedValue):
                     continue
-                name = getattr(value.value, "id", None) or getattr(value.value, "attr", None)
-                if isinstance(name, str) and name.endswith("worker_key"):
+                if _is_raw_worker_key(value.value):
                     offenders.append(f"{path.relative_to(_SOURCE_ROOT)}:{node.lineno}")
 
     assert offenders == []
@@ -154,15 +159,5 @@ def test_the_log_guard_catches_formatted_and_attribute_loggers() -> None:
     )
     allowed = ast.parse("logger.warning(f'worker {worker_log_id(worker_key)} failed')\n")
 
-    def offending(tree: ast.Module) -> list[ast.Call]:
-        return [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and _is_logger(node.func.value)
-            and _raw_worker_key_arguments(node)
-        ]
-
-    assert len(offending(flagged)) == 2
-    assert offending(allowed) == []
+    assert len(_raw_key_log_calls(flagged)) == 2
+    assert _raw_key_log_calls(allowed) == []
