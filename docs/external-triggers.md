@@ -19,7 +19,7 @@ There are two kinds of triggers:
 
 Triggers are created and managed by tool calls in a live Matrix conversation, not in `config.yaml`.
 Trigger records are stored in the primary runtime's [control state](deployment/storage.md#data-persistence).
-Agent workers and sandbox runners do not receive that path.
+Agent workers and sandbox runners do not receive the control state path.
 
 ## Configuration
 
