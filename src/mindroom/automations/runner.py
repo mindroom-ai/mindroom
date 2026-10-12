@@ -285,16 +285,25 @@ class AutomationRunner:
         posted = False
         try:
             room_id = await asyncio.to_thread(_room_id, config, self.runtime_paths, instance, automation.room)
-            if room_id is None:
-                logger.warning(
-                    "Automation has no room to post in",
+            if room_id is None and requester_id is not None:
+                # A requester who never got a personal room is a normal state, not a misconfiguration.
+                logger.info(
+                    "Automation requester has no personal room; skipped",
                     agent=agent_name,
                     automation=automation.name,
                     requester=requester_id,
                 )
                 return
+            if room_id is None:
+                logger.warning("Automation has no room to post in", agent=agent_name, automation=automation.name)
+                return
             if requester_id is not None and not self._may_answer(config, agent_name, requester_id, room_id):
-                logger.info("Automation requester may no longer use the agent; skipped", agent=agent_name)
+                logger.info(
+                    "Automation requester may no longer use the agent; skipped",
+                    agent=agent_name,
+                    automation=automation.name,
+                    requester=requester_id,
+                )
                 return
             bot = self.bot_provider(agent_name)
             if bot is None:

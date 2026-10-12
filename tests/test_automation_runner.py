@@ -804,7 +804,10 @@ async def test_a_private_check_gets_the_requesters_workspace_state_and_identity(
 
 @pytest.mark.asyncio
 async def test_a_requester_without_a_personal_room_gets_no_prompt(tmp_path: Path) -> None:
-    """Nowhere else is private to the requester and the agent, so their automations wait for a personal room."""
+    """Nowhere else is private to the requester and the agent, so their automations wait for a personal room.
+
+    A requester without one is a normal state, not a misconfiguration, so it is logged without a warning.
+    """
     _config, _paths, runner, bot, _roots = _private_setup(
         tmp_path,
         {ALICE: MEMORY, BOB: MEMORY},
@@ -812,10 +815,18 @@ async def test_a_requester_without_a_personal_room_gets_no_prompt(tmp_path: Path
     )
 
     await _tick(runner, NOON)
-    await _tick(runner, DAY_LATER)
+    with patch.object(runner_module, "logger") as logger:
+        await _tick(runner, DAY_LATER)
 
     assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]
     assert ("mind", BOB) not in runner._active
+    logger.warning.assert_not_called()
+    logger.info.assert_any_call(
+        "Automation requester has no personal room; skipped",
+        agent="mind",
+        automation="prompt_curation",
+        requester=BOB,
+    )
 
 
 @pytest.mark.asyncio
