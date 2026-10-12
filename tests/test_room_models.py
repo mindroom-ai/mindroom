@@ -240,20 +240,18 @@ def test_room_model_store_scopes_records_by_room(tmp_path: Path) -> None:
 def test_room_model_overrides_do_not_silently_evict_active_rooms(tmp_path: Path) -> None:
     """A durable room default must remain until reset, even after many other rooms are set."""
     context = _room_model_context(tmp_path, AsyncMock())
-    for index in range(1001):
-        set_room_model_override(
-            context.runtime_paths,
-            room_id=f"!room-{index}:localhost",
-            model_name="large",
-        )
-
-    oldest = resolve_room_model_override(
-        context.runtime_paths,
-        "!room-0:localhost",
-        configured_models=context.config.models,
+    path = _store_path(context.runtime_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({f"!room-{index}:localhost": {"model": "large"} for index in range(1000)}),
+        encoding="utf-8",
     )
 
-    assert oldest.active == "large"
+    set_room_model_override(context.runtime_paths, room_id=ROOM_ID, model_name="large")
+
+    for room_id in ("!room-0:localhost", ROOM_ID):
+        state = resolve_room_model_override(context.runtime_paths, room_id, configured_models=context.config.models)
+        assert state.active == "large"
 
 
 def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(tmp_path: Path) -> None:
