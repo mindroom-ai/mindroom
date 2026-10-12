@@ -232,6 +232,7 @@ Scheduled turns and other agents' messages queued behind the reply wait for it i
 ### Seeing and cancelling jobs
 
 MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
+The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 In any client, `!jobs` lists the conversation's running jobs and `!cancel_job <id|all>` cancels them; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
 **Stop**, an edit, or deleting a message stops only that reply; its jobs keep running until they are cancelled.
@@ -242,6 +243,7 @@ Cancellation does not undo external side effects or forcibly stop arbitrary Pyth
 ### How results reach the agent
 
 A job belongs to its conversation and requester, and to the agent that answers there; a team owns the jobs its members start for it.
+For a team formed on the fly by mentioning several agents, the follow-up comes from the agent that posted the team's reply, on its own.
 While a reply of that agent runs, it is told after its next tool call which jobs ended meanwhile and is asked to acknowledge them with one `job(action="collect")` call, which returns their results.
 A job with no useful output still needs acknowledging; a cancelled job needs none.
 A reply that starts after jobs ended is told the same way when it begins.
