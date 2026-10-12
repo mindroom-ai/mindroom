@@ -23,9 +23,9 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `budgets/` - Per-user caps set on the [Budgets](../budgets.md#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
-- `matrix_state.yaml` - Each agent's Matrix account and access token, the rooms MindRoom manages, and the space room ID
+- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, and router, the rooms MindRoom manages, and the space room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
-- `sync_continuity/` - Per-agent Matrix room joins still in progress, kept across restarts
+- `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 
 Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; learning and memory stay under the storage directory.
 
