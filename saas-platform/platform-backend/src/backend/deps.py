@@ -305,10 +305,7 @@ async def _authenticate_user(  # noqa: C901, PLR0912
         db_time = time.perf_counter() - start
         logger.info("Auth database lookup: %.2fms", db_time * 1000)
 
-    except HTTPException as e:
-        # Record failure if it's an auth error (not a 404)
-        if e.status_code == 401:
-            auth_monitor.record_failure(client_ip)
+    except HTTPException:
         raise
     except Exception:
         logger.exception("User verification error")

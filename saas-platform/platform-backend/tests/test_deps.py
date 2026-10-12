@@ -92,7 +92,7 @@ class TestDeps:
 
         assert exc_info.value.status_code == 401
         assert exc_info.value.detail == "Invalid token"
-        assert len(auth_monitor.failed_attempts["unknown"]) == 1
+        assert not auth_monitor.failed_attempts.get("unknown")
 
     @pytest.mark.asyncio
     async def test_verify_user_creates_account(
