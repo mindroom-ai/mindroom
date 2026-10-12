@@ -5252,7 +5252,7 @@ def test_kubernetes_script_worker_omits_agent_vault_identity_material(tmp_path: 
     assert not {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} & volume_names
 
 
-def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp_path: Path) -> None:
+def test_agent_vault_main_env_error_names_worker_log_id_when_vault_name_missing(tmp_path: Path) -> None:
     """The defensive vault-name guard should name the worker that failed by its log ID."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),

@@ -9,7 +9,12 @@ from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.tool_system.worker_routing import worker_dir_name, worker_log_id
+from mindroom.tool_system.worker_routing import (
+    private_instance_scope_root_path,
+    shared_storage_root,
+    worker_dir_name,
+    worker_log_id,
+)
 from mindroom.workers.backends._dedicated_worker_common import plan_scoped_workspace_mounts
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
@@ -81,24 +86,47 @@ def test_no_error_message_or_thread_name_embeds_a_raw_worker_key() -> None:
     assert offenders == []
 
 
-def test_missing_private_workspace_log_names_no_requester(tmp_path: Path) -> None:
-    """A private workspace that does not exist yet is logged below its scope, whose directory names the requester."""
-    worker_key = "v1:default:user:~@alice:example.org"
+_PRIVATE_USER_KEY = "v1:default:user:~@alice:example.org"
+
+
+def _plan_private_mounts(storage_root: Path) -> tuple[object, ...]:
     config = Config(
         agents={"writer": AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user", root="workspace"))},
     )
+    return plan_scoped_workspace_mounts(
+        worker_key=_PRIVATE_USER_KEY,
+        local_shared_storage_root=storage_root,
+        worker_visible_shared_storage_root=Path("/app/worker"),
+        private_agent_names=frozenset(),
+        resolved_agent_policies=config.get_agent_policies(),
+    )
 
+
+def test_missing_private_workspace_log_names_no_requester(tmp_path: Path) -> None:
+    """A private workspace that does not exist yet is logged below its scope, whose directory names the requester."""
     with capture_logs() as logs:
-        mounts = plan_scoped_workspace_mounts(
-            worker_key=worker_key,
-            local_shared_storage_root=tmp_path,
-            worker_visible_shared_storage_root=Path("/app/worker"),
-            private_agent_names=frozenset(),
-            resolved_agent_policies=config.get_agent_policies(),
-        )
+        mounts = _plan_private_mounts(tmp_path)
 
     assert mounts == ()
     [event] = [log for log in logs if log["event"] == "Not mounting a workspace that does not exist yet"]
-    assert event["worker"] == worker_log_id(worker_key)
+    assert event["worker"] == worker_log_id(_PRIVATE_USER_KEY)
+    assert event["workspace"] == "writer/workspace"
+    assert "alice" not in repr(logs)
+
+
+def test_linked_private_workspace_warning_names_no_requester(tmp_path: Path) -> None:
+    """A private workspace replaced by a link is refused and logged below its scope too."""
+    scope = private_instance_scope_root_path(shared_storage_root(tmp_path), _PRIVATE_USER_KEY)
+    (scope / "writer").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (scope / "writer" / "workspace").symlink_to(elsewhere)
+
+    with capture_logs() as logs:
+        mounts = _plan_private_mounts(tmp_path)
+
+    assert mounts == ()
+    [event] = [log for log in logs if log["event"] == "Not mounting a workspace reached through a link"]
+    assert event["worker"] == worker_log_id(_PRIVATE_USER_KEY)
     assert event["workspace"] == "writer/workspace"
     assert "alice" not in repr(logs)
