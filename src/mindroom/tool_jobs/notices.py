@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
 from mindroom.hooks.types import EnrichmentItem
+from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 _HOOK_ATTR = "_mindroom_job_notice_hook_installed"
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -63,8 +66,15 @@ async def _acknowledge_cancellations(runtime: ToolJobRuntime, jobs: Sequence[Bac
         if job.status != "cancelled":
             continue
         waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth, timeout=0)
-        if waited.claim is not None:
+        if waited.claim is None:
+            continue
+        try:
             await runtime.acknowledge_wait(job.job_id, waited.claim)
+        except Exception:
+            # Unacknowledged, the cancellation is noticed again by a later reply.
+            logger.warning("Background job cancellation was not acknowledged", job_id=job.job_id, exc_info=True)
+        finally:
+            await runtime.release_wait(job.job_id, waited.claim)
 
 
 async def _unnoticed_notice(notices: JobNotices) -> str | None:

@@ -246,6 +246,32 @@ async def test_a_noticed_cancellation_needs_no_collect(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_cancellation_whose_acknowledgement_fails_is_noticed_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed save of a noticed cancellation neither breaks the reply nor keeps the job claimed."""
+    conversation = await _conversation(tmp_path)
+    try:
+        await conversation.start("cancelled")
+        await conversation.cancel("cancelled")
+
+        async def fail(*_args: object) -> None:
+            msg = "store unavailable"
+            raise RuntimeError(msg)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(conversation.runtime, "acknowledge_wait", fail)
+            with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
+                assert "`cancelled`" in str(await _turn_start_job_note())
+        with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
+            assert "`cancelled`" in str(await _turn_start_job_note())
+        assert (await lookup(conversation.runtime, "cancelled", owner=conversation.owner, depth=0)).consumed
+    finally:
+        await conversation.runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_no_notice_without_a_running_turn_context(tmp_path: Path) -> None:
     """A model run outside a reply's notice context, such as a background job's own run, adds no notice."""
     conversation = await _conversation(tmp_path)
