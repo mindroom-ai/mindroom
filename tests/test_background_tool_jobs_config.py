@@ -277,7 +277,7 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
         from mindroom.config.main import Config
         from mindroom.config.models import ModelConfig
         from mindroom.tool_jobs import agno_compat_execution
-        from tests.conftest import make_turn_context, test_runtime_paths
+        from tests.conftest import test_runtime_paths
         from tests.identity_helpers import persist_entity_accounts
 
         config = Config(

@@ -12,6 +12,7 @@ from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.team import Team
 from agno.tools import Toolkit
+from agno.tools.function import FunctionCall
 
 from mindroom.agents import apply_tool_approval_capability, team_background_jobs
 from mindroom.config.access import ResponderAccessConfig
@@ -34,6 +35,7 @@ from mindroom.tool_jobs.runtime import (
     JobAccessError,
     register_background_runtime,
 )
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -46,6 +48,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.history_helpers import _agent as history_agent
 from tests.history_helpers import _runtime_paths as history_runtime_paths
 from tests.tool_job_helpers import (
+    SpanRecorder,
     completed_delegation_job,
     managed_team_config,
     pending_outcome,
@@ -346,6 +349,35 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
             collected = str(await controls.job("collect"))
         assert "`member` (report) completed" in collected
         assert "Member result" in collected
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path) -> None:
+    """A team leader's job calls pass its plugins' tool hooks and land in its reply's call record, as other calls do."""
+    config = managed_team_config(tmp_path)
+    paths = team_coordinator(tmp_path, config).runtime_paths
+    team = replace(completed_delegation_job().owner, agent_name="team", transport_agent_name="team")
+    runtime = await tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=team),
+        agent_name="team",
+        transport_agent_name="team",
+    )
+    recorder = SpanRecorder(stopped=False)
+    try:
+        controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
+        assert controls is not None
+        call = FunctionCall(function=controls.get_async_functions()["job"], arguments={"action": "list"})
+        with tool_runtime_context(context), recording_tool_calls(recorder):
+            await call.aexecute()
+        assert [(kind, name) for kind, name, _arguments, _result in recorder.records] == [
+            ("started", "job"),
+            ("finished", "job"),
+        ]
     finally:
         await runtime.shutdown()
 

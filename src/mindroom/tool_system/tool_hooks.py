@@ -723,7 +723,7 @@ async def _check_before_body(
     tool_name: str,
     has_after_hooks: bool,
 ) -> None:
-    """Keep work stopped, or no longer authorized, since its hooks and approval ran out of the tool body."""
+    """Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran."""
     try:
         job_checkpoint()
         check_current_execution_authority(arguments=args)
