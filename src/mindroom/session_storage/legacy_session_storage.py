@@ -1,4 +1,4 @@
-"""Compatibility for Agno 2 session payloads retained beside current run rows."""
+"""Compatibility for older session payloads: Agno 2 run blobs and retired run metadata."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def _string_field(entry: object, key: str) -> str | None:
 # Legacy format: Run rows whose `metadata` holds a `tools_schema` list of tool definitions, written with every run.
 # Last legacy release: v2026.10.273; replacement: the unreleased run metadata omits tool schemas.
 # Handling: Each loaded run, including member responses embedded in a paused team run, drops the key, so cached and
-# replayed runs stop holding the schemas; rewritten rows omit it.
+# replayed runs stop holding the schemas; rows written by current releases omit it.
 # Coverage: tests/test_agent_storage_runs.py::test_loaded_runs_drop_their_stored_tool_schemas,
 # tests/test_agent_storage_runs.py::test_loaded_team_runs_drop_tool_schemas_of_embedded_member_responses.
 def drop_run_tool_schemas(runs: Iterable[RunOutput | TeamRunOutput]) -> None:

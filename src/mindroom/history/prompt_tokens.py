@@ -8,7 +8,7 @@ resolved execution plan.
 
 The prompt-only tool surface (model-visible payloads plus tool instructions)
 is prepared once per agent or team instance and reused by static token
-budgeting and run-metadata assembly within that turn. Agent and team instances
+budgeting within that turn. Agent and team instances
 are rebuilt per response, so the surface never outlives one turn's tool state.
 """
 
@@ -156,7 +156,7 @@ def _store_tool_surface(entity: Agent | Team, surface: _PromptToolSurface) -> No
 def _agent_prompt_tool_surface(agent: Agent) -> _PromptToolSurface:
     """Prepare (or reuse) the prompt-only tool surface for one agent instance.
 
-    The estimator and run-metadata assembly only need model-visible schemas and
+    The estimators only need model-visible schemas and
     tool instructions, not executable validate-call wrappers. Preparing those
     schemas here reuses cached Function schema metadata across fresh Agent
     instances.
