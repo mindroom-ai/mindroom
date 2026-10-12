@@ -1526,6 +1526,44 @@ async def test_sync_tool_aexecute_keeps_original_agno_chain_without_background_t
 
 
 @pytest.mark.asyncio
+async def test_a_job_cancelled_while_its_before_hook_runs_never_enters_the_tool_body(tmp_path: Path) -> None:
+    """A job's cancel that lands during a before hook stops the tool body, though no task cancellation reaches it."""
+    control = JobControl()
+    blocked: list[bool] = []
+    ran: list[str] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(_ctx: ToolBeforeCallContext) -> None:
+        control.cancel()
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        blocked.append(ctx.blocked)
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.from_plugins([_plugin("tool-policy", [before, after])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+    )
+    assert bridge is not None
+
+    def sync_tool() -> str:
+        ran.append("body")
+        return "done"
+
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        tool_execution_identity(_execution_identity()),
+        job_control_context(control),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await bridge("sync_tool", sync_tool, {})
+
+    assert ran == []
+    assert blocked == [True]
+
+
+@pytest.mark.asyncio
 async def test_sync_tool_aexecute_cancellation_during_before_hook_never_starts_body(tmp_path: Path) -> None:
     """Cancellation before the synchronous leaf remains ordinary task cancellation."""
     before_started = asyncio.Event()
