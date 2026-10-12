@@ -18,7 +18,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from sqlalchemy import event
+from sqlalchemy import Table, create_engine, event
 
 from mindroom.session_storage.agent_storage import (
     create_state_storage,
@@ -960,3 +960,39 @@ def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_o
     assert _stored_run(db_path, "t0")[0] == 3
     assert loaded is not None
     assert [run.run_id for run in loaded.runs or []] == ["m0", "t0"]
+
+
+def test_storage_opens_when_another_owner_creates_the_runs_table_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owners opening one database at once can both find the runs table missing; the one that loses still opens."""
+    first = _storage(tmp_path)
+    first.upsert_session(AgentSession(session_id="s1", agent_id="code"))
+    first.close()
+    db_path = tmp_path / "sessions" / "code.db"
+    with sqlite3.connect(db_path) as connection:
+        tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "code_sessions_runs" not in tables
+    original_create = Table.create
+    other_owner = create_engine(f"sqlite:///{db_path}")
+
+    def create_after_another_owner(table: Table, bind: object, checkfirst: bool = False) -> None:
+        if table.name == "code_sessions_runs":
+            # Another owner's create lands between this owner's existence check and its CREATE TABLE.
+            monkeypatch.setattr(Table, "create", original_create)
+            original_create(table, other_owner)
+            original_create(table, bind, checkfirst=False)
+            return
+        original_create(table, bind, checkfirst=checkfirst)
+
+    monkeypatch.setattr(Table, "create", create_after_another_owner)
+    second = _storage(tmp_path)
+    try:
+        second.upsert_run(run=_run("s1", "r1"), session_id="s1", user_id=None)
+        stored = _loaded_run_ids(second, "s1")
+    finally:
+        second.close()
+        other_owner.dispose()
+
+    assert stored == ["r1"]

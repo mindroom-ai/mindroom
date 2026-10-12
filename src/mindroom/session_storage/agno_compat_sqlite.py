@@ -15,6 +15,7 @@ from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from sqlalchemy import and_, case, event, func, select
 from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.exc import OperationalError
 
 from mindroom.history.summary_rows_schema import (
     NON_VISIBLE_RUN_STATUS_VALUES,
@@ -68,7 +69,21 @@ def remove_default_pragmas(engine: Engine) -> None:
 # and tests/test_helper_usage.py::test_scope_reset_and_first_turn_write_preserve_concurrent_session.
 def owned_table(db: SqliteDb, table_type: Literal["runs", "sessions"]) -> Table:
     """Return the runs or sessions table, creating it on first use."""
-    table = db._get_table(table_type=table_type, create_table_if_not_found=True)
+    # AGNO_COMPAT: Table creation is check-then-create across storage objects.
+    # Reason: SqliteDb serializes table resolution only within one storage object, then checks for the table
+    # and issues a plain CREATE TABLE, so two owners opening one fresh conversation database at once can both
+    # find it missing and the later CREATE fails with "already exists", failing that owner's reply.
+    # Upstream issue: Tracking gap: no issue identified for concurrent table creation across SqliteDb objects.
+    # Upstream PR: None identified.
+    # Remove when: SqliteDb creates tables with IF NOT EXISTS or tolerates a concurrent create.
+    # Coverage: tests/test_agent_storage_runs.py::test_storage_opens_when_another_owner_creates_the_runs_table_first.
+    try:
+        table = db._get_table(table_type=table_type, create_table_if_not_found=True)
+    except OperationalError as error:
+        if "already exists" not in str(error.orig):
+            raise
+        # Another owner created it between this owner's check and its CREATE; resolve the existing table.
+        table = db._get_table(table_type=table_type, create_table_if_not_found=True)
     if table is None:
         msg = f"SQLite {table_type} table unavailable"
         raise RuntimeError(msg)
