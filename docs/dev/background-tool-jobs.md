@@ -50,7 +50,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 | `tool_jobs/follow_ups.py` | A follow-up's journal source, identity, streak, and envelope |
 | `tool_jobs/publication.py` | The jobs state each agent publishes per room |
 | `tool_jobs/client_cancel.py` | Client cancel events, `!jobs` and `!cancel_job`, and cancelling a left room's jobs |
-| `orchestration/tool_job_runtime.py` | Startup, policy revocation, publishing state, card expiry, admitting follow-ups, retention and shutdown coordination |
+| `orchestration/tool_job_runtime.py` | Startup, policy revocation, publishing state, card denial, admitting follow-ups, retention and shutdown coordination |
 | `response_runner.py` | Running a follow-up under the conversation lock |
 | Response and delivery owners | Serialize turns, preserve published text and tool traces, settle visible delivery |
 

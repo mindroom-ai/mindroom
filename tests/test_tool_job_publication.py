@@ -137,6 +137,21 @@ async def test_a_room_the_bot_left_gets_no_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_bot_that_rejoins_a_room_rewrites_its_state() -> None:
+    """A list written before the bot left is replaced when it is back, though the jobs changed while it was gone."""
+    bots = _bots("agent_a")
+    publisher = JobStatePublisher()
+    await publisher.publish(bots.get, [_job("job_1")])
+    rooms = bots["agent_a"].client.rooms
+    bots["agent_a"].client.rooms = {}
+    await publisher.publish(bots.get, [_job("job_1", status="cancelled")])
+    bots["agent_a"].client.rooms = rooms
+    await publisher.publish(bots.get, [])
+    assert bots["agent_a"].client.room_put_state.await_count == 2
+    assert bots["agent_a"].client.room_put_state.await_args.kwargs["content"] == {"jobs": []}
+
+
+@pytest.mark.asyncio
 async def test_a_forbidden_write_is_not_retried_until_the_jobs_change() -> None:
     """A room where the bot may not write the state is left alone until its jobs change."""
     bots = _bots("agent_a")

@@ -70,8 +70,8 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any
             continue
         try:
             value, payload = await consume_tool_job(runtime, waited.job, waited.claim)
-        except JobAccessError:
-            # Its claim is released, so a later collect reads it; the others still arrive now.
+        except ValueError:
+            # Unavailable or undecodable; its claim is released, so a later collect reads it, and the others arrive now.
             sections.append(f"`{job.job_id}` ({job.tool_name}) {job.status}: its result could not be read now")
             continue
         if isinstance(value, ToolResult):
@@ -124,23 +124,6 @@ class JobTools(Toolkit):
         self.async_functions["job"].owning_toolkit = "job"
 
     @staticmethod
-    def available(
-        runtime_paths: RuntimePaths,
-        owner: ToolExecutionIdentity | None,
-        *,
-        depth: int,
-        enabled: bool,
-    ) -> bool:
-        """Require the same live conversation capability at construction and approval recovery."""
-        return (
-            enabled
-            and depth == 0
-            and owner is not None
-            and owner.channel == "matrix"
-            and get_background_runtime(runtime_paths) is not None
-        )
-
-    @staticmethod
     def build(
         tools: list[Toolkit],
         runtime_paths: RuntimePaths,
@@ -150,8 +133,14 @@ class JobTools(Toolkit):
         enabled: bool,
         output_file_policy: ToolOutputFilePolicy | None = None,
     ) -> Toolkit | None:
-        """Build the reserved toolkit for the caller's ordinary policy/hook pipeline."""
-        if owner is None or not JobTools.available(runtime_paths, owner, depth=depth, enabled=enabled):
+        """Build the reserved toolkit for a top-level Matrix caller while the job runtime runs, else nothing."""
+        if (
+            not enabled
+            or depth != 0
+            or owner is None
+            or owner.channel != "matrix"
+            or get_background_runtime(runtime_paths) is None
+        ):
             return None
         if any("job" in toolkit.get_async_functions() for toolkit in tools):
             msg = "Tool function name job is reserved for managed job controls"

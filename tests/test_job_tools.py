@@ -27,7 +27,7 @@ from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
@@ -597,8 +597,8 @@ async def test_collect_reports_the_others_when_one_result_cannot_be_read(
 
     async def read(runtime: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:
         if job.job_id == "job_b":
-            msg = "Tool job result is not available."
-            raise JobAccessError(msg)
+            msg = "Unsupported durable tool result payload."
+            raise ValueError(msg)
         return await original(runtime, job)
 
     monkeypatch.setattr(consumption_module, "read_result_payload", read)

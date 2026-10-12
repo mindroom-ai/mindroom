@@ -2522,7 +2522,7 @@ class ToolJobStore:
         return await self._backend.read(tool_jobs.load_all)
 
     async def accept(self, job_id: str, job_json: str) -> None:
-        """Save a newly accepted job, refusing an ID that was ever accepted before."""
+        """Save a newly accepted job, refusing an ID that is still saved."""
         await self._backend.write(
             lambda transaction: tool_jobs.accept(transaction, self._runtime_generation, job_id, job_json),
         )

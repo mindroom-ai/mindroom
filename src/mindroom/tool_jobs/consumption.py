@@ -56,25 +56,7 @@ class ConsumptionOwner:
     storage_factory: Callable[[], BaseDb] | None = None
     _claims: list[_Consumption] = field(default_factory=list)
 
-    def register(self, runtime: ToolJobRuntime, job_id: str, claim: JobClaim, call: FunctionCall) -> None:
-        """Keep a claim until the parent run that made this exact tool call is saved."""
-        context = function_run_context(call.function)
-        if context is None or not call.call_id:
-            msg = "Tool result consumption requires exact run and tool-call identity"
-            raise ValueError(msg)
-        if function_actor(call.function) is None:
-            msg = "Tool result consumption requires a concrete agent or team"
-            raise ValueError(msg)
-        self._keep(
-            runtime,
-            job_id,
-            claim,
-            run_id=context.run_id,
-            team=function_agent(call.function) is None,
-            call_id=call.call_id,
-        )
-
-    def _keep(
+    def register(
         self,
         runtime: ToolJobRuntime,
         job_id: str,
@@ -190,11 +172,19 @@ async def _retain_claim(
     if call is None or owner is None:
         await runtime.release_wait(job_id, claim)
         return
-    try:
-        owner.register(runtime, job_id, claim, call)
-    except BaseException:
+    context = function_run_context(call.function)
+    if context is None or not call.call_id or function_actor(call.function) is None:
         await runtime.release_wait(job_id, claim)
-        raise
+        msg = "Tool result consumption requires the exact run, tool call, and concrete agent or team"
+        raise ValueError(msg)
+    owner.register(
+        runtime,
+        job_id,
+        claim,
+        run_id=context.run_id,
+        team=function_agent(call.function) is None,
+        call_id=call.call_id,
+    )
 
 
 async def retain_parent_call_claim(
@@ -211,7 +201,7 @@ async def retain_parent_call_claim(
     if owner is None or not run_id or not call_id:
         await runtime.release_wait(job_id, claim)
         return
-    owner._keep(runtime, job_id, claim, run_id=run_id, team=team, call_id=call_id)
+    owner.register(runtime, job_id, claim, run_id=run_id, team=team, call_id=call_id)
 
 
 async def consume_tool_job(

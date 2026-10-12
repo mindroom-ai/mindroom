@@ -57,7 +57,7 @@ def require_ownership(transaction: Transaction, runtime_generation: str) -> None
 
 
 def accept(transaction: Transaction, runtime_generation: str, job_id: str, job_json: str) -> None:
-    """Save a newly accepted job, refusing an ID any runtime already accepted."""
+    """Save a newly accepted job, refusing an ID that is still saved."""
     require_ownership(transaction, runtime_generation)
     inserted = transaction.fetchone(
         """

@@ -383,7 +383,7 @@ class ToolJobRuntime:
     ) -> None:
         """Durably save the job, with its new or still unsaved payload, then make it current.
 
-        `accepted` saves a newly accepted job, which the journal refuses if its ID was ever accepted before.
+        `accepted` saves a newly accepted job, which the journal refuses while a job with its ID is still saved.
         A failed write leaves memory unchanged.
         """
         if payload is None and job.has_result_payload:
