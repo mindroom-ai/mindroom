@@ -634,6 +634,8 @@ def _load_root_skills(root: Path) -> list[Skill]:
     if cached and cached[0] == snapshot:
         return cached[1]
 
+    # OpenClaw skills write `metadata` as a JSON5 string, which Agno's validator rejects;
+    # parse_skill_metadata normalizes it instead.
     loader = LocalSkills(str(resolved_root), validate=False)
     try:
         skills = loader.load()
