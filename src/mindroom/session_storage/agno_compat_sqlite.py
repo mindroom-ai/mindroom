@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.db.utils import build_single_run_row, deserialize_session_json_fields
-from sqlalchemy import event, func, select
+from sqlalchemy import and_, case, event, func, select
 from sqlalchemy.dialects.sqlite import insert
 
 from mindroom.history.summary_rows_schema import (
@@ -78,8 +79,10 @@ def _existing_table(db: SqliteDb, table_type: Literal["runs", "sessions"]) -> Ta
 # Upstream issue: https://github.com/agno-agi/agno/issues/9936
 # Upstream PR: https://github.com/agno-agi/agno/pull/9938
 # Remove when: The pinned adapter appends new runs after existing indexes even when
-# given a shortened session-list position; keep owner prompt sanitization.
-# Coverage: tests/test_agent_storage_runs.py::test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors.
+# given a shortened session-list position, and lets the owner allocate the index and veto an
+# insert or update inside its UPSERT; keep owner prompt sanitization and the conversation-log rules.
+# Coverage: tests/test_agent_storage_runs.py::test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors
+# and tests/test_agent_storage_runs.py::test_new_runs_sort_after_every_summary_row.
 # AGNO_COMPAT: Run persistence has no caller-owned transaction extension point.
 # Reason: SqliteDb.upsert_run commits internally, preventing atomic application-owned usage writes.
 # Upstream issue: No matching transaction extension point identified; the run UPSERT is copied from Agno 3.0.9.
@@ -87,8 +90,8 @@ def _existing_table(db: SqliteDb, table_type: Literal["runs", "sessions"]) -> Ta
 # Remove when: Agno accepts a caller-owned transaction or an in-transaction persistence hook;
 # retain the owner's independent usage retention and atomic snapshot update.
 # Coverage: tests/test_usage_storage.py::test_usage_write_failure_rolls_back_the_run,
-# tests/test_budget_spend.py::test_spend_charges_a_resumed_run_for_its_requests_this_month, and
-# tests/test_history_archive.py::test_roll_back_restores_earlier_runs_of_the_hit_generation_in_order.
+# tests/test_usage_storage.py::test_a_refused_save_of_a_removed_run_still_records_usage, and
+# tests/test_budget_spend.py::test_spend_charges_a_resumed_run_for_its_requests_this_month.
 def insert_run_row(
     transaction: Session,
     runs: Table,
@@ -96,15 +99,41 @@ def insert_run_row(
     *,
     session_id: str,
     user_id: str | None,
-) -> Row[Any]:
-    """Upsert one run row at the end of its session inside the caller's transaction."""
+    session_table: str,
+) -> Row[Any] | Literal["removed", "frozen"]:
+    """Upsert one run row inside the caller's write transaction, under the conversation log's rules.
+
+    A run a cut removed, or a member of one, writes no row (``"removed"``). A visible run behind
+    its scope's latest summary row, or a member of one, is folded and stays as stored
+    (``"frozen"``). A run new to the session, or saved visible over a stored non-visible row
+    such as a completed approval continuation, takes the next index after every run and summary row.
+    """
     row = build_single_run_row(run, session_id=session_id, user_id=user_id, run_index=None)
-    row["run_index"] = (
-        select(func.coalesce(func.max(runs.c.run_index) + 1, 0))
-        .where(runs.c.session_id == session_id)
-        .scalar_subquery()
-    )
+    connection = transaction.connection()
+    summaries, removed = (quote_identifier(name) for name in summary_rows_table_names(session_table))
+    runs_name = quote_identifier(runs.name)
+    if (
+        connection.exec_driver_sql(
+            f"SELECT 1 FROM {removed} WHERE run_id IN (?, ?)",  # noqa: S608
+            (row["run_id"], row["parent_run_id"]),
+        ).first()
+        is not None
+    ):
+        return "removed"
+    if _is_folded(connection, runs_name, summaries, row["run_id"]):
+        return "frozen"
+    row["run_index"] = connection.exec_driver_sql(
+        f"SELECT MAX(COALESCE((SELECT MAX(run_index) FROM {runs_name} WHERE session_id = ?), -1), "  # noqa: S608
+        f"COALESCE((SELECT MAX(after_run_index) FROM {summaries} WHERE session_id = ?), -1)) + 1",
+        (session_id, session_id),
+    ).scalar_one()
     statement = insert(runs).values(**row)
+    becomes_visible = and_(
+        runs.c.parent_run_id.is_(None),
+        runs.c.status.in_(NON_VISIBLE_RUN_STATUSES),
+        statement.excluded.parent_run_id.is_(None),
+        statement.excluded.status.not_in(NON_VISIBLE_RUN_STATUSES),
+    )
     return transaction.execute(
         statement.on_conflict_do_update(
             index_elements=["run_id"],
@@ -113,10 +142,32 @@ def insert_run_row(
                     name: statement.excluded[name]
                     for name in ("status", "run_data", "user_id", "parent_run_id", "updated_at")
                 },
-                "run_index": func.coalesce(runs.c.run_index, statement.excluded.run_index),
+                # The model produced the rest of such a run after the turns it waited for, so it sorts after them.
+                "run_index": case(
+                    (becomes_visible, statement.excluded.run_index),
+                    else_=func.coalesce(runs.c.run_index, statement.excluded.run_index),
+                ),
             },
         ).returning(runs.c.session_id, runs.c.run_id, runs.c.run_data, runs.c.created_at, runs.c.updated_at),
     ).one()
+
+
+def _is_folded(connection: Connection, runs: str, summaries: str, run_id: str) -> bool:
+    """Return whether a stored run, or the top-level run it belongs to, is visible and behind its scope's latest summary row."""
+    hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUSES)
+    return (
+        connection.exec_driver_sql(
+            "WITH RECURSIVE chain(run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id) "  # noqa: S608
+            f"AS (SELECT run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id FROM {runs} "
+            "WHERE run_id = ? UNION SELECT run.run_id, run.parent_run_id, run.run_index, run.status, run.run_type, "
+            f"run.agent_id, run.team_id, run.session_id FROM {runs} AS run JOIN chain ON run.run_id = chain.parent_run_id) "
+            f"SELECT 1 FROM chain AS top WHERE top.parent_run_id IS NULL AND top.status NOT IN ({hidden}) "
+            f"AND top.run_index <= (SELECT row.after_run_index FROM {summaries} AS row WHERE row.session_id = top.session_id "
+            f"AND row.scope_key = {run_scope_key_sql('top')} ORDER BY row.id DESC LIMIT 1)",
+            (run_id,),
+        ).first()
+        is not None
+    )
 
 
 def upsert_run_at_end(
@@ -130,19 +181,36 @@ def upsert_run_at_end(
     """Save the run and optional usage in one transaction, preserving Agno's row/index semantics."""
     runs = owned_table(db, "runs")
     with db.Session() as transaction, transaction.begin():
+        connection = transaction.connection()
+        # The insertion rules read the log before they write, so the write lock comes first.
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
         for statement in summary_rows_schema_sql(db.session_table_name):
-            transaction.connection().exec_driver_sql(statement)
-        stored = insert_run_row(transaction, runs, run, session_id=session_id, user_id=user_id)
-        if record_usage:
-            payload = project_usage(
-                {**stored.run_data, "created_at": stored.created_at, "updated_at": stored.updated_at},
-            )
-            connection = transaction.connection()
-            connection.exec_driver_sql(usage_table_sql(db.session_table_name))
-            connection.exec_driver_sql(
-                usage_upsert_sql(db.session_table_name),
-                (stored.session_id, stored.run_id, json.dumps(payload)),
-            )
+            connection.exec_driver_sql(statement)
+        stored = insert_run_row(
+            transaction,
+            runs,
+            run,
+            session_id=session_id,
+            user_id=user_id,
+            session_table=db.session_table_name,
+        )
+        if not record_usage or stored == "frozen":
+            # A folded run's usage is final; a stale copy must not replace it.
+            return
+        if stored == "removed":
+            # The provider calls behind a save of a cut run were made; the ledger outlives deleted runs.
+            run_data = cast("dict[str, Any]", run) if isinstance(run, dict) else run.to_dict()
+            now = int(time.time())
+            payload_run = {**run_data, "created_at": run_data.get("created_at") or now, "updated_at": now}
+            run_id = run_data["run_id"]
+        else:
+            payload_run = {**stored.run_data, "created_at": stored.created_at, "updated_at": stored.updated_at}
+            run_id = stored.run_id
+        connection.exec_driver_sql(usage_table_sql(db.session_table_name))
+        connection.exec_driver_sql(
+            usage_upsert_sql(db.session_table_name),
+            (session_id, run_id, json.dumps(project_usage(payload_run))),
+        )
 
 
 @contextmanager

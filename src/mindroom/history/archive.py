@@ -359,7 +359,14 @@ def roll_back_to(
             restored_run_ids=[run.run_id for run in restored if run.run_id],
         )
         for run in restored:
-            agno_compat_sqlite.insert_run_row(transaction, runs, run, session_id=session_id, user_id=run.user_id)
+            agno_compat_sqlite.insert_run_row(
+                transaction,
+                runs,
+                run,
+                session_id=session_id,
+                user_id=run.user_id,
+                session_table=db.session_table_name,
+            )
 
 
 def _retire_generations(

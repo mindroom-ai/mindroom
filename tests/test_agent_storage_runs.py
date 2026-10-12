@@ -503,6 +503,211 @@ def test_blob_entries_without_a_string_run_id_are_dropped(tmp_path: Path) -> Non
     assert _blob(db_path) is None
 
 
+def _status_run(run_id: str, status: RunStatus, *, content: str | None = None) -> RunOutput:
+    return RunOutput(
+        run_id=run_id,
+        agent_id="code",
+        session_id="s1",
+        status=status,
+        content=content,
+        messages=[Message(role="user", content=run_id)],
+    )
+
+
+def _summary_after(db_path: Path, run_id: str) -> None:
+    """Position one summary row of the agent scope right after ``run_id``, as compaction would."""
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+            "SELECT 's1', 'agent:code', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = ?",
+            (run_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _stored_run(db_path: Path, run_id: str) -> tuple[int, str, str]:
+    connection = sqlite3.connect(db_path)
+    try:
+        return connection.execute(
+            "SELECT run_index, status, run_data FROM code_sessions_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+
+def test_new_runs_sort_after_every_summary_row(tmp_path: Path) -> None:
+    """Deleting the newest runs must not let a new run reuse an index a summary row sorts after."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        seed_session(
+            storage,
+            AgentSession(
+                session_id="s1",
+                agent_id="code",
+                runs=[_status_run(f"r{i}", RunStatus.completed) for i in range(3)],
+            ),
+        )
+        _summary_after(db_path, "r2")
+        storage.delete_runs(["r1", "r2"])
+        storage.upsert_run(_status_run("r3", RunStatus.completed), session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r3")[0] == 3
+    assert loaded == ["r3"]
+
+
+@pytest.mark.parametrize(
+    "stored_status",
+    [RunStatus.paused, RunStatus.cancelled, RunStatus.error],
+    ids=["approval", "cli-checkpoint", "interrupted-record"],
+)
+def test_a_non_visible_run_saved_visible_moves_to_the_end(tmp_path: Path, stored_status: RunStatus) -> None:
+    """A continuation finishing after newer turns and a compaction replays after the summary."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [_status_run("r0", stored_status), *(_status_run(f"r{i}", RunStatus.completed) for i in range(1, 4))]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        _summary_after(db_path, "r3")
+        storage.upsert_run(_status_run("r0", RunStatus.completed, content="approved"), session_id="s1")
+        loaded = get_agent_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r0")[0] == 4
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["r0"]
+
+
+def test_a_continuation_without_a_summary_replays_after_the_turns_it_waited_for(tmp_path: Path) -> None:
+    """The move holds without compaction too: the resumed run sorts after the turns its continuation saw."""
+    storage = _storage(tmp_path)
+    try:
+        runs = [_status_run("r0", RunStatus.paused), _status_run("r1", RunStatus.completed)]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        storage.upsert_run(_status_run("r0", RunStatus.completed), session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert loaded == ["r1", "r0"]
+
+
+def test_a_save_keeping_visibility_never_moves_a_run(tmp_path: Path) -> None:
+    """Re-saving a visible run, or a paused run that stays paused, keeps its place."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [
+            _status_run("r0", RunStatus.paused),
+            _status_run("r1", RunStatus.completed),
+            _status_run("r2", RunStatus.completed),
+        ]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        storage.upsert_run(_status_run("r1", RunStatus.completed, content="linked"), session_id="s1")
+        storage.upsert_run(_status_run("r0", RunStatus.paused, content="still waiting"), session_id="s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r0")[0] == 0
+    assert _stored_run(db_path, "r1")[0] == 1
+
+
+def test_a_folded_run_is_frozen(tmp_path: Path) -> None:
+    """A stale copy of a run behind the latest summary row changes neither its row nor its usage."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [
+            _status_run("p0", RunStatus.paused),
+            _status_run("r1", RunStatus.completed, content="original"),
+            _status_run("r2", RunStatus.completed),
+        ]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        _summary_after(db_path, "r2")
+        before = _stored_run(db_path, "r1")
+        with sqlite3.connect(db_path) as connection:
+            usage_before = connection.execute(
+                "SELECT usage_data FROM code_sessions_usage WHERE run_id = 'r1'",
+            ).fetchone()
+        storage.upsert_run(_status_run("r1", RunStatus.paused, content="stale paused"), session_id="s1")
+        storage.upsert_run(_status_run("r1", RunStatus.completed, content="stale completed"), session_id="s1")
+        storage.upsert_run(_status_run("p0", RunStatus.paused, content="still waiting"), session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r1") == before
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute("SELECT usage_data FROM code_sessions_usage WHERE run_id = 'r1'").fetchone()
+            == usage_before
+        )
+    assert json.loads(_stored_run(db_path, "p0")[2])["content"] == "still waiting"
+    assert loaded == ["p0"]
+
+
+def test_a_member_of_a_folded_team_run_is_frozen(tmp_path: Path) -> None:
+    """A folded team run's member rows are as final as the team run."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    member = RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="original")
+    try:
+        seed_session(
+            storage,
+            TeamSession(
+                session_id="s1",
+                team_id="eng",
+                runs=[member, TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed)],
+            ),
+        )
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+                "SELECT 's1', 'team:eng', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = 't0'",
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        stale = RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="stale")
+        storage.upsert_run(stale, session_id="s1")
+    finally:
+        storage.close()
+
+    assert json.loads(_stored_run(db_path, "m0")[2])["content"] == "original"
+
+
+def test_a_removed_run_is_never_written_again(tmp_path: Path) -> None:
+    """A run a cut deleted, and a member row under it, stay gone when a late save arrives."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        seed_session(
+            storage,
+            AgentSession(session_id="s1", agent_id="code", runs=[_status_run("r0", RunStatus.completed)]),
+        )
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('gone', 's1')")
+        storage.upsert_run(_status_run("gone", RunStatus.completed), session_id="s1")
+        child = RunOutput(run_id="gone-member", agent_id="helper", session_id="s1", parent_run_id="gone")
+        storage.upsert_run(child, session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert loaded == ["r0"]
+    assert _stored_run(db_path, "gone") is None
+    assert _stored_run(db_path, "gone-member") is None
+
+
 def test_failed_run_writes_leave_the_session_as_loaded() -> None:
     """The store is written first; when it refuses, ``session.runs`` must not claim the change landed."""
     session = _session("s1", ["r1", "r2"])

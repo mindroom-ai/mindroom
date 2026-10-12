@@ -185,6 +185,21 @@ def test_repeated_saves_replace_the_usage_snapshot(usage_db: SqliteDb) -> None:
     assert rows[0][1]["metrics"]["total_tokens"] == 30
 
 
+def test_a_refused_save_of_a_removed_run_still_records_usage(usage_db: SqliteDb) -> None:
+    """The provider calls behind a late save of a cut run were made, so their usage stays recorded."""
+    with sqlite3.connect(usage_db.db_file) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS code_sessions_removed_runs (run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL)",
+        )
+        connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('run-1', 'session')")
+
+    usage_db.upsert_run(_run(), session_id="session")
+
+    assert [(run_id, payload["metrics"]["total_tokens"]) for run_id, payload in _rows(usage_db)] == [("run-1", 10)]
+    with sqlite3.connect(usage_db.db_file) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM code_sessions_runs").fetchone() == (0,)
+
+
 def test_run_cleanup_preserves_usage_before_regeneration(usage_db: SqliteDb) -> None:
     """Replay cleanup cannot erase incurred usage, and the replacement run adds its own work."""
     usage_db.upsert_run(_run(), session_id="session")
