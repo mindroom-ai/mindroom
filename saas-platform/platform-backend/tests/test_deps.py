@@ -369,58 +369,27 @@ class TestDeps:
         assert get_admin_metric("unauthorized") == 1
 
     @staticmethod
-    def _reject_tokens(mock_auth_client: MagicMock, status: int = 403) -> None:
-        """Make Supabase reject every token as it does for a bad or expired JWT."""
-        mock_auth_client.auth.get_user.side_effect = AuthApiError("invalid JWT", status, "bad_jwt")
-
-    @pytest.mark.asyncio
-    async def test_rejected_user_tokens_lock_the_client_out(self, mock_auth_client: MagicMock):
-        """Rejected user tokens lock the client out, after which user checks are refused before Supabase is asked."""
-        self._reject_tokens(mock_auth_client)
+    async def _lock_out_with_malformed_headers(verify) -> None:
         for _ in range(auth_monitor.MAX_FAILURES):
             with pytest.raises(HTTPException) as exc_info:
-                await verify_user("Bearer guessed-token")
+                await verify("malformed")
             assert exc_info.value.status_code == 401
 
-        with pytest.raises(HTTPException) as exc_info:
-            await verify_user("Bearer guessed-token")
-
-        assert exc_info.value.status_code == 429
-        assert mock_auth_client.auth.get_user.call_count == auth_monitor.MAX_FAILURES
-
     @pytest.mark.asyncio
-    async def test_failed_admin_checks_lock_the_client_out(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
-        """Rejected admin tokens count toward the same lockout as user checks, and a locked-out client is refused."""
+    @pytest.mark.parametrize("verify", [verify_user, verify_admin])
+    async def test_malformed_headers_lock_the_client_out_of_both_paths(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify
+    ):
+        """Malformed headers on either path lock the client out of both, before Supabase is asked."""
         reset_security_metrics()
-        self._reject_tokens(mock_auth_client)
+        await self._lock_out_with_malformed_headers(verify)
 
-        for _ in range(auth_monitor.MAX_FAILURES):
+        for locked_out in (verify_user, verify_admin):
             with pytest.raises(HTTPException) as exc_info:
-                await verify_admin("Bearer guessed-token")
-            assert exc_info.value.status_code == 401
-
-        with pytest.raises(HTTPException) as exc_info:
-            await verify_admin("Bearer guessed-token")
-
-        assert exc_info.value.status_code == 429
-        assert mock_auth_client.auth.get_user.call_count == auth_monitor.MAX_FAILURES
-        assert get_admin_metric("unauthorized") == auth_monitor.MAX_FAILURES
-        assert get_admin_metric("error") == 0
+                await locked_out("Bearer some-token")
+            assert exc_info.value.status_code == 429
+        mock_auth_client.auth.get_user.assert_not_called()
         assert get_admin_metric("blocked") == 1
-
-    @pytest.mark.asyncio
-    async def test_locked_out_client_is_refused_on_the_admin_path(self, mock_auth_client: MagicMock):
-        """A client locked out by rejected user tokens cannot keep guessing on admin routes."""
-        self._reject_tokens(mock_auth_client)
-        for _ in range(auth_monitor.MAX_FAILURES):
-            with pytest.raises(HTTPException):
-                await verify_user("Bearer guessed-token")
-
-        with pytest.raises(HTTPException) as exc_info:
-            await verify_admin("Bearer guessed-token")
-
-        assert exc_info.value.status_code == 429
-        assert mock_auth_client.auth.get_user.call_count == auth_monitor.MAX_FAILURES
 
     @pytest.mark.asyncio
     async def test_malformed_admin_header_counts_toward_the_lockout(self):
@@ -432,19 +401,33 @@ class TestDeps:
         assert len(auth_monitor.failed_attempts["unknown"]) == 1
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", [401, 403])
+    @pytest.mark.parametrize(
+        "error",
+        [
+            AuthApiError("invalid JWT: unable to parse or verify signature", 403, "bad_jwt"),
+            AuthApiError("Session from session_id claim in JWT does not exist", 403, "session_not_found"),
+            AuthApiError("invalid JWT", 401, "bad_jwt"),
+        ],
+        ids=["bad-jwt", "session-ended", "bad-jwt-401"],
+    )
     @pytest.mark.parametrize("verify", [verify_user, verify_admin])
-    async def test_supabase_token_rejection_counts_once(
-        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify, status: int
+    async def test_supabase_token_rejections_never_lock_a_client_out(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify, error: Exception
     ):
-        """Supabase rejecting a token is exactly one failed attempt."""
-        self._reject_tokens(mock_auth_client, status)
+        """Supabase also rejects authentic tokens of ended sessions, so rejections are reported but never counted."""
+        reset_security_metrics()
+        mock_auth_client.auth.get_user.side_effect = error
 
-        with pytest.raises(HTTPException) as exc_info:
-            await verify("Bearer guessed-token")
+        for _ in range(auth_monitor.MAX_FAILURES + 1):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify("Bearer revoked-token")
+            assert exc_info.value.status_code == 401
 
-        assert exc_info.value.status_code == 401
-        assert len(auth_monitor.failed_attempts["unknown"]) == 1
+        assert not auth_monitor.failed_attempts.get("unknown")
+        assert not auth_monitor.is_blocked("unknown")
+        if verify is verify_admin:
+            assert get_admin_metric("unauthorized") == auth_monitor.MAX_FAILURES + 1
+            assert get_admin_metric("error") == 0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -460,7 +443,7 @@ class TestDeps:
     async def test_supabase_outage_does_not_count_toward_the_lockout(
         self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify, error: Exception
     ):
-        """Supabase failing to answer or erroring is not a failed attempt, so an outage cannot lock out every client."""
+        """Supabase failing to answer or erroring is not a failed attempt and is reported as an error."""
         reset_security_metrics()
         mock_auth_client.auth.get_user.side_effect = error
 

@@ -179,9 +179,12 @@ def _refuse_locked_out_client(client_ip: str) -> None:
 
 
 def _token_was_rejected(exc: Exception) -> bool:
-    """Return whether Supabase rejected the token itself rather than failing to answer.
+    """Return whether Supabase rejected the token rather than failing to answer.
 
-    Only rejections count toward a lockout, so an auth outage cannot lock out every client.
+    Rejections are reported but never count toward the lockout: Supabase also rejects authentic tokens
+    whose session ended, for example after a sign-out on another device, or that just expired, so counting
+    them would lock legitimate clients and everyone sharing their address out, while a signed token
+    cannot be guessed anyway.
     """
     return isinstance(exc, AuthApiError) and exc.status in {401, 403}
 
@@ -307,10 +310,8 @@ async def _authenticate_user(  # noqa: C901, PLR0912
         if e.status_code == 401:
             auth_monitor.record_failure(client_ip)
         raise
-    except Exception as exc:
+    except Exception:
         logger.exception("User verification error")
-        if _token_was_rejected(exc):
-            auth_monitor.record_failure(client_ip)
         msg = "Authentication failed"
         raise HTTPException(status_code=401, detail=msg) from None
 
@@ -374,16 +375,10 @@ async def verify_admin(authorization: str = Header(None), request: Request = Non
         record_admin_verification("success")
         _record_audit_actor(request, user.user.id, user.user.email)
         return {"user_id": user.user.id, "email": user.user.email}  # noqa: TRY300
-    except HTTPException as exc:
-        if exc.status_code == 401:
-            auth_monitor.record_failure(client_ip)
+    except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Admin verification error")
         msg = "Authentication failed"
-        if _token_was_rejected(exc):
-            auth_monitor.record_failure(client_ip)
-            record_admin_verification("unauthorized")
-        else:
-            record_admin_verification("error")
+        record_admin_verification("unauthorized" if _token_was_rejected(exc) else "error")
         raise HTTPException(status_code=401, detail=msg) from None
