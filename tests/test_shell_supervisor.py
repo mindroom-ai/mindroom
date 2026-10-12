@@ -1020,7 +1020,7 @@ async def test_supervisor_sigkill_terminates_supervised_process_group(
     )
     supervised_pid = int(result.split("PID ")[1].split(")")[0])
     for _ in range(40):
-        if ready_path.exists():
+        if ready_path.exists() and ready_path.read_text(encoding="utf-8"):
             break
         await asyncio.sleep(0.05)
     script_pid, descendant_pid = map(int, ready_path.read_text(encoding="utf-8").split())
