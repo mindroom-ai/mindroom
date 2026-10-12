@@ -132,7 +132,7 @@ class ToolJobRuntimeCoordinator:
         self._journal = journal = self.journal_provider()
         self._instance = instance = pin_background_tool_jobs(config, self.runtime_paths)
         # With background jobs off, saved jobs wait untouched for the next enabled start, which reports them.
-        if instance.settings.enabled and self._runtime is None:
+        if instance.settings.enabled:
             store = journal.tool_jobs(uuid4().hex)
             # Take the jobs over before dispatch starts, fencing any runtime that still writes from before;
             # the first sync recovers them, and a later one never takes them back from a newer process.

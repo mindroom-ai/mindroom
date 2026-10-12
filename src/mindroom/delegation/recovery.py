@@ -112,16 +112,14 @@ async def interrupt_stopped_child(
     cancel_reason: str = "Delegation cancelled.",
 ) -> None:
     """Settle a child its job stopped: a shutdown or restart interrupts it as crash recovery does, else it is cancelled."""
-    if job_stopped_by_shutdown():
-        await interrupt_child(
-            child,
-            config=config,
-            runtime_paths=runtime_paths,
-            reason=_RESTART_INTERRUPTION_REASON,
-            status="failed",
-        )
-    else:
-        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=cancel_reason)
+    shutdown = job_stopped_by_shutdown()
+    await interrupt_child(
+        child,
+        config=config,
+        runtime_paths=runtime_paths,
+        reason=_RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
+        status="failed" if shutdown else "cancelled",
+    )
 
 
 async def interrupt_child(

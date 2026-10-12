@@ -164,10 +164,9 @@ async def _retain_claim(
     runtime: ToolJobRuntime,
     job_id: str,
     claim: JobClaim,
-    function_call: FunctionCall | None = None,
+    call: FunctionCall | None,
 ) -> None:
     """Keep a claim until the parent run saves the exact tool call, releasing it when no such run will be saved."""
-    call = function_call or current_tool_call()
     owner = _OWNER.get()
     if call is None or owner is None:
         await runtime.release_wait(job_id, claim)

@@ -1968,7 +1968,7 @@ def team_job_controls(
     runtime_paths: constants.RuntimePaths,
     owner: ToolExecutionIdentity,
 ) -> Toolkit | None:
-    """Build a team leader's job toolkit: the team owns, and collects, the jobs its members start for it."""
+    """Build a team leader's job toolkit, with background jobs on: the team owns, and collects, its members' jobs."""
     bridge = _build_agent_tool_hook_bridge(
         hook_registry=None,
         plugins=_load_agent_plugins(config, runtime_paths),
@@ -1983,7 +1983,7 @@ def team_job_controls(
         runtime_paths,
         owner,
         depth=0,
-        enabled=background_tool_jobs_enabled(config, runtime_paths),
+        enabled=True,
         supports_native_tool_approval=True,
         tool_hook_bridge=bridge,
     )
