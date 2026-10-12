@@ -48,7 +48,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
   Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
   User docs name implementation details only when a documented procedure needs them.
 - **Design and architecture documents** (`docs/architecture/` and the design records in `docs/dev/`) hold only what the code cannot show: reasons, decisions and rejected alternatives, assumptions, external constraints and wire contracts, refuted theories, evidence, limitations, invariant purposes, linked operator procedures, and open questions.
-  Do not describe what the code does there beyond the inventories this file requires, such as the code map, `security-posture.md`, and the Agno upstream map.
+  Do not describe what the code does there beyond the inventories this file requires, such as the code map, `security-posture.md`, the plaintext inventory in `matrix-event-journal-security.md`, and the Agno upstream map.
   Name each dated record `docs/dev/YYYY-MM-DD-<title>.md` after its creation date.
 - Sentences like these fail the question test:
   - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." states a hardening limit normal use never reaches, with no effect a user sees.

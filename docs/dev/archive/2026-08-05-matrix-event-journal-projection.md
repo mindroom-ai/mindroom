@@ -62,18 +62,17 @@ Several fixes over-corrected past the defect they targeted and produced somethin
 | --- | --- | --- |
 | A rejoin could resend a stale answer | Bind the transaction ID to the membership epoch and delete attempted rows | Deduplication was the mechanism, not the failure, so this turned a suppressed duplicate into a visible one |
 | An echo could freeze a streamed answer | Treat a matching revision ID as a canonicalizing echo | Identity has no direction, so a late seed overwrote authoritative data with a local clock |
-| An empty page with a continuation was read as exhaustion | Raise when the token stops advancing | A homeserver at the start of its history returns exactly that shape, so a normal room became permanently unhydratable |
 | A device change could resend a duplicate | Record the sending device when the row is claimed | A room lookup that raised left the row stamped with the current device, so the next pass skipped the lookup and posted twice |
 | A failed final edit sent its error notice twice | Send the notice directly, then adopt it as the row's outcome | Acknowledgement is first-writer-wins and recovery can resend and acknowledge in the gap, and a membership-fence refusal and a Matrix failure return the same false, so a refused enqueue sent an old error into a room the bot had left; the fix sends nothing, because either the fence refused or the row still owes the answer |
 | A cancelled ledger write | Roll the in-memory record back on cancellation | The cancelled write could already have committed |
 | A cancellation right after an approval card was sent orphaned the card | Shield the durable write | `asyncio.shield` lets the write land but delivers the cancellation first, so the expiry ran before the row existed and the cancelled approval was recorded as approved; a detached task that records and then expires the card is the fix |
 
-One obvious fix was tried and reverted before it shipped: making hydration the only proof of freshness (`return not await conversation_is_hydrated(...)`).
-Non-blocking reads never hydrate, so every dispatch read stayed degraded forever and the dispatch-safe read collapsed into a strict one; eleven tests failed, including one that asserts a command must not block on a strict read.
-The fix had to make hydration happen on the dispatch path, with a first read that reports degraded while hydrating in the background, instead of only making the predicate stricter.
+Making hydration the only proof of freshness for every read (`return not await conversation_is_hydrated(...)`) was first tried and reverted.
+Non-blocking reads never hydrate, so every dispatch read stayed degraded and the dispatch-safe read collapsed into a strict one; eleven tests failed, including one that asserts a command must not block on a strict read.
+The predicate later shipped applied only to reads whose caller requires complete history.
 
-Before committing a fix, state the mirror-image input, the same events reversed or the benign server response with the same shape, and say which way each choice fails; prefer the direction that degrades, because hydration and delivery run once per something and a hard failure there does not heal.
-For the first three rows a twenty-line probe against a temporary SQLite store settled each case in under a minute and disagreed with the reasoning every time.
+Before committing a fix, state the mirror-image input, the same events reversed or the benign server response with the same shape, and say which way each choice fails; prefer the failure a later pass can still repair, because hydration and delivery run once per something.
+For the rejoin and echo rows a twenty-line probe against a temporary SQLite store settled each case in under a minute and disagreed with the reasoning every time.
 For the device, final-edit, and ledger rows the second attempt was simpler than the first: read the room, send nothing, wait for the write to report.
 
 ## Matrix, nio, and tooling behaviour found during the work
@@ -94,7 +93,7 @@ One nio test pinned the old behaviour and was changed deliberately, because the 
 
 - nio attaches provenance only to timeline events; state-block member events carry none, so their actionability cannot come from nio's classification.
 - An old message on an ordinary live timeline, as when a replacement bot joins a room and syncs normally, is `LIVE`, admitted actionable, and suppressed later by policy; only cold history and notices are context-only.
-  A test that asserts the context-only mechanism rather than the no-turn outcome reads zero on that path and looks like a regression, which is why the restart-regression fuzz profile reports its `context_only` count rather than asserting it.
+  A test that asserts the context-only mechanism rather than the no-turn outcome reads zero on that path and looks like a regression.
 - A departure reaches the bot twice, from the local leave and from its sync echo.
   A guard cleared by a rejoin let the echo fence a second time and delete the conversation hydrated under the new membership, and an in-process record also lost or misattributed departures on a failed fence, a restart between the fence and its echo, two leaves before one echo, and an echo that never arrived, so confirming a local membership change against its echo has to be durable and exactly once.
 - A post-restart wedge with none of the sync-livelock signatures showed one event logging `coalescing_gate_message_enqueued` with no `coalescing_gate_flush_started`, and that event's callback starting twice 13 ms and 19 ms apart.

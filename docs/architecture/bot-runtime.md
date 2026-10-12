@@ -64,7 +64,7 @@ Recovery re-delivers a recorded result, while an interrupted attempt without one
 
 ## Durable Dispatch Boundary
 
-Nio owns receive cursors, prepared batches, provenance, encryption recipients, and room-key sharing; the [event journal contracts](matrix-event-journal-contracts.md) record why MindRoom trusts nio for these instead of re-deriving them.
+Nio owns receive cursors, prepared batches, provenance, encryption recipients, and room-key sharing; the [event journal contracts](matrix-event-journal-contracts.md) record that MindRoom trusts nio for these instead of re-deriving them.
 
 ### Retention and deduplication
 
@@ -73,7 +73,7 @@ No checkpoint-relative pruning frontier can therefore preserve exact deduplicati
 
 ### Failure, refusal, and ignored traffic
 
-A callback that raises or is cancelled stays pending at the head of its room lane and retries with capped backoff for as long as it fails, so a homeserver, provider, or network outage delays events instead of dropping them.
+A callback that raises stays pending at the head of its room lane and retries with capped backoff for as long as it fails, so a homeserver, provider, or network outage delays events instead of dropping them; a cancelled callback stays pending for startup replay.
 Only a callback that recognizes a deterministic refusal settles its event, by returning an outcome instead of raising.
 A message or media event whose relation target the homeserver refuses to serve can never be placed in a conversation, so it settles as intentionally ignored.
 A successful but empty readiness result settles as intentionally ignored instead of repeating download or transcription work forever.

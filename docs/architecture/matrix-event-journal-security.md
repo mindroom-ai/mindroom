@@ -29,10 +29,10 @@ Turn records are scoped to the agent name alone, so a re-login under a new Matri
   Redacting a revision deletes its row, and deleting the logical message deletes all of its revisions.
 - `turn_records.record_json` holds turn identity, outcome, and regeneration content.
   Its prepared voice-source checkpoint (prepared body, Matrix content, batching scope, and echo thread) lets a retry skip transcription, is never copied into agent run metadata, and is removed on turn completion or source redaction, including redaction through a source's discovery alias.
-  Records otherwise follow age and count retention once no unsettled source or unfinished turn fact protects them.
+  Records holding a conversation's redaction tombstone are kept indefinitely, because history cleanup derives from them; other records follow age and count retention once no unsettled source or unfinished turn fact protects them.
 - `matrix_delivery_outbox.payload_json` holds each response or tool-approval event frozen before it is sent, `result_json` holds local completion facts, which can include final response text and interactive metadata, and `reply_row_json` can hold the reply text that delivery writes.
   Rows an earlier release wrote can also hold source prompts inside a serialized prepared edit turn record.
-- `approval_continuations.context_json` can hold the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` needed to resume an approved call, and it is deleted with its calls after terminal delivery or cleanup.
+- `approval_continuations.context_json` can hold the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` needed to resume an approved call, and `approval_continuation_calls.reason` can hold the text of a human's denial reply; both are deleted with the continuation after terminal delivery or cleanup.
 - `reply_messages.presentation_json` and `possibly_shown_json` hold what each AI reply shows and what its latest progress edit may have shown: visible text, tool trace, and team presentation state.
   `reply_messages.owed_write_json` can hold reply text a Matrix write still owes, and `reply_spans.rollback_json` holds the presentation a claimed span restores if it rolls back.
   `reply_tool_calls.entry_json` records every tool call before it runs, with its redacted argument preview and, once it returns, its redacted result preview, whether or not the reply shows tool calls.

@@ -345,7 +345,7 @@ class JournalDispatcher:
     def release_delivered_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Forget sources the outbox has taken over, after their commit.
 
-        The durable half of contract 2's handoff belongs to the transaction
+        The durable half of the outbox-enqueue handoff belongs to the transaction
         that recorded the answer: settling separately would leave a window in
         which a crash left the journal and the outbox both owning the turn,
         and the replay that follows would spend the model a second time on a

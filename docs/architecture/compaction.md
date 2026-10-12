@@ -1,7 +1,8 @@
 # History compaction
 
 This page records the assumptions and decisions behind portable history compaction, its archive of compacted runs, and seen-message tracking.
-User-facing behavior is in [Context Window](../configuration/history.md#context-window), and the Agno and provider workarounds are in the [Agno compatibility inventory](agno-compatibility.md).
+User-facing behavior is in [Context Window](../configuration/history.md#context-window), Agno workarounds are in the [Agno compatibility inventory](agno-compatibility.md), and provider request workarounds are in `history/summary_provider_compat.py` and `history/claude_replay_compat.py`.
+When upgrading Agno or a provider SDK, run those modules' contract tests before removing a workaround.
 
 ## Assumptions
 

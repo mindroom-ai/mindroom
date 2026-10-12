@@ -12,4 +12,4 @@ Findings that the current schema and code fix are omitted.
 ## Open
 
 - No test applies the RLS policies against PostgreSQL as one tenant and checks that another tenant's rows stay hidden; the multitenancy tests mock the Supabase client, so a schema change could regress isolation unnoticed.
-- Tenants cannot see their own audit logs; a per-tenant view that keeps admin oversight was suggested and is optional.
+- Tenants see their own audit entries only in the GDPR data export; a dashboard view that keeps admin oversight was suggested and is optional.
