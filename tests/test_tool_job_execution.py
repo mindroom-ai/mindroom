@@ -7,6 +7,7 @@ import base64
 import json
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
+from contextlib import suppress
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Never
@@ -1396,6 +1397,68 @@ async def test_a_call_cancelled_while_its_reply_waits_tells_the_model_not_to_run
         [message] = [message for message in response.messages or [] if message.role == "tool"]
         assert "cancelled" in str(message.content)
         assert "do not call it again" in str(message.content)
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_finished_call_counts_as_read_when_its_reply_fails_on_the_next_step(
+    tmp_path: Path,
+    stream: bool,
+) -> None:
+    """A call that finished inside its reply is read once the failed run is saved, streaming or not."""
+
+    async def report(topic: str) -> str:
+        return f"report on {topic}"
+
+    class FailingSecondStep(DelegationModel):
+        steps: int = 0
+
+        async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
+            self.steps += 1
+            if self.steps == 2:
+                msg = "provider overloaded"
+                raise RuntimeError(msg)
+            return await super().ainvoke(*args, **kwargs)
+
+        async def ainvoke_stream(self, *args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            yield await self.ainvoke(*args, **kwargs)
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    model = FailingSecondStep(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("report", "call", topic="alpha")]), ModelResponse(content="done")],
+    )
+    install_tool_job_execution(model)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", context.config, paths, owner)
+
+    storage = storage_factory()
+    agent = Agent(id="leader", model=model, tools=[assembled_function(report)], db=storage, telemetry=False)
+
+    @owned_tool_execution()
+    async def reply() -> None:
+        set_consumption_storage(storage_factory)
+        if stream:
+            async for _event in agent.arun("Go", session_id=context.session_id, stream=True):
+                pass
+        else:
+            await agent.arun("Go", session_id=context.session_id)
+
+    try:
+        with tool_runtime_context(context), suppress(RuntimeError):
+            await reply()
+        (job,) = runtime.retained_jobs()
+        assert job.status == "completed"
+        assert job.consumed
     finally:
         storage.close()
         await runtime.shutdown()

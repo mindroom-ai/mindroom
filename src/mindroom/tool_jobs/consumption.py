@@ -41,12 +41,18 @@ class _Consumption:
     call_id: str
 
     def saved(self, storage: BaseDb) -> bool:
-        """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team."""
+        """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team.
+
+        A run stopped or failed after the call is saved without its tools when it did not stream, but keeps the
+        call's result message, so either counts.
+        """
         run = storage.get_run(self.run_id)
-        return isinstance(run, TeamRunOutput if self.team else RunOutput) and any(
+        if not isinstance(run, TeamRunOutput if self.team else RunOutput):
+            return False
+        return any(
             tool.tool_call_id == self.call_id and not tool.is_paused and tool.result is not None
             for tool in run.tools or []
-        )
+        ) or any(message.role == "tool" and message.tool_call_id == self.call_id for message in run.messages or [])
 
 
 @dataclass
