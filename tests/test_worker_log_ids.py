@@ -32,14 +32,30 @@ def test_worker_log_id_hides_the_requester_and_matches_the_worker_directory() ->
     assert worker_log_id(worker_key) == log_id
 
 
+def _is_raw_worker_key(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Name) and node.id.endswith("worker_key")) or (
+        isinstance(node, ast.Attribute) and node.attr.endswith("worker_key")
+    )
+
+
 def _raw_worker_key_arguments(call: ast.Call) -> list[ast.expr]:
+    """Return log arguments that are, or format, a raw worker key."""
     values = [*call.args, *(keyword.value for keyword in call.keywords)]
-    return [
-        value
-        for value in values
-        if (isinstance(value, ast.Name) and value.id.endswith("worker_key"))
-        or (isinstance(value, ast.Attribute) and value.attr.endswith("worker_key"))
-    ]
+    raw: list[ast.expr] = [value for value in values if _is_raw_worker_key(value)]
+    for value in values:
+        if isinstance(value, ast.JoinedStr):
+            raw.extend(
+                part.value
+                for part in value.values
+                if isinstance(part, ast.FormattedValue) and _is_raw_worker_key(part.value)
+            )
+    return raw
+
+
+def _is_logger(receiver: ast.expr) -> bool:
+    if isinstance(receiver, ast.Name):
+        return "log" in receiver.id.lower()
+    return isinstance(receiver, ast.Attribute) and "log" in receiver.attr.lower()
 
 
 def test_no_log_call_passes_a_raw_worker_key() -> None:
@@ -52,8 +68,7 @@ def test_no_log_call_passes_a_raw_worker_key() -> None:
                 continue
             if node.func.attr not in _LOG_METHODS:
                 continue
-            receiver = node.func.value
-            if not (isinstance(receiver, ast.Name) and "log" in receiver.id.lower()):
+            if not _is_logger(node.func.value):
                 continue
             if _raw_worker_key_arguments(node):
                 offenders.append(f"{path.relative_to(_SOURCE_ROOT)}:{node.lineno}")
@@ -130,3 +145,24 @@ def test_linked_private_workspace_warning_names_no_requester(tmp_path: Path) -> 
     assert event["worker"] == worker_log_id(_PRIVATE_USER_KEY)
     assert event["workspace"] == "writer/workspace"
     assert "alice" not in repr(logs)
+
+
+def test_the_log_guard_catches_formatted_and_attribute_loggers() -> None:
+    """The guard sees a key formatted into an f-string message and calls on `self.logger`-style receivers."""
+    flagged = ast.parse(
+        "logger.warning(f'worker {worker_key} failed')\nself.deps.logger.info('started', worker=handle.worker_key)\n",
+    )
+    allowed = ast.parse("logger.warning(f'worker {worker_log_id(worker_key)} failed')\n")
+
+    def offending(tree: ast.Module) -> list[ast.Call]:
+        return [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and _is_logger(node.func.value)
+            and _raw_worker_key_arguments(node)
+        ]
+
+    assert len(offending(flagged)) == 2
+    assert offending(allowed) == []
