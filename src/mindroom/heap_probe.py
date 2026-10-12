@@ -1,7 +1,13 @@
-"""Startup heap freeze and opt-in periodic type histogram of the primary process's Python heap.
+"""Heap freezes and an opt-in periodic type histogram of the primary process's Python heap.
 
 Call audio shares the event loop with full garbage collections, so the primary
-freezes its import-time heap once before any bot exists.
+freezes its import-time heap once before any bot exists. A full collection
+walks every live object, so a large runtime pauses for seconds. Once the
+runtime is ready, and then every ``MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS``,
+the primary unfreezes, collects once, and freezes the survivors again. Routine
+full collections then only walk objects created since the last refreeze, and
+bots a config reload replaced are collected at the next refreeze instead of
+staying frozen.
 
 A long-running primary can grow for hours without saying what it holds, and
 external memory profilers cannot attach inside hardened containers. When
@@ -10,8 +16,9 @@ every object tracked by the garbage collector by type and logs the most common
 types, so successive records show which kinds of objects accumulate.
 
 Only GC-tracked containers are counted; strings, bytes, and numbers are not.
-Objects frozen at startup, before any bot exists, are left out of the
-histogram and only counted, so the types show what the runtime created.
+Frozen objects are left out of the histogram and only counted, so the types
+show what the runtime created since the last freeze; disable the refreeze to
+see accumulation over the whole process lifetime.
 Each record also carries glibc's malloc totals and Python's allocated block
 count. Live malloc bytes are ``arena_in_use_bytes`` plus ``mmap_bytes``;
 Python's small-object arenas come straight from mmap, so malloc does not count
@@ -50,29 +57,46 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _HEAP_PROBE_INTERVAL_ENV = "MINDROOM_HEAP_PROBE_INTERVAL_SECONDS"
-# A walk costs about one full collection; shorter intervals would make the probe the main source of pauses.
-_MIN_HEAP_PROBE_INTERVAL_SECONDS = 60.0
+_HEAP_REFREEZE_INTERVAL_ENV = "MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS"
+_DEFAULT_HEAP_REFREEZE_INTERVAL_SECONDS = 3600.0
+# A probe walk or a refreeze costs about one full collection; shorter intervals would make it the main source of pauses.
+_MIN_HEAP_TASK_INTERVAL_SECONDS = 60.0
 _TOP_TYPE_COUNT = 25
 
 
-def _heap_probe_interval_seconds(runtime_paths: RuntimePaths) -> float | None:
-    """Return the probe interval, or ``None`` when unset or zero disables the probe."""
-    raw = (runtime_paths.env_value(_HEAP_PROBE_INTERVAL_ENV) or "").strip()
+def _interval_seconds(runtime_paths: RuntimePaths, env_name: str, *, default: float | None, task: str) -> float | None:
+    """Return one heap task interval, ``default`` when unset, or ``None`` when zero disables the task."""
+    raw = (runtime_paths.env_value(env_name) or "").strip()
     if not raw:
-        return None
+        return default
     try:
         interval_seconds = float(raw)
     except ValueError:
         interval_seconds = math.nan
     if interval_seconds == 0:
         return None
-    if not math.isfinite(interval_seconds) or interval_seconds < _MIN_HEAP_PROBE_INTERVAL_SECONDS:
+    if not math.isfinite(interval_seconds) or interval_seconds < _MIN_HEAP_TASK_INTERVAL_SECONDS:
         msg = (
-            f"{_HEAP_PROBE_INTERVAL_ENV} must be 0 to disable the heap probe or at least "
-            f"{_MIN_HEAP_PROBE_INTERVAL_SECONDS:g} seconds, got {raw!r}"
+            f"{env_name} must be 0 to disable the {task} or at least "
+            f"{_MIN_HEAP_TASK_INTERVAL_SECONDS:g} seconds, got {raw!r}"
         )
         raise ValueError(msg)
     return interval_seconds
+
+
+def _heap_probe_interval_seconds(runtime_paths: RuntimePaths) -> float | None:
+    """Return the probe interval, or ``None`` when unset or zero disables the probe."""
+    return _interval_seconds(runtime_paths, _HEAP_PROBE_INTERVAL_ENV, default=None, task="heap probe")
+
+
+def _heap_refreeze_interval_seconds(runtime_paths: RuntimePaths) -> float | None:
+    """Return the refreeze interval, hourly by default, or ``None`` when zero disables refreezing."""
+    return _interval_seconds(
+        runtime_paths,
+        _HEAP_REFREEZE_INTERVAL_ENV,
+        default=_DEFAULT_HEAP_REFREEZE_INTERVAL_SECONDS,
+        task="heap refreeze",
+    )
 
 
 def _rss_bytes() -> int | None:
@@ -175,10 +199,64 @@ async def _run_heap_type_probe(
         _log_heap_type_probe()
 
 
-def start_heap_type_probe(runtime_paths: RuntimePaths) -> asyncio.Task[None] | None:
-    """Start the probe task when the env knob opts in; the caller cancels it at shutdown."""
-    interval_seconds = _heap_probe_interval_seconds(runtime_paths)
-    if interval_seconds is None:
-        return None
-    logger.info("heap_type_probe_started", interval_seconds=interval_seconds)
-    return create_background_task(_run_heap_type_probe(interval_seconds), name="heap_type_probe")
+def _refreeze_runtime_heap() -> None:
+    """Collect what the frozen heap released, then freeze the survivors again.
+
+    Unfreezing first makes objects frozen earlier collectable, such as bots a
+    config reload replaced; collecting before freezing keeps garbage out of
+    the frozen set. Objects still alive here that later become cyclic garbage,
+    such as a reply in flight, wait for the next refreeze. The collection walks
+    the whole heap once, so it pauses the loop about as long as one full
+    collection did before.
+    """
+    started = time.perf_counter()
+    gc.unfreeze()
+    collected = gc.collect()
+    collect_seconds = time.perf_counter() - started
+    gc.freeze()
+    logger.info(
+        "runtime_heap_refrozen",
+        frozen_objects=gc.get_freeze_count(),
+        collected=collected,
+        collect_seconds=round(collect_seconds, 3),
+    )
+
+
+async def _run_heap_refreeze(
+    interval_seconds: float,
+    *,
+    ready: Callable[[], Awaitable[object]],
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Refreeze once the runtime is ready, then after each interval until cancelled."""
+    await ready()
+    while True:
+        _refreeze_runtime_heap()
+        await sleep(interval_seconds)
+
+
+def start_heap_tasks(
+    runtime_paths: RuntimePaths,
+    *,
+    runtime_ready: Callable[[], Awaitable[object]],
+) -> list[asyncio.Task[None]]:
+    """Start the heap refreeze and the opt-in probe; the caller cancels them at shutdown.
+
+    Both intervals are validated before either task exists, so an invalid value
+    fails startup without leaving a task that shutdown would never cancel.
+    """
+    refreeze_interval_seconds = _heap_refreeze_interval_seconds(runtime_paths)
+    probe_interval_seconds = _heap_probe_interval_seconds(runtime_paths)
+    tasks: list[asyncio.Task[None]] = []
+    if refreeze_interval_seconds is not None:
+        logger.info("heap_refreeze_started", interval_seconds=refreeze_interval_seconds)
+        tasks.append(
+            create_background_task(
+                _run_heap_refreeze(refreeze_interval_seconds, ready=runtime_ready),
+                name="heap_refreeze",
+            ),
+        )
+    if probe_interval_seconds is not None:
+        logger.info("heap_type_probe_started", interval_seconds=probe_interval_seconds)
+        tasks.append(create_background_task(_run_heap_type_probe(probe_interval_seconds), name="heap_type_probe"))
+    return tasks

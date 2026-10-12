@@ -55,7 +55,7 @@ from mindroom.constants import (
 )
 from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
-from mindroom.heap_probe import start_heap_type_probe
+from mindroom.heap_probe import start_heap_tasks
 from mindroom.hooks import (
     ConfigReloadedContext,
     HookRegistry,
@@ -295,6 +295,7 @@ def _mock_runtime_orchestrator() -> MagicMock:
     """Create a lifecycle test double with the runtime readiness contract."""
     orchestrator = MagicMock()
     orchestrator._runtime_ready_event = asyncio.Event()
+    orchestrator.wait_until_runtime_ready = orchestrator._runtime_ready_event.wait
     return orchestrator
 
 
@@ -1662,15 +1663,22 @@ class TestAgentBot(AgentBotTestBase):
         assert heartbeat_cancelled.is_set()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("interval", [None, "60"])
-    async def test_orchestrator_main_starts_opt_in_heap_probe_and_cancels_it_at_shutdown(
+    @pytest.mark.parametrize(
+        ("process_env", "expected_tasks"),
+        [
+            ({}, ["heap_refreeze"]),
+            ({"MINDROOM_HEAP_PROBE_INTERVAL_SECONDS": "60"}, ["heap_refreeze", "heap_type_probe"]),
+            ({"MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS": "0"}, []),
+        ],
+    )
+    async def test_orchestrator_main_starts_heap_tasks_and_cancels_them_at_shutdown(
         self,
         tmp_path: Path,
-        interval: str | None,
+        process_env: dict[str, str],
+        expected_tasks: list[str],
     ) -> None:
-        """Only an opted-in primary runs the heap probe, and runtime cleanup cancels it."""
+        """The hourly refreeze runs by default, the probe only when opted in, and runtime cleanup cancels both."""
         reset_runtime_state()
-        process_env = {} if interval is None else {"MINDROOM_HEAP_PROBE_INTERVAL_SECONDS": interval}
         runtime_paths = resolve_runtime_paths(
             config_path=tmp_path / "config.yaml",
             storage_path=tmp_path,
@@ -1679,41 +1687,46 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after auxiliary start"))
         mock_orchestrator.stop = AsyncMock()
-        started_probes: list[asyncio.Task[None] | None] = []
+        started_tasks: list[asyncio.Task[None]] = []
 
-        def _start_probe(paths: RuntimePaths) -> asyncio.Task[None] | None:
-            probe = start_heap_type_probe(paths)
-            started_probes.append(probe)
-            return probe
+        def _start_heap_tasks(
+            paths: RuntimePaths,
+            *,
+            runtime_ready: Callable[[], Awaitable[object]],
+        ) -> list[asyncio.Task[None]]:
+            tasks = start_heap_tasks(paths, runtime_ready=runtime_ready)
+            started_tasks.extend(tasks)
+            return tasks
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
-            patch("mindroom.orchestrator.start_heap_type_probe", side_effect=_start_probe),
+            patch("mindroom.orchestrator.start_heap_tasks", side_effect=_start_heap_tasks),
             pytest.raises(RuntimeError, match="stop after auxiliary start"),
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        [probe] = started_probes
-        if interval is None:
-            assert probe is None
-        else:
-            assert probe is not None
-            assert probe.cancelled()
+        assert [task.get_name() for task in started_tasks] == expected_tasks
+        assert all(task.cancelled() for task in started_tasks)
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_rejects_invalid_heap_probe_before_starting_auxiliary_tasks(
+    @pytest.mark.parametrize(
+        "env_name",
+        ["MINDROOM_HEAP_PROBE_INTERVAL_SECONDS", "MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS"],
+    )
+    async def test_orchestrator_main_rejects_invalid_heap_interval_before_starting_auxiliary_tasks(
         self,
         tmp_path: Path,
+        env_name: str,
     ) -> None:
-        """An invalid probe interval fails startup before any watcher or heartbeat task exists to leak."""
+        """An invalid heap task interval fails startup before any watcher or heartbeat task exists to leak."""
         reset_runtime_state()
         runtime_paths = resolve_runtime_paths(
             config_path=tmp_path / "config.yaml",
             storage_path=tmp_path,
-            process_env={"MINDROOM_HEAP_PROBE_INTERVAL_SECONDS": "30"},
+            process_env={env_name: "30"},
         )
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.stop = AsyncMock()
@@ -1726,7 +1739,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=run_auxiliary),
             patch("mindroom.orchestrator.run_provisioning_heartbeat", new=heartbeat),
-            pytest.raises(ValueError, match="MINDROOM_HEAP_PROBE_INTERVAL_SECONDS"),
+            pytest.raises(ValueError, match=env_name),
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
