@@ -171,6 +171,22 @@ describe('LandingPage', () => {
     expect(hero().getByRole('img', { name: /MindRoom Chat/ })).toBeInTheDocument()
   })
 
+  it('gives every use case a painted agent avatar', () => {
+    render(<LandingPage />)
+
+    expect(document.querySelectorAll('#use-cases img[src^="/avatars/"]')).toHaveLength(12)
+  })
+
+  it('gives every reason a painted agent avatar and a docs link', () => {
+    render(<LandingPage />)
+
+    const why = document.getElementById('why') as HTMLElement
+    expect(why.querySelectorAll('img[src^="/avatars/"]')).toHaveLength(6)
+    const links = within(why).getAllByRole('link')
+    expect(links).toHaveLength(6)
+    links.forEach((link) => expect(link.getAttribute('href')).toMatch(/^https:\/\/docs\.mindroom\.chat\/#/))
+  })
+
   it('links to MindRoom Chat from the header and the hero', () => {
     render(<LandingPage />)
 

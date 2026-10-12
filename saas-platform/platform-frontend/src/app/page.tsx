@@ -6,25 +6,21 @@ import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
 import { ProductPreview } from '@/components/landing/ProductPreview'
+import { AgentAvatar, type AvatarName } from '@/components/landing/AgentAvatar'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useLiquidGlass } from '@/components/glass/useLiquidGlass'
 import {
   ArrowRight,
   BookOpen,
-  Bot,
-  Brain,
   Check,
   Cloud,
   Copy,
   GitBranch,
   Globe,
   Laptop,
-  Lock,
   Menu,
   MessageSquare,
-  Network,
   Server,
-  Shield,
   Smartphone,
   SquareTerminal,
   TabletSmartphone,
@@ -36,6 +32,15 @@ type IconItem = {
   title: string
   body: string
   icon: LucideIcon
+  href: string
+}
+
+type UseCase = { text: string; avatar: AvatarName }
+
+type Reason = {
+  title: string
+  body: string
+  avatar: AvatarName
   href: string
 }
 
@@ -121,59 +126,59 @@ const menuLinks: { href: string; label: string; external?: boolean; newTab?: boo
 
 const heroFacts = ['Open source, Apache 2.0', 'Any model, local or cloud', 'Self-host the whole stack']
 
-const personalUses = [
-  'Plan a family trip, from flights to a packing list.',
-  'Keep your calendar, reminders, and to-do lists in order, by voice.',
-  'Keep notes, a journal, and memories you can find months later.',
-  'Follow the topics you care about, with a digest only when something is new.',
-  'Look after your homelab and smart home, with approval for the actions you choose.',
-  'Build quick tools and scripts in the agent’s own workspace.',
+const personalUses: UseCase[] = [
+  { text: 'Plan a family trip, from flights to a packing list.', avatar: 'helper' },
+  { text: 'Keep your calendar, reminders, and to-do lists in order, by voice.', avatar: 'planner' },
+  { text: 'Keep notes, a journal, and memories you can find months later.', avatar: 'writer' },
+  { text: 'Follow the topics you care about, with a digest only when something is new.', avatar: 'news' },
+  { text: 'Look after your homelab and smart home, with approval for the actions you choose.', avatar: 'home' },
+  { text: 'Build quick tools and scripts in the agent’s own workspace.', avatar: 'builder' },
 ]
 
-const workUses = [
-  'Find anything across email, chat, documents, tickets, and code, with sources.',
-  'Get a morning briefing, or a summary of your week before a one-on-one.',
-  'Write status updates from what actually happened in chat and the tracker.',
-  'Turn a question into a report or a presentation built from your own documents.',
-  'Triage the inbox and draft emails, approving each one before it is sent.',
-  'Join a new team and ask its agent how the work fits together.',
+const workUses: UseCase[] = [
+  { text: 'Find anything across email, chat, documents, tickets, and code, with sources.', avatar: 'research' },
+  { text: 'Get a morning briefing, or a summary of your week before a one-on-one.', avatar: 'general' },
+  { text: 'Write status updates from what actually happened in chat and the tracker.', avatar: 'summary' },
+  { text: 'Turn a question into a report or a presentation built from your own documents.', avatar: 'data' },
+  { text: 'Triage the inbox and draft emails, approving each one before it is sent.', avatar: 'email' },
+  { text: 'Join a new team and ask its agent how the work fits together.', avatar: 'router' },
 ]
 
-const reasons: IconItem[] = [
+const reasons: Reason[] = [
   {
     title: 'Connected to your tools and documents',
     body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents. Even from a server across the world, they can use a computer you pair.',
-    icon: Bot,
+    avatar: 'code',
     href: `${docsUrl}#agents-that-know-you-and-your-work`,
   },
   {
     title: 'Private where it matters',
     body: 'Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home, and what you tell a private agent stays out of shared ones.',
-    icon: Lock,
+    avatar: 'security',
     href: `${docsUrl}#private-where-it-matters`,
   },
   {
     title: 'Memory that keeps improving',
     body: 'Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills.',
-    icon: Brain,
+    avatar: 'mind',
     href: `${docsUrl}#they-remember-and-keep-improving`,
   },
   {
     title: 'Safe to give real access',
     body: 'One-tap approval for the actions you choose, sandboxed code execution (on by default in hosted MindRoom), and opt-in end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
-    icon: Shield,
+    avatar: 'analyst',
     href: `${docsUrl}#safe-to-give-real-access`,
   },
   {
     title: 'A chat app built for agents',
     body: 'MindRoom builds its own client for the web, Mac, iPhone, iPad, and Android (in beta), so agents can show live tool traces, ask for approval, open interactive canvases, join voice calls, and work in a real browser you can take over.',
-    icon: MessageSquare,
+    avatar: 'computer',
     href: `${docsUrl}#a-chat-app-built-for-agents`,
   },
   {
     title: 'Works where you already are',
     body: 'Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an MCP gateway brings them to Claude Code and Codex.',
-    icon: Network,
+    avatar: 'phone',
     href: `${docsUrl}#works-where-you-already-are`,
   },
 ]
@@ -415,15 +420,15 @@ function RunItYourself({ setup }: { setup: IconItem }) {
   )
 }
 
-function UseCaseList({ title, items }: { title: string; items: string[] }) {
+function UseCaseList({ title, items }: { title: string; items: UseCase[] }) {
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-      <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{title}</h3>
-      <ul className="mt-4 space-y-3">
+    <div>
+      <h3 className="text-xl font-semibold tracking-tight text-gray-950 dark:text-white">{title}</h3>
+      <ul className="mt-4 divide-y divide-gray-950/8 border-t border-gray-950/8 dark:divide-white/8 dark:border-white/8">
         {items.map((item) => (
-          <li key={item} className="flex gap-3 text-sm leading-6 text-gray-700 dark:text-gray-300">
-            <Check className="mt-1 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-            {item}
+          <li key={item.text} className="flex items-center gap-4 py-3.5">
+            <AgentAvatar name={item.avatar} size={40} />
+            <span className="text-[15px] leading-6 text-gray-700 dark:text-gray-300">{item.text}</span>
           </li>
         ))}
       </ul>
@@ -431,31 +436,23 @@ function UseCaseList({ title, items }: { title: string; items: string[] }) {
   )
 }
 
-function ReasonRows({ items }: { items: IconItem[] }) {
+function ReasonList({ items }: { items: Reason[] }) {
   return (
-    <div className="grid border-y border-gray-200 dark:border-gray-800 lg:grid-cols-2">
-      {items.map((item) => {
-        const Icon = item.icon
-        return (
-          <article
-            key={item.title}
-            className="flex gap-4 border-b border-gray-200 py-6 last:border-b-0 dark:border-gray-800 lg:odd:pr-8 lg:even:border-l lg:even:pl-8 lg:[&:nth-last-child(2)]:border-b-0"
-          >
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-gray-100 text-gray-900 dark:bg-white/8 dark:text-white">
-              <Icon className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="text-base font-semibold text-gray-950 dark:text-white">
-                <a href={item.href} className="group inline-flex items-center gap-1.5 hover:text-orange-700 dark:hover:text-orange-300">
-                  {item.title}
-                  <ArrowRight className="h-4 w-4 text-gray-400 transition-transform group-hover:translate-x-0.5 group-hover:text-current" />
-                </a>
-              </h3>
-              <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
-            </div>
-          </article>
-        )
-      })}
+    <div className="divide-y divide-gray-950/8 border-y border-gray-950/8 dark:divide-white/8 dark:border-white/8">
+      {items.map((item) => (
+        <article key={item.title} className="flex gap-5 py-7">
+          <AgentAvatar name={item.avatar} size={52} />
+          <div className="min-w-0">
+            <h3 className="text-lg font-semibold tracking-tight text-gray-950 dark:text-white">
+              <a href={item.href} className="group hover:text-brand-700 dark:hover:text-brand-300">
+                {item.title}
+                <ArrowRight className="ml-1.5 inline h-4 w-4 align-[-2px] text-gray-400 transition-transform group-hover:translate-x-0.5 group-hover:text-current" />
+              </a>
+            </h3>
+            <p className="mt-2 text-[15px] leading-7 text-gray-600 dark:text-gray-300">{item.body}</p>
+          </div>
+        </article>
+      ))}
     </div>
   )
 }
@@ -633,31 +630,31 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="use-cases" className="border-b border-gray-200 py-16 dark:border-gray-800">
+      <section id="use-cases" className="border-b border-gray-950/8 py-20 dark:border-white/8 sm:py-24">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
-            title="Your assistant at home, your team's memory at work."
+            title={<>Your assistant at <Em>home,</Em> your team&apos;s memory at <Em>work.</Em></>}
             body="Personal agents for your own life and shared agents for your team, each with its own model, memory, and access."
           />
-          <div className="mt-10">
+          <div className="mt-12">
             <ProductFilm />
           </div>
-          <div className="mt-10 grid gap-6 lg:grid-cols-2">
+          <div className="mt-16 grid gap-12 lg:grid-cols-2 lg:gap-16">
             <UseCaseList title="Personal" items={personalUses} />
             <UseCaseList title="Work" items={workUses} />
           </div>
         </div>
       </section>
 
-      <section id="why" className="border-b border-gray-200 bg-gray-50 py-16 dark:border-gray-800 dark:bg-gray-900/30">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <SectionHeading
-            title="Agents that remember and stay yours."
-            body="MindRoom builds the whole stack, from the chat app to the server to the AI backend, so it can be private, extensible, and built for agents from end to end."
-          />
-          <div className="mt-10">
-            <ReasonRows items={reasons} />
+      <section id="why" className="border-b border-gray-950/8 bg-paper py-20 dark:border-white/8 dark:bg-gray-900/40 sm:py-24">
+        <div className="mx-auto grid max-w-7xl gap-12 px-4 sm:px-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16 lg:px-8">
+          <div className="lg:sticky lg:top-28 lg:self-start">
+            <SectionHeading
+              title={<>Agents that remember and stay <Em>yours.</Em></>}
+              body="MindRoom builds the whole stack, from the chat app to the server to the AI backend, so it can be private, extensible, and built for agents from end to end."
+            />
           </div>
+          <ReasonList items={reasons} />
         </div>
       </section>
 
@@ -691,44 +688,39 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="hosted" className="bg-gray-50 py-16 dark:bg-gray-900/30">
+      <section id="hosted" className="bg-paper py-20 dark:bg-gray-900/40 sm:py-24">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
-            title="Prefer us to host it?"
+            title={<>Prefer us to <Em>host it?</Em></>}
             body="Nothing to install: bring your own model keys or include AI usage in your plan, and try MindRoom free for 3 days."
           />
-          <div className="mt-10 overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
+          <div className="mt-12 grid divide-y divide-gray-950/8 overflow-hidden rounded-2xl bg-white shadow-[0_24px_60px_-28px_rgba(47,33,97,0.25)] dark:divide-white/8 dark:bg-gray-950 dark:shadow-none dark:outline dark:outline-1 dark:outline-white/10 lg:grid-cols-3 lg:divide-x lg:divide-y-0">
             {plans.map((plan) => (
-              <article
-                key={plan.name}
-                className="grid gap-5 border-b border-gray-200 p-5 last:border-b-0 dark:border-gray-800 lg:grid-cols-[1fr_0.6fr_1.2fr_10rem] lg:items-center"
-              >
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{plan.name}</h3>
-                  <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{plan.description}</p>
-                </div>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-3xl font-semibold text-gray-950 dark:text-white">{plan.price}</span>
+              <article key={plan.name} className="flex flex-col p-7 sm:p-8">
+                <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{plan.name}</h3>
+                <p className="mt-1.5 text-sm leading-6 text-gray-600 dark:text-gray-300 lg:min-h-12">{plan.description}</p>
+                <div className="mt-6 flex items-baseline gap-2">
+                  <span className="text-5xl font-semibold tracking-[-0.03em] text-gray-950 dark:text-white">{plan.price}</span>
                   <span className="text-sm text-gray-500 dark:text-gray-400">monthly</span>
                 </div>
-                <ul className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
+                <ul className="mt-6 flex-1 space-y-2.5">
                   {plan.features.map((feature) => (
-                    <li key={feature} className="flex gap-2 text-sm text-gray-700 dark:text-gray-300">
-                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <li key={feature} className="flex gap-2.5 text-sm text-gray-700 dark:text-gray-300">
+                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-brand-600 dark:text-brand-300" />
                       {feature}
                     </li>
                   ))}
                 </ul>
                 <Link
                   href={plan.href}
-                  className="inline-flex items-center justify-center rounded-md border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8"
+                  className="mt-8 inline-flex items-center justify-center rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-800 transition-colors hover:border-brand-600 hover:bg-brand-50 hover:text-brand-800 dark:border-white/14 dark:text-gray-100 dark:hover:border-brand-400 dark:hover:bg-brand-400/10 dark:hover:text-white"
                 >
                   {plan.cta}
                 </Link>
               </article>
             ))}
           </div>
-          <p className="mt-5 text-sm text-gray-600 dark:text-gray-300">
+          <p className="mt-6 text-sm text-gray-600 dark:text-gray-300">
             Need custom limits, dedicated infrastructure, or an on-premises deployment?{' '}
             <a href="mailto:sales@mindroom.chat" className="font-semibold text-gray-950 underline decoration-gray-400 underline-offset-2 hover:decoration-gray-950 dark:text-white dark:hover:decoration-white">
               Email sales@mindroom.chat
@@ -737,11 +729,13 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="border-y border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800 dark:bg-gray-900">
-        <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+      <section className="bg-brand-950 py-20 text-white">
+        <div className="mx-auto flex max-w-7xl flex-col gap-8 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
-            <h2 className="text-3xl font-semibold text-white">Run MindRoom today.</h2>
-            <p className="mt-3 max-w-2xl text-base leading-7 text-gray-300">
+            <h2 className="text-4xl font-semibold tracking-[-0.03em] text-white sm:text-5xl">
+              Run MindRoom <em className="font-serif text-[1.08em] font-normal italic tracking-normal text-brand-300">today.</em>
+            </h2>
+            <p className="mt-4 max-w-2xl text-base leading-7 text-brand-100/80">
               Install it with one command, read the docs, or let us host it for you.
             </p>
           </div>

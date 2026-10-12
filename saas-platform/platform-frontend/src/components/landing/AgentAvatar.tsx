@@ -26,7 +26,6 @@ export function AgentAvatar({ name, size = 32, className = '' }: { name: AvatarN
       alt=""
       width={size}
       height={size}
-      loading="lazy"
       decoding="async"
       style={{ width: size, height: size }}
       className={`shrink-0 rounded-[28%] object-cover ${className}`}
