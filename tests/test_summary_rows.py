@@ -413,15 +413,21 @@ def test_compaction_writes_back_only_the_runs_it_edited(storage: SqliteDb) -> No
     session = _loaded(storage)
     loaded_runs = list(session.runs or [])
     working = deepcopy(session)
-    next(run for run in working.runs or [] if run.run_id == "r2").content = "stripped"
+    edited = next(run for run in working.runs or [] if run.run_id == "r2")
+    edited.messages = [Message(role="user", content="question r2, stripped")]
     storage.upsert_run(_event_run("p1"), session_id="s1")
+    # The edited run's reply event is linked while the summary call runs.
+    linked = _event_run("r2")
+    linked.metadata = {**(linked.metadata or {}), constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$reply-r2"}
+    storage.upsert_run(linked, session_id="s1")
     assert _fold(storage, ["r0"], "S1") is not None
 
     save_working_run_changes(storage, _loaded(storage), loaded_runs, working)
 
     stored = {run.run_id: run for run in _loaded(storage).runs or []}
     assert stored["p1"].status == RunStatus.completed
-    assert stored["r2"].content == "stripped"
+    assert [message.content for message in stored["r2"].messages or []] == ["question r2, stripped"]
+    assert (stored["r2"].metadata or {})[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$reply-r2"
 
 
 def test_append_never_sorts_behind_the_latest_row(storage: SqliteDb) -> None:

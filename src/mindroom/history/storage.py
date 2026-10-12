@@ -594,26 +594,28 @@ def save_working_run_changes(
     loaded_runs: Sequence[RunOutput | TeamRunOutput],
     working_session: AgentSession | TeamSession,
 ) -> None:
-    """Persist edits compaction made to the runs it kept, such as stripped replay fields.
+    """Persist the message edits compaction made to the runs it kept, such as stripped replay fields.
 
-    Runs compare against ``loaded_runs``, the copies compaction started from, so a run
-    another writer changed meanwhile, such as an approval that completed, is not written back.
+    A run is written only when its working messages differ from ``loaded_runs``, the copies
+    compaction started from, and then as the copy ``session`` holds now with those messages,
+    so what another writer stored meanwhile, such as a completed approval or a linked reply
+    event, stays.
     """
-    save_runs(storage, session, _runs_changed_by_working(loaded_runs, working_session.runs or []))
+    loaded = {run.run_id: _message_dicts(run) for run in loaded_runs if run.run_id}
+    current = {run.run_id: run for run in session.runs or [] if run.run_id}
+    edited: list[RunOutput | TeamRunOutput] = []
+    for run in working_session.runs or []:
+        stored = current.get(run.run_id)
+        if stored is None or run.run_id not in loaded or _message_dicts(run) == loaded[run.run_id]:
+            continue
+        merged = deepcopy(stored)
+        merged.messages = deepcopy(run.messages)
+        edited.append(merged)
+    save_runs(storage, session, edited)
 
 
-def _runs_changed_by_working(
-    target_runs: Sequence[RunOutput | TeamRunOutput],
-    working_runs: list[RunOutput | TeamRunOutput],
-) -> list[RunOutput | TeamRunOutput]:
-    """Copies of the working-session versions of stored runs whose contents changed."""
-    working_by_id = {run.run_id: run for run in working_runs if isinstance(run.run_id, str) and run.run_id}
-    changed: list[RunOutput | TeamRunOutput] = []
-    for run in target_runs:
-        working_run = working_by_id.get(run.run_id) if isinstance(run.run_id, str) else None
-        if working_run is not None and working_run.to_dict() != run.to_dict():
-            changed.append(deepcopy(working_run))
-    return changed
+def _message_dicts(run: RunOutput | TeamRunOutput) -> list[dict[str, Any]]:
+    return [message.to_dict() for message in run.messages or []]
 
 
 def _read_preserved_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:
