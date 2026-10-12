@@ -3492,7 +3492,7 @@ class ResponseRunner:
             raise
         return False
 
-    async def handoff_job_follow_up(self, event: JournalEvent) -> bool:
+    async def handoff_job_follow_up(self, event: JournalEvent) -> None:
         """Hand a follow-up to a detached response owner; its reply, or that owner, settles it."""
         if not self.has_live_inbox_response(event.event_id):
             self.track_inbox_response(
@@ -3502,7 +3502,6 @@ class ResponseRunner:
                 source_event_ids=(event.event_id,),
                 recovery_proof_ready=lambda: True,
             )
-        return False
 
     async def _run_job_follow_up(self, event: JournalEvent) -> None:
         """Run the turn a follow-up asks for, then settle a follow-up no reply took."""

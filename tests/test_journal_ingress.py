@@ -3168,7 +3168,7 @@ class TestOutOfBandDispatch:
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
                 replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(return_value=True),
+                on_job_follow_up=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3251,7 +3251,7 @@ class TestDeferralOwnership:
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda _event_id: turn_claimed,
                 replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(return_value=True),
+                on_job_follow_up=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3881,7 +3881,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
                 replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(return_value=True),
+                on_job_follow_up=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -4118,7 +4118,7 @@ class TestAdmittedWorkReachesItsCallback:
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
                 replies_ended=lambda _reply_ids: None,
-                on_job_follow_up=AsyncMock(return_value=True),
+                on_job_follow_up=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
             schedule_trigger_sender_is_managed=lambda sender: sender == BOT,

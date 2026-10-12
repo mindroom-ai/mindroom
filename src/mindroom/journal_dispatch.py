@@ -97,8 +97,8 @@ class JournalCallbacks:
     turn_has_live_claim: Callable[[str], bool]
     # Delivers what replies left waiting to replay a settled source owe Matrix.
     replies_ended: Callable[[tuple[str, ...]], None]
-    # Runs a follow-up turn; False while a response owner holds the follow-up, which settles it.
-    on_job_follow_up: Callable[[JournalEvent], Awaitable[bool]]
+    # Hands a follow-up to its response owner, which settles it.
+    on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
     on_rtc: _RtcCallback | None = None
     on_job_cancel: _JobCancelCallback = _ignore_job_cancel
 
@@ -248,7 +248,8 @@ class JournalDispatcher:
             return approval_settled
         if event.kind is EventKind.JOB_FOLLOW_UP:
             # A runtime source, not a Matrix event: nothing for ingress to parse.
-            return await self.callbacks.on_job_follow_up(event)
+            await self.callbacks.on_job_follow_up(event)
+            return False
         return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
 
     async def _parse_and_invoke(self, event: JournalEvent, *, needs_turn_replay: bool) -> bool:
