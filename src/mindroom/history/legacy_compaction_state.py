@@ -122,9 +122,14 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
 # response uses it. It drops stored copies of every archived or tombstoned run with their member runs,
 # restores the archived runs ahead of the live ones in archive order, renumbers each session, and turns each
 # generation into a summary row after its last restored top-level run (legacy generations before every run),
-# with the event ids of its archived runs, then drops both archive tables. Replay, seen ids, and redaction
-# candidates match what the archive gave; tombstones are not carried over.
-# Coverage: tests/test_archive_migration.py.
+# with the event ids of its archived runs, then drops both archive tables. Replay and redaction candidates
+# match what the archive gave after its pre-reply reconcile, and so do seen ids, except that metadata seen ids
+# reconcile dropped when the cached summary differed from the newest generation (an interrupted summary
+# write) stay; tombstones are not carried over.
+# Coverage: tests/test_archive_migration.py::test_ordinary_generations_become_summary_rows_after_their_runs,
+# ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
+# ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
+# and ::test_redaction_candidates_keep_what_the_archive_matched.
 def _convert_archive(connection: Connection, session_table: str, runs: Table) -> None:
     compactions = quote_identifier(f"{session_table}_compactions")
     compacted_runs = quote_identifier(f"{session_table}_compacted_runs")
