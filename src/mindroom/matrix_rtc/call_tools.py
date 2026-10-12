@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import time
 from dataclasses import dataclass, field, replace
 from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any, Literal
@@ -44,6 +45,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.budgets.monitor import budget_model
+from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
@@ -128,21 +130,52 @@ async def _save_call_usage(
     if agent_name is None or session_id is None:
         msg = "Voice usage requires an owned agent conversation"
         raise ValueError(msg)
+    owner = _call_usage_owner(
+        agent_name,
+        session_id,
+        created_at=created_at,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
     await run_session_storage_operation(
-        functools.partial(create_session_storage, agent_name, config, runtime_paths, execution_identity),
+        owner.storage_factory,
         functools.partial(
             save_independent_usage,
-            session_id=session_id,
+            session_id=owner.session_id,
             usage_id=f"{kind}:{usage_id}",
             kind=kind,
             requester_id=execution_identity.requester_id,
-            initial_session=AgnoAgentSession(
-                session_id=session_id,
-                agent_id=agent_name,
-                created_at=int(created_at),
-                updated_at=int(created_at),
-            ),
+            initial_session=owner.initial_session,
             run=run,
+        ),
+    )
+
+
+def _call_usage_owner(
+    agent_name: str,
+    session_id: str,
+    *,
+    created_at: float,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> HelperUsageOwner:
+    """Return the caller-owned ledger that a call's voice usage and its tools' helper usage share."""
+    return HelperUsageOwner(
+        storage_factory=functools.partial(
+            create_session_storage,
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity,
+        ),
+        session_id=session_id,
+        initial_session=AgnoAgentSession(
+            session_id=session_id,
+            agent_id=agent_name,
+            created_at=int(created_at),
+            updated_at=int(created_at),
         ),
     )
 
@@ -556,18 +589,17 @@ async def build_call_tools(
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
-    if enable_responder:
-        runtime_model = await asyncio.to_thread(
-            functools.partial(
-                config.resolve_runtime_model,
-                entity_name=agent_name,
-                active_model_name=active_model_name,
-                room_id=room_id,
-                thread_id=None,
-                runtime_paths=runtime_paths,
-            ),
-        )
-        active_model_name = runtime_model.model_name
+    runtime_model = await asyncio.to_thread(
+        functools.partial(
+            config.resolve_runtime_model,
+            entity_name=agent_name,
+            active_model_name=active_model_name,
+            room_id=room_id,
+            thread_id=None,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    active_model_name = runtime_model.model_name
     target = MessageTarget(
         room_id=room_id,
         source_thread_id=None,
@@ -585,14 +617,14 @@ async def build_call_tools(
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
     requested_model_name = active_model_name
-    if enable_responder and active_model_name is not None:
-        active_model_name = budget_model(
-            config,
-            runtime_paths,
-            context.budget_monitor,
-            requester_id,
-            active_model_name,
-        )
+    # Realtime tools such as claude_agent also run on this model, so every backend applies the caller's budget.
+    active_model_name = budget_model(
+        config,
+        runtime_paths,
+        context.budget_monitor,
+        requester_id,
+        active_model_name,
+    )
     context = replace(
         context,
         active_model_name=active_model_name,
@@ -682,6 +714,7 @@ async def build_call_tools(
             tool_function_filter=context.tool_function_filter,
             refresh_scheduler=refresh_scheduler,
             eager_deferred_tools=True,
+            active_model_name=active_model_name,
         ),
     )
     session, run_context, effective_tools = await _prepare_call_agent_tools(
@@ -689,6 +722,15 @@ async def build_call_tools(
         agent_name=agent_name,
         session_id=session_id,
         requester_id=requester_id,
+    )
+    # Paid helper tools, such as claude_agent, record their usage in the call's ledger for the caller.
+    usage_owner = _call_usage_owner(
+        agent_name,
+        session_id,
+        created_at=time.time(),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
     )
     tools: list[Any] = []
     visible_functions: list[Function | dict[Any, Any]] = []
@@ -707,6 +749,7 @@ async def build_call_tools(
                 agent_name=agent_name,
                 config=config,
                 authorize_operation=authorize_operation,
+                usage_owner=usage_owner,
             ),
         )
     instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
@@ -1057,6 +1100,7 @@ def _wrap_agno_function(
     agent_name: str,
     config: Config,
     authorize_operation: _CallAuthorizationGuard,
+    usage_owner: HelperUsageOwner,
 ) -> RawFunctionTool:
     """Wrap one agno function as a livekit raw function tool."""
     from livekit.agents import llm  # noqa: PLC0415
@@ -1082,7 +1126,7 @@ def _wrap_agno_function(
                 return "Call access was revoked before this tool could run."
             logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
             try:
-                with tool_runtime_context(context):
+                with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
                     # create_agent installs MindRoom's canonical hook bridge on
                     # every function. It owns approval evaluation, including the
                     # defensive argument copy, so do not preflight policy here.
@@ -1091,7 +1135,7 @@ def _wrap_agno_function(
                         result = await execution.aexecute()
                     else:
                         # asyncio.to_thread copies the current contextvars context,
-                        # so hooks and the tool see the call's runtime context.
+                        # so hooks and the tool see the call's runtime context and usage owner.
                         result = await asyncio.to_thread(execution.execute)
             except Exception as error:
                 logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))

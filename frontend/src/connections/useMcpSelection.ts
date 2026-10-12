@@ -95,7 +95,7 @@ export function useMcpSelection() {
     const tools = new Set(
       current === null
         ? agent.tools
-            .filter((item) => !item.requires_room_context)
+            .filter((item) => item.mcp_available)
             .map((item) => item.name)
         : (current ?? []),
     );

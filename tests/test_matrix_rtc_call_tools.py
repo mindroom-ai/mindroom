@@ -13,8 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.knowledge.knowledge import Knowledge
-from agno.metrics import RunMetrics
+from agno.metrics import ModelMetrics, RunMetrics
 from agno.models.anthropic import Claude
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
@@ -29,6 +30,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.invite_router import InviteRouterTools
+from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -57,6 +59,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.usage.stats import collect_admin_usage
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -74,6 +77,7 @@ if TYPE_CHECKING:
 
 AGENT = "helper"
 REQUESTER = "@alice:example.org"
+_USAGE_OWNER = HelperUsageOwner(storage_factory=MagicMock(), session_id="call")
 
 
 @asynccontextmanager
@@ -157,6 +161,7 @@ def _wrap(function: Function):  # noqa: ANN202
         agent_name=AGENT,
         config=_config(),
         authorize_operation=_authorized_call_operation,
+        usage_owner=_USAGE_OWNER,
     )
 
 
@@ -179,6 +184,7 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
         agent_name=AGENT,
         config=_config(),
         authorize_operation=denied_operation,
+        usage_owner=_USAGE_OWNER,
     )
 
     assert await wrapped({"a": 2, "b": 3}) == "Call access was revoked before this tool could run."
@@ -1012,7 +1018,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         ) -> ToolRuntimeContext:
             assert user_id == REQUESTER
             assert agent_name == AGENT
-            assert active_model_name is None
+            assert active_model_name == "default"
             seen_targets.append(target)
             return _runtime_context(
                 config=config,
@@ -1794,6 +1800,82 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
     assert [call.kwargs["active_model_name"] for call in create_agent_mock.call_args_list] == ["large", "cheap"]
     assert tooling.close is not None
     await tooling.close()
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Realtime tools such as claude_agent start on an over-budget caller's fallback and count toward the caller."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="large")},
+        models={
+            "large": ModelConfig(provider="anthropic", id="claude-opus-5-5", pricing=ModelPricing(input=5, output=25)),
+            "cheap": ModelConfig(provider="anthropic", id="claude-haiku-5-5"),
+        },
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0),
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    execution_identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=AGENT,
+        runtime_paths=runtime_paths,
+        requester_id=REQUESTER,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!room:example.org",
+    )
+
+    async def claude_send(prompt: str) -> str:
+        # Like claude_agent, a paid helper tool records its usage under the bound owner.
+        owner = get_helper_usage_owner()
+        assert owner is not None
+        model = ModelMetrics(id="claude-haiku-5-5", provider="Anthropic", input_tokens=100, total_tokens=100)
+        await record_helper_usage(
+            RunOutput(
+                run_id="turn",
+                metrics=RunMetrics(input_tokens=100, total_tokens=100, details={"model": [model]}),
+            ),
+            owner=owner,
+            invocation_id="turn",
+            kind="claude_agent",
+            requester_id=REQUESTER,
+        )
+        return f"done: {prompt}"
+
+    create_agent_mock = MagicMock(
+        return_value=FakeAgnoAgent([_function(claude_send, {"type": "object"}, name="claude_send")]),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
+    )
+    tool_support = SimpleNamespace(
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
+        build_execution_identity=lambda **_kwargs: execution_identity,
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+    )
+
+    assert create_agent_mock.call_args.kwargs["active_model_name"] == "cheap"
+    assert await tooling.tools[0]({"prompt": "fix it"}) == "done: fix it"
+    report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
+    assert [(user.user_id, user.totals.input_tokens) for user in report.user_breakdown] == [(REQUESTER, 100)]
 
 
 @pytest.mark.asyncio

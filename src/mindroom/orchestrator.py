@@ -480,6 +480,7 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             definition_provider=lambda name: self.hook_registry.automations.get(name),
+            agent_reply_memberships=self.agent_reply_memberships,
         )
         self._budgets = BudgetMonitor(runtime_paths=self.runtime_paths, config_provider=lambda: self.config)
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(

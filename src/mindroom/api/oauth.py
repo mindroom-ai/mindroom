@@ -78,9 +78,8 @@ from mindroom.oauth.service import (
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
-    build_tool_execution_identity,
+    build_requester_execution_identity,
 )
 
 if TYPE_CHECKING:
@@ -359,24 +358,6 @@ def _verify_conversation_connect_target_authorized(request: Request, target: OAu
     return config
 
 
-def _conversation_execution_identity(
-    agent_name: str,
-    requester_id: str,
-    runtime_paths: RuntimePaths,
-) -> ToolExecutionIdentity:
-    """Build the execution identity a conversation-issued OAuth link froze for one requester."""
-    return build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-
-
 def _conversation_connect_context(
     request: Request,
     provider: OAuthProvider,
@@ -393,7 +374,11 @@ def _conversation_connect_context(
     if binding.worker_scope != "shared":
         _verify_connect_target_authorized(request, requester_id, runtime_paths)
     config = _verify_conversation_connect_target_authorized(request, target)
-    identity = _conversation_execution_identity(agent_name, requester_id, runtime_paths)
+    identity = build_requester_execution_identity(
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+    )
     worker_target = build_agent_toolkit_worker_target(
         config.resolve_entity(agent_name).execution_scope,
         agent_name,
@@ -499,7 +484,11 @@ def _verify_browser_reset_intent(
     # as, so the one-time bearer link is the delegated authority for a configured
     # credential manager and is consumed on POST instead.
     if intent.binding.worker_scope == "shared":
-        identity = _conversation_execution_identity(agent_name, intent.requester_id, runtime_paths)
+        identity = build_requester_execution_identity(
+            agent_name=agent_name,
+            runtime_paths=runtime_paths,
+            requester_id=intent.requester_id,
+        )
     else:
         _verify_connect_target_authorized(request, intent.requester_id, runtime_paths)
         identity = require_agent_oauth_connection_authorized(

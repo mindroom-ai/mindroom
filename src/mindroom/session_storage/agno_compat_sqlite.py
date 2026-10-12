@@ -74,7 +74,8 @@ def owned_table(db: SqliteDb, table_type: Literal["runs", "sessions"]) -> Table:
 # Upstream PR: None identified for sharing the run transaction.
 # Remove when: Agno accepts a caller-owned transaction or an in-transaction persistence hook;
 # retain the owner's independent usage retention and atomic snapshot update.
-# Coverage: tests/test_usage_storage.py::test_usage_write_failure_rolls_back_the_run and
+# Coverage: tests/test_usage_storage.py::test_usage_write_failure_rolls_back_the_run,
+# tests/test_budget_spend.py::test_spend_charges_a_resumed_run_for_its_requests_this_month, and
 # tests/test_history_archive.py::test_roll_back_restores_earlier_runs_of_the_hit_generation_in_order.
 def insert_run_row(
     transaction: Session,
@@ -102,7 +103,7 @@ def insert_run_row(
                 },
                 "run_index": func.coalesce(runs.c.run_index, statement.excluded.run_index),
             },
-        ).returning(runs.c.session_id, runs.c.run_id, runs.c.run_data, runs.c.created_at),
+        ).returning(runs.c.session_id, runs.c.run_id, runs.c.run_data, runs.c.created_at, runs.c.updated_at),
     ).one()
 
 
@@ -119,7 +120,9 @@ def upsert_run_at_end(
     with db.Session() as transaction, transaction.begin():
         stored = insert_run_row(transaction, runs, run, session_id=session_id, user_id=user_id)
         if record_usage:
-            payload = project_usage({**stored.run_data, "created_at": stored.created_at})
+            payload = project_usage(
+                {**stored.run_data, "created_at": stored.created_at, "updated_at": stored.updated_at},
+            )
             connection = transaction.connection()
             connection.exec_driver_sql(usage_table_sql(db.session_table_name))
             connection.exec_driver_sql(

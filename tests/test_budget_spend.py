@@ -9,7 +9,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import ModelMetrics, RunMetrics
+from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
+from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
@@ -313,3 +314,61 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
 
     assert snapshot.spend_usd == {ALICE: pytest.approx(5.0 + 3.0)}
     assert snapshot.unpriced_models == ()
+
+
+def test_spend_charges_a_resumed_run_for_its_requests_this_month(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run paused last month and resumed this month is charged for its requests made this month."""
+    config = _config()
+    paths = _paths(tmp_path)
+    model = get_model_instance(config, paths, "astra")
+    started = int(datetime(2026, 9, 24, tzinfo=UTC).timestamp())
+    resumed = int(datetime(2026, 10, 2, tzinfo=UTC).timestamp())
+
+    def request(created_at: int) -> Message:
+        return Message(
+            role="assistant",
+            created_at=created_at,
+            provider_data={"mindroom_model": {"id": model.id, "provider": model.get_provider()}},
+            metrics=MessageMetrics(input_tokens=1_000_000, total_tokens=1_000_000),
+        )
+
+    def metrics(tokens: int) -> RunMetrics:
+        model_metrics = ModelMetrics(
+            id=model.id,
+            provider=model.get_provider(),
+            input_tokens=tokens,
+            total_tokens=tokens,
+        )
+        return RunMetrics(input_tokens=tokens, total_tokens=tokens, details={"model": [model_metrics]})
+
+    run = RunOutput(
+        run_id="run-1",
+        model_provider=model.provider,
+        model=model.id,
+        created_at=started,
+        messages=[request(started)],
+        metrics=metrics(1_000_000),
+    )
+    storage = create_state_storage(
+        "code",
+        paths.storage_root / "agents" / "code",
+        subdir="sessions",
+        session_table="code_sessions",
+    )
+    try:
+        with monkeypatch.context() as clock:
+            clock.setattr("agno.db.utils.time.time", lambda: started)
+            seed_session(storage, AgentSession(session_id="session-1", agent_id="code", user_id=ALICE, runs=[run]))
+            run.messages = [*(run.messages or []), request(resumed)]
+            run.metrics = metrics(2_000_000)
+            clock.setattr("agno.db.utils.time.time", lambda: resumed)
+            storage.upsert_run(run=run, session_id="session-1")
+    finally:
+        storage.close()
+
+    snapshot = collect_monthly_spend(config, paths, NOW, price_table(config, paths).prices)
+
+    assert snapshot.spend_usd == {ALICE: pytest.approx(5.0)}

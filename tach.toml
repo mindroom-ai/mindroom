@@ -997,6 +997,7 @@ visibility = [
     "mindroom.thread_summary",
     "mindroom.voice.handler",
     "mindroom.skill_learning.reviewer",
+    "mindroom.matrix_rtc.call_tools",
 ]
 
 [[modules]]
@@ -4179,6 +4180,7 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.session_context",
     "mindroom.history.turn_recorder",
@@ -6415,6 +6417,7 @@ expose = [
     "agent_workspace_relative_path",
     "agent_workspace_root_path",
     "build_agent_toolkit_worker_target",
+    "build_requester_execution_identity",
     "build_tool_execution_identity",
     "build_worker_target_from_runtime_env",
     "get_tool_execution_identity",
@@ -8646,7 +8649,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.memory",
     "mindroom.path_confinement",
-    "mindroom.runtime_resolution",
 ]
 visibility = ["mindroom.automations.registry"]
 
@@ -8665,6 +8667,7 @@ visibility = ["mindroom.automations.registry"]
 [[modules]]
 path = "mindroom.automations.runner"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.automations.steps",
     "mindroom.automations.threads",
     "mindroom.background_tasks",
@@ -8672,9 +8675,12 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
+    "mindroom.matrix.personal_room_store",
     "mindroom.matrix.state",
+    "mindroom.private_storage.private_instance_identity",
     "mindroom.runtime_resolution",
     "mindroom.thread_tags",
+    "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.orchestrator"]
 

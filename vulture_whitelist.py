@@ -21,7 +21,6 @@ _._save_file_to_disk  # FileGenerationTools save step overridden to write inside
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)
 is_shared  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
 can_use  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
-mcp_available  # JSON response field consumed by connections portal (src/mindroom/api/connections.py)
 can_connect  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 localhostProfile  # Kubernetes wire TypedDict key (src/mindroom/workers/backends/kubernetes_config.py)
