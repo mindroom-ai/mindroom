@@ -182,7 +182,7 @@ class JobTools(Toolkit):
         Args:
             action: Operation; list reports status and saved summaries, wait retrieves the stored result, and
                 collect returns and acknowledges every ended job.
-            job_id: Exact job ID, required except for list.
+            job_id: Exact job ID, required for wait and cancel.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.
             wait_timeout: Seconds to wait; null waits until completion or a newer message, zero returns immediately.

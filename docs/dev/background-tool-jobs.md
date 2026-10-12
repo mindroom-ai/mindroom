@@ -45,7 +45,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 | `delegation/background.py` | Native child identity and cleanup inside the generic execution owner |
 | `tool_jobs/approvals.py` | Approval cards a job posts for its child's or its own gated call, and denies when the job ends early |
 | `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
-| `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and that conversation's ended jobs |
+| `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and how long a reply waits for a job's approval |
 | `tool_jobs/notices.py` | The notice on a tool result and the turn-start note, once per job per reply |
 | `tool_jobs/follow_ups.py` | A follow-up's journal source, identity, streak, and envelope |
 | `tool_jobs/publication.py` | The jobs state each agent publishes per room |

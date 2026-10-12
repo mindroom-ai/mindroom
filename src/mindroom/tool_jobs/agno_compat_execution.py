@@ -36,6 +36,8 @@ _SDK_BINDINGS_LOCK = Lock()
 # AGNO_COMPAT: Own every nested SDK dispatch inside accepted background execution.
 # Reason: Embedded agents may bypass MindRoom's model construction; SDK sync dispatch
 # offloads a complete hook chain whose thread outlives cancellation of its waiter.
+# The class-level patch relies on every SDK dispatch, embedded models' included, calling
+# `Model.arun_function_call`; the coverage tests fail if an Agno upgrade routes dispatch elsewhere.
 # Upstream issue: No matching public accepted-call completion owner identified.
 # Upstream PR: None identified.
 # Remove when: SDK dispatch retains synchronous work until its resource owner can close.

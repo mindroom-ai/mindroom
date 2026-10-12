@@ -1,4 +1,4 @@
-"""A conversation's background jobs: the key a reply finds them by, and those of them that ended."""
+"""The conversation a reply's background jobs belong to: the key a reply finds them by, and how long it waits for them."""
 
 from __future__ import annotations
 
