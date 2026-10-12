@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,7 +19,7 @@ from sqlalchemy import event
 
 from mindroom import constants
 from mindroom.history import summary_rows
-from mindroom.history.storage import read_chunk_basis, remove_runs_answering
+from mindroom.history.storage import read_chunk_basis, remove_runs_answering, save_working_run_changes
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from tests.conftest import seed_session
@@ -404,6 +405,23 @@ def test_a_chunk_builds_on_the_summary_it_loaded(storage: SqliteDb) -> None:
 
     assert basis is not None
     assert [run.run_id for run in basis.covered] == ["r1", "r2"]
+
+
+def test_compaction_writes_back_only_the_runs_it_edited(storage: SqliteDb) -> None:
+    """An approval that completes during a summary call keeps its result; compaction saves only runs it changed."""
+    _seed_events(storage, [_event_run("r0"), _event_run("p1", status=RunStatus.paused), _event_run("r2")])
+    session = _loaded(storage)
+    loaded_runs = list(session.runs or [])
+    working = deepcopy(session)
+    next(run for run in working.runs or [] if run.run_id == "r2").content = "stripped"
+    storage.upsert_run(_event_run("p1"), session_id="s1")
+    assert _fold(storage, ["r0"], "S1") is not None
+
+    save_working_run_changes(storage, _loaded(storage), loaded_runs, working)
+
+    stored = {run.run_id: run for run in _loaded(storage).runs or []}
+    assert stored["p1"].status == RunStatus.completed
+    assert stored["r2"].content == "stripped"
 
 
 def test_append_never_sorts_behind_the_latest_row(storage: SqliteDb) -> None:

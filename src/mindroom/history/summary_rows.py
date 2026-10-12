@@ -201,7 +201,7 @@ def append_summary(
         for _run_index, _status, metadata in stored.values():
             seen |= seen_event_ids(metadata)
             event_ids |= seen_event_ids(metadata) | source_event_ids(metadata)
-        # With nothing covered (a mid-turn fold of a first turn), the row sorts where the latest one does.
+        # With nothing covered, the row sorts where the latest one does.
         after_run_index = max((run.run_index for run in covered), default=previous_index)
         row_id = connection.exec_driver_sql(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, after_run_index, summary, summary_model, "  # noqa: S608
@@ -347,14 +347,9 @@ def _cut(
     """Delete every top-level run and non-barrier row at or after ``cut``, with descendants, and record the removed runs."""
     top_level = set(_top_level_from(connection, tables, session_id, scope_key, cut))
     deleted_rows = [row for row in rows if row.summary is not None and (row.after_run_index, row.id) >= cut]
-    removed = top_level | _descendants(connection, tables, session_id, top_level)
-    for start in range(0, len(sorted(removed)), _ID_CHUNK_SIZE):
-        chunk = sorted(removed)[start : start + _ID_CHUNK_SIZE]
-        placeholders = ", ".join("?" for _ in chunk)
-        connection.exec_driver_sql(
-            f"DELETE FROM {tables.runs} WHERE session_id = ? AND run_id IN ({placeholders})",  # noqa: S608
-            (session_id, *chunk),
-        )
+    removed = sorted(delete_session_run_subtrees(connection, tables.runs, session_id, top_level))
+    for start in range(0, len(removed), _ID_CHUNK_SIZE):
+        chunk = removed[start : start + _ID_CHUNK_SIZE]
         connection.exec_driver_sql(
             f"INSERT OR IGNORE INTO {tables.removed} (run_id, session_id) VALUES {', '.join('(?, ?)' for _ in chunk)}",  # noqa: S608
             tuple(value for run_id in chunk for value in (run_id, session_id)),
@@ -381,23 +376,33 @@ def _top_level_from(connection: Connection, tables: _Tables, session_id: str, sc
     ]
 
 
-def _descendants(connection: Connection, tables: _Tables, session_id: str, run_ids: set[str]) -> set[str]:
-    found: set[str] = set()
-    frontier = sorted(run_ids)
+def delete_session_run_subtrees(connection: Connection, runs: str, session_id: str, run_ids: set[str]) -> set[str]:
+    """Delete one session's ``run_ids`` with every member run below them; return the deleted ids.
+
+    ``runs`` is the quoted runs table; the caller owns the transaction.
+    """
+    found = {run_id for run_id in run_ids if run_id}
+    frontier = sorted(found)
     while frontier:
-        chunk = frontier[:_ID_CHUNK_SIZE]
-        frontier = frontier[_ID_CHUNK_SIZE:]
+        chunk, frontier = frontier[:_ID_CHUNK_SIZE], frontier[_ID_CHUNK_SIZE:]
         children = [
             run_id
             for (run_id,) in connection.exec_driver_sql(
-                f"SELECT run_id FROM {tables.runs} WHERE session_id = ? "  # noqa: S608
+                f"SELECT run_id FROM {runs} WHERE session_id = ? "  # noqa: S608
                 f"AND parent_run_id IN ({', '.join('?' for _ in chunk)})",
                 (session_id, *chunk),
             )
-            if run_id not in found and run_id not in run_ids
+            if run_id not in found
         ]
         found.update(children)
         frontier.extend(children)
+    ordered = sorted(found)
+    for start in range(0, len(ordered), _ID_CHUNK_SIZE):
+        chunk = ordered[start : start + _ID_CHUNK_SIZE]
+        connection.exec_driver_sql(
+            f"DELETE FROM {runs} WHERE session_id = ? AND run_id IN ({', '.join('?' for _ in chunk)})",  # noqa: S608
+            (session_id, *chunk),
+        )
     return found
 
 

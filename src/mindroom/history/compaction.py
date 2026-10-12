@@ -222,6 +222,7 @@ async def compact_scope_history(
         return None
 
     before_run_count = len(visible_runs)
+    loaded_runs = list(session.runs or [])
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
 
@@ -269,7 +270,7 @@ async def compact_scope_history(
         return None
 
     compacted_at = _iso_utc_now()
-    await run_blocking_until_complete(save_working_run_changes, storage, session, working_session)
+    await run_blocking_until_complete(save_working_run_changes, storage, session, loaded_runs, working_session)
     await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",

@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
+from mindroom.history.summary_rows import delete_session_run_subtrees
 from mindroom.history.summary_rows_schema import owner_scope_key, summary_rows_schema_sql, summary_rows_table_names
 from mindroom.session_storage import agno_compat_sqlite
 from mindroom.session_storage.legacy_session_storage import (
@@ -102,7 +103,7 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
             )
             scopes.setdefault(summary_scope, ())
         tombstoned = {run_id for ids in scopes.values() for run_id in ids}
-        _drop_runs(connection, runs_table, session_id, tombstoned)
+        delete_session_run_subtrees(connection, quote_identifier(runs_table), session_id, tombstoned)
         adopted_metadata = _without_adopted_state(metadata, scopes, summary_scope)
         if adopted_metadata != metadata:
             connection.exec_driver_sql(
@@ -140,7 +141,12 @@ def _convert_archive(connection: Connection, session_table: str, runs: Table) ->
         archived.setdefault(session_id, []).append((run_id, run_data))
     for session_id, entries in archived.items():
         # A stale save or blob residue can hold a copy that reconcile had not pruned yet.
-        _drop_runs(connection, runs.name, session_id, {run_id for run_id, _ in entries})
+        delete_session_run_subtrees(
+            connection,
+            quote_identifier(runs.name),
+            session_id,
+            {run_id for run_id, _ in entries},
+        )
         restored: list[str] = []
         for run_id, run_data in entries:
             if run_data is not None:
@@ -207,26 +213,6 @@ def _generation_event_ids(connection: Connection, session_table: str, generation
             (generation_id, generation_id),
         )
     )
-
-
-def _drop_runs(connection: Connection, runs_table: str, session_id: str, run_ids: set[str]) -> None:
-    """Drop stored copies of runs compaction removed, with their member runs."""
-    runs = quote_identifier(runs_table)
-    frontier = sorted(run_ids)
-    while frontier:
-        placeholders = ", ".join("?" for _ in frontier)
-        children = [
-            run_id
-            for (run_id,) in connection.exec_driver_sql(
-                f"SELECT run_id FROM {runs} WHERE session_id = ? AND parent_run_id IN ({placeholders})",  # noqa: S608
-                (session_id, *frontier),
-            )
-        ]
-        connection.exec_driver_sql(
-            f"DELETE FROM {runs} WHERE session_id = ? AND run_id IN ({placeholders})",  # noqa: S608
-            (session_id, *frontier),
-        )
-        frontier = children
 
 
 def _legacy_tombstones(raw_state: dict[str, Any]) -> tuple[str, ...] | None:

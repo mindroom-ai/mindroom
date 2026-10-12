@@ -591,14 +591,19 @@ def append_compaction_chunk(
 def save_working_run_changes(
     storage: BaseDb,
     session: AgentSession | TeamSession,
+    loaded_runs: Sequence[RunOutput | TeamRunOutput],
     working_session: AgentSession | TeamSession,
 ) -> None:
-    """Persist edits compaction made to the runs it kept, such as stripped replay fields."""
-    save_runs(storage, session, _runs_changed_by_working(session.runs or [], working_session.runs or []))
+    """Persist edits compaction made to the runs it kept, such as stripped replay fields.
+
+    Runs compare against ``loaded_runs``, the copies compaction started from, so a run
+    another writer changed meanwhile, such as an approval that completed, is not written back.
+    """
+    save_runs(storage, session, _runs_changed_by_working(loaded_runs, working_session.runs or []))
 
 
 def _runs_changed_by_working(
-    target_runs: list[RunOutput | TeamRunOutput],
+    target_runs: Sequence[RunOutput | TeamRunOutput],
     working_runs: list[RunOutput | TeamRunOutput],
 ) -> list[RunOutput | TeamRunOutput]:
     """Copies of the working-session versions of stored runs whose contents changed."""

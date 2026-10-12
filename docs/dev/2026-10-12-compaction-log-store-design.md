@@ -47,7 +47,7 @@ The user's direction: store each scope's history as one ordered, append-only log
 - Event sets are incremental: a row holds only what its own chunk or segment folded, and readers take the union over rows.
 - `<session_table>_removed_runs` (`session_id`, `run_id`, cascading from the session row) records every run a cut deleted and every segment owner a cut invalidated, without content, so a later save of that run is dropped (see Cut).
 - The schema includes the segment columns from the start, so the #2798 rework adds no second schema change.
-  Both tables are created whenever a conversation database opens, so fresh files and databases that never compacted have them.
+  Both tables are created when a conversation database with a sessions table opens, or by the first run write or summary-row access of a fresh file, so databases that never compacted have them.
 
 ### The invariant
 
