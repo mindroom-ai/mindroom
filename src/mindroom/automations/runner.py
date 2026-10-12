@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
-from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationContext, Done
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import create_background_task
@@ -31,11 +31,9 @@ from mindroom.config.automations import PluginAutomation
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, primary_records_dir
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.personal_room_store import personal_room_record_path, read_personal_room
 from mindroom.matrix.state import resolve_room_id
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
-from mindroom.requester_identity import is_managed_entity_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
@@ -135,7 +133,7 @@ def _room_id(
     """Return where the instance's prompts go: the configured room, or the requester's personal room with the agent."""
     agent_name, requester_id = instance
     if requester_id is not None:
-        # Replies quote the requester's private files, so they go to the room meant for no other person.
+        # Replies quote the requester's private files, so they go to the requester's personal room, never a shared one.
         record = read_personal_room(personal_room_record_path(runtime_paths, agent_name, requester_id))
         return record.room_id if record is not None else None
     rooms = config.get_agent(agent_name).rooms
@@ -309,7 +307,15 @@ class AutomationRunner:
             if room_id is None:
                 logger.warning("Automation has no room to post in", agent=agent_name, automation=automation.name)
                 return
-            if requester_id is not None and not self._may_answer(config, agent_name, requester_id, room_id):
+            # Unresolved membership counts as no, so a run on the requester's behalf waits for a proven grant.
+            if requester_id is not None and not is_sender_allowed_for_agent_reply_in_room(
+                requester_id,
+                agent_name,
+                config,
+                room_id,
+                self.runtime_paths,
+                self.agent_reply_memberships,
+            ):
                 logger.info(
                     "Automation requester may no longer use the agent; skipped",
                     agent=agent_name,
@@ -352,21 +358,6 @@ class AutomationRunner:
         finally:
             if not posted:
                 self._release(instance)
-
-    def _may_answer(self, config: Config, agent_name: str, requester_id: str, room_id: str) -> bool:
-        """Return whether the agent may still answer the requester in their room; unresolved membership is no."""
-        try:
-            return is_sender_allowed_for_agent_reply_in_room(
-                requester_id,
-                agent_name,
-                config,
-                room_id,
-                self.runtime_paths,
-                self.agent_reply_memberships,
-                require_resolved_membership=True,
-            )
-        except ReplyMembershipPendingError:
-            return False
 
     async def _advance(self, pending: _PendingRun, timed_out: bool) -> None:
         """Run the continuation of a prompt whose run ended, then post its next prompt or its notice."""
@@ -416,14 +407,6 @@ class AutomationRunner:
         clock_offset: timedelta,
     ) -> bool:
         """Post ``ask`` and wait for its run; return whether it was posted."""
-        if chain.requester_id is not None and not await self._private_to_requester(config, bot, chain):
-            logger.info(
-                "Automation room has someone besides its requester and the agents; skipped",
-                agent=chain.agent_name,
-                automation=chain.settings.name,
-                requester=chain.requester_id,
-            )
-            return False
         target_thread = None if ask.new_thread else thread_id
         event_id = await self._post_mention(config, bot, chain, ask.text, target_thread)
         if event_id is None:
@@ -451,17 +434,6 @@ class AutomationRunner:
             new_thread=ask.new_thread,
         )
         return True
-
-    async def _private_to_requester(self, config: Config, bot: AgentBot | TeamBot, chain: _Chain) -> bool:
-        """Return whether only the requester and MindRoom's agents are in the chain's room, read when each prompt posts.
-
-        Replies quote the requester's private files, and MindRoom never removes anyone from an adopted personal room.
-        """
-        members = await get_room_members(bot.client, chain.room_id) if bot.client is not None else None
-        return members is not None and all(
-            member == chain.requester_id or is_managed_entity_id(member, config, self.runtime_paths)
-            for member in members
-        )
 
     async def _resolve_thread(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str) -> None:
         """Mark a finished chain's thread as resolved."""

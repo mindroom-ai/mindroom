@@ -25,8 +25,7 @@ Shared agents keep one schedule and lock per agent and their existing state dire
 
 Each prompt and notice for a private instance goes to that requester's personal room with the agent, read from the primary-only personal-room record.
 Personal rooms are the only rooms MindRoom keeps free of other people: it removes any other person invited into a room it created.
-MindRoom agents the owner invites stay and read the replies there, as they read every other reply in that room.
-MindRoom never removes anyone from an adopted personal room, whose attested roster can include other people, so each prompt is posted only while the room's joined members are the requester and MindRoom's agents.
+MindRoom agents the owner invites stay, and an adopted personal room keeps whoever its record attests and whoever its owner lets in; they read automation replies as they read every other reply the agent posts there from the same private files.
 A private agent therefore needs `personal_rooms.agent` to name it before it may list or inherit automations, and its entries may not set `room`.
 
 Rejected alternatives:
@@ -34,6 +33,7 @@ Rejected alternatives:
 - **The configured `room`, as for shared agents.** Every member of that room would see each requester's private memory in the replies.
 - **Detecting a direct-message room per requester.** MindRoom has no primitive that keeps such a room private, and its membership can change after detection.
 - **The room where the requester last spoke to the agent.** It can be shared with other people, and the choice changes from day to day.
+- **Posting only while the room's live members are the requester and MindRoom's agents.** An adopted room with shared history shows earlier automation threads to anyone who joins later, so the check could not keep them private, and every send, notice, and check side effect would need it.
 
 ### Run as the requester
 
@@ -56,5 +56,6 @@ An agent-level `context_files` entry of a private agent loads from the shared ag
 
 - Only the agent named by `personal_rooms.agent` can run automations as a private agent, because there is one personal-rooms agent per installation.
 - A requester who never got a personal room, or whose personal-room record cannot be read, is skipped.
+- A requester who reaches the agent through a bridge alias is skipped, because the personal-room record is keyed by the Matrix ID that joined onboarding while the private instance is keyed by the canonical requester; this fails closed.
 - A requester who left their personal room still gets prompts there, because the prompts maintain files the requester's other conversations with the agent use.
 - Access revoked while a chain is running is enforced by ingress on the next prompt, so that step times out after an hour instead of being skipped.
