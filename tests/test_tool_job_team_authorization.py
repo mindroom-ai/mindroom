@@ -355,7 +355,7 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path) -> None:
-    """A team leader's job calls pass its plugins' tool hooks and land in its reply's call record, as other calls do."""
+    """A team leader's job calls go through its tool-hook bridge and land in its reply's call record, as others do."""
     config = managed_team_config(tmp_path)
     paths = team_coordinator(tmp_path, config).runtime_paths
     team = replace(completed_delegation_job().owner, agent_name="team", transport_agent_name="team")

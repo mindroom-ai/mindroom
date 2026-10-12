@@ -11,6 +11,7 @@ import pytest
 from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.team import Team
+from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.agents import create_agent
@@ -50,6 +51,26 @@ if TYPE_CHECKING:
 
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+@pytest.mark.asyncio
+async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path) -> None:
+    """A configured tool with its own `job` function would shadow the job controls, so the agent refuses it."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    def job() -> str:
+        return "a plugin's job"
+
+    try:
+        with pytest.raises(ValueError, match="reserved"):
+            JobTools.build([Toolkit(name="ci", tools=[job])], paths, owner, depth=0, enabled=True)
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

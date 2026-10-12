@@ -3565,12 +3565,9 @@ class ResponseRunner:
             await self.generate_response(request)
             return
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        if any(name not in registry.current_ids for name in team.agents):
-            # A member left the configuration, so no team answers; a later reply's note reports the jobs.
-            return
         await self.generate_team_response_helper(
             request,
-            team_agents=[registry.current_ids[name] for name in team.agents],
+            team_agents=[registry.current_id(name) for name in team.agents],
             team_mode=team.mode,
         )
 

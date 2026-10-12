@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
@@ -3140,6 +3141,39 @@ class TestRoomRetryBackoff:
         finally:
             await worker.stop()
         assert attempts == ["$failed", "$failed"]
+
+
+async def test_a_follow_up_whose_turn_is_gone_is_dispatched_again(alice: PrincipalStore) -> None:
+    """A follow-up waits for the fleet at startup and for its live turn, and runs again once that turn is gone."""
+    owners: set[str] = set()
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        return None
+
+    dispatcher = JournalDispatcher(
+        store=alice,
+        callbacks=JournalCallbacks(
+            on_message=cast("Any", noop),
+            on_media=cast("Any", noop),
+            on_reaction=cast("Any", noop),
+            on_approval=cast("Any", noop),
+            on_room_lifecycle=cast("Any", noop),
+            on_redaction=cast("Any", noop),
+            on_approval_continuation=AsyncMock(return_value=None),
+            source_has_live_owner=lambda event_id: event_id in owners,
+            turn_has_live_claim=lambda _event_id: False,
+            replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+        ),
+        room_for_id=lambda _room_id: room(),
+    )
+    follow_up = cast("JournalEvent", SimpleNamespace(kind=EventKind.JOB_FOLLOW_UP, event_id="job-follow-up:1"))
+    assert dispatcher._deferral_is_live(follow_up)
+    dispatcher.release_turn_replay()
+    owners.add(follow_up.event_id)
+    assert dispatcher._deferral_is_live(follow_up)
+    owners.clear()
+    assert not dispatcher._deferral_is_live(follow_up)
 
 
 class TestOutOfBandDispatch:
