@@ -809,7 +809,7 @@
     },
     "BudgetsConfig": {
       "additionalProperties": false,
-      "description": "Monthly USD caps per requester, with a fallback model once a cap is reached.",
+      "description": "Default monthly USD cap per requester, with a fallback model once a cap is reached.",
       "properties": {
         "monthly_limit_usd": {
           "anyOf": [
@@ -822,7 +822,7 @@
             }
           ],
           "default": null,
-          "description": "Default monthly cap in USD for each user; unset leaves users without an override uncapped",
+          "description": "Default monthly cap in USD for each user without a cap of their own; unset leaves them uncapped",
           "title": "Monthly Limit Usd"
         },
         "fallback_model": {
@@ -832,16 +832,6 @@
           "x-mindroom": {
             "reference": "model"
           }
-        },
-        "users": {
-          "additionalProperties": {
-            "minimum": 0,
-            "type": "number"
-          },
-          "default": {},
-          "description": "Monthly USD caps for specific Matrix users, overriding monthly_limit_usd",
-          "title": "Users",
-          "type": "object"
         }
       },
       "required": [

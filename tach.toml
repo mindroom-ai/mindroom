@@ -2044,7 +2044,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.budgets"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]

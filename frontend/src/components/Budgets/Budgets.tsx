@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Save, Wallet } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +18,11 @@ import { showSaveFailureToastIfNeeded } from "@/components/shared";
 import type { ConfigPath } from "@/lib/configSchema";
 import { isConcreteMatrixUserId } from "@/lib/matrixIds";
 import { cn } from "@/lib/utils";
-import { fetchBudgets } from "@/services/budgetService";
+import {
+  clearUserCap,
+  fetchBudgets,
+  setUserCap,
+} from "@/services/budgetService";
 import { useConfigStore } from "@/store/configStore";
 import type { EnabledBudgetStatus } from "@/types/budgets";
 import type { BudgetsConfig, Config, ModelPricing } from "@/types/config";
@@ -59,12 +63,14 @@ function UsdInput({
   placeholder,
   onCommit,
   className,
+  readOnly,
 }: {
   label: string;
   value: number | null | undefined;
   placeholder?: string;
   onCommit: (value: number | undefined) => void;
   className?: string;
+  readOnly?: boolean;
 }) {
   const [text, setText] = useState(value == null ? "" : String(value));
   useEffect(() => {
@@ -83,6 +89,7 @@ function UsdInput({
       aria-invalid={invalid}
       value={text}
       placeholder={placeholder}
+      readOnly={readOnly}
       className={cn("aria-invalid:border-destructive", className)}
       onChange={(event) => {
         setText(event.target.value);
@@ -163,7 +170,7 @@ function SettingsCard({
                   }
                 />
                 <span className="block text-xs font-normal text-muted-foreground">
-                  Leave blank to cap only the users listed below.
+                  Leave blank to cap only users with a cap of their own.
                 </span>
               </label>
               <div className="space-y-1.5 text-sm font-medium">
@@ -195,56 +202,106 @@ function SettingsCard({
   );
 }
 
+/** A user's cap, saved when the field is left or Enter is pressed, never per keystroke. */
+function CapInput({
+  label,
+  value,
+  placeholder,
+  onSave,
+}: {
+  label: string;
+  value: number | undefined;
+  placeholder: string;
+  onSave: (value: number | undefined) => Promise<unknown>;
+}) {
+  const shown = value == null ? "" : String(value);
+  const [text, setText] = useState(shown);
+  // Only typed text is saved, and the field shows the saved cap whenever nothing typed is pending.
+  const [typed, setTyped] = useState(false);
+  // The field is read-only while saving, so a later edit cannot be overwritten by this save.
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!typed) setText(shown);
+  }, [shown, typed]);
+  const invalid = parseUsd(text) === null;
+  const save = async () => {
+    if (!typed || saving) return;
+    const parsed = parseUsd(text);
+    if (parsed !== null && parsed !== value) {
+      setSaving(true);
+      await onSave(parsed);
+      setSaving(false);
+    }
+    setTyped(false);
+  };
+  return (
+    <Input
+      inputMode="decimal"
+      aria-label={label}
+      aria-invalid={invalid}
+      value={text}
+      placeholder={placeholder}
+      readOnly={saving}
+      className="w-40 aria-invalid:border-destructive"
+      onChange={(event) => {
+        setText(event.target.value);
+        setTyped(true);
+      }}
+      onBlur={() => void save()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") void save();
+      }}
+    />
+  );
+}
+
+/** Users with spend or their own cap, shown with the caps the runtime applies, not unsaved edits. */
 function UsersCard({
-  budgets,
-  aliases,
   status,
   statusError,
-  updateConfigValue,
 }: {
-  budgets: BudgetsConfig;
-  aliases: Record<string, string[]>;
   status: EnabledBudgetStatus | undefined;
   statusError: string | undefined;
-  updateConfigValue: (path: ConfigPath, value: unknown) => void;
 }) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [newUserId, setNewUserId] = useState("");
   const [newUserCap, setNewUserCap] = useState<number | undefined>();
-  // Users edited on this page stay listed, so clearing a cap to retype it keeps the row.
-  const [editedUserIds, setEditedUserIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const overrides = budgets.users ?? {};
-  const canonicalUserIds = new Map(
-    Object.entries(aliases).flatMap(([canonical, aliasIds]) =>
-      aliasIds.map((aliasId) => [aliasId, canonical] as const),
-    ),
-  );
-  const canonicalOf = (userId: string) =>
-    canonicalUserIds.get(userId) ?? userId;
-  // Spend is reported per canonical user, so a cap keyed by a bridge alias belongs to that user's row.
-  const capKeys = new Map<string, string>();
-  for (const key of Object.keys(overrides)) {
-    if (!capKeys.has(canonicalOf(key))) capKeys.set(canonicalOf(key), key);
-  }
-  const capKeyOf = (userId: string) => capKeys.get(userId) ?? userId;
+  // The add form is read-only while saving, so finishing cannot clear a newer entry.
+  const [adding, setAdding] = useState(false);
   // Until a spend scan has reported, spend is unknown rather than zero.
   const spendKnown = status?.generated_at != null;
-  const spend = new Map(
-    (status?.users ?? []).map((user) => [user.user_id, user.spend_usd]),
-  );
-  const userIds = [
-    ...new Set([...spend.keys(), ...capKeys.keys(), ...editedUserIds]),
-  ].sort(
-    (a, b) => (spend.get(b) ?? 0) - (spend.get(a) ?? 0) || a.localeCompare(b),
-  );
+  const users = status?.users ?? [];
   const defaultLabel =
-    budgets.monthly_limit_usd == null
+    status?.default_limit_usd == null
       ? "Uncapped"
-      : `Default (${formatUsd(budgets.monthly_limit_usd)})`;
+      : `Default (${formatUsd(status.default_limit_usd)})`;
 
-  const handleAdd = () => {
+  // Caps are saved right away, apart from the page's Save button, and the server
+  // files a bridge alias's cap under its canonical user.
+  const saveCap = async (
+    userId: string,
+    limit: number | undefined,
+  ): Promise<boolean> => {
+    try {
+      if (limit === undefined) {
+        await clearUserCap(userId);
+      } else {
+        await setUserCap(userId, limit);
+      }
+    } catch (error) {
+      toast({
+        title: "Could not save the cap",
+        description: error instanceof Error ? error.message : String(error),
+        variant: "destructive",
+      });
+      return false;
+    }
+    await queryClient.invalidateQueries({ queryKey: ["budgets"] });
+    return true;
+  };
+
+  const handleAdd = async () => {
     const userId = newUserId.trim();
     if (!isConcreteMatrixUserId(userId)) {
       toast({
@@ -262,15 +319,13 @@ function UsersCard({
       });
       return;
     }
-    // An alias shares its user's cap, so it updates that user's existing entry.
-    const canonicalUserId = canonicalOf(userId);
-    updateConfigValue(
-      ["budgets", "users", capKeyOf(canonicalUserId)],
-      newUserCap,
-    );
-    setEditedUserIds((previous) => new Set(previous).add(canonicalUserId));
-    setNewUserId("");
-    setNewUserCap(undefined);
+    setAdding(true);
+    const saved = await saveCap(userId, newUserCap);
+    setAdding(false);
+    if (saved) {
+      setNewUserId("");
+      setNewUserCap(undefined);
+    }
   };
 
   return (
@@ -283,7 +338,7 @@ function UsersCard({
                 status.generated_at
                   ? `, updated ${new Date(status.generated_at).toLocaleString()}`
                   : ", updating"
-              }.`
+              }. A cap is saved when you leave its field.`
             : "Month-to-date spend for users with spend or their own cap."}
         </CardDescription>
       </CardHeader>
@@ -304,7 +359,7 @@ function UsersCard({
               </tr>
             </thead>
             <tbody>
-              {userIds.length === 0 && (
+              {users.length === 0 && (
                 <tr>
                   <td colSpan={4} className="py-4 text-muted-foreground">
                     {spendKnown
@@ -313,27 +368,26 @@ function UsersCard({
                   </td>
                 </tr>
               )}
-              {userIds.map((userId) => {
-                const userSpend = spend.get(userId) ?? 0;
-                const override = overrides[capKeyOf(userId)];
-                const limit = override ?? budgets.monthly_limit_usd;
-                const over = spendKnown && limit != null && userSpend >= limit;
+              {users.map((user) => {
+                const override = user.override_usd ?? undefined;
+                const limit = user.limit_usd;
+                const over = spendKnown && user.over_budget;
                 const fraction =
                   limit == null
                     ? 0
                     : limit === 0
                       ? 1
-                      : Math.min(userSpend / limit, 1);
+                      : Math.min(user.spend_usd / limit, 1);
                 return (
                   <tr
-                    key={userId}
+                    key={user.user_id}
                     className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border/60 py-3 sm:table-row sm:py-0"
                   >
                     <td className="w-full break-all font-mono sm:w-auto sm:py-2 sm:pr-3">
-                      {userId}
+                      {user.user_id}
                     </td>
                     <td className="sm:py-2 sm:pr-3">
-                      <div>{spendKnown ? formatUsd(userSpend) : "—"}</div>
+                      <div>{spendKnown ? formatUsd(user.spend_usd) : "—"}</div>
                       {spendKnown && limit != null && (
                         <div
                           aria-hidden="true"
@@ -351,26 +405,22 @@ function UsersCard({
                       )}
                     </td>
                     <td className="sm:py-2 sm:pr-3">
-                      <UsdInput
-                        label={`Monthly cap for ${userId}`}
+                      <CapInput
+                        label={`Monthly cap for ${user.user_id}`}
                         value={override}
                         placeholder={defaultLabel}
-                        className="w-40"
-                        onCommit={(value) => {
-                          setEditedUserIds((previous) =>
-                            new Set(previous).add(userId),
-                          );
-                          updateConfigValue(
-                            ["budgets", "users", capKeyOf(userId)],
-                            value,
-                          );
-                        }}
+                        onSave={(value) => saveCap(user.user_id, value)}
                       />
+                      {user.updated_by != null && (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          Set by {user.updated_by}
+                        </div>
+                      )}
                     </td>
                     <td className="sm:py-2">
                       {over ? (
                         <Badge variant="destructive">
-                          Over budget, using {budgets.fallback_model}
+                          Over budget, using {status?.fallback_model}
                         </Badge>
                       ) : (
                         <Badge variant="secondary">
@@ -394,6 +444,7 @@ function UsersCard({
             onChange={(event) => setNewUserId(event.target.value)}
             placeholder="@user:example.com"
             aria-label="New user Matrix ID"
+            readOnly={adding}
             className="font-mono sm:max-w-xs"
           />
           <UsdInput
@@ -401,9 +452,15 @@ function UsersCard({
             value={newUserCap}
             placeholder="Cap (USD)"
             className="sm:w-40"
+            readOnly={adding}
             onCommit={setNewUserCap}
           />
-          <Button type="button" variant="outline" onClick={handleAdd}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={adding}
+            onClick={() => void handleAdd()}
+          >
             Add user
           </Button>
         </div>
@@ -516,15 +573,18 @@ export function Budgets() {
   const { config, isDirty, isLoading, saveConfig, updateConfigValue } =
     useConfigStore();
   const { toast } = useToast();
+  const budgets = config?.budgets ?? null;
+  // Saved budgets reach the runtime with its next config reload, a few seconds after Save.
+  const savedOn = budgets != null && !isDirty;
   const query = useQuery({
     queryKey: ["budgets"],
     queryFn: ({ signal }) => fetchBudgets(signal),
     retry: false,
-    refetchInterval: 60_000,
+    refetchInterval: ({ state }) =>
+      savedOn && state.data?.enabled === false ? 1_000 : 60_000,
     refetchOnWindowFocus: false,
   });
   const status = query.data?.enabled === true ? query.data : undefined;
-  const budgets = config?.budgets ?? null;
 
   const handleSave = async () => {
     const result = await saveConfig();
@@ -573,15 +633,25 @@ export function Budgets() {
             budgets={budgets}
             updateConfigValue={updateConfigValue}
           />
-          {budgets != null && (
-            <UsersCard
-              budgets={budgets}
-              aliases={config.authorization?.aliases ?? {}}
-              status={status}
-              statusError={query.isError ? query.error.message : undefined}
-              updateConfigValue={updateConfigValue}
-            />
-          )}
+          {budgets != null &&
+            // The server accepts per-user caps only once its running config has budgets on.
+            (query.data?.enabled === false ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Users</CardTitle>
+                  <CardDescription>
+                    {savedOn
+                      ? "Turning on budgets…"
+                      : "Save to turn on budgets, then set per-user caps here."}
+                  </CardDescription>
+                </CardHeader>
+              </Card>
+            ) : (
+              <UsersCard
+                status={status}
+                statusError={query.isError ? query.error.message : undefined}
+              />
+            ))}
           {status != null && status.unpriced_models.length > 0 && (
             <Alert>
               <AlertTriangle className="h-4 w-4" aria-hidden="true" />
