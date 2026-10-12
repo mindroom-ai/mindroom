@@ -15,7 +15,7 @@ from mindroom.model_selection import CommandResultContent, freeze_command_result
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 
 @dataclass(frozen=True)
@@ -159,25 +159,63 @@ class RevisionReplay:
         }
 
 
+type _RevisionReplayRow = tuple[str, int, bool, str | None, bool]
+
+
+class _RevisionReplayRows(Mapping[str, RevisionReplay]):
+    """Read-only replay provenance stored as one plain tuple per edit.
+
+    The handled-turn ledger keeps every record in memory for the life of the
+    process, and a record can carry dozens of edits. One frozen dataclass per
+    edit would give every full garbage collection that many more objects to
+    walk. The collector stops tracking tuples and dicts that hold only strings,
+    ints, bools, and None, so this map costs it one object however many edits it
+    holds; ``RevisionReplay`` values are rebuilt on access.
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, rows: dict[str, _RevisionReplayRow]) -> None:
+        self._rows = rows
+
+    def __getitem__(self, event_id: str) -> RevisionReplay:
+        return RevisionReplay(*self._rows[event_id])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._rows)
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({dict(self)!r})"
+
+
 def _revision_replay_map(raw: Mapping[str, object] | None) -> Mapping[str, RevisionReplay]:
     """Freeze validated ledger provenance."""
-    result: dict[str, RevisionReplay] = {}
+    rows: dict[str, _RevisionReplayRow] = {}
     for event_id, value in (raw or {}).items():
         if isinstance(value, RevisionReplay):
-            result[event_id] = value
+            rows[event_id] = (
+                value.source_event_id,
+                value.timestamp_ms,
+                value.redacted,
+                value.response_event_id,
+                value.legacy_summary_provenance,
+            )
         elif isinstance(value, Mapping):
             value = typing.cast("Mapping[str, object]", value)
             source = value.get("source_event_id")
             timestamp = value.get("timestamp_ms")
             if isinstance(source, str) and isinstance(timestamp, int) and not isinstance(timestamp, bool):
-                result[event_id] = RevisionReplay(
+                rows[event_id] = (
                     source,
                     timestamp,
                     value.get("redacted") is True,
                     canonical_optional_string(value.get("response_event_id")),
                     value.get("legacy_summary_provenance") is True,
                 )
-    return MappingProxyType(result)
+    return _RevisionReplayRows(rows)
 
 
 @dataclass(frozen=True)
