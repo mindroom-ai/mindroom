@@ -308,7 +308,7 @@ async def test_cancel_job_command_refuses_a_sender_without_access(tmp_path: Path
             access=ResponderAccessConfig(users=["@bob:test"], current_room_members=False),
         )
         reply = await _command(tmp_path, "!cancel_job job_a", agent=restricted)
-        assert reply == "No such background job here."
+        assert reply == "No running background job here has that ID; `!jobs` lists them."
         assert _status(runtime, "job_a") == "running"
     finally:
         await runtime.shutdown()

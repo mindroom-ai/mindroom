@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import job_checkpoint, pending_human_messages_context
+from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, ToolJobRuntime
 from tests.tool_job_helpers import (
@@ -588,11 +589,13 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
 
     async def lookups(runtime: ToolJobRuntime) -> list[str]:
         ended = await runtime.ended_jobs(
-            recipient=source["transport_agent_name"],
-            room_id=source["room_id"],
-            thread_id=source["thread_id"],
-            requester_id="@alice:test",
-            silent=False,
+            ConversationKey(
+                recipient=source["transport_agent_name"],
+                room_id=source["room_id"],
+                thread_id=source["thread_id"],
+                requester_id="@alice:test",
+                silent=False,
+            ),
         )
         return [job.job_id for job in ended]
 
@@ -617,7 +620,7 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
         backdate_job(runtime, "a", datetime.now(UTC) - timedelta(days=31))
         # The conversation lookup skips consumed jobs, so only the index itself shows that expiry removed one.
         conversation = ("parent", "!room:test", "$root", "@alice:test")
-        assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation)] == [
+        assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation, {}).values()] == [
             "a",
             "b",
             "c",
@@ -629,7 +632,11 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
 
         await runtime.expire_ended(before=datetime.now(UTC) - timedelta(days=30), source_finished=source_finished)
         assert await lookups(runtime) == ["b", "c", "unsourced"]
-        assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation)] == ["b", "c", "unsourced"]
+        assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation, {}).values()] == [
+            "b",
+            "c",
+            "unsourced",
+        ]
     finally:
         await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)

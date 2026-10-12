@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
-from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
+from mindroom.tool_jobs.conversation import current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
     describe_job,
@@ -65,7 +65,7 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any
     sections: list[str] = []
     collected: list[ToolResult] = []
     current = current_conversation()
-    for job in () if current is None else await ended_jobs(*current):
+    for job in () if current is None else await current[0].ended_jobs(current[1]):
         try:
             waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
         except JobAccessError:

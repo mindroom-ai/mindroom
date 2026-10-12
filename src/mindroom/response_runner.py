@@ -158,7 +158,6 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -235,6 +234,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -3522,7 +3522,7 @@ class ResponseRunner:
         """Decide under the conversation lock whether a follow-up still has jobs to report, which a reply may have collected."""
         assert request.follow_up_key is not None
         runtime = get_background_runtime(self.deps.runtime_paths)
-        if runtime is not None and follow_up_jobs(await ended_jobs(runtime, request.follow_up_key)):
+        if runtime is not None and follow_up_jobs(await runtime.ended_jobs(request.follow_up_key)):
             return True
         # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
         reply = await self.deps.replies.store.replies.for_sources((request.response_envelope.source_event_id,))

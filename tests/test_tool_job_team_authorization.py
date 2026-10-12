@@ -20,7 +20,7 @@ from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn,
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
-from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
+from mindroom.tool_jobs.conversation import current_conversation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
@@ -157,7 +157,7 @@ async def test_the_entity_that_answers_owns_its_members_jobs(tmp_path: Path) -> 
         with tool_runtime_context(context):
             current = current_conversation()
         assert current is not None
-        assert [job.job_id for job in await ended_jobs(*current)] == ["member"]
+        assert [job.job_id for job in await current[0].ended_jobs(current[1])] == ["member"]
         answering = replace(owner, agent_name="lead")
         assert [job.job_id for job in await runtime.list_jobs(owner=answering, depth=0)] == ["member"]
         other_member = replace(owner, agent_name="other")
@@ -211,7 +211,7 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         with tool_runtime_context(context):
             current = current_conversation()
         assert current is not None
-        assert await ended_jobs(*current) == ()
+        assert await current[0].ended_jobs(current[1]) == ()
         for control in (runtime.wait, runtime.cancel):
             with pytest.raises(JobAccessError):
                 await control(job.job_id, owner=owner, depth=0)

@@ -143,7 +143,9 @@ async def cancel_jobs_command(
             return "That ID matches several background jobs here; use more of it."
     allowed = [job for job in targets if may_cancel(job)]
     if not allowed:
-        return "No background jobs to cancel here." if prefix is None else "No such background job here."
+        if prefix is None:
+            return "No background jobs to cancel here."
+        return "No running background job here has that ID; `!jobs` lists them."
     for job in allowed:
         await runtime.request_cancel(job.job_id)
     return "Cancelling " + ", ".join(describe_job(job, short=True) for job in allowed) + "."

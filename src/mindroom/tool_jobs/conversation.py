@@ -11,7 +11,7 @@ from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import ToolJobRuntime
 
 
 @dataclass(frozen=True)
@@ -43,15 +43,4 @@ def current_conversation() -> tuple[ToolJobRuntime, ConversationKey] | None:
         thread_id=context.resolved_thread_id,
         requester_id=context.requester_id,
         silent=context.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
-    )
-
-
-async def ended_jobs(runtime: ToolJobRuntime, key: ConversationKey) -> tuple[BackgroundJob, ...]:
-    """Return the ended, readable, unacknowledged top-level jobs of ``key``, oldest first."""
-    return await runtime.ended_jobs(
-        recipient=key.recipient,
-        room_id=key.room_id,
-        thread_id=key.thread_id,
-        requester_id=key.requester_id,
-        silent=key.silent,
     )

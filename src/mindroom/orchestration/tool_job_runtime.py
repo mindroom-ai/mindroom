@@ -20,7 +20,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
-from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
+from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_jobs, next_follow_up_id
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
@@ -365,7 +365,7 @@ class ToolJobRuntimeCoordinator:
             # Jobs an admitted follow-up already reports need no access check again.
             follow_up_id = next_follow_up_id(key, candidates)
             if follow_up_id not in self._admitted_follow_ups:
-                jobs = follow_up_jobs(await ended_jobs(runtime, key))
+                jobs = follow_up_jobs(await runtime.ended_jobs(key))
                 bot = self.bot_provider(key.recipient)
                 if not jobs or bot is None:
                     continue

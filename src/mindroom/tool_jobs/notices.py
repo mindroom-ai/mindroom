@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
 from mindroom.hooks.types import EnrichmentItem
 from mindroom.logging_config import get_logger
-from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
+from mindroom.tool_jobs.conversation import current_conversation
 from mindroom.tool_jobs.runtime import describe_job
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -85,7 +85,7 @@ async def _unnoticed_notice(notices: JobNotices) -> str | None:
     if current is None or context is None:
         return None
     runtime, key = current
-    jobs = [job for job in await ended_jobs(runtime, key) if job.job_id not in notices.noticed]
+    jobs = [job for job in await runtime.ended_jobs(key) if job.job_id not in notices.noticed]
     if not jobs:
         return None
     notices.noticed.update(job.job_id for job in jobs)

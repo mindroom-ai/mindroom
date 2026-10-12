@@ -32,13 +32,14 @@ from mindroom.tool_system.call_record import without_tool_call_recording
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from agno.tools.function import Function
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import SavedToolJob, ToolJobStore
     from mindroom.tool_jobs.control import PendingHumanMessages
+    from mindroom.tool_jobs.conversation import ConversationKey
 
 type _OutcomeStatus = Literal["completed", "failed", "cancelled", "denied", "interrupted"]
 # A running job that waits for human decisions on the approval cards it posted is `awaiting_approval`.
@@ -215,25 +216,6 @@ def _conversation_key(owner: ToolExecutionIdentity) -> tuple[str, str | None, st
     return (owner.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id)
 
 
-@dataclass
-class _EntryIndex[Key]:
-    """Accepted jobs grouped by an identity that stays fixed for each job's life, in admission order."""
-
-    groups: dict[Key, dict[str, _Entry]] = field(default_factory=dict)
-
-    def add(self, key: Key, entry: _Entry) -> None:
-        self.groups.setdefault(key, {})[entry.job.job_id] = entry
-
-    def remove(self, key: Key, job_id: str) -> None:
-        group = self.groups[key]
-        del group[job_id]
-        if not group:
-            del self.groups[key]
-
-    def get(self, key: Key) -> list[_Entry]:
-        return list(self.groups.get(key, {}).values())
-
-
 def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> None:
     """Log a failed cancellation drain with its job, which stays for a later canceller, recovery, or shutdown."""
     if not drain.cancelled() and (error := drain.exception()) is not None:
@@ -308,7 +290,7 @@ class ToolJobRuntime:
         self._entries: dict[str, _Entry] = {}
         # Conversation lookups read this instead of scanning every entry; `_add_entry` and `_remove_entry` keep it.
         # Jobs are keyed by their recipient, room, thread, and requester.
-        self._by_conversation = _EntryIndex[tuple[str, str | None, str | None, str | None]]()
+        self._by_conversation: dict[tuple[str, str | None, str | None, str | None], dict[str, _Entry]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
@@ -338,11 +320,14 @@ class ToolJobRuntime:
         """Make an accepted job current and findable by its conversation, which never changes."""
         job = entry.job
         self._entries[job.job_id] = entry
-        self._by_conversation.add(_conversation_key(job.owner), entry)
+        self._by_conversation.setdefault(_conversation_key(job.owner), {})[job.job_id] = entry
 
     def _remove_entry(self, job_id: str) -> None:
-        job = self._entries.pop(job_id).job
-        self._by_conversation.remove(_conversation_key(job.owner), job_id)
+        key = _conversation_key(self._entries.pop(job_id).job.owner)
+        group = self._by_conversation[key]
+        del group[job_id]
+        if not group:
+            del self._by_conversation[key]
 
     def _owns(self, job: BackgroundJob, owner: ToolExecutionIdentity, depth: int) -> bool:
         """Whether a caller owns a job: it made the call, or it is the agent or team that answers in its conversation.
@@ -696,22 +681,6 @@ class ToolJobRuntime:
             await self._request_cancel(entry)
             return await self._snapshot(entry)
 
-    @staticmethod
-    async def _isolated(
-        entries: Iterable[_Entry],
-        action: Callable[[_Entry], Awaitable[object]],
-        failure: str,
-    ) -> list[Exception]:
-        """Apply an action to each job, logging and returning failures so one job cannot block the rest."""
-        failures = []
-        for entry in entries:
-            try:
-                await action(entry)
-            except Exception as error:
-                logger.exception(failure, job_id=entry.job.job_id)
-                failures.append(error)
-        return failures
-
     async def cancel_revoked(self, *, denied: Callable[[BackgroundJob], bool]) -> None:
         """Withdraw execution whose grant is proven revoked, retaining owned cleanup; a failed job retries next pass."""
         async with self._lock:
@@ -721,7 +690,12 @@ class ToolJobRuntime:
                 for entry in self._entries.values()
                 if entry.job.status not in TERMINAL_STATUSES and denied(entry.job)
             ]
-            await self._isolated(revoked, self._request_cancel, "Tool job revocation failed")
+            for entry in revoked:
+                # One failed job must not block the rest; it retries on the next pass.
+                try:
+                    await self._request_cancel(entry)
+                except Exception:
+                    logger.exception("Tool job revocation failed", job_id=entry.job.job_id)
 
     async def _request_cancel(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
         """Durably request cancellation and return its one drain; the caller holds the runtime lock."""
@@ -788,15 +762,7 @@ class ToolJobRuntime:
             outcome = stopped
         return outcome if outcome is not None and outcome.status in TERMINAL_STATUSES else default
 
-    async def ended_jobs(
-        self,
-        *,
-        recipient: str,
-        room_id: str,
-        thread_id: str | None,
-        requester_id: str,
-        silent: bool,
-    ) -> tuple[BackgroundJob, ...]:
+    async def ended_jobs(self, key: ConversationKey) -> tuple[BackgroundJob, ...]:
         """Return one conversation's ended top-level jobs that nobody acknowledged or reads now, oldest first.
 
         A job stays out while a waiter claims it, while its requester's access is unresolved or gone, and once its
@@ -807,12 +773,17 @@ class ToolJobRuntime:
                 return ()
             ended = [
                 await self._snapshot(entry)
-                for entry in self._by_conversation.get((recipient, room_id, thread_id, requester_id))
+                for entry in list(
+                    self._by_conversation.get(
+                        (key.recipient, key.room_id, key.thread_id, key.requester_id),
+                        {},
+                    ).values(),
+                )
                 if entry.job.status in TERMINAL_STATUSES
                 and entry.job.depth == 0
                 and not entry.job.consumed
                 and entry.claim is None
-                and (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent
+                and (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == key.silent
                 and self._authorize(entry.job)
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))

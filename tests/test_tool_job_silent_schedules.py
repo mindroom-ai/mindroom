@@ -26,7 +26,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
+from mindroom.tool_jobs.conversation import ConversationKey, current_conversation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
@@ -233,7 +233,7 @@ async def test_quiet_and_visible_results_stay_with_their_own_replies(tmp_path: P
         with tool_runtime_context(context):
             current = current_conversation()
         assert current is not None
-        assert [job.job_id for job in await ended_jobs(*current)] == ["quiet" if silent else "visible"]
+        assert [job.job_id for job in await current[0].ended_jobs(current[1])] == ["quiet" if silent else "visible"]
     finally:
         await runtime.shutdown()
 
@@ -302,9 +302,9 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
             "thread_id": owner.resolved_thread_id,
             "requester_id": owner.requester_id,
         }
-        quiet = await runtime.ended_jobs(**conversation, silent=True)
+        quiet = await runtime.ended_jobs(ConversationKey(**conversation, silent=True))
         assert [job.job_id for job in quiet] == [job_id]
-        assert await runtime.ended_jobs(**conversation, silent=False) == ()
+        assert await runtime.ended_jobs(ConversationKey(**conversation, silent=False)) == ()
     finally:
         release.set()
         await runtime.shutdown()
