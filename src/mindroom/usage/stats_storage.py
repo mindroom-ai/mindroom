@@ -64,9 +64,11 @@ _REQUIRED_COLUMNS = frozenset(
     {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
 )
 _USAGE_REQUIRED_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
+# A dated read keeps snapshots last written in range, so a run resumed after ``since`` keeps its new requests.
 # Malformed snapshots stay in a dated read, so the reader reports them instead of SQLite failing the whole store.
 _USAGE_SINCE_CONDITION = (
-    "CASE WHEN json_valid(usage_data) THEN json_extract(usage_data, '$.created_at') >= ? ELSE 1 END"
+    "CASE WHEN json_valid(usage_data) THEN "
+    "COALESCE(json_extract(usage_data, '$.updated_at'), json_extract(usage_data, '$.created_at')) >= ? ELSE 1 END"
 )
 
 
@@ -477,7 +479,7 @@ def iter_usage_storage_rows(
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
     """Read independent usage snapshots and optional cumulative session counters without writes.
 
-    ``since`` reads only runs created at or after that epoch time and skips session counters,
+    ``since`` reads only runs last updated at or after that epoch time and skips session counters,
     which cover a session's whole history.
     """
     if mode not in {"runs", "both"}:

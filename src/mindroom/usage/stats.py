@@ -880,7 +880,7 @@ def collect_admin_usage(
 ) -> UsageReport:
     """Collect retained session aggregates across configured agents and stored teams.
 
-    ``since`` limits the report to runs created at or after that epoch time, without session totals.
+    ``since`` limits the report to runs last updated at or after that epoch time, without session totals.
     """
     return _collect_usage(
         sources=discover_admin_usage_sources(config=config, runtime_paths=runtime_paths),
