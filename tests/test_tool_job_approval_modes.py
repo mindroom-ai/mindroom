@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -27,7 +28,7 @@ from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import end_tool_call_approval
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
-from mindroom.tool_jobs.control import pending_human_messages_context
+from mindroom.tool_jobs.control import JobControl, job_control_context, pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
@@ -367,21 +368,34 @@ async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["resources", "context"])
+@pytest.mark.parametrize("missing", ["resources", "context", "managed mode", "toolkit binding"])
 async def test_gated_call_that_cannot_become_a_job_never_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     missing: str,
 ) -> None:
-    """Without a job to ask through, a call that asks for its approval as its job fails instead of running."""
+    """Without a job to ask through, a call that asks for its approval as its job fails instead of running.
+
+    That covers a call inside another job, which runs inline, and a function without its toolkit's binding, as the
+    SDK generates them.
+    """
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run:
         agent = run.agent()
+        if missing == "toolkit binding":
+            for toolkit in agent.tools or []:
+                for function in toolkit.get_async_functions().values():
+                    function.owning_toolkit = None
         if missing == "resources":
             with tool_runtime_context(run.context):
                 response = await agent.arun("Write", session_id=run.context.session_id)
-        else:
+        elif missing == "context":
             async with execution_resources():
                 response = await agent.arun("Write", session_id=run.context.session_id)
+        else:
+            inside_a_job = job_control_context(JobControl()) if missing == "managed mode" else nullcontext()
+            async with execution_resources():
+                with tool_runtime_context(run.context), inside_a_job:
+                    response = await agent.arun("Write", session_id=run.context.session_id)
         assert "needs approval" in _tool_result(response)
         assert (run.effects, run.cards.requested) == ([], [])
 

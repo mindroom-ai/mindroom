@@ -42,6 +42,7 @@ from mindroom.tool_jobs.consumption import (
     set_consumption_storage,
 )
 from mindroom.tool_jobs.control import pending_human_messages_context
+from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import (
@@ -1339,15 +1340,24 @@ async def test_a_refused_job_fails_its_call_not_the_reply(
     )
     install_tool_job_execution(model)
     agent = Agent(id="leader", model=model, tools=[assembled_function(write_note)])
+    recorder = SpanRecorder(stopped=False)
+
+    async def cleanup() -> None:
+        return None
+
     try:
         async with execution_resources():
-            with tool_runtime_context(context):
+            with tool_runtime_context(context), recording_tool_calls(recorder):
                 response = await agent.arun("Note", session_id=context.session_id)
+            # The refused call gave its resource reference back, so the reply's own cleanup is not deferred.
+            assert defer_execution_cleanup(cleanup) is False
         assert response.status is RunStatus.completed
         assert response.content == "done"
         assert response.tools is not None
         assert response.tools[0].tool_call_error
         assert ran == []
+        # A job the runtime refused finishes the record its call opened; a call refused before admission opens none.
+        assert [record[0] for record in recorder.records] == (["started", "finished"] if refusal == "start" else [])
     finally:
         await runtime.shutdown()
 
@@ -1461,4 +1471,55 @@ async def test_a_finished_call_counts_as_read_when_its_reply_fails_on_the_next_s
         assert job.consumed
     finally:
         storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_wait_is_refused_leaves_its_job_to_be_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call whose wait the runtime refuses fails, and gives its job back, so the job's outcome still gets reported."""
+    gate = asyncio.Event()
+
+    async def slow_tool() -> str:
+        await gate.wait()
+        return "finished"
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def refuse_wait(*_args: object, **_kwargs: object) -> Never:
+        msg = "Tool job is not available in this conversation."
+        raise JobAccessError(msg)
+
+    monkeypatch.setattr(runtime, "wait", refuse_wait)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("slow_tool", "call")]), ModelResponse(content="done")],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[assembled_function(slow_tool)])
+    key = ConversationKey(
+        recipient=context.recipient,
+        room_id=context.room_id,
+        thread_id=context.resolved_thread_id,
+        requester_id=context.requester_id,
+        silent=False,
+    )
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                response = await agent.arun("Go", session_id=context.session_id)
+        assert response.tools is not None
+        assert response.tools[0].tool_call_error
+        (job,) = runtime.retained_jobs()
+        gate.set()
+        await wait_for_status(runtime, job.job_id, "completed")
+        assert [ended.job_id for ended in await runtime.ended_jobs(key)] == [job.job_id]
+    finally:
+        gate.set()
         await runtime.shutdown()

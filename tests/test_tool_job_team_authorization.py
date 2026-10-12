@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from agno.agent import Agent
@@ -14,10 +15,15 @@ from agno.tools import Toolkit
 
 from mindroom.agents import apply_tool_approval_capability, team_background_jobs
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
+from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
 from mindroom.tool_jobs.conversation import current_conversation
@@ -30,8 +36,15 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import serialize_tool_execution_identity, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    serialize_tool_execution_identity,
+    tool_execution_identity,
+)
+from tests.conftest import FakeModel, bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
+from tests.history_helpers import _agent as history_agent
+from tests.history_helpers import _runtime_paths as history_runtime_paths
 from tests.tool_job_helpers import (
     completed_delegation_job,
     managed_team_config,
@@ -48,7 +61,6 @@ from tests.tool_job_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -374,3 +386,63 @@ def test_a_plugin_toolkit_named_job_still_asks_for_approval(tmp_path: Path) -> N
     )
     assert toolkit is not None
     assert toolkit.get_functions()["run_job"].requires_confirmation is True
+
+
+@pytest.mark.asyncio
+async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notices(tmp_path: Path) -> None:
+    """The leader of a configured team can collect its members' jobs and hears when they end."""
+    runtime_paths = history_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"alpha": AgentConfig(display_name="Alpha"), "zeta": AgentConfig(display_name="Zeta")},
+            teams={"pair": TeamConfig(display_name="Pair", role="Test team", agents=["alpha", "zeta"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=2_000)},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+        runtime_paths,
+    )
+    runtime = await tool_job_runtime(tmp_path / "jobs")
+    pin_background_tool_jobs(config, runtime_paths)
+    register_background_runtime(runtime_paths, runtime)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="pair",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        transport_agent_name="pair",
+    )
+    members = [history_agent(agent_id="alpha", name="Alpha"), history_agent(agent_id="zeta", name="Zeta")]
+    try:
+        with (
+            open_bound_scope_session_context(
+                agents=members,
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                team_name="pair",
+            ) as scope_context,
+            patch(
+                "mindroom.providers.model_loading.get_model_instance",
+                return_value=FakeModel(id="fake-model", provider="fake"),
+            ),
+        ):
+            team = _create_team_instance(
+                agents=members,
+                mode=TeamMode.COORDINATE,
+                config=config,
+                runtime_paths=runtime_paths,
+                team_display_name="Pair",
+                scope_context=scope_context,
+                execution_identity=identity,
+                model_name="default",
+                configured_team_name="pair",
+            )
+        assert any("job" in toolkit.get_async_functions() for toolkit in team.tools or [])
+        assert vars(team.model).get("_mindroom_job_notice_hook_installed") is True
+    finally:
+        await runtime.shutdown()

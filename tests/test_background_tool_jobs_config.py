@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,7 @@ from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent, team_background_jobs
+from mindroom.ai import _with_background_tool_jobs
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
@@ -28,7 +30,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
-from tests.conftest import test_runtime_paths
+from tests.conftest import make_turn_context, test_runtime_paths
 from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_config_lifecycle import _make_lifecycle
@@ -241,6 +243,23 @@ def test_team_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: b
     assert bool(vars(model).get("_mindroom_tool_jobs")) is enabled
 
 
+@pytest.mark.parametrize(
+    ("enabled", "voice_call", "expected"),
+    [(False, False, False), (True, False, True), (True, True, False)],
+)
+def test_a_turn_runs_its_calls_as_jobs_only_with_jobs_on_and_outside_a_voice_call(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    voice_call: bool,
+    expected: bool,
+) -> None:
+    """A voice call's tools finish inside its turn, since no reply owns their outcomes afterwards."""
+    config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled))
+    turn = replace(make_turn_context(entity_label="lead"), inline_tools=voice_call)
+    assert _with_background_tool_jobs(turn, config, test_runtime_paths(tmp_path)).background_tool_jobs is expected
+
+
 def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tmp_path: Path) -> None:
     """An earlier enabled test cannot conceal accidental SDK installation in disabled mode."""
     script = textwrap.dedent("""
@@ -258,7 +277,7 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
         from mindroom.config.main import Config
         from mindroom.config.models import ModelConfig
         from mindroom.tool_jobs import agno_compat_execution
-        from tests.conftest import test_runtime_paths
+        from tests.conftest import make_turn_context, test_runtime_paths
         from tests.identity_helpers import persist_entity_accounts
 
         config = Config(

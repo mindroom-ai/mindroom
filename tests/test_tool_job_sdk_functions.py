@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Never, cast
 
 import pytest
 from agno.knowledge.knowledge import Knowledge
 from agno.learn.stores.user_memory import UserMemoryStore
 from agno.models.response import ModelResponse
+from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
+from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import get_agent_runtime_state_dbs
+from mindroom.tool_jobs.agno_execution import wrap_tool_execution
+from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_jobs.execution_authority import authorized_tool_call
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import tool_execution_identity
-from tests.delegation_helpers import _call, _delegate_runtime_context
+from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
 from tests.history_helpers import RecordingModel
 from tests.identity_helpers import entity_ids
 from tests.test_skills import _write_skill
@@ -26,6 +35,7 @@ from tests.tool_job_helpers import (
     managed_team_config,
     saved_jobs,
     team_coordinator,
+    tool_job_runtime,
 )
 
 if TYPE_CHECKING:
@@ -128,3 +138,45 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         for db in get_agent_runtime_state_dbs(agent):
             if db is not None:
                 db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped_by", ["cancel", "revoked grant"])
+async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, stopped_by: str) -> None:
+    """SDK-generated functions have no tool hooks, so the job's own stop and grant checks keep them from running."""
+    ran: list[str] = []
+
+    def search(query: str) -> str:
+        return query
+
+    async def original(call: FunctionCall) -> Never:
+        ran.append(call.function.name)
+        raise AssertionError
+
+    def authorize_execution(*_args: object) -> None:
+        if stopped_by == "revoked grant":
+            msg = "No longer authorized"
+            raise JobAccessError(msg)
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path, authorize_execution=authorize_execution)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    control = JobControl()
+    if stopped_by == "cancel":
+        control.cancel()
+    job_call = FunctionCall(function=Function(name="job_tool"), arguments={})
+    sdk_call = FunctionCall(function=Function.from_callable(search), arguments={"query": "tea"})
+    try:
+        async with execution_resources():
+            with (
+                tool_runtime_context(context),
+                job_control_context(control),
+                authorized_tool_call(build_execution_identity_from_runtime_context(context), job_call),
+                pytest.raises(asyncio.CancelledError if stopped_by == "cancel" else JobAccessError),
+            ):
+                await wrap_tool_execution(original, depth=0)(sdk_call)
+    finally:
+        await runtime.shutdown()
+    assert ran == []

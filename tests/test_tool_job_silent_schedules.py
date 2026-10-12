@@ -15,7 +15,13 @@ from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 
-from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
+from mindroom.ai import (
+    _AgentRunContext,
+    _collect_response_body_with_trace,
+    _PreparedAgentRun,
+    ai_response,
+    stream_agent_response,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
@@ -66,8 +72,9 @@ async def _run_silent_turn(
     enabled: bool,
     collect_stream: bool,
     record_turn: bool = True,
+    direct_stream: bool = False,
 ) -> _SilentTurn:
-    """Run one silent scheduled agent turn."""
+    """Run one silent scheduled agent turn, through `ai_response` or the streaming entry a Matrix reply calls."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
         agents={"leader": AgentConfig(display_name="Leader")},
@@ -142,17 +149,32 @@ async def _run_silent_turn(
             patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
             patch("mindroom.ai._prepare_agent_run_context", new=prepare),
         ):
-            answer = await ai_response(
-                ctx,
-                prompt="Silent check",
-                runtime_paths=paths,
-                config=config,
-                execution_identity=owner,
-                collect_streamed_response=collect_stream,
-                show_tool_calls=True,
-                tool_trace_collector=trace,
-                turn_recorder=recorder,
-            )
+            if direct_stream:
+                answer = await _collect_response_body_with_trace(
+                    stream_agent_response(
+                        ctx,
+                        prompt="Silent check",
+                        runtime_paths=paths,
+                        config=config,
+                        execution_identity=owner,
+                        show_tool_calls=True,
+                        turn_recorder=recorder,
+                    ),
+                    show_tool_calls=True,
+                    tool_trace_collector=trace,
+                )
+            else:
+                answer = await ai_response(
+                    ctx,
+                    prompt="Silent check",
+                    runtime_paths=paths,
+                    config=config,
+                    execution_identity=owner,
+                    collect_streamed_response=collect_stream,
+                    show_tool_calls=True,
+                    tool_trace_collector=trace,
+                    turn_recorder=recorder,
+                )
         return _SilentTurn(answer, trace, recorder, pending_outcomes(runtime))
     finally:
         await runtime.shutdown()
@@ -191,6 +213,30 @@ async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
             ),
         )
     assert observed[1] == observed[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("collect_stream", "direct_stream"),
+    [(False, False), (True, False), (True, True)],
+    ids=["blocking", "collected-stream", "matrix-stream"],
+)
+async def test_a_turn_with_jobs_on_lets_a_managed_call_detach(
+    tmp_path: Path,
+    *,
+    collect_stream: bool,
+    direct_stream: bool,
+) -> None:
+    """Every reply entry point runs its managed calls as jobs once the instance runs them."""
+    turn = await _run_silent_turn(
+        tmp_path,
+        [ModelResponse(tool_calls=[_call("probe_tool", "read", wait_timeout=0)]), ModelResponse(content="done")],
+        enabled=True,
+        collect_stream=collect_stream,
+        direct_stream=direct_stream,
+    )
+    [call] = [tool for tool in turn.trace if tool.tool_name == "probe_tool"]
+    assert '"job_id"' in str(call.result_preview)
 
 
 @pytest.mark.asyncio
