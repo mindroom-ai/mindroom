@@ -114,11 +114,17 @@ def conversation_jobs(runtime: ToolJobRuntime, *, room_id: str, thread_id: str |
     )
 
 
+# How a person reads each state of a live job.
+_LIVE_STATUS_TEXT = {"running": "running", "awaiting_approval": "waiting for approval", "cancel_requested": "stopping"}
+
+
 def jobs_listing(jobs: list[BackgroundJob]) -> str:
     """Describe a conversation's live jobs for a chat reply."""
     if not jobs:
         return "No background jobs are running here."
-    lines = [f"- {describe_job(job, short=True)} {job.status}, by {job.owner.recipient}" for job in jobs]
+    lines = [
+        f"- {describe_job(job, short=True)} {_LIVE_STATUS_TEXT[job.status]}, by {job.owner.recipient}" for job in jobs
+    ]
     return "Background jobs running here:\n" + "\n".join(lines)
 
 

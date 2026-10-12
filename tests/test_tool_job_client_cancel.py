@@ -30,6 +30,7 @@ from mindroom.tool_jobs.client_cancel import (
     _parse_job_cancel,
     cancel_room_jobs,
     handle_job_cancel_event,
+    jobs_listing,
     person_may_cancel,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -267,6 +268,27 @@ async def test_jobs_lists_short_ids_that_cancel_job_accepts(tmp_path: Path) -> N
         assert "`a1b2c3d4`" in await _command(tmp_path, "!cancel_job a1b2c3d4")
         await wait_for_status(runtime, "a1b2c3d4e5f60718", "cancelled")
         assert _status(runtime, "a1ffffffffffffff") == "running"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_jobs_says_in_words_which_jobs_wait_for_approval_or_are_stopping(tmp_path: Path) -> None:
+    """`!jobs` names each live state as people read it, not as the job record spells it."""
+    runtime = await _command_runtime(tmp_path)
+    try:
+        await _start(runtime, "job_a")
+        [job] = runtime.retained_jobs()
+        listing = jobs_listing(
+            [
+                job,
+                replace(job, job_id="job_b", status="awaiting_approval"),
+                replace(job, job_id="job_c", status="cancel_requested"),
+            ],
+        )
+        assert "`job_a` (run_tests) running," in listing
+        assert "`job_b` (run_tests) waiting for approval," in listing
+        assert "`job_c` (run_tests) stopping," in listing
     finally:
         await runtime.shutdown()
 
