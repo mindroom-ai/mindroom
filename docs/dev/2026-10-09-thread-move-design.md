@@ -36,6 +36,7 @@ Having the router re-post every message with a name prefix is the least code, bu
 ### Visible attribution
 
 Matrix clients do not render `com.mindroom.original_sender`, so router-posted copies also name the author visibly in the text or media caption.
+A relay names the Matrix poster, not the person a post speaks for, and copies the visible text as it appeared, so handoff boilerplate and earlier move copies never gain a second or false name.
 
 ## Limitations
 

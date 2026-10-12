@@ -21,7 +21,7 @@ Each report holds its category's assumptions, decisions, and open findings; this
 
 ## Assumptions and limitations
 
-- Stripe processes payments, which keeps the platform out of PCI DSS scope only as long as card data never reaches platform servers ([07](2025-09-11-security-review-07-data-protection.md)).
+- Stripe's hosted checkout processes payments, which keeps the platform's PCI DSS obligations at the reduced hosted-checkout level only as long as card data never reaches platform servers ([07](2025-09-11-security-review-07-data-protection.md)).
 - The platform holds no GDPR, SOC 2, or ISO 27001 attestation: the GDPR self-service flows exist, but processor-wide deletion and retention were not verified, and alerting, incident response, and formal security policies are the SOC 2 and ISO 27001 gaps.
 
 ## Secret-rotation cautions

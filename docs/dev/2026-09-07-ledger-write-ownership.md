@@ -169,6 +169,7 @@ All four runs complete exactly 200 replies, settle all three fence principals an
 Initial reply spread is slightly worse with the candidate in both comparisons and completion latency is nearly unchanged.
 Removing this read changes neither transaction count nor worker handoffs, and a lower query count alone does not justify expanding the production call signatures.
 Reconsider this optimization only with new evidence of a worthwhile end-to-end gain.
+A 500 ms guard in the projection-progress test failed during this trial, and a controlled 650 ms delay after successful admission reproduced that failure without changing the database result, so the guard measured database latency rather than a correctness regression; the adjusted test still fails when admission waits for another recovery pass.
 
 The four retained controls are `control-200-20260906T144825Z`, `control-200-20260906T145836Z`, `control-200-20260906T150134Z` and `control-200-20260906T150430Z` under `query-reuse` in the capacity workspace.
 

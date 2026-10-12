@@ -49,6 +49,11 @@ Moving projection out of the admission transaction so a worker could resolve fir
 The same fact refuted review proposals for epoch-scoped projection watermarks and a durable admission-to-projection fence: projection commits inside admission, so there is no window to fence.
 A worker that skips revisions already superseded was rejected because it cannot know a later edit is coming; resolving on read downloads only the revision that won, whatever order the edits arrived in.
 
+### Approvals got their own durable store
+
+Approvals needed their exact-call identity kept durably, but neither existing owner could hold it: `visible_messages` models conversation messages, and the journal clears a settled event's payload on purpose.
+They got their own small durable projection instead of widening either.
+
 ### A changed sending device reconciles against the room
 
 Recovery was first framed as a choice between refusing to resend after a device change, which loses the answer silently, and resending under a fresh transaction ID, which duplicates if the original landed and breaks the deterministic-ID invariant.
@@ -122,6 +127,9 @@ Reads ran against a 100,000-message conversation walked to its start over 2,001 
 | Conversation read query plan | covering index `visible_messages_page` | indexed |
 | Pending replay query plan | index `journal_events_pending` | indexed |
 | Database size per message | 636 bytes | not set |
+| Replacement source | 4,589 lines (an earlier 3,654 omitted `journal_dispatch.py` and `matrix/outbound_projection.py`) | smaller than replaced |
+| Replaced owners | 15,870 lines | — |
+| Projected net change | −12,216 lines projected, while the branch then stood at +2,624 | materially net negative once the old owners are deleted |
 
 The nine-boundary crash matrix, from before the journal commit to after acknowledgement but before settlement, produced one terminal turn and at most one visible response at every boundary.
 

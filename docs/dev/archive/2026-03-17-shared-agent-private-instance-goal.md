@@ -18,7 +18,7 @@ Users should not have to wire workspace-relative paths, link context files to ru
 
 - The public config describes intent, not plumbing: one agent-local concept for requester-private state, higher-level than workspace path settings.
   Low-level workspace machinery stays an implementation detail and must not become a second source of truth for runtime scope or state-root decisions.
-- The public surface is named `private`; renaming it to `requester_state` was rejected.
+- The public surface stays named `private`; renaming it to `requester_state` was out of scope.
 - `worker_scope` and `private.per` are different concepts: `worker_scope` controls worker runtime reuse for shared agents, `private.per` partitions requester state for private agents, and `private.template_dir` is only the scaffold source for that state.
   A private agent's internal execution scope is derived from `private.per`, but that derived scope is not a public field, so never describe `private.per` as if it were `worker_scope` or infer or restore one field from the other.
 - Template sources are explicit local directories rather than hidden built-in content, and private context files and private knowledge paths are stated in config rather than inferred from template contents.

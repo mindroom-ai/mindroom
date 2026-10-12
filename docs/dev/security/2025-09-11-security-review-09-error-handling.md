@@ -6,6 +6,7 @@ It keeps the findings still open when re-checked against the code on 2026-10-12.
 ## Raw exception text in error responses
 
 Several instance-lifecycle failures put the caught exception's text in the HTTP 500 detail, so Kubernetes, database, and provider error text, which can name internal resources, constraints, or identifiers, reaches the client, including customers using the instance controls.
+The admin complete account-deletion route (`DELETE /admin/accounts/{account_id}/complete`) does the same with failures from instance uninstall, the `hard_delete_account` RPC, and the auth-user delete.
 FastAPI keeps Python tracebacks out of production responses, so these exception strings are the remaining disclosure path; the fix is a stable public message with the detail kept in server logs.
 
 ## Log redaction is opt-in
