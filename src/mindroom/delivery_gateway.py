@@ -1698,17 +1698,15 @@ class DeliveryGateway:
         )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        failure_reason = "durable Matrix delivery was refused"
         outcome = await self._send_content(request, resolved_target.room_id, content)
-        delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
-        if isinstance(outcome, MatrixDeliveryFailure):
-            failure_reason = _matrix_delivery_failure_reason(outcome)
-        if delivered is not None:
-            self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-            return delivered.event_id
+        if isinstance(outcome, DeliveredMatrixEvent):
+            self.deps.logger.info("Sent response", event_id=outcome.event_id, **resolved_target.log_context)
+            return outcome.event_id
         self.deps.logger.error(
             "Failed to send response to room",
-            error=failure_reason,
+            error=_matrix_delivery_failure_reason(outcome)
+            if isinstance(outcome, MatrixDeliveryFailure)
+            else "durable Matrix delivery was refused",
             **resolved_target.log_context,
         )
         return None
@@ -1757,18 +1755,16 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
-        failure_reason = "durable Matrix edit was refused"
         outcome = await self._edit_content(request, target.room_id, content)
-        delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
-        if isinstance(outcome, MatrixDeliveryFailure):
-            failure_reason = _matrix_delivery_failure_reason(outcome)
-        if delivered is not None:
+        if isinstance(outcome, DeliveredMatrixEvent):
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
-            error=failure_reason,
+            error=_matrix_delivery_failure_reason(outcome)
+            if isinstance(outcome, MatrixDeliveryFailure)
+            else "durable Matrix edit was refused",
             **target.log_context,
         )
         return False

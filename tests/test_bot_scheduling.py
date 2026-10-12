@@ -175,7 +175,6 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     )
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
-    bot.client.add_event_admission_callback = MagicMock()
     bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
     install_runtime_journal_support(bot)
@@ -505,7 +504,6 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
-                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
                 mock_client.user_id = agent_user.user_id
@@ -564,7 +562,6 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
-                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
                 mock_client.user_id = agent_user.user_id

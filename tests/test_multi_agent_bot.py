@@ -449,9 +449,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.has_uncommitted_classic_sync_state = False
         mock_client.next_batch = ""
         mock_client.user_id = mock_agent_user.user_id
         mock_client.device_id = "DEVICEID"
