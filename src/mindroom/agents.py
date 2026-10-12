@@ -1295,9 +1295,12 @@ def apply_tool_approval_capability(
         )
         # A scheduled call runs only with the approval its requester gave when it was scheduled.
         is_scheduled_call_runner = registered_tool_name == "scheduler" and function.name == "run_scheduled_call"
+        # The job controls act only on the caller's own jobs, each of which passed its own approval.
+        is_job_controls = registered_tool_name == "job"
         return (
             not is_matrix_room_runtime_function
             and not is_scheduled_call_runner
+            and not is_job_controls
             and tool_may_require_approval(config, function.name)
         )
 

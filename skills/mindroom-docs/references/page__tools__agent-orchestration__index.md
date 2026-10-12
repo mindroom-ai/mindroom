@@ -249,14 +249,14 @@ A reply that starts after jobs ended is told the same way when it begins.
 Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
 Cancelled jobs and a silent schedule's jobs get no follow-up; the next reply hears of them, and a silent schedule's next run reports its own work.
-At most 20 follow-ups run in a row without a human message; after that, results wait for the next human message, whose reply hears of them.
+Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
 Another requester's reply in a shared room never hears of these results.
 A job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own.
 
 ### The `job` function
 
 The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
-The management function never backgrounds itself.
+The management function never backgrounds itself and never asks for approval, since it acts only on the caller's own jobs.
 Enabling background jobs reserves the function name `job`; custom and plugin tools must use another function name.
 
 | Action | Behavior |

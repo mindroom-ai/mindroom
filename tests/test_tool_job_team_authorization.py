@@ -335,3 +335,23 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
         assert "Member result" in collected
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_job_tool_never_asks_for_approval(tmp_path: Path) -> None:
+    """A team leader's, like an agent's, job tool runs at once even when every call needs approval."""
+    config = managed_team_config(tmp_path)
+    config.tool_approval.default = "require_approval"
+    paths = team_coordinator(tmp_path, config).runtime_paths
+    team = replace(completed_delegation_job().owner, agent_name="team", transport_agent_name="team")
+    runtime = await tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    try:
+        controls = team_job_controls(config, paths, team)
+        assert isinstance(controls, JobTools)
+        job = controls.async_functions["job"]
+        assert job.requires_confirmation is not True
+        assert job.approval_type is None
+    finally:
+        await runtime.shutdown()

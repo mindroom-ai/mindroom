@@ -113,7 +113,7 @@ class JobTools(Toolkit):
                 'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to ask '
                 "one to stop; the next notice says how it ended. "
                 'When told background jobs ended, call job(action="collect") once to read and acknowledge all of them. '
-                "Only the agent that started a job can access it; teams must ask that member to manage it."
+                "You can access the jobs you started; when you answer as a team, also the jobs your members started for it."
             ),
         )
         self.async_functions["job"].owning_toolkit = "job"
