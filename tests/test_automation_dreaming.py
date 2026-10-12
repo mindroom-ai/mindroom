@@ -43,8 +43,8 @@ _CLOCK_START = time.monotonic()
 def _now() -> datetime:
     """Return a clock that starts at noon on TODAY and advances with real time.
 
-    The note names above are fixed at collection, so a clock that never nears midnight keeps them right however long
-    the run takes and whenever it starts, while run IDs taken from it still increase.
+    The note names above are fixed at collection, so a clock that reaches midnight only after twelve hours keeps them
+    right whenever the run starts, while run IDs taken from it still increase.
     """
     return datetime.combine(TODAY, day_time(12), UTC) + timedelta(seconds=time.monotonic() - _CLOCK_START)
 
@@ -445,7 +445,10 @@ def test_a_valid_proposal_is_saved_as_a_patch_and_reviewed_in_a_thread_of_its_ow
     assert "+- Sam moved to Utrecht." in patch_text
 
 
-@pytest.mark.parametrize("path", [TODAY_NOTE, "memory/profile.md", "memory/notes.txt", "MEMORY.md"])
+@pytest.mark.parametrize(
+    "path",
+    [pytest.param(TODAY_NOTE, id="today-note"), "memory/profile.md", "memory/notes.txt", "MEMORY.md"],
+)
 def test_staged_files_outside_what_the_run_may_change_are_findings(tmp_path: Path, path: str) -> None:
     """Today's note, context files, non-Markdown files, and anything outside memory/ stop the run unapplied."""
     workspace = _workspace(tmp_path, context_files=["memory/profile.md"])

@@ -247,10 +247,11 @@ async def test_cancelled_capture_does_not_publish(shell_toolkit: Toolkit, tmp_pa
             mindroom_output_path="cancelled.txt",
         ),
     )
+    pid_file = tmp_path / "process.pid"
     async with asyncio.timeout(10):
-        while not ((tmp_path / "process.pid").exists() and (tmp_path / "process.pid").read_text()):  # noqa: ASYNC110
+        while not (pid_file.exists() and pid_file.read_text()):  # noqa: ASYNC110
             await asyncio.sleep(0.01)
-    pid = int((tmp_path / "process.pid").read_text())
+    pid = int(pid_file.read_text())
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
