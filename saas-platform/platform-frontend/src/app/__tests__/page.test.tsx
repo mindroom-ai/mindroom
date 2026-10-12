@@ -56,7 +56,8 @@ describe('LandingPage', () => {
     render(<LandingPage />)
 
     expect(screen.getByRole('heading', { name: "Your assistant at home, your team's memory at work." })).toBeInTheDocument()
-    expect(screen.getByLabelText('MindRoom product film')).toHaveAttribute('controls')
+    expect(screen.getByLabelText('MindRoom product film').tagName).toBe('VIDEO')
+    expect(screen.getByRole('button', { name: 'Play the MindRoom film' })).toBeInTheDocument()
   })
 
   it('copies the install command from the hero', async () => {
