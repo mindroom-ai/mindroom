@@ -9,6 +9,7 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from agno.exceptions import AgentRunException
@@ -484,131 +485,137 @@ def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
         return False, timer, call, FunctionExecutionResult(status="failure", error=call.error)
 
 
-def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
+def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
     """Wrap one SDK executor with admission, a job-gated call's approval, and exact consumption."""
+    return partial(_execute_call, original, depth=depth)
 
-    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: PLR0911 - Keep admission and cleanup together.
-        context = get_tool_runtime_context()
-        runtime = get_background_runtime(context.runtime_paths) if context is not None else None
-        resources = current_execution_resources()
-        # A call that asks for its approval as its job never runs without becoming one.
-        job_approval = call.function.approval_type == JOB_APPROVAL_TYPE
-        if runtime is None or context is None or resources is None:
-            return _unaskable(call) if job_approval else await original(call)
-        if _is_framework_function(call.function):
-            if job_approval:
-                return _unaskable(call)
-            job_checkpoint()
-            check_current_execution_authority()
-            return await original(call)
-        mode = wait_mode(call.function, depth=depth)
-        if job_approval and mode != "managed":
+
+async def _execute_call(original: _Execute, call: FunctionCall, *, depth: int) -> ToolCallResult:  # noqa: PLR0911 - Each admission outcome returns.
+    """Admit one SDK call: run it inline, as a managed job, or not at all when a job-gated call cannot become one."""
+    context = get_tool_runtime_context()
+    runtime = get_background_runtime(context.runtime_paths) if context is not None else None
+    resources = current_execution_resources()
+    # A call that asks for its approval as its job never runs without becoming one.
+    job_approval = call.function.approval_type == JOB_APPROVAL_TYPE
+    if runtime is None or context is None or resources is None:
+        return _unaskable(call) if job_approval else await original(call)
+    if _is_framework_function(call.function):
+        if job_approval:
             return _unaskable(call)
-        try:
-            wait_timeout = _wait_budget(call, mode=mode, depth=depth)
-        except ValueError as error:
-            return _failed_call(call, error)
-        owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
-        actor = function_actor(call.function)
-        if actor is not None and actor.id:
-            owner = replace(owner, agent_name=actor.id)
         job_checkpoint()
-        with authorized_tool_call(owner, call):
-            try:
-                check_current_execution_authority()
-            except JobAccessError as error:
-                if job_owns_execution():
-                    # A job whose grant no longer covers its nested call fails as a whole.
-                    raise
-                # Access changed after the call was offered, as a reload that removed its toolkit does: the call
-                # fails, not the reply's run.
-                return _failed_call(call, error)
-            if mode != "managed" or call.function.external_execution:
-                return await _execute_inline(original, call, mode=mode)
-        return await managed(
-            call,
-            runtime,
-            context,
-            resources,
-            owner,
-            wait_timeout=wait_timeout,
-            job_approval=job_approval,
-        )
-
-    async def managed(
-        call: FunctionCall,
-        runtime: ToolJobRuntime,
-        context: ToolRuntimeContext,
-        resources: ExecutionResources,
-        owner: ToolExecutionIdentity,
-        *,
-        wait_timeout: float | None,
-        job_approval: bool,
-    ) -> ToolCallResult:
-        """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned."""
-        run_context = function_run_context(call.function)
-        if run_context is None or not run_context.run_id or not call.call_id:
-            msg = "Managed tool execution requires an exact run and tool-call identity"
-            raise ValueError(msg)
-        identity = {"owner": asdict(owner), "run_id": run_context.run_id, "tool_call_id": call.call_id}
-        job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-        adapter = {
-            "run_id": run_context.run_id,
-            "tool_call_id": call.call_id,
-            "arguments": encode_tool_result(call.arguments),
-            "origin": function_provenance(call.function, call.arguments),
-            "authority": function_authority(call.function),
-        }
-        owned_call = isolated_function_call(call)
-        owned_call.arguments = application_arguments(owned_call.arguments)
-        baseline = deepcopy(run_context.session_state or {})
-        # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
-        record_return = await record_call(call.function.name, dict(owned_call.arguments or {}))
-        reference = resources.acquire()
-        approval = _job_approval(runtime, job_id, owned_call, owner, context) if job_approval else None
-
-        claim = None
-        retained = False
+        check_current_execution_authority()
+        return await original(call)
+    mode = wait_mode(call.function, depth=depth)
+    if job_approval and mode != "managed":
+        return _unaskable(call)
+    try:
+        wait_timeout = _wait_budget(call, mode=mode, depth=depth)
+    except ValueError as error:
+        return _failed_call(call, error)
+    owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
+    actor = function_actor(call.function)
+    if actor is not None and actor.id:
+        owner = replace(owner, agent_name=actor.id)
+    job_checkpoint()
+    with authorized_tool_call(owner, call):
         try:
-            _, claim = await runtime.start(
-                job_id,
-                tool_name=call.function.name,
-                depth=depth,
-                toolkit_name=call.function.owning_toolkit,
-                source_event_id=context.membership_turn_id,
-                source_kind=context.source_kind,
-                adapter=adapter,
-                owner=owner,
-                operation=lambda: _run_operation(original, owned_call, owner, baseline, reference, approval),
-                reattach=True,
-            )
-            with Timer() as timer:
-                waited = await runtime.wait(
-                    job_id,
-                    owner=owner,
-                    depth=depth,
-                    timeout=wait_timeout,
-                    claim=claim,
-                    # The reply waits this long for a human decision, then goes on while the job waits for it.
-                    approval_timeout=current_approval_wait_timeout() if job_approval else None,
-                )
-            if waited.claim is None:
-                call.result = format_job_handle(waited.job)
-                response = True, timer, call, FunctionExecutionResult(status="success", result=call.result)
-            else:
-                response = await _consume_result(runtime, waited.job, waited.claim, call, timer)
-                retained = True
-            # A released wait's call returned its job handle, which names the job a restart's account points to.
-            await record_return(call.result if call.error is None else call.error)
+            check_current_execution_authority()
         except JobAccessError as error:
-            # The runtime refused the job, or this caller's wait for it: the call fails, not the reply's run.
-            response = _failed_call(call, error)
-            await record_return(call.error)
-        finally:
-            if not retained:
-                await runtime.release_wait(job_id, claim)
-            if not runtime.owns_execution(job_id, adapter):
-                await reference.release()
-        return response
+            if job_owns_execution():
+                # A job whose grant no longer covers its nested call fails as a whole.
+                raise
+            # Access changed after the call was offered, as a reload that removed its toolkit does: the call
+            # fails, not the reply's run.
+            return _failed_call(call, error)
+        if mode != "managed" or call.function.external_execution:
+            return await _execute_inline(original, call, mode=mode)
+    return await _run_managed_call(
+        original,
+        call,
+        runtime,
+        context,
+        resources,
+        owner,
+        depth=depth,
+        wait_timeout=wait_timeout,
+        job_approval=job_approval,
+    )
 
-    return execute
+
+async def _run_managed_call(
+    original: _Execute,
+    call: FunctionCall,
+    runtime: ToolJobRuntime,
+    context: ToolRuntimeContext,
+    resources: ExecutionResources,
+    owner: ToolExecutionIdentity,
+    *,
+    depth: int,
+    wait_timeout: float | None,
+    job_approval: bool,
+) -> ToolCallResult:
+    """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned."""
+    run_context = function_run_context(call.function)
+    if run_context is None or not run_context.run_id or not call.call_id:
+        msg = "Managed tool execution requires an exact run and tool-call identity"
+        raise ValueError(msg)
+    identity = {"owner": asdict(owner), "run_id": run_context.run_id, "tool_call_id": call.call_id}
+    job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    adapter = {
+        "run_id": run_context.run_id,
+        "tool_call_id": call.call_id,
+        "arguments": encode_tool_result(call.arguments),
+        "origin": function_provenance(call.function, call.arguments),
+        "authority": function_authority(call.function),
+    }
+    owned_call = isolated_function_call(call)
+    owned_call.arguments = application_arguments(owned_call.arguments)
+    baseline = deepcopy(run_context.session_state or {})
+    # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
+    record_return = await record_call(call.function.name, dict(owned_call.arguments or {}))
+    reference = resources.acquire()
+    approval = _job_approval(runtime, job_id, owned_call, owner, context) if job_approval else None
+
+    claim = None
+    retained = False
+    try:
+        _, claim = await runtime.start(
+            job_id,
+            tool_name=call.function.name,
+            depth=depth,
+            toolkit_name=call.function.owning_toolkit,
+            source_event_id=context.membership_turn_id,
+            source_kind=context.source_kind,
+            adapter=adapter,
+            owner=owner,
+            operation=lambda: _run_operation(original, owned_call, owner, baseline, reference, approval),
+            reattach=True,
+        )
+        with Timer() as timer:
+            waited = await runtime.wait(
+                job_id,
+                owner=owner,
+                depth=depth,
+                timeout=wait_timeout,
+                claim=claim,
+                # The reply waits this long for a human decision, then goes on while the job waits for it.
+                approval_timeout=current_approval_wait_timeout() if job_approval else None,
+            )
+        if waited.claim is None:
+            call.result = format_job_handle(waited.job)
+            response = True, timer, call, FunctionExecutionResult(status="success", result=call.result)
+        else:
+            response = await _consume_result(runtime, waited.job, waited.claim, call, timer)
+            retained = True
+        # A released wait's call returned its job handle, which names the job a restart's account points to.
+        await record_return(call.result if call.error is None else call.error)
+    except JobAccessError as error:
+        # The runtime refused the job, or this caller's wait for it: the call fails, not the reply's run.
+        response = _failed_call(call, error)
+        await record_return(call.error)
+    finally:
+        if not retained:
+            await runtime.release_wait(job_id, claim)
+        if not runtime.owns_execution(job_id, adapter):
+            await reference.release()
+    return response
