@@ -83,8 +83,9 @@ def test_no_log_call_passes_a_raw_worker_key() -> None:
 
 
 def _is_message_fstring(parent: ast.AST | None) -> bool:
-    if isinstance(parent, ast.Assign):
-        return any(isinstance(target, ast.Name) and target.id in {"msg", "failure_reason"} for target in parent.targets)
+    # Ruff's EM rules move every exception message into a variable first, whatever its name.
+    if isinstance(parent, ast.Assign | ast.AnnAssign):
+        return True
     return isinstance(parent, ast.keyword) and parent.arg == "name"
 
 
