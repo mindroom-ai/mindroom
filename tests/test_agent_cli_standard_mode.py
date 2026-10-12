@@ -12,18 +12,21 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import agents, ai
-from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent
+from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, _cli_callable
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools.job import JobTools
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_agent_cli_shell_access import running_api  # noqa: F401 - pytest fixture
+from tests.tool_job_helpers import job_owner
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -232,6 +235,12 @@ async def test_approval_gated_tools_stay_native_only(
     listing = _tool_output(provider).replace(" ", "")
     assert '"function":"subtract"' in listing, listing
     assert '"function":"add"' not in listing, listing
+
+
+def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:
+    """A job read through the CLI is never saved as the reply's own call, so the reply reads its jobs directly."""
+    job = JobTools(test_runtime_paths(tmp_path), job_owner()).get_async_functions()["job"]
+    assert not _cli_callable(job)
 
 
 @pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
