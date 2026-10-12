@@ -68,6 +68,10 @@ Several fixes over-corrected past the defect they targeted and produced somethin
 | A cancelled ledger write | Roll the in-memory record back on cancellation | The cancelled write could already have committed |
 | A cancellation right after an approval card was sent orphaned the card | Shield the durable write | `asyncio.shield` lets the write land but delivers the cancellation first, so the expiry ran before the row existed and the cancelled approval was recorded as approved; a detached task that records and then expires the card is the fix |
 
+One obvious fix was tried and reverted before it shipped: making hydration the only proof of freshness (`return not await conversation_is_hydrated(...)`).
+Non-blocking reads never hydrate, so every dispatch read stayed degraded forever and the dispatch-safe read collapsed into a strict one; eleven tests failed, including one that asserts a command must not block on a strict read.
+The fix had to make hydration happen on the dispatch path, with a first read that reports degraded while hydrating in the background, instead of only making the predicate stricter.
+
 Before committing a fix, state the mirror-image input, the same events reversed or the benign server response with the same shape, and say which way each choice fails; prefer the direction that degrades, because hydration and delivery run once per something and a hard failure there does not heal.
 For the first three rows a twenty-line probe against a temporary SQLite store settled each case in under a minute and disagreed with the reasoning every time.
 For the device, final-edit, and ledger rows the second attempt was simpler than the first: read the room, send nothing, wait for the write to report.
@@ -164,6 +168,19 @@ The whole-tree figures include deleted tests and tooling; the production line an
 
 `matrix/cache/` was 12,441 lines in 29 files and `event_journal/` was 6,295 in 19 while doing strictly more, and the tree held 328 fewer functions than `main`.
 Mid-branch figures were wrong in both directions, from +3,940 while replacements landed ahead of the deletions to a claimed −8,258 that was 3,161 lines off by the merge, so re-measure rather than quote a figure taken before the tip.
+
+## How the work was verified
+
+These process lessons kept catching real defects and are not visible in the diff.
+
+- Every fix was pinned by reverting the production change and confirming the matching test failed.
+  Several tests that looked like coverage pinned the defect instead: one blanked an outbox row's device without changing it, so no duplicate was reachable, and another injected the binder it claimed to exercise.
+- A mutation result lied in four ways: a concurrent agent rewrote the file before the mutant ran (verify the patch by checksum first), a syntax error made pytest exit 4 with zero failures (read the exit code), a `^FAILED` grep missed colourised lines (grep unanchored), and the test could not reach the mutated seam (a property spanning a decision and its transport needs a mutation at each).
+- Review findings were verified before acting, because some were wrong in ways that made things worse: commit-then-publish for the ledger would have traded a rare duplicate after a failed write plus restart for a common one during any in-flight write, and a publish-before-commit window was called a regression although `origin/main` had a larger one.
+- Each phase had to delete its predecessor and leave the tree smaller, so a green, well-tested approval-card change that added 68 net lines was held back, and a write path with no producer had to be wired or deleted.
+- Building against the real nio branch, not tracing consumers by hand, showed that `persist_recovery=True` is required: nio refuses an acknowledgement past an open gap unless the gap row outlives the process, so with it false every certified response raises `LocalProtocolError`.
+- Verify with a clean working tree: a marker registered only in an uncommitted `pyproject.toml` made seven tests pass locally that would have failed in CI.
+- Parallel agents collided in git, not code: `git commit` commits the whole index, so one agent's commit swept in other agents' files, and `pre-commit` stashing unstaged files reverted another agent's restore; separate worktrees, or explicit file ownership in a shared one, avoid both.
 
 ## Limitations accepted at the cutover
 

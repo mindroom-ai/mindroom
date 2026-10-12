@@ -23,7 +23,7 @@ A standalone summary prompt over a serialized transcript, which portable compact
 
 ## Outcome
 
-The idea was built twice and closed unmerged: PR #1276, then PR #2059, which PR #2069 superseded with native provider compaction and a portable text fallback.
+The idea was built three times and closed unmerged each time: PR #861, PR #1276, then PR #2059, which PR #2069 superseded with native provider compaction and a portable text fallback.
 A live canary test on PR #1276 showed that a compaction instruction appended as a user message cannot override the agent's own system instructions: a system-prompt canary token was copied into the persisted summary.
 PR #2059 measured the warm request at 14,574 input tokens, 14,336 of them cached, against 8,533 uncached tokens for the standalone request, and the warm request was slower (5.84 s against 4.32 s).
 

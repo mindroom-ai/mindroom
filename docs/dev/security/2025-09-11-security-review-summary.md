@@ -14,7 +14,7 @@ Each report holds its category's assumptions, decisions, and open findings; this
 ## Decisions
 
 - The review recommended restricted staging with trusted testers and no public exposure until the review set is revalidated and the open findings close.
-- The production blockers were, in priority order, a verified rotation of platform secrets with confirmed revocation of the provider keys leaked into the Git history ([03](2025-09-11-security-review-03-secrets.md)), alert routing and incident response ([11](2025-09-11-security-review-11-monitoring.md)), platform pod hardening together with a decision on internal TLS ([06](2025-09-11-security-review-06-infrastructure.md)), and then the remaining high and medium findings.
+- The production blockers were, in priority order, a verified rotation of platform secrets with confirmed revocation of the provider keys leaked into the Git history ([03](2025-09-11-security-review-03-secrets.md)), alert routing and incident response ([11](2025-09-11-security-review-11-monitoring.md)), platform pod hardening together with a decision on internal TLS ([06](2025-09-11-security-review-06-infrastructure.md)), and then the remaining open findings in the category reports.
 - Internal TLS or mTLS was treated as optional for the first release and a post-launch improvement; the open choice is mTLS or a service mesh versus documented compensating controls.
 - The backend caches verified tokens to avoid a Supabase round-trip per request; the resulting revocation lag is an open finding in [01](2025-09-11-security-review-01-auth.md).
 - A bug bounty waits until monitoring and incident response are mature, and an external audit or penetration test follows remediation, before public release.

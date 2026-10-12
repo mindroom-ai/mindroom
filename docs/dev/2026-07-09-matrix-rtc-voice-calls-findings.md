@@ -37,6 +37,7 @@ Repro tricks: seed the session through the localStorage key `mindroom_multi_acco
 
 - Against production MatrixRTC on mindroom.chat, `tests/manual/scratch/live_agent_speaking_test.py` passed all six legs with the realtime backend on 2026-07-09 and the cascaded backend on 2026-07-10: the agent greeted aloud, understood a spoken question, ran the real `multiply` tool, spoke the answer 345, and wrote the transcript and memory reference.
   The cascaded run also kept a natural sentence pause within one user turn.
+  At the last documented deployment check, production still ran mindroom-nio 0.25.2, so encrypted-room hearing was not active there; unencrypted rooms worked fully.
 - On 2026-07-09 a user created a Cinny Voice Room, invited Mind, and held a spoken conversation with it.
 - `tests/manual/matrix_rtc_live_smoke.py` passed every stage against production: well-known discovery, OpenID, LiveKit JWT, and SFU signaling.
 - In the deployed snapshot, the voice agent received Mind's real chat system prompt (51k characters, rendered identically to chat) and its 23 then-visible tools.
@@ -46,3 +47,4 @@ Repro tricks: seed the session through the localStorage key `mindroom_multi_acco
 - `defaults.max_preload_chars` (50k) truncated about 37k characters of Mind's context files, USER.md among them.
   This affects chat too, but chat masks it with thread history, while a cold call session has none.
   Decide whether to raise the cap, harden the voice-call guidance against gpt-realtime's "can't reveal memories" reflexes, or both.
+- As of 2026-07-14, hearing in encrypted rooms was proven only by `tests/test_matrix_rtc_e2ee_roundtrip.py` and had not been validated in a live call.

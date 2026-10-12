@@ -23,3 +23,4 @@ It covers which guarantees the redesign kept, weakened, or deliberately dropped,
   This was accepted on the condition that the degradation stays measurable, which is why the `follow_up_missed_combined_turn` log event exists.
 - Two idle fires into one conversation at the same moment, such as overlapping scheduled fires or a zero-debounce deferred voice burst, may become a turn plus a follow-up instead of one merged turn.
 - Failed voice transcription is not required to split the surrounding texts into separate batches; the surviving texts follow normal conversation identity and batching.
+- Neither of the last two allowances materialized when the redesign shipped: the deferred room-scope voice burst still dispatches as one turn, overlapping scheduled fires still buffer behind the first, and failed room voice still leaves surviving roots uncoalesced, so the tests kept those stronger assertions.

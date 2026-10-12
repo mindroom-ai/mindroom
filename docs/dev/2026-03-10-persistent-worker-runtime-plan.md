@@ -52,7 +52,7 @@ Users talk to one visible agent with one prompt, model, tool config, and Matrix 
 
 ## Open gaps
 
-- Enabling `user` and `user_agent` agents on `/v1`, which needs a trusted authenticated principal.
+- Enabling `user` and `user_agent` agents on `/v1`: API keys can bind to a requester, but `/v1` still serves only unscoped and `shared` agents.
 - Choosing the concurrent-writer-safe storage or strategy for agent-owned files that several runtimes mutate.
 - Fleet-level metrics are missing: worker creation and reuse counts, startup latency, idle evictions, execute requests by tool and scope, and credential lease issuance and expiry.
   The workers API serves debugging, not fleet observability.

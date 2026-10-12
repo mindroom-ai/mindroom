@@ -32,7 +32,7 @@ Users should not have to wire workspace-relative paths, link context files to ru
 ## Non-goals and limitations
 
 - A worker-scoped shared agent does not automatically get private copies of its context files.
-- `/v1` is shared-only and has no requester isolation.
+- This work did not add requester isolation to `/v1`, which served only shared agents.
 - Configured teams cannot include private agents, directly or through members that delegate to them.
 
 ## Acceptance check

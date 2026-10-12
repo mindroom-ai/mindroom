@@ -140,13 +140,16 @@ The user-visible history behavior is on [Conversation history](../configuration/
 
 - Nothing durable records that history cleanup is owed: every response derives it from the tombstones, so a crash between tombstone and cleanup, or a redacted event no turn owns, needs no recovery path.
 - Approval creation and source-redaction admission serialize, so an approval cannot acquire a source that a deletion already settled.
-- Redacted replay can stay in local session storage until its history scope next serves a response, because approval continuations, manual compaction, and voice-call turns do not run the check.
+- Redacted replay can stay in local session storage until its history scope next serves a response, because cleanup runs only then.
+  Approval continuations, manual compaction, and voice-call turns do not run the check either.
 - Semantic memory backends such as Mem0 keep their own lifecycle and are not changed by this cleanup.
 
 ## Approval Event Client Contract
 
 Clients consume approval events under these rules, which this repository's code cannot enforce:
 
+- Policy approval events eligible for timed grants expose a canonical `approval_scope` with an opaque scope ID, entity, invoking agent, and concrete operation, including the MCP server and remote tool when applicable; one-shot-only approvals omit it and stay individually reviewable.
+- Approved calls carry immutable `approval_provenance`: `kind: once`, or `kind: timed_grant` with grant ID, originating card, granting user, decision time, duration, and fixed expiry.
 - Clients associate approval history with the paused response through `response_event_id`, never by tool names or argument similarity.
 - Clients render compact history from the original event plus its latest same-sender terminal edit, taking complete argument evidence from the original, inline or as its Matrix attachment, because terminal edits omit it.
 - Only the originating grant card carries mutable auto-approval controls, and revocation or expiry never changes the historical authorization of calls the grant covered.

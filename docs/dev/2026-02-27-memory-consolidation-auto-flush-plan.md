@@ -23,7 +23,7 @@ This record explains why file memory is the primary backend and why auto-flush e
 
 - Cross-thread memory is eventually consistent: a fact is often available by the next turn, and sometimes within the same turn if the flush finishes quickly.
 - A session's change is detected only by its last-update time, with no per-message cursor, so a backlog larger than one extraction window is not processed incrementally across cycles; each changed session re-extracts only its newest bounded window.
-- Boot does not reset a persisted in-flight mark, so a session whose flush was interrupted by a crash is skipped until stale cleanup drops its entry.
+- Boot does not reset a persisted in-flight mark, so a session whose flush was interrupted by a crash is skipped until it goes `stale_ttl_seconds` without a new turn and stale cleanup drops its entry; a session that stays in use is skipped indefinitely, because every turn refreshes its last-seen time and keeps the mark.
 
 ## Not implemented
 

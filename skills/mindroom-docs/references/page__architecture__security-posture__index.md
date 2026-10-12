@@ -30,7 +30,7 @@ Runners and dedicated workers never receive the primary's config file, its direc
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
-The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so records the primary treats as authority, such as room and invite ledgers and the primary's copy of each private-instance owner record, live below the primary-only `tracking/` directory instead.
+The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, and the primary's copy of each private-instance owner record, together with their locks.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 
 ### Workspace mounts by worker scope

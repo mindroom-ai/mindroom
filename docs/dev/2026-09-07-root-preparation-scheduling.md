@@ -1,6 +1,6 @@
 # Independent root preparation
 
-This record covers the September 2026 decision to let independent new conversations in a threaded room prepare concurrently, up to eight at a time per bot.
+This record covers the September 2026 decision to let independent new conversations in a threaded room prepare concurrently, up to eight preparations at a time per bot; the bound covers preparation, not the number of running model replies.
 It also keeps the 200-conversation capacity controls and the startup-throughput investigation that measured what the change did and did not fix.
 
 ## Why

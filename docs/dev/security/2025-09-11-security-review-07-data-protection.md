@@ -13,6 +13,10 @@ It keeps the payment-data invariant and the findings still open when re-checked 
 
 Without column-level encryption, personal data, including Stripe webhook payloads that can carry invoice contact details, depends entirely on the hosted Supabase database for encryption at rest, and no evidence that it is enabled has been recorded.
 
+### Webhook payloads have no retention limit
+
+No cleanup job removes `webhook_events` rows, and deleting an account only clears their `account_id`, so stored Stripe payloads, which can carry invoice contact details, outlive the account with no documented retention period.
+
 ### Compliance work outside the code
 
 The repository has no breach-notification procedure, data protection impact assessment, or documented lawful basis for processing.

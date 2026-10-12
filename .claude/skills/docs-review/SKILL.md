@@ -21,7 +21,7 @@ Focus on things that require judgment:
 2. **Completeness**: Are there undocumented features, config options, user-visible behaviors, or operator procedures?
    In user docs, internal limits, hardening, and failure or recovery paths are gaps only when a user would plausibly ask about them; `docs/architecture/` pages keep the inventories AGENTS.md requires complete.
 3. **Relevance**: Does every sentence in user docs pass the Documentation Policy, or does it describe implementation mechanics or change history?
-   `docs/architecture/` pages and the design records in `docs/dev/` hold only what the code cannot show (reasons, assumptions, external constraints, rejected alternatives, evidence, limitations, open questions); a sentence there that describes what the code does is a finding.
+   `docs/architecture/` pages and the design records in `docs/dev/` hold only what the code cannot show, as the AGENTS.md Documentation Policy lists; outside the inventories AGENTS.md requires, a sentence there that describes what the code does is a finding.
 4. **Clarity**: Would a MindRoom agent answering a user question find and apply this? Are examples realistic?
 5. **Consistency**: Do different docs contradict each other or repeat the same fact?
 6. **Freshness**: Has the code changed in ways the docs don't reflect?
@@ -69,7 +69,7 @@ git ls-files "src/mindroom/**/*.py"
 
 Check `docs/architecture/`, including the module rows in `docs/architecture/code-map.md`:
 - Listed modules exist and descriptions match what the code does
-- No important source modules are missing from the code map; the other `docs/architecture/` pages record reasons and invariants, not modules or data flow
+- No important source modules are missing from the code map; the other `docs/architecture/` pages record reasons, invariants, and required inventories, not module walkthroughs or data flow
 
 ### 4. Verify Feature Docs Against Implementation
 
