@@ -333,6 +333,60 @@ async def test_worker_respects_batch_limits(
 
 
 @pytest.mark.asyncio
+async def test_worker_start_releases_a_flush_interrupted_by_a_crash(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session whose flush was in flight when the process died is flushed again after restart."""
+    storage_path = tmp_path
+    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
+    state_file = storage_path / "memory_flush_state.json"
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    payload["sessions"]["general:s1"]["in_flight"] = True
+    state_file.write_text(json.dumps(payload), encoding="utf-8")
+    # A later turn marks the session dirty again and must not keep the stale mark alive forever.
+    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
+
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this important decision")],
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+    writes: list[str] = []
+
+    def _fake_append_daily_memory(content: str, agent_name: str, **_: object) -> dict[str, str]:
+        writes.append(f"{agent_name}:{content}")
+        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
+
+    worker: MemoryAutoFlushWorker
+
+    def _config_then_stop() -> Config:
+        worker.stop()
+        return config
+
+    worker = MemoryAutoFlushWorker(
+        storage_path=storage_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=_config_then_stop,
+    )
+    await asyncio.wait_for(worker.run(), timeout=10)
+
+    assert len(writes) == 1
+    session_state = json.loads(state_file.read_text(encoding="utf-8"))["sessions"]["general:s1"]
+    assert session_state["in_flight"] is False
+
+
+@pytest.mark.asyncio
 async def test_worker_session_load_does_not_block_the_event_loop(
     tmp_path: Path,
     config: Config,

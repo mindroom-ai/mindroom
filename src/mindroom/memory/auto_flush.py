@@ -487,6 +487,22 @@ async def _extract_memory_summary(
     return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
 
 
+def _release_interrupted_flushes(storage_path: Path) -> None:
+    """Clear in-flight marks a stopped process left behind, because only a running worker can own a flush.
+
+    Without this, a crash mid-flush leaves the mark set, and every later turn keeps it, so a session that stays in
+    use is never flushed again.
+    """
+    with _STATE_LOCK:
+        state = _read_state_unlocked(storage_path)
+        interrupted = [entry for entry in state["sessions"].values() if entry.get("in_flight", False)]
+        if not interrupted:
+            return
+        for entry in interrupted:
+            entry["in_flight"] = False
+        _write_state_unlocked(storage_path, state)
+
+
 def _retry_cooldown_seconds(settings: MemoryAutoFlushConfig, failures: int) -> int:
     if failures <= 0:
         return settings.retry_cooldown_seconds
@@ -514,6 +530,7 @@ class MemoryAutoFlushWorker:
 
     async def run(self) -> None:
         """Run periodic auto-flush cycles until stopped."""
+        _release_interrupted_flushes(self.storage_path)
         _WAKE_EVENTS.add(self._wake_event)
         try:
             while not self._stop_event.is_set():
