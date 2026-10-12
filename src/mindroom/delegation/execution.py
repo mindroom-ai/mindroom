@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
 from agno.db.base import BaseDb
@@ -667,6 +667,10 @@ async def _background_child_outcome(
     output_request: ToolOutputFileRequest | None = None,
 ) -> BackgroundOutcome:
     """Keep child execution, approvals, liveness and settlement owned by its background job."""
+
+    def finished(status: Literal["completed", "failed", "cancelled", "denied"], text: str) -> BackgroundOutcome:
+        return delegation_outcome(status, _finalize_delegation_output(text, output_request))
+
     run = partial(
         _run_child,
         child,
@@ -719,12 +723,9 @@ async def _background_child_outcome(
                     error=str(cleanup_error),
                     exc_info=True,
                 )
-                return delegation_outcome(
+                return finished(
                     "failed",
-                    _finalize_delegation_output(
-                        f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
-                        output_request,
-                    ),
+                    f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
                 )
         try:
             receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
@@ -737,39 +738,35 @@ async def _background_child_outcome(
                 error=str(settlement_error),
                 exc_info=True,
             )
-            return delegation_outcome(
+            return finished(
                 "failed",
-                _finalize_delegation_output(
-                    f"{primary_error}\n\n"
-                    f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
-                    output_request,
-                ),
+                f"{primary_error}\n\n"
+                f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
             )
         status = child.status
         assert status != "running"
         assert status != "paused"
-        return delegation_outcome(
-            status,
-            _finalize_delegation_output(_child_result_text(child, receipt), output_request),
-        )
+        return finished(status, _child_result_text(child, receipt))
 
 
-async def _settle_background_wait(
+def _forget_child(state: DelegationState, child: DelegationChild) -> None:
+    state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
+
+
+async def _detach_from_job(
     state: DelegationState,
     child: DelegationChild,
-    result: str,
     *,
     hook_state: DelegationHookState,
     persist: Callable[[DelegationState], Awaitable[None]],
-    resolve_result: Callable[..., str],
     config: Config,
     runtime_paths: RuntimePaths,
+    result: str | None,
+    error: BaseException | None = None,
 ) -> None:
-    """Close the parent call with what its wait returned; the child's job keeps owning the child."""
-    # The job already applied the output policy to the child's result.
-    result = resolve_result(result, output_request=None)
-    state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
-    await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
+    """Close the parent call; the child's job keeps owning and settling the child."""
+    _forget_child(state, child)
+    await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result, error=error)
     await persist(state)
 
 
@@ -1137,7 +1134,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if retained is not None:
             if background is not None:
                 # The child's job keeps settling it; this parent call only stops waiting for it.
-                state.children = [item for item in state.children if item.delegation_id != retained.delegation_id]
+                _forget_child(state, retained)
             else:
                 await interrupt_child(
                     retained,
@@ -1228,6 +1225,15 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             persona=target.persona,
         )
         state.children.append(child)
+    detach = partial(
+        _detach_from_job,
+        state,
+        child,
+        hook_state=hook_state,
+        persist=persist,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
     # The liveness claim spans the child's run or job admission and its settlement, so recovery never takes the
     # child mid-failure. A managed wait releases it: the job claims liveness itself while it runs the child, and a
     # parent claim held across the wait would block cancel cleanup.
@@ -1291,16 +1297,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             team=isinstance(response, TeamRunOutput),
                             call_id=tool.tool_call_id or "",
                         ),
-                        settle=partial(
-                            _settle_background_wait,
-                            state,
-                            child,
-                            hook_state=hook_state,
-                            persist=persist,
-                            resolve_result=resolve_result,
-                            config=config,
-                            runtime_paths=runtime_paths,
-                        ),
+                        # The job already applied the output policy to the child's result.
+                        settle=lambda result: detach(result=resolve_result(result, output_request=None)),
                         finished=finished,
                     )
                     return False
@@ -1331,17 +1329,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     return True
             except asyncio.CancelledError:
                 if background is not None and background.has_job(child.delegation_id):
-                    state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
-                    await after_delegation(
-                        hook_state,
-                        config=config,
-                        runtime_paths=runtime_paths,
+                    await detach(
                         result=None,
                         error=asyncio.CancelledError(
                             "Delegation wait cancelled; accepted child remains owned by its job.",
                         ),
                     )
-                    await persist(state)
                     raise
                 await interrupt_stopped_child(child, config=config, runtime_paths=runtime_paths)
                 await after_delegation(
@@ -1355,15 +1348,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 raise
             except Exception as error:
                 if background is not None and background.has_job(child.delegation_id):
-                    state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
-                    await after_delegation(
-                        hook_state,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        result=None,
-                        error=error,
-                    )
-                    await persist(state)
+                    await detach(result=None, error=error)
                     raise
                 await interrupt_child(
                     child,
