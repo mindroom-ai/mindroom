@@ -30,7 +30,7 @@ from mindroom.approval.tool_approval import (
 )
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
-from mindroom.custom_tools.job import JobTools, is_job_function
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     persona_allows,
@@ -1296,12 +1296,9 @@ def apply_tool_approval_capability(
         )
         # A scheduled call runs only with the approval its requester gave when it was scheduled.
         is_scheduled_call_runner = registered_tool_name == "scheduler" and function.name == "run_scheduled_call"
-        # The job controls act only on the caller's own jobs, each of which passed its own approval.
-        is_job_controls = is_job_function(function)
         return (
             not is_matrix_room_runtime_function
             and not is_scheduled_call_runner
-            and not is_job_controls
             and tool_may_require_approval(config, function.name)
         )
 
@@ -1708,12 +1705,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
             )
     controls = _job_controls(
         tools,
-        config,
         runtime_paths,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
-        supports_native_tool_approval=supports_native_tool_approval,
         tool_hook_bridge=tool_hook_bridge,
         output_file_policy=_agent_tool_output_file_policy(
             agent_runtime,
@@ -1935,17 +1930,18 @@ def _build_agent_instructions(
 
 def _job_controls(
     tools: Sequence[Toolkit],
-    config: Config,
     runtime_paths: constants.RuntimePaths,
     owner: ToolExecutionIdentity | None,
     *,
     depth: int,
     enabled: bool,
-    supports_native_tool_approval: bool,
     tool_hook_bridge: Callable[..., Any] | None,
     output_file_policy: ToolOutputFilePolicy | None = None,
 ) -> Toolkit | None:
-    """Build the reserved job toolkit through its caller's approval policy and tool hooks."""
+    """Build the reserved job toolkit behind its caller's tool hooks.
+
+    It never asks for approval: it acts only on the caller's own jobs, each of which passed its own.
+    """
     controls = JobTools.build(
         list(tools),
         runtime_paths,
@@ -1953,12 +1949,6 @@ def _job_controls(
         depth=depth,
         enabled=enabled,
         output_file_policy=output_file_policy,
-    )
-    controls = apply_tool_approval_capability(
-        controls,
-        config,
-        supports_native_tool_approval=supports_native_tool_approval,
-        registered_tool_name="job",
     )
     return None if controls is None else prepend_tool_hook_bridge(controls, tool_hook_bridge)
 
@@ -1977,16 +1967,7 @@ def team_job_controls(
         config=config,
         runtime_paths=runtime_paths,
     )
-    return _job_controls(
-        (),
-        config,
-        runtime_paths,
-        owner,
-        depth=0,
-        enabled=True,
-        supports_native_tool_approval=True,
-        tool_hook_bridge=bridge,
-    )
+    return _job_controls((), runtime_paths, owner, depth=0, enabled=True, tool_hook_bridge=bridge)
 
 
 def _install_background_jobs(
