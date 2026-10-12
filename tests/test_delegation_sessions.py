@@ -181,6 +181,7 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
         system_prompt="You are a critic {x}.",
         tools=("file",),
         skills=("research",),
+        knowledge=("docs",),
     )
     child = _self_child(config, owner, persona)
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)

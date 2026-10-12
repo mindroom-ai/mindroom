@@ -64,7 +64,7 @@ class SubagentPersona:
         skills = data.get("skills", ())
         # LEGACY_COMPAT: Authored subagent personas persisted without knowledge.
         # Legacy format: Persona snapshots in parent delegation state and subagent session records omitted knowledge; an authored child with a tool list had no knowledge search and one without a tool list searched every caller knowledge base.
-        # Last legacy release: v2026.10.256; replacement: the next release persists each persona's knowledge bases, null following its tool list.
+        # Last legacy release: v2026.10.260; replacement: the next release persists each persona's knowledge bases, null following its tool list.
         # Handling: An absent knowledge field reads as null, which follows the tool list exactly as those releases did, so retained authored children and their follow-ups keep their knowledge search.
         # Coverage: tests/test_delegation_sessions.py::test_persona_snapshot_without_knowledge_follows_its_tool_list.
         knowledge = data.get("knowledge")

@@ -362,9 +362,9 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
     profile = _write_profile(
         tmp_path,
         "adder",
-        "---\ndescription: Adds numbers.\ntools: [calculator]\n---\nYou add numbers.\n",
+        "---\ndescription: Adds numbers.\ntools: [calculator]\nknowledge: [docs]\n---\nYou add numbers.\n",
     )
-    config = _config(tools=("calculator", "file"), approval=True)
+    config = _config(tools=("calculator", "file"), approval=True, knowledge_bases=("docs", "faq"))
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     model = _InstructionRecordingModel(
@@ -419,7 +419,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
 
     assert completed.status == RunStatus.completed
     assert model.authored_prompts == ["You add numbers.", "You add numbers."]
-    assert resumed_knowledge == [()]
+    assert resumed_knowledge == [("docs",)]
     assert len(model.offered) == 2
     assert all("add" in offered and "read_file" not in offered for offered in model.offered)
     assert DelegationState.from_metadata(completed.metadata).children[0].persona == SubagentPersona(
@@ -428,7 +428,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
         system_prompt="You add numbers.",
         tools=("calculator",),
         skills=(),
-        knowledge=(),
+        knowledge=("docs",),
     )
 
 
@@ -528,7 +528,18 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_native_authoring_after_the_caller_is_removed_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("arguments", "refusal"),
+    [
+        ({"tools": ["file"]}, "Cannot delegate: unknown tool 'file'. Your tools: none."),
+        ({"knowledge": ["docs"]}, "Cannot delegate: unknown knowledge base 'docs'. Your knowledge bases: none."),
+    ],
+)
+async def test_native_authoring_after_the_caller_is_removed_is_refused(
+    tmp_path: Path,
+    arguments: dict[str, object],
+    refusal: str,
+) -> None:
     """A reload that removes the caller mid-response refuses its authored subagent instead of failing the response."""
     config = _config(tools=("file",))
     paths = _runtime_paths(tmp_path)
@@ -540,7 +551,7 @@ async def test_native_authoring_after_the_caller_is_removed_is_refused(tmp_path:
         result = await _resolve_delegation_target(
             ToolExecution(
                 tool_name="run_subagent",
-                tool_args={"task": "Read.", "system_prompt": "Q", "tools": ["file"]},
+                tool_args={"task": "Read.", "system_prompt": "Q", **arguments},
             ),
             None,
             caller_identity=identity,
@@ -549,7 +560,7 @@ async def test_native_authoring_after_the_caller_is_removed_is_refused(tmp_path:
             depth=0,
         )
 
-    assert result == "Cannot delegate: unknown tool 'file'. Your tools: none."
+    assert result == refusal
 
 
 @pytest.mark.asyncio
