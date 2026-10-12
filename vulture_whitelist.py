@@ -62,7 +62,7 @@ _._refresh_token  # google-auth stores refresh token in a read-only-property bac
 _.exc_text  # logging filter clears cached provider-controlled exception text (src/mindroom/custom_tools/github.py)
 _.stack_info  # logging filter clears provider-controlled stack text (src/mindroom/custom_tools/github.py)
 _.add_session_summary_to_context  # unused attribute (src/mindroom/teams.py)
-set_at  # unused variable (src/mindroom/thread_tags.py, src/mindroom/room_model_overrides.py, src/mindroom/room_thread_modes.py)
+set_at  # unused variable (src/mindroom/thread_tags.py)
 _.__package__  # unused attribute (src/mindroom/tool_system/plugin_imports.py)
 _.__path__  # unused attribute (src/mindroom/tool_system/plugin_imports.py)
 sys_path  # unused variable (src/mindroom/tool_system/plugins.py)

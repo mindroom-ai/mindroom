@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -44,7 +43,7 @@ def _save_overrides(path: Path, overrides: dict[str, OverrideRecord]) -> None:
     write_bounded_override_records(path, overrides, max_records=_MAX_TRACKED_ROOMS)
 
 
-def _get_room_thread_mode_override(runtime_paths: RuntimePaths, room_id: str | None) -> RoomThreadMode | None:
+def resolve_room_thread_mode_override(runtime_paths: RuntimePaths, room_id: str | None) -> RoomThreadMode | None:
     """Return the mode stored for one Matrix room, if any."""
     if room_id is None:
         return None
@@ -57,50 +56,17 @@ def _get_room_thread_mode_override(runtime_paths: RuntimePaths, room_id: str | N
     return cast("RoomThreadMode", mode)
 
 
-@dataclass(frozen=True)
-class _RoomThreadModeOverride:
-    """One room's stored thread mode override."""
-
-    mode: RoomThreadMode | None
-    set_by: str | None = None
-    set_at: str | None = None
-
-
-def get_room_thread_mode_override(runtime_paths: RuntimePaths, room_id: str) -> _RoomThreadModeOverride:
-    """Return one room's full override record."""
-    record = _load_overrides(_store_path(runtime_paths)).get(room_id)
-    if record is None:
-        return _RoomThreadModeOverride(mode=None)
-    mode = record["mode"]
-    if mode not in _VALID_ROOM_THREAD_MODES:
-        return _RoomThreadModeOverride(mode=None)
-    return _RoomThreadModeOverride(
-        mode=cast("RoomThreadMode", mode),
-        set_by=record.get("set_by"),
-        set_at=record.get("set_at"),
-    )
-
-
-def resolve_room_thread_mode_override(runtime_paths: RuntimePaths, room_id: str | None) -> RoomThreadMode | None:
-    """Return one room's active override mode, if present."""
-    return _get_room_thread_mode_override(runtime_paths, room_id)
-
-
 def set_room_thread_mode_override(
     runtime_paths: RuntimePaths,
     *,
     room_id: str,
     mode: RoomThreadMode,
-    set_by: str,
 ) -> None:
     """Persist one room's thread mode override, replacing any previous one."""
     path = _store_path(runtime_paths)
     overrides = _load_overrides(path)
-    overrides[room_id] = {
-        "mode": mode,
-        "set_by": set_by,
-        "set_at": datetime.now(UTC).isoformat(),
-    }
+    # The bounded write keeps the newest records by set_at.
+    overrides[room_id] = {"mode": mode, "set_at": datetime.now(UTC).isoformat()}
     _save_overrides(path, overrides)
 
 

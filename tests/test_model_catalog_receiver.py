@@ -338,7 +338,7 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     paths = runtime_paths_for(config)
     config.models["room"] = ModelConfig(provider="openai", id="room-model")
     config.models["thread"] = ModelConfig(provider="openai", id="thread-model")
-    set_room_model_override(paths, room_id=ROOM, model_name="room", set_by=USER)
+    set_room_model_override(paths, room_id=ROOM, model_name="room")
     set_thread_model_override(
         paths,
         room_id=ROOM,

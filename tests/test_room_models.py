@@ -214,15 +214,14 @@ async def test_room_model_command_show_lists_state_and_available_models(tmp_path
     assert "`large` (openai large-model)" in response
 
 
-def test_room_model_store_scopes_records_by_room_and_preserves_audit_metadata(tmp_path: Path) -> None:
-    """A room override must not leak into another room or lose its author."""
+def test_room_model_store_scopes_records_by_room(tmp_path: Path) -> None:
+    """A room override must not leak into another room."""
     runtime_paths = test_runtime_paths(tmp_path)
 
     set_room_model_override(
         runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     state = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default", "large"})
@@ -233,8 +232,6 @@ def test_room_model_store_scopes_records_by_room_and_preserves_audit_metadata(tm
     )
     assert state.active == "large"
     assert state.stale is None
-    assert state.set_by == "@admin:localhost"
-    assert state.set_at is not None
     assert other_state.active is None
     assert clear_room_model_override(runtime_paths, ROOM_ID) is True
     assert clear_room_model_override(runtime_paths, ROOM_ID) is False
@@ -248,7 +245,6 @@ def test_room_model_overrides_do_not_silently_evict_active_rooms(tmp_path: Path)
             context.runtime_paths,
             room_id=f"!room-{index}:localhost",
             model_name="large",
-            set_by="@admin:localhost",
         )
 
     oldest = resolve_room_model_override(
@@ -269,7 +265,6 @@ def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(
         json.dumps(
             {
                 ROOM_ID: {"model": [], "set_at": "2026-08-15T00:00:00+00:00"},
-                "!bad-time:localhost": {"model": "large", "set_at": 12345},
                 "!removed:localhost": {"model": "removed", "set_at": "2026-08-15T00:00:00+00:00"},
             },
         ),
@@ -277,11 +272,6 @@ def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(
     )
 
     invalid = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default", "large"})
-    invalid_time = resolve_room_model_override(
-        runtime_paths,
-        "!bad-time:localhost",
-        configured_models={"default", "large"},
-    )
     stale = resolve_room_model_override(
         runtime_paths,
         "!removed:localhost",
@@ -289,10 +279,20 @@ def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(
     )
     assert invalid.active is None
     assert invalid.stale is None
-    assert invalid_time.active is None
-    assert invalid_time.stale is None
     assert stale.active is None
     assert stale.stale == "removed"
+
+
+def test_room_model_store_applies_records_that_name_their_setter(tmp_path: Path) -> None:
+    """Records stored with the setter's user ID and time must keep applying."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = _store_path(runtime_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"model": "large", "set_by": "@admin:localhost", "set_at": "2026-08-15T00:00:00+00:00"}
+    path.write_text(json.dumps({ROOM_ID: record}), encoding="utf-8")
+
+    state = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default", "large"})
+    assert state.active == "large"
 
 
 def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,7 +314,6 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     assert (
@@ -365,7 +364,6 @@ async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> Non
         context.runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
     selected_models: list[str] = []
 
@@ -401,7 +399,6 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         context.runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     members = materialize_exact_team_members(
@@ -477,7 +474,6 @@ def test_stale_runtime_room_override_falls_back_to_static_room_model(
         runtime_paths,
         room_id=ROOM_ID,
         model_name="removed",
-        set_by="@admin:localhost",
     )
 
     runtime_model = config.resolve_runtime_model(
@@ -513,8 +509,8 @@ async def test_room_model_command_rejects_non_admin_without_changing_state(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_room_model_command_records_authorizing_sender(tmp_path: Path) -> None:
-    """Bridge-mediated commands must audit the Matrix user satisfying the admin check."""
+async def test_room_model_command_accepts_admin_sender_for_bridged_requester(tmp_path: Path) -> None:
+    """The Matrix sender's room admin power must authorize a bridged requester's command."""
     client = AsyncMock()
     client.room_get_state_event.return_value = _power_levels_response(users={"@bridge-admin:localhost": 100})
     context = _room_model_context(tmp_path, client)
@@ -533,7 +529,6 @@ async def test_room_model_command_records_authorizing_sender(tmp_path: Path) -> 
 
     state = resolve_room_model_override(context.runtime_paths, ROOM_ID, configured_models=context.config.models)
     assert state.active == "large"
-    assert state.set_by == "@bridge-admin:localhost"
 
 
 @pytest.mark.asyncio
@@ -577,7 +572,6 @@ async def test_room_model_command_reports_stale_override(tmp_path: Path) -> None
         context.runtime_paths,
         room_id=ROOM_ID,
         model_name="removed",
-        set_by="@admin:localhost",
     )
 
     await handle_command(

@@ -61,8 +61,7 @@ async def handle_room_model_command(
         if requested.lower() not in _RESET_ARGUMENTS:
             return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
 
-    admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
-    if admin_user_id is None:
+    if await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id)) is None:
         return "❌ Room admin only."
 
     if requested not in config.models:
@@ -73,12 +72,7 @@ async def handle_room_model_command(
             )
         return "This room has no model override."
 
-    set_room_model_override(
-        runtime_paths,
-        room_id=room_id,
-        model_name=requested,
-        set_by=admin_user_id,
-    )
+    set_room_model_override(runtime_paths, room_id=room_id, model_name=requested)
     model = config.models[requested]
     return (
         f"✅ This room now uses `{requested}` ({model.provider} {model.id}) as its model default.\n"

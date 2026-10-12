@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.constants import tracking_dir
@@ -28,7 +27,7 @@ def _store_path(runtime_paths: RuntimePaths) -> Path:
 
 def _is_valid_override(_room_id: str, record: dict[object, object]) -> bool:
     """Return whether one persisted room-model record has the required shape."""
-    return isinstance(record.get("model"), str) and isinstance(record.get("set_at", ""), str)
+    return isinstance(record.get("model"), str)
 
 
 def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
@@ -46,8 +45,6 @@ class _RoomModelOverrideState:
 
     active: str | None
     stale: str | None
-    set_by: str | None = None
-    set_at: str | None = None
 
 
 def resolve_room_model_override(
@@ -63,10 +60,9 @@ def resolve_room_model_override(
     if record is None:
         return _RoomModelOverrideState(active=None, stale=None)
     model_name = record["model"]
-    metadata = {"set_by": record.get("set_by"), "set_at": record.get("set_at")}
     if model_name in configured_models:
-        return _RoomModelOverrideState(active=model_name, stale=None, **metadata)
-    return _RoomModelOverrideState(active=None, stale=model_name, **metadata)
+        return _RoomModelOverrideState(active=model_name, stale=None)
+    return _RoomModelOverrideState(active=None, stale=model_name)
 
 
 def set_room_model_override(
@@ -74,16 +70,11 @@ def set_room_model_override(
     *,
     room_id: str,
     model_name: str,
-    set_by: str,
 ) -> None:
     """Persist one room's model override, replacing any previous one."""
     path = _store_path(runtime_paths)
     overrides = _load_overrides(path)
-    overrides[room_id] = {
-        "model": model_name,
-        "set_by": set_by,
-        "set_at": datetime.now(UTC).isoformat(),
-    }
+    overrides[room_id] = {"model": model_name}
     _save_overrides(path, overrides)
 
 

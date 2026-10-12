@@ -355,7 +355,6 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     response = handle_model_command(
@@ -800,7 +799,6 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
         context.runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     with tool_runtime_context(context):

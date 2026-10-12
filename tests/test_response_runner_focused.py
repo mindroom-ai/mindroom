@@ -5608,7 +5608,6 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     request = _plain_request(_target())
     runtime = await coordinator.prepare_response_runtime(request)
@@ -5616,7 +5615,6 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="default",
-        set_by="@admin:localhost",
     )
     active_models: list[str | None] = []
 
@@ -5703,7 +5701,6 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     original_begin_locked_turn = coordinator._begin_locked_turn
     active_models: list[str | None] = []
@@ -5713,7 +5710,6 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
             coordinator.deps.runtime_paths,
             room_id="!room:localhost",
             model_name="default",
-            set_by="@admin:localhost",
         )
         return await original_begin_locked_turn(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -6136,7 +6132,6 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     request = replace(_plain_request(_target()), scheduled_model=scheduled_model)
     runtime = await coordinator.prepare_response_runtime(request)
@@ -6144,7 +6139,6 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="default",
-        set_by="@admin:localhost",
     )
     active_models: list[str | None] = []
     transport = StreamTransportOutcome(
@@ -7942,7 +7936,6 @@ async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path:
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     active_models: list[str | None] = []
 
