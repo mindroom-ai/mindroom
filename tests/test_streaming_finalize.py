@@ -30,6 +30,7 @@ from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
@@ -200,27 +201,6 @@ async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send
 
 
 @pytest.mark.asyncio
-async def test_completed_terminal_edit_opts_into_sync_recovery_retry(tmp_path: Path) -> None:
-    """Completed terminal delivery should opt into the bounded recovery retry."""
-    streaming = _streaming_response(_config(tmp_path))
-    streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "complete answer"
-    delivered = DeliveredMatrixEvent(
-        event_id="$terminal-edit",
-        content_sent={"body": "complete answer"},
-    )
-    edit = AsyncMock(return_value=delivered)
-
-    with patch("mindroom.streaming.edit_message_result", new=edit):
-        outcome = await streaming.finalize(_client())
-
-    assert outcome.terminal_status == "completed"
-    assert outcome.failure_reason is None
-    edit.assert_awaited_once()
-    assert edit.call_args.kwargs["retry_sync_recovery"] is True
-
-
-@pytest.mark.asyncio
 async def test_a_completed_first_event_answer_goes_through_the_durable_sender(tmp_path: Path) -> None:
     """A stream with no placeholder still owes its answer a durable row.
 
@@ -262,28 +242,6 @@ async def test_a_cancelled_first_event_note_stays_on_the_plain_sender(tmp_path: 
 
     terminal_send.assert_not_awaited()
     plain_send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_cancelled_terminal_sync_recovery_error_does_not_backoff(tmp_path: Path) -> None:
-    """Cancellation notes retain their immediate terminal-delivery semantics."""
-    streaming = _streaming_response(_config(tmp_path))
-    streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "partial answer"
-    edit = AsyncMock(side_effect=nio.SendRetryError("Room timeline recovery is still pending."))
-    sleep_mock = AsyncMock()
-
-    with (
-        patch("mindroom.streaming.edit_message_result", new=edit),
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
-        outcome = await streaming.finalize(_client(), cancelled=True)
-
-    edit.assert_awaited_once()
-    assert edit.call_args.kwargs["retry_sync_recovery"] is False
-    sleep_mock.assert_not_awaited()
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.failure_reason == "cancelled_by_user"
 
 
 @pytest.mark.asyncio
@@ -614,16 +572,17 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recovery(
+async def test_refused_final_edit_stays_owed_until_recovery(
     tmp_path: Path,
     journal_store: EventJournalStore,
 ) -> None:
-    """A retryable barrier keeps the immutable FINAL owed without a competing error edit."""
+    """A refused final edit keeps the immutable FINAL owed without a competing error edit."""
     principal = journal_store.principal("code@alice")
     gateway = _delivery_gateway(tmp_path, principal)
     gateway = replace(gateway, deps=replace(gateway.deps, sending_device_id=lambda: "DEVICE"))
-    barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
-    durable_edit = AsyncMock(side_effect=barrier_error)
+    durable_edit = AsyncMock(
+        return_value=MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup"),
+    )
     failure_edit = AsyncMock(return_value=None)
     with (
         patch("mindroom.delivery_gateway.send_message_outcome", new=durable_edit),
@@ -638,7 +597,7 @@ async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recov
                     identity=ResponseIdentity(
                         response_kind="ai",
                         response_envelope=_envelope(),
-                        correlation_id="corr-persistent-sync-recovery-barrier",
+                        correlation_id="corr-refused-final-edit",
                         sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
                     ),
                     tool_trace=None,
@@ -647,7 +606,6 @@ async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recov
             )
 
     assert durable_edit.await_count == 1
-    assert durable_edit.await_args.kwargs["retry_sync_recovery"] is True
     failure_edit.assert_not_awaited()
     assert outcome.terminal_status == "suspended"
     assert outcome.final_visible_event_id is None
@@ -662,7 +620,6 @@ async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recov
     assert owed.edits_event_id == "$placeholder"
     assert owed.payload["m.new_content"]["body"] == "final answer"
     first_attempt = durable_edit.await_args
-    durable_edit.side_effect = None
     durable_edit.return_value = DeliveredMatrixEvent("$final-edit", content_sent=owed.payload)
     with (
         patch("mindroom.delivery_gateway.send_message_outcome", new=durable_edit),
@@ -671,7 +628,7 @@ async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recov
         await gateway._recovery_worker().flush(delivery_id="$reply", stage=DeliveryStage.FINAL)
     assert durable_edit.await_count == 2
     assert durable_edit.await_args.args == first_attempt.args
-    for key in ("transaction_id", "retry_sync_recovery", "content_is_prepared"):
+    for key in ("transaction_id", "content_is_prepared"):
         assert durable_edit.await_args.kwargs[key] == first_attempt.kwargs[key]
     failure_edit.assert_not_awaited()
     delivered = await gateway.deps.outbox.load_matrix_delivery(delivery_id="$reply", stage=DeliveryStage.FINAL)
@@ -682,17 +639,18 @@ async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recov
 
 
 @pytest.mark.asyncio
-async def test_persistent_sync_recovery_barrier_leaves_a_new_send_owed(
+async def test_refused_final_send_stays_owed(
     tmp_path: Path,
     journal_store: EventJournalStore,
 ) -> None:
-    """An exhausted final-send retry leaves the answer owed to recovery."""
+    """A refused final send leaves the answer owed to recovery."""
     principal = journal_store.principal("code@alice")
     gateway = _delivery_gateway(tmp_path, principal)
-    barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
     with patch(
         "mindroom.delivery_gateway.send_message_outcome",
-        new=AsyncMock(side_effect=barrier_error),
+        new=AsyncMock(
+            return_value=MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup"),
+        ),
     ) as send:
         async with _reply_span(principal):
             outcome = await gateway.deliver_final(
@@ -703,7 +661,7 @@ async def test_persistent_sync_recovery_barrier_leaves_a_new_send_owed(
                     identity=ResponseIdentity(
                         response_kind="ai",
                         response_envelope=_envelope(),
-                        correlation_id="corr-persistent-sync-recovery-send-barrier",
+                        correlation_id="corr-refused-final-send",
                         sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
                     ),
                     tool_trace=None,
@@ -712,7 +670,6 @@ async def test_persistent_sync_recovery_barrier_leaves_a_new_send_owed(
             )
 
     send.assert_awaited_once()
-    assert send.await_args.kwargs["retry_sync_recovery"] is True
     assert outcome.terminal_status == "suspended"
     assert outcome.final_visible_event_id is None
     assert outcome.failure_reason == "delivery_failed"

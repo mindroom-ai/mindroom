@@ -54,9 +54,6 @@ It is scoped to the agent rather than the sync principal, so the proof that a me
 The delivery outbox freezes each send's event type, payload, transaction ID, and sending device before the first attempt.
 After a crash between sending and recording, ordinary responses and tool-approval cards recover through the same worker without posting duplicates, including after a device change.
 
-While nio recovers a limited-sync gap in a room, it rejects sends to that room with `SendRetryError`.
-MindRoom then retries the same prepared payload in place for up to 30 seconds and reports a delivery failure if the gap does not close in time.
-
 See [Room Cleanup](../rooms.md#room-cleanup).
 
 ## Identity Management

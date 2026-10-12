@@ -100,8 +100,6 @@ class _FakeGateway:
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="send", content=dict(content), display_text=content["body"]))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -113,8 +111,6 @@ class _FakeGateway:
         event_id: str,
         new_content: dict[str, Any],
         new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text, event_id=event_id))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
@@ -331,14 +327,12 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
         client: object,
         room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,
     ) -> DeliveredMatrixEvent | None:
         entered.set()
         await release.wait()
         if not accepted:
             return None
-        return await gateway.send(client, room_id, content, retry_sync_recovery=retry_sync_recovery)
+        return await gateway.send(client, room_id, content)
 
     streaming = StreamingResponse(
         target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
@@ -444,8 +438,6 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_content.update(content)
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -544,8 +536,6 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_bodies.append(content["body"])
         streaming.accumulated_text = "Answer buffered while the placeholder is in flight"
@@ -557,8 +547,6 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         _event_id: str,
         new_content: dict[str, Any],
         _new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_bodies.append(new_content["body"])
         return DeliveredMatrixEvent(event_id="$answer-edit", content_sent=dict(new_content))
@@ -620,8 +608,6 @@ async def test_terminal_failure_note_ack_is_visible_but_not_substantive(
         _event_id: str,
         new_content: dict[str, Any],
         _new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         return DeliveredMatrixEvent(event_id="$terminal-edit", content_sent=dict(new_content))
 

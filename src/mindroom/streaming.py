@@ -13,7 +13,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
-from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -1201,7 +1200,6 @@ class StreamingResponse:
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
                 retry_without_backoff=retry_without_backoff,
-                retry_sync_recovery=not is_final or retry_on_failure,
                 is_final=durable_terminal,
                 progress=_progress_state(prepared_delivery.committed_state) if self.durable_reply else None,
             )
@@ -1419,7 +1417,6 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
-        retry_sync_recovery: bool,
         is_final: bool = False,
         progress: ProgressState | None = None,
     ) -> bool:
@@ -1438,7 +1435,6 @@ class StreamingResponse:
                 self.room_id,
                 content,
                 display_text,
-                retry_sync_recovery=retry_sync_recovery,
                 **durable_progress,
             )
         else:
@@ -1446,7 +1442,6 @@ class StreamingResponse:
                 client,
                 self.room_id,
                 content,
-                retry_sync_recovery=retry_sync_recovery,
             )
         if delivered is None:
             return False
@@ -1462,7 +1457,6 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
-        retry_sync_recovery: bool,
         is_final: bool = False,
         progress: ProgressState | None = None,
     ) -> bool:
@@ -1476,7 +1470,6 @@ class StreamingResponse:
                 self.event_id,
                 content,
                 display_text,
-                retry_sync_recovery=retry_sync_recovery,
                 **durable_progress,
             )
         else:
@@ -1486,7 +1479,6 @@ class StreamingResponse:
                 self.event_id,
                 content,
                 display_text,
-                retry_sync_recovery=retry_sync_recovery,
             )
         return delivered is not None
 
@@ -1511,7 +1503,6 @@ class StreamingResponse:
         display_text: str,
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
-        retry_sync_recovery: bool = False,
         is_final: bool = False,
         progress: ProgressState | None = None,
     ) -> bool:
@@ -1530,7 +1521,6 @@ class StreamingResponse:
                         client,
                         content=content,
                         display_text=display_text,
-                        retry_sync_recovery=retry_sync_recovery,
                         is_final=is_final,
                         progress=progress,
                     ):
@@ -1542,14 +1532,11 @@ class StreamingResponse:
                         client,
                         content=content,
                         display_text=display_text,
-                        retry_sync_recovery=retry_sync_recovery,
                         is_final=is_final,
                         progress=progress,
                     ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
-            except SendRetryError:
-                raise
             except Exception:
                 logger.warning(
                     "Streaming update attempt raised an exception",
