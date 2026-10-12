@@ -807,7 +807,7 @@ async def test_mcp_tool_call_during_a_turn_does_not_hand_the_turn_context_to_the
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The SDK keeps each sent call's context for the session's lifetime, and a turn's contextvars hold its Agent."""
+    """The SDK keeps each sent call's context until the session's next message, and a turn's contextvars hold its Agent."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.planned_tool_results = [
