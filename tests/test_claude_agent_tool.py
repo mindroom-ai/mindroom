@@ -51,6 +51,8 @@ class _FakeClaudeSDKClient:
         self.interrupted = False
         self.queries: list[str] = []
         self.set_models: list[str | None] = []
+        self.model = self.options.model
+        self.query_models: list[str | None] = []
         _FakeClaudeSDKClient.instances.append(self)
 
     async def connect(self) -> None:
@@ -58,9 +60,11 @@ class _FakeClaudeSDKClient:
 
     async def set_model(self, model: str | None = None) -> None:
         self.set_models.append(model)
+        self.model = model
 
     async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
         self.queries.append(prompt)
+        self.query_models.append(self.model)
 
     async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
         last_prompt = self.queries[-1]
@@ -595,6 +599,7 @@ async def test_claude_send_switches_a_reused_session_to_each_reply_model(
     [client] = _FakeClaudeSDKClient.instances
     assert client.options.model == "claude-opus-5-5"
     assert client.set_models == ["claude-haiku-5-5", "claude-opus-5-5"]
+    assert client.query_models == ["claude-opus-5-5", "claude-haiku-5-5", "claude-haiku-5-5", "claude-opus-5-5"]
 
 
 @pytest.mark.asyncio
