@@ -117,6 +117,7 @@ class _ClaudeSessionState:
     client: ClaudeSDKClient
     owner: asyncio.Task[None]
     close_requested: asyncio.Event
+    model: str | None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: float = field(default_factory=monotonic)
     last_used_at: float = field(default_factory=monotonic)
@@ -183,6 +184,7 @@ class _ClaudeSessionManager:
                     client=client,
                     owner=owner,
                     close_requested=close_requested,
+                    model=options.model,
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
                 )
                 self._sessions[session_key] = session
@@ -658,6 +660,10 @@ class ClaudeAgentTools(Toolkit):
         async with session.lock:
             session.last_used_at = monotonic()
             try:
+                if session.model != resolved_model:
+                    # A reused session runs each turn on that reply's model, such as an over-budget fallback.
+                    await session.client.set_model(resolved_model)
+                    session.model = resolved_model
                 await session.client.query(trimmed_prompt)
                 response_text, tool_names, turn = await self._collect_response(session)
                 session.last_used_at = monotonic()

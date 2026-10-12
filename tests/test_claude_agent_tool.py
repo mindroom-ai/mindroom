@@ -50,10 +50,14 @@ class _FakeClaudeSDKClient:
         self.connected = False
         self.interrupted = False
         self.queries: list[str] = []
+        self.set_models: list[str | None] = []
         _FakeClaudeSDKClient.instances.append(self)
 
     async def connect(self) -> None:
         self.connected = True
+
+    async def set_model(self, model: str | None = None) -> None:
+        self.set_models.append(model)
 
     async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
         self.queries.append(prompt)
@@ -574,6 +578,23 @@ async def test_claude_send_uses_agent_model_when_tool_model_unset(
 
     options = _FakeClaudeSDKClient.instances[0].options
     assert options.model == "claude-sonnet-5"
+
+
+@pytest.mark.asyncio
+async def test_claude_send_switches_a_reused_session_to_each_reply_model(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+) -> None:
+    """A reused session runs each turn on that reply's model, such as an over-budget fallback."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = RunContext(run_id="run-1", session_id="session-1")
+
+    for model_id in ["claude-opus-5-5", "claude-haiku-5-5", "claude-haiku-5-5", "claude-opus-5-5"]:
+        agent = SimpleNamespace(name="general", model=SimpleNamespace(id=model_id))
+        await tools.claude_send("hello", run_context=run_context, agent=agent)
+
+    [client] = _FakeClaudeSDKClient.instances
+    assert client.options.model == "claude-opus-5-5"
+    assert client.set_models == ["claude-haiku-5-5", "claude-opus-5-5"]
 
 
 @pytest.mark.asyncio
