@@ -18,12 +18,12 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `knowledge_db/` - Knowledge base vector stores
 - `knowledge_git/` - Git data of [Git-backed knowledge bases](../knowledge.md#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
-- `control_state/` - [External trigger](../external-triggers.md) records, unless `MINDROOM_CONTROL_STATE_PATH` points elsewhere
+- `control_state/` - Primary-only control records, such as [external triggers](../external-triggers.md), [background script](../tools/background-scripts.md) runs, and [`matrix_message`](../tools/matrix-message.md#safe-send-retries) send receipts, unless `MINDROOM_CONTROL_STATE_PATH` points elsewhere
 - `credentials/` - Secrets synchronized from `.env`
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `budgets/` - Per-user caps set on the [Budgets](../budgets.md#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
-- `matrix_state.yaml` - Each agent's Matrix account and access token
+- `matrix_state.yaml` - Each agent's Matrix account and access token, the rooms MindRoom manages, and the space room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 - `sync_continuity/` - Per-agent Matrix room joins still in progress, kept across restarts
 

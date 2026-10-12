@@ -300,19 +300,5 @@ Matrix sync callback
 
 ## Persistent State
 
-Persistent state lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
-
-- `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, such as an agent's traces in `agents/<agent>/sessions/<agent>.db`, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `agents/*/learning/` – Per-agent Agno Learning data when learning is enabled
-- `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
-- `knowledge_db/` – Knowledge base vector stores for file-backed RAG
-- `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
-- `credentials/` – JSON secrets synchronized from `.env`
-- `budgets/user_caps.json` – Per-user monthly budget caps set from the dashboard or the budget service
-- `encryption_keys/` – Matrix E2E encryption keys
-- `sync_continuity/` – Crash-atomic pending join/decrypt fences
-- `logs/` – Log files
-- `matrix_state.yaml` – Matrix sync state
-
-These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
-`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
+[Data Persistence](../deployment/storage.md#data-persistence) is the one list of what lives under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
+An agent's Agno session database, including its traces, is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.
