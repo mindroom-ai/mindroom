@@ -525,7 +525,9 @@ class _CallAgentCache:
                 active_model_name=self.active_model_name,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=True,
+                supports_native_tool_approval=True,
                 eager_deferred_tools=True,
+                agent_cli_in_shell=True,
             )
             _refuse_text_chat_functions(agent, self.config)
             prewarm_agent_model_client(agent, history_storage)
@@ -869,8 +871,6 @@ async def _run_authorized_call_agent(
                     config=config,
                     knowledge=knowledge_resolution.knowledge,
                     run_id_callback=recorder.set_run_id,
-                    include_interactive_questions=False,
-                    tool_function_filter=context.tool_function_filter,
                     show_tool_calls=False,
                     run_metadata_collector=run_metadata,
                     execution_identity=execution_identity,
@@ -988,7 +988,7 @@ def _function_requires_async_execution(function: Function) -> bool:
 
 
 def _function_requires_text_chat(function: Function, config: Config) -> bool:
-    """Return whether voice must hide a function with no usable approval UI."""
+    """Return whether a function needs text-chat UI that a voice call lacks."""
     is_matrix_room_runtime_function = (
         function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
     )
@@ -1009,18 +1009,17 @@ def _refuse_text_chat_call(name: str) -> str:
 
 def _refuse_text_chat_functions(agent: AgnoAgent, config: Config) -> None:
     """Keep functions that need text chat visible, so the prompt matches chat's, but refuse them when called."""
-    seen: set[int] = set()
-    for tool in agent.tools if isinstance(agent.tools, list) else ():
-        if isinstance(tool, Toolkit):
-            functions = (*tool.functions.values(), *tool.async_functions.values())
-        elif isinstance(tool, Function):
-            functions = (tool,)
-        else:
+    # MindRoom builds each agent's tools as a list of configured toolkits.
+    for toolkit in agent.tools if isinstance(agent.tools, list) else ():
+        if not isinstance(toolkit, Toolkit):
             continue
-        for function in functions:
-            if id(function) in seen or not _function_requires_text_chat(function, config):
+        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if function.external_execution_silent:
+                # Chat hands delegation to its driver; calls run the child turn directly.
+                function.external_execution = False
+                function.external_execution_silent = False
+            if not _function_requires_text_chat(function, config):
                 continue
-            seen.add(id(function))
             # Agno pauses the run for these flags before any tool hook can refuse.
             function.requires_confirmation = False
             function.requires_user_input = False
@@ -1030,7 +1029,7 @@ def _refuse_text_chat_functions(agent: AgnoAgent, config: Config) -> None:
 
 
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
-    """Return whether the call agent can send Matrix messages; calls hide tools that may need approval."""
+    """Return whether the call agent can send Matrix messages; tools that may need approval are unavailable in calls."""
     return "matrix_message" in config.resolve_entity(agent_name).available_tools and not tool_may_require_approval(
         config,
         "matrix_message",

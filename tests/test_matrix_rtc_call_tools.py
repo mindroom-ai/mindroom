@@ -20,6 +20,7 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.budgets import BudgetsConfig
@@ -38,6 +39,7 @@ from mindroom.matrix_rtc.call_tools import (
     _CallAgentRunState,
     _CallResponseTracker,
     _close_cascaded_call_resources,
+    _refuse_text_chat_call,
     _wrap_agno_function,
     build_call_tools,
     matrix_message_available_during_call,
@@ -180,6 +182,65 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
 
     assert await wrapped({"a": 2, "b": 3}) == "Call access was revoked before this tool could run."
     assert calls == []
+
+
+def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cached call agent exposes chat's functions, so calls reuse chat's prompt cache."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                AGENT: AgentConfig(display_name="Helper", tools=["calculator"], delegate_to=["other"]),
+                "other": AgentConfig(display_name="Other"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test")},
+            tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="add", action="require_approval")]),
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.prewarm_agent_model_client", MagicMock())
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=None,  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name=None,
+    )
+    call_agent = cache._build_agent(knowledge=None, refresh_scheduler=None)
+    chat_agent = create_agent(
+        AGENT,
+        config,
+        runtime_paths,
+        None,
+        session_id="call-session",
+        dynamic_tool_continuation=True,
+        supports_native_tool_approval=True,
+        agent_cli_in_shell=True,
+    )
+
+    def functions(agent: AgnoAgent) -> dict[str, Function]:
+        return {
+            name: function
+            for toolkit in agent.tools
+            for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
+        }
+
+    call_functions = functions(call_agent)
+    assert list(call_functions) == list(functions(chat_agent))
+    assert call_agent.instructions == chat_agent.instructions
+    add = call_functions["add"]
+    assert add.requires_confirmation is False
+    assert add.tool_hooks is not None
+    assert add.tool_hooks[0](name="add") == _TEXT_CHAT_REQUIRED_MESSAGE
+    # Delegation runs the child turn directly in calls instead of pausing for chat's driver.
+    run_subagent = call_functions["run_subagent"]
+    assert run_subagent.external_execution is False
+    assert _refuse_text_chat_call not in (run_subagent.tool_hooks or [])
 
 
 def test_call_agent_cache_closes_history_storage_when_agent_build_fails(
@@ -1012,6 +1073,7 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
         ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
     ]
     contexts: list[ToolRuntimeContext] = []
+    turn_contexts: list[ToolRuntimeContext] = []
     recorded_tool_uses: list[list[str]] = []
     runtime_paths = test_runtime_paths(tmp_path)
     authorization_allowed = True
@@ -1055,6 +1117,7 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
             operation: Callable[[], Awaitable[str]],
         ) -> str:
             assert tool_context.tool_function_filter is not None
+            turn_contexts.append(tool_context)
             return await operation()
 
     async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
@@ -1148,7 +1211,8 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert kwargs["knowledge"] is knowledge
     assert kwargs["execution_identity"] is execution_identity
     assert kwargs["refresh_scheduler"] is refresh_scheduler
-    assert kwargs["include_interactive_questions"] is False
+    assert "include_interactive_questions" not in kwargs
+    assert "tool_function_filter" not in kwargs
     assert kwargs["show_tool_calls"] is False
     assert kwargs["eager_deferred_tools"] is True
     assert kwargs["reusable_agent"] is cached_agent
@@ -1156,6 +1220,8 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     # The cached delegate keeps chat's tools and prompt, so calls reuse chat's prompt cache.
     assert "tool_function_filter" not in create_agent_mock.call_args.kwargs
     assert "include_interactive_questions" not in create_agent_mock.call_args.kwargs
+    assert create_agent_mock.call_args.kwargs["supports_native_tool_approval"] is True
+    assert create_agent_mock.call_args.kwargs["agent_cli_in_shell"] is True
     assert set(toolkit.functions) == {"safe", "confirm", "policy_approval", "run_workflow"}
     assert not safe.tool_hooks
     for refused in (confirm, policy, workflow):
@@ -1243,8 +1309,8 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert persisted_interruptions[-1]["partial_text"] == ("provider failed" if reconcile_spoken_response else "")
     assert persisted_interruptions[-1]["original_status"] is RunStatus.error
 
-    # Agents ai_response builds itself still hide these functions.
-    tool_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
+    # Delegated children and script runs still hide these functions through the turn's runtime context.
+    tool_filter = cast("Callable[[Function], bool]", turn_contexts[0].tool_function_filter)
     confirm_again = _function(lambda: "confirm", empty_schema, name="confirm")
     confirm_again.requires_confirmation = True
     assert tool_filter(_function(lambda: "safe", empty_schema, name="safe")) is True

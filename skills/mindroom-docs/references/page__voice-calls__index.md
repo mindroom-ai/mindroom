@@ -237,7 +237,7 @@ A configured room assignment wins over invites; if several calls-enabled agents 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
 
-Tools that need confirmation, user input, external execution, or [`tool_approval`](https://docs.mindroom.chat/tool-approval/) are hidden during calls in every backend, because a call has no approval UI.
+Tools that need confirmation, user input, external execution, or [`tool_approval`](https://docs.mindroom.chat/tool-approval/) are unavailable during calls in every backend, because a call has no approval UI; the agent tells the caller to use text chat for them.
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
