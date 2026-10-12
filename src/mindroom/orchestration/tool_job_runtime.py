@@ -21,7 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey, ended_jobs
-from mindroom.tool_jobs.follow_ups import follow_up_event_id, follow_up_jobs, follow_up_streak
+from mindroom.tool_jobs.follow_ups import follow_up_jobs, next_follow_up_id
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.publication import JobStatePublisher
@@ -64,28 +64,35 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
     return recipient in config.agents and actor in config.agents
 
 
-def _follow_up_keys(jobs: Iterable[BackgroundJob]) -> list[ConversationKey]:
-    """Return each conversation with ended top-level jobs that may need a follow-up, by its answering entity.
+def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey, tuple[BackgroundJob, ...]]:
+    """Group the ended top-level jobs a follow-up may report by conversation, before checking anyone's access.
 
     A silent schedule's work waits for its next silent run, which opens with the note instead.
     """
-    keys = {
-        ConversationKey(
-            recipient=job.owner.recipient,
-            room_id=job.owner.room_id,
-            thread_id=job.owner.resolved_thread_id,
-            requester_id=job.owner.requester_id,
-            silent=False,
-        )
-        for job in jobs
-        if job.status in TERMINAL_STATUSES
-        and job.depth == 0
-        and not job.consumed
-        and job.owner.room_id is not None
-        and job.owner.requester_id is not None
-        and job.source_kind != SILENT_SCHEDULE_SOURCE_KIND
-    }
-    return sorted(keys, key=lambda key: (key.recipient, key.room_id, key.thread_id or "", key.requester_id))
+    groups: dict[ConversationKey, list[BackgroundJob]] = {}
+    for job in jobs:
+        if (
+            job.status in TERMINAL_STATUSES
+            and job.depth == 0
+            and not job.consumed
+            and job.owner.room_id is not None
+            and job.owner.requester_id is not None
+            and job.source_kind != SILENT_SCHEDULE_SOURCE_KIND
+        ):
+            key = ConversationKey(
+                recipient=job.owner.recipient,
+                room_id=job.owner.room_id,
+                thread_id=job.owner.resolved_thread_id,
+                requester_id=job.owner.requester_id,
+                silent=False,
+            )
+            groups.setdefault(key, []).append(job)
+    candidates = {key: follow_up_jobs(group) for key, group in groups.items()}
+    return {key: candidates[key] for key in sorted(candidates, key=_key_order) if candidates[key]}
+
+
+def _key_order(key: ConversationKey) -> tuple[str, str, str, str]:
+    return (key.recipient, key.room_id, key.thread_id or "", key.requester_id)
 
 
 def _accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:
@@ -354,18 +361,19 @@ class ToolJobRuntimeCoordinator:
         a job a human message started counts none.
         """
         due: set[str] = set()
-        for key in _follow_up_keys(runtime.retained_jobs()):
-            jobs = follow_up_jobs(await ended_jobs(runtime, key))
-            bot = self.bot_provider(key.recipient)
-            if not jobs or bot is None:
-                continue
-            streak = 1 + max(follow_up_streak(job.source_event_id) for job in jobs)
-            follow_up_id = follow_up_event_id(key, jobs, streak)
+        for key, candidates in _follow_up_candidates(runtime.retained_jobs()).items():
+            # Jobs an admitted follow-up already reports need no access check again.
+            follow_up_id = next_follow_up_id(key, candidates)
+            if follow_up_id not in self._admitted_follow_ups:
+                jobs = follow_up_jobs(await ended_jobs(runtime, key))
+                bot = self.bot_provider(key.recipient)
+                if not jobs or bot is None:
+                    continue
+                follow_up_id = next_follow_up_id(key, jobs)
+                if follow_up_id not in self._admitted_follow_ups:
+                    await bot.admit_job_follow_up(key, follow_up_id)
+                    self._admitted_follow_ups.add(follow_up_id)
             due.add(follow_up_id)
-            if follow_up_id in self._admitted_follow_ups:
-                continue
-            await bot.admit_job_follow_up(key, follow_up_id)
-            self._admitted_follow_ups.add(follow_up_id)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
 

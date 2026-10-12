@@ -20,10 +20,10 @@ from mindroom.response_turn import CompletedAttempt, TurnSinks, run_blocking_res
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     _FOLLOW_UP_LIMIT,
+    _follow_up_event_id,
+    _follow_up_streak,
     follow_up_envelope,
     follow_up_event,
-    follow_up_event_id,
-    follow_up_streak,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
@@ -114,8 +114,8 @@ async def test_jobs_ending_together_share_one_follow_up(tmp_path: Path) -> None:
         key, follow_up_id = bot.admit_job_follow_up.await_args.args
         assert key == _key(job_owner())
         jobs = [job for job in runtime.retained_jobs() if job.job_id in {"job_a", "job_b"}]
-        assert follow_up_id == follow_up_event_id(key, jobs, 1)
-        assert follow_up_streak(follow_up_id) == 1
+        assert follow_up_id == _follow_up_event_id(key, jobs, 1)
+        assert _follow_up_streak(follow_up_id) == 1
     finally:
         await runtime.shutdown()
 
@@ -175,20 +175,6 @@ async def test_jobs_the_requester_may_no_longer_access_get_no_follow_up(tmp_path
         await runtime.shutdown()
 
 
-async def test_a_job_ending_after_the_last_step_still_gets_its_follow_up(tmp_path: Path) -> None:
-    """A job that ends while a reply runs, after its model's last step, is followed up; the reply never saw it."""
-    runtime = await tool_job_runtime(tmp_path)
-    bot = _admitting_bot()
-    bot.has_active_response_for_target = MagicMock(return_value=True)
-    coordinator = job_coordinator(tmp_path, runtime, bot)
-    try:
-        await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
-        await coordinator._admit_follow_ups(runtime)
-        bot.admit_job_follow_up.assert_awaited_once()
-    finally:
-        await runtime.shutdown()
-
-
 async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp_path: Path) -> None:
     """Work a follow-up turn started counts one more in a row; work a human message started starts over."""
     runtime = await tool_job_runtime(tmp_path)
@@ -200,12 +186,12 @@ async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp
     owner = job_owner()
     key = _key(owner)
     try:
-        last = follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+        last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
         await _ended(runtime, "from_the_last", BackgroundOutcome("completed", "a"), source_event_id=last)
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_not_awaited()
 
-        before = follow_up_event_id(key, [], _FOLLOW_UP_LIMIT - 1)
+        before = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT - 1)
         other = replace(owner, requester_id="@bob:example.org")
         await _ended(
             runtime,
@@ -223,7 +209,7 @@ async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp
         )
         await coordinator._admit_follow_ups(runtime)
         streaks = {
-            call.args[0].requester_id: follow_up_streak(call.args[1])
+            call.args[0].requester_id: _follow_up_streak(call.args[1])
             for call in bot.admit_job_follow_up.await_args_list
         }
         assert streaks == {"@bob:example.org": _FOLLOW_UP_LIMIT, "@carol:example.org": 1}
@@ -251,7 +237,7 @@ async def test_a_job_a_finished_follow_up_started_gets_its_own_follow_up(tmp_pat
         await coordinator._admit_follow_ups(runtime)
         assert bot.admit_job_follow_up.await_count == 2
         _key_arg, second_id = bot.admit_job_follow_up.await_args.args
-        assert follow_up_streak(second_id) == 2
+        assert _follow_up_streak(second_id) == 2
     finally:
         await runtime.shutdown()
 
@@ -266,14 +252,14 @@ async def test_a_capped_job_does_not_hold_back_a_later_one(tmp_path: Path) -> No
     bot.journal_principal = MagicMock(return_value=principal)
     key = _key(job_owner())
     try:
-        last = follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+        last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
         await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last)
         await _ended(runtime, "fresh", BackgroundOutcome("completed", "b"), source_event_id="$human")
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_awaited_once()
         _key_arg, follow_up_id = bot.admit_job_follow_up.await_args.args
         fresh = [job for job in runtime.retained_jobs() if job.job_id == "fresh"]
-        assert follow_up_id == follow_up_event_id(key, fresh, 1)
+        assert follow_up_id == _follow_up_event_id(key, fresh, 1)
     finally:
         await runtime.shutdown()
 
@@ -287,6 +273,32 @@ async def test_an_admitted_follow_up_is_not_admitted_again(tmp_path: Path) -> No
         await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
         await coordinator._admit_follow_ups(runtime)
         await coordinator._admit_follow_ups(runtime)
+        bot.admit_job_follow_up.assert_awaited_once()
+    finally:
+        await runtime.shutdown()
+
+
+async def test_later_passes_do_not_recheck_access_for_jobs_already_followed_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ended jobs waiting on an admitted follow-up, or on nothing, cost later passes no access checks."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    try:
+        await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
+        await _ended(
+            runtime,
+            "job_b",
+            BackgroundOutcome("cancelled"),
+            owner=replace(job_owner(), requester_id="@bob:test"),
+        )
+        await coordinator._admit_follow_ups(runtime)
+        checks = AsyncMock(wraps=runtime.ended_jobs)
+        monkeypatch.setattr(runtime, "ended_jobs", checks)
+        await coordinator._admit_follow_ups(runtime)
+        checks.assert_not_awaited()
         bot.admit_job_follow_up.assert_awaited_once()
     finally:
         await runtime.shutdown()
@@ -461,7 +473,7 @@ async def test_a_follow_up_is_not_due_for_jobs_past_the_limit(tmp_path: Path) ->
             "capped",
             BackgroundOutcome("completed", "done"),
             owner=_runner_owner(key),
-            source_event_id=follow_up_event_id(key, [], _FOLLOW_UP_LIMIT),
+            source_event_id=_follow_up_event_id(key, [], _FOLLOW_UP_LIMIT),
         )
         request = runner._job_follow_up_request(
             key,

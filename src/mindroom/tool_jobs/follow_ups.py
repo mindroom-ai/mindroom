@@ -29,7 +29,7 @@ def _digest(text: str) -> str:
 _FOLLOW_UP_ID_PREFIX = "job-follow-up:"
 
 
-def follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob], streak: int) -> str:
+def _follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob], streak: int) -> str:
     """Name the follow-up for one set of ended jobs, so admitting it again changes nothing.
 
     The name ends with ``streak``, how many follow-ups in a row it is, so a job its turn starts can count it from the
@@ -38,6 +38,11 @@ def follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob], stre
     conversation = "\n".join((key.recipient, key.room_id, key.thread_id or "", key.requester_id))
     jobs_digest = _digest(",".join(sorted(job.job_id for job in jobs)))
     return f"{_FOLLOW_UP_ID_PREFIX}{_digest(conversation)}:{jobs_digest}:{streak}"
+
+
+def next_follow_up_id(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> str:
+    """Name the follow-up that reports ``jobs``, one more in a row than the longest chain that started them."""
+    return _follow_up_event_id(key, jobs, 1 + max(_follow_up_streak(job.source_event_id) for job in jobs))
 
 
 def follow_up_event(
@@ -74,7 +79,7 @@ def follow_up_key(event: JournalEvent, recipient: str) -> ConversationKey | None
     )
 
 
-def follow_up_streak(source_event_id: str | None) -> int:
+def _follow_up_streak(source_event_id: str | None) -> int:
     """Return how many follow-ups in a row the turn that started a job ends, which is none for a human message."""
     if source_event_id is None or not source_event_id.startswith(_FOLLOW_UP_ID_PREFIX):
         return 0
@@ -112,5 +117,5 @@ def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     human message, without holding back the others.
     """
     return tuple(
-        job for job in jobs if job.status != "cancelled" and follow_up_streak(job.source_event_id) < _FOLLOW_UP_LIMIT
+        job for job in jobs if job.status != "cancelled" and _follow_up_streak(job.source_event_id) < _FOLLOW_UP_LIMIT
     )
