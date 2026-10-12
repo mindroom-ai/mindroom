@@ -30,7 +30,7 @@ A standalone probe reproduced it: one concurrent turn succeeds, and at `min(32, 
 A dedicated executor breaks the cycle but keeps the write-behind queue, which cannot enlist in the caller's transaction, so the ledger write became awaitable instead.
 Only writes were converted (28 call sites) and the hundred-odd reads stayed synchronous over an in-memory map, which is why production changed by only +332/−581.
 
-### Outgoing messages reach the conversation only through their sync echo
+### Outgoing messages are not seeded at send acknowledgement
 
 Seeding the projection at send acknowledgement was built first, for turns that read the conversation after sending and for turns no room event triggered, and then deleted.
 The ordering guarantee decided it, not the absence of such readers: the server orders the bot's own echo before any later message on the same timeline, so a later turn already sees the previous answer.

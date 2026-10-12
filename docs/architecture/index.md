@@ -10,7 +10,7 @@ icon: lucide/layout
 - [Internal Turn CLI](agent-cli.md) - Why minimal-mode CLI calls are owned by one response turn, and how they recover
 - [Agent Orchestration](orchestration.md) - Room setup, session-storage recovery, and runtime replacement rationale
 - [Bot Runtime](bot-runtime.md) - Why the turn runtime is split as it is, the invariants its seams protect, and planned simplifications
-- [Reply Messages](reply-messages.md) - The durable records that own every AI reply, and the rules that change them
+- [Reply Messages](reply-messages.md) - The outcomes the reply design rules out, the decisions behind it, its accepted limitations, and the invariants tests pin
 - [Code Map](code-map.md) - The inbound turn pipeline at module level, key modules and their purpose, and where persistent state lives
 - [Migration and Compatibility Boundaries](migrations.md) - Why historical formats are handled as they are, and which migrations dependencies own
 - [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it

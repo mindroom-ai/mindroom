@@ -20,8 +20,8 @@ The journal owns an actionable source until its answer is durably enqueued in th
 
 ### Nothing outbound enters the conversation before the server orders it
 
-Outgoing messages are not seeded into the projection as provisional content; the sync echo is the only route into conversation content.
-The accepted cost is that a turn reading the conversation immediately after speaking does not see its own message.
+Outgoing messages are not seeded into the projection as provisional content: they enter conversation content only as server-ordered events, through their sync echo or, for edits and interactive prompts, through the server copy fetched when delivery is acknowledged.
+The accepted cost is that a turn reading the conversation immediately after sending a plain message does not see it until the echo arrives.
 
 ### Admission does not wait for the whole outbox
 

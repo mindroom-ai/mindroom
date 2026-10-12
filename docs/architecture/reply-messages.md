@@ -35,7 +35,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 - I-S2. A reply settles its journal sources in the same transaction that marks the turn they index answered when the reply answered them, so a crash cannot leave one without the other.
   Deleted sources, sources that became terminal without an answer, and those of a removed entity or of an approval whose owner is gone settle unanswered.
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
-- I-S3. The outbox is transport for every durable Matrix write, never for streaming progress edits, and commits nothing outside transport for a reply's row.
+- I-S3. The outbox commits nothing outside transport for a reply's outbox row.
 - I-S4. An approval continuation owns consent and the Agno run payload, names its reply through its paused span, and holds no reply or source fact of its own.
 
 ### Claims

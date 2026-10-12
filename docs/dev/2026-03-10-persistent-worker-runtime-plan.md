@@ -14,7 +14,7 @@ Users talk to one visible agent with one prompt, model, tool config, and Matrix 
 - Each non-private agent, and each realized private instance, has exactly one authoritative state root, and `worker_scope` decides only which runtime executes a call and when it is reused, never which files are authoritative.
   This lets two requesters of one non-private agent use different runtimes while sharing that agent's files, and lets an operator change an agent's scope without moving or forking its state.
 - Worker runtimes hold non-authoritative state, such as virtualenvs, caches, scratch files, and provider metadata, so a worker can be evicted, scaled to zero, or recreated from scratch at any time without losing agent state.
-  The one exception is the worker's own credential store, which holds the saved settings of worker-routed tools for `user` and `user_agent` scopes and is deleted when the worker is retired.
+  The one exception is the worker's own credential store, which keeps credentials of services that configure no registered tool and is deleted when the worker is retired; tool settings stay in the primary's stores and reach workers through per-call leases.
 - Requester-, room-, or thread-level distinctions inside durable state belong in record keys or table contents, not in separate filesystem roots per scope.
 - Several runtimes can write one agent's files at once, such as different requesters' `user_agent` workers for one agent.
   Simple workspace files may use last-write-wins when that is acceptable, but agent-owned files that more than one runtime mutates, such as SQLite databases, memory entrypoint files, and structured metadata files, need a storage engine or strategy that tolerates concurrent writers.
