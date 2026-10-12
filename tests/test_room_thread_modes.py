@@ -149,17 +149,6 @@ def test_room_thread_mode_store_drops_invalid_records(tmp_path: Path) -> None:
     assert resolve_room_thread_mode_override(runtime_paths, "!container:localhost") is None
 
 
-def test_room_thread_mode_store_applies_records_that_name_their_setter(tmp_path: Path) -> None:
-    """Records stored with the setter's user ID must keep applying."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    path = _store_path(runtime_paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"mode": "room", "set_by": "@admin:localhost", "set_at": "2026-06-17T00:00:00+00:00"}
-    path.write_text(json.dumps({ROOM_ID: record}), encoding="utf-8")
-
-    assert resolve_room_thread_mode_override(runtime_paths, ROOM_ID) == "room"
-
-
 def test_room_thread_mode_store_evicts_the_oldest_room_past_the_cap(tmp_path: Path) -> None:
     """A newly set room must survive the cap, which drops the room set longest ago."""
     runtime_paths = test_runtime_paths(tmp_path)

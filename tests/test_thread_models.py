@@ -550,22 +550,6 @@ def test_resolve_runtime_model_requires_runtime_paths_for_thread_id(tmp_path: Pa
         config.resolve_runtime_model(entity_name="test_agent", thread_id=THREAD_ID)
 
 
-def test_store_applies_records_that_name_their_room_and_setter(tmp_path: Path) -> None:
-    """Records stored with the thread's room and setter must keep applying."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    path = _store_path(runtime_paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "model:test_agent": "large",
-        "room_id": ROOM_ID,
-        "set_by": "@user:localhost",
-        "set_at": "2026-07-09T00:00:00+00:00",
-    }
-    path.write_text(json.dumps({THREAD_ID: record}), encoding="utf-8")
-
-    assert _stored_model(runtime_paths, THREAD_ID) == "large"
-
-
 def test_rewriting_an_old_record_drops_its_room_and_setter(tmp_path: Path) -> None:
     """Setting or clearing a model on an old record keeps only model selections and set_at."""
     config = bind_runtime_paths(

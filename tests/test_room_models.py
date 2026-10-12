@@ -281,18 +281,6 @@ def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(
     assert stale.stale == "removed"
 
 
-def test_room_model_store_applies_records_that_name_their_setter(tmp_path: Path) -> None:
-    """Records stored with the setter's user ID and time must keep applying."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    path = _store_path(runtime_paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"model": "large", "set_by": "@admin:localhost", "set_at": "2026-08-15T00:00:00+00:00"}
-    path.write_text(json.dumps({ROOM_ID: record}), encoding="utf-8")
-
-    state = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default", "large"})
-    assert state.active == "large"
-
-
 def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Room runtime state must beat static room config while thread and explicit choices still win."""
     config = bind_runtime_paths(

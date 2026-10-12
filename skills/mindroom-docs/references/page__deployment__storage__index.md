@@ -14,7 +14,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `knowledge_db/` - Knowledge base vector stores
 - `knowledge_git/` - Git data of [Git-backed knowledge bases](https://docs.mindroom.chat/knowledge/#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
-- `control_state/` - Primary-only control records, such as [external triggers](https://docs.mindroom.chat/external-triggers/), [background script](https://docs.mindroom.chat/tools/background-scripts/) runs, and [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#safe-send-retries) send receipts, unless `MINDROOM_CONTROL_STATE_PATH` points elsewhere
+- `control_state/` - Primary-only control records, such as [external triggers](https://docs.mindroom.chat/external-triggers/), [background script](https://docs.mindroom.chat/tools/background-scripts/) runs, and [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#safe-send-retries) send receipts, unless [`MINDROOM_CONTROL_STATE_PATH`](https://docs.mindroom.chat/configuration/#environment-variables) points elsewhere
 - `credentials/` - Secrets synchronized from `.env`
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API

@@ -235,7 +235,6 @@ Several volumes and Secrets only work together, so back them up and restore them
 | Tuwunel `<fullname>-data` | Tuwunel chart `storage` | The homeserver's RocksDB database and its `media/` directory |
 
 Back up the sessions volume together with the storage claim.
-[Data Persistence](https://docs.mindroom.chat/deployment/storage/#data-persistence) describes the storage root's directories in more detail.
 
 ### Restore units
 

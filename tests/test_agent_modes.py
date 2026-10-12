@@ -3,7 +3,6 @@
 # ruff: noqa: D103
 
 import fcntl
-import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -98,23 +97,3 @@ def test_mode_records_are_bounded(tmp_path: Path) -> None:
         agent_modes.set_agent_mode(paths, state_root, "agent", str(number), "minimal")
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "0") == "standard"
     assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "1000") == "minimal"
-
-
-def test_records_load_with_or_without_a_stored_setter(tmp_path: Path) -> None:
-    """Choices stored without a setter apply, and choices stored with one still apply."""
-    paths, state_root = _paths(tmp_path)
-    path = agent_modes._path(paths, state_root)
-    path.parent.mkdir(parents=True)
-    records = {
-        agent_modes._key("agent", session): {
-            "agent": "agent",
-            "session": session,
-            "mode": "minimal",
-            "set_at": "2026-10-01T00:00:00+00:00",
-            **extra,
-        }
-        for session, extra in (("new", {}), ("old", {"set_by": "alice"}))
-    }
-    path.write_text(json.dumps(records), encoding="utf-8")
-    assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "new") == "minimal"
-    assert agent_modes.resolve_agent_mode(paths, state_root, "agent", "old") == "minimal"

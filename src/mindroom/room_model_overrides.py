@@ -35,10 +35,6 @@ def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
     return load_cached_override_records(path, _is_valid_override)
 
 
-def _save_overrides(path: Path, overrides: dict[str, OverrideRecord]) -> None:
-    write_override_records(path, overrides)
-
-
 @dataclass(frozen=True)
 class _RoomModelOverrideState:
     """One room's stored override split into active and stale model names."""
@@ -75,7 +71,7 @@ def set_room_model_override(
     path = _store_path(runtime_paths)
     overrides = _load_overrides(path)
     overrides[room_id] = {"model": model_name}
-    _save_overrides(path, overrides)
+    write_override_records(path, overrides)
 
 
 def clear_room_model_override(runtime_paths: RuntimePaths, room_id: str) -> bool:
@@ -85,5 +81,5 @@ def clear_room_model_override(runtime_paths: RuntimePaths, room_id: str) -> bool
     if room_id not in overrides:
         return False
     del overrides[room_id]
-    _save_overrides(path, overrides)
+    write_override_records(path, overrides)
     return True

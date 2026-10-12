@@ -300,5 +300,5 @@ Matrix sync callback
 
 ## Persistent State
 
-[Data Persistence](../deployment/storage.md#data-persistence) is the one list of what lives under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
+[Data Persistence](../deployment/storage.md#data-persistence) lists the main directories under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
 An agent's Agno session database, including its traces, is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.
