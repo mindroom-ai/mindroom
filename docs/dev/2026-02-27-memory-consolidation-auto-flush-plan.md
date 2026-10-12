@@ -28,4 +28,4 @@ This record explains why file memory is the primary backend and why auto-flush e
 ## Not implemented
 
 - Cursor-based backlog chunking, which would remove the extraction-window limitation above.
-- The optional curation pass: auto-flush only appends to dated daily notes, and this pass would promote durable facts from them into the curated `MEMORY.md`, append-only and under strict caps.
+- The optional curation pass that would have promoted durable facts from daily notes into `MEMORY.md` was superseded: the `dreaming` automation promotes them into `memory/` topic files and never edits `MEMORY.md`.

@@ -96,6 +96,8 @@ One nio test pinned the old behaviour and was changed deliberately, because the 
 
 ### Other findings
 
+- Moving the final-text transform into terminal delivery first failed as `assert None == '$stream_1'`: the module-level streaming entry point forwarded an explicit keyword list to `streaming_cls(...)` and rejected `final_text_transform`, and the delivery reported `FinalDeliveryOutcome(terminal_status='error', event_id=None)` instead of raising, so a `TypeError` read as a missing event ID.
+  Blaming missing `response_hooks` on the test doubles was an inference and was wrong; read the traceback before re-deriving the wiring.
 - nio attaches provenance only to timeline events; state-block member events carry none, so their actionability cannot come from nio's classification.
 - An old message on an ordinary live timeline, as when a replacement bot joins a room and syncs normally, is `LIVE`, admitted actionable, and suppressed later by policy; context-only classification is reserved for events not received while a member, such as cold history, and for notices and unknown msgtypes.
   A test that asserts the context-only mechanism rather than the no-turn outcome reads zero on that path and looks like a regression.
@@ -193,3 +195,4 @@ These process lessons kept catching real defects and are not visible in the diff
 
 An attempted outbox row is resent across a rejoin, so when its first send never arrived, the previous membership's answer reaches the new one late.
 That was preferred to deriving a fresh transaction, which posts the answer twice if the first send landed, or refreshing the payload, which leaves the durable record and the room disagreeing about what was said.
+PR #1836 later replaced the resend: an old-membership row is reconciled against the room, adopting an event already there or retiring the row, and is never sent; both rejected alternatives still stand.
