@@ -168,7 +168,7 @@ Authoring errors:
 - `Cannot author a subagent for '<name>': system_prompt, tools, skills, knowledge, and profile apply only to yourself.` - authoring applies only to the caller's own copy.
 - `Cannot delegate: unknown tool '<entry>'. Your tools: ...` - `tools` names a toolkit or function the caller does not have.
 - `Cannot delegate: unknown skill '<name>'. Your skills: ...` - `skills` names a skill the caller does not have.
-- `Cannot delegate: unknown knowledge base '<id>'. Your knowledge bases: ...` - `knowledge` names a base the caller does not search.
+- `Cannot delegate: unknown knowledge base '<id>'. Your knowledge bases: ...` - `knowledge` names something other than one of the caller's `semantic` knowledge bases, such as a `files`-mode base or the caller's file memory.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
 - `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.

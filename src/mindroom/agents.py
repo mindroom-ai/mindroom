@@ -738,7 +738,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     """Build one configured toolkit for an agent.
 
     ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
-    the copies it authors within the persona's tools and skills.
+    the copies it authors within the persona's tools, skills, and knowledge bases.
 
     Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
@@ -1993,7 +1993,7 @@ def create_agent(
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
     # An authored persona's prompt replaces the agent's identity; it gets no learning of its own and only the caller
-    # skills its persona keeps.
+    # skills and knowledge bases its persona keeps.
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
     # up front; it also hides functions Agno generates without an owning toolkit, other than kept skills and knowledge.
     persona_prompt = persona.system_prompt if persona is not None else None

@@ -108,9 +108,9 @@ class DelegateTools(Toolkit):
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(config, runtime_paths, delegate_to, execution_identity)
         self._workspace_root = workspace_root
-        # An authored subagent's own tools and skills cap the copies it authors, on every channel.
+        # An authored subagent's own tools, skills, and knowledge bases cap the copies it authors, on every channel.
         self._persona = persona
-        # A caller that may run itself may also author that copy's prompt, tools, skills, or profile.
+        # A caller that may run itself may also author that copy's prompt, tools, skills, knowledge, or profile.
         self._authoring = agent_name in delegate_to
 
         super().__init__(

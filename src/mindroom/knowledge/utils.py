@@ -332,11 +332,11 @@ def resolve_agent_knowledge_access(
     only: tuple[str, ...] | None = None,
 ) -> _KnowledgeResolution:
     """Resolve configured knowledge base(s) with diagnostics for one agent, narrowed to ``only`` when set."""
-    file_memory = resolve_agent_file_memory_knowledge(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity,
+    # A narrowed resolution never searches file memory, so it skips building that overlay.
+    file_memory = (
+        None
+        if only is not None
+        else resolve_agent_file_memory_knowledge(agent_name, config, runtime_paths, execution_identity)
     )
     effective_config = file_memory.config if file_memory is not None else config
     base_ids = _agent_knowledge_base_ids(
@@ -367,12 +367,17 @@ async def resolve_agent_knowledge_access_async(
     only: tuple[str, ...] | None = None,
 ) -> _KnowledgeResolution:
     """Resolve agent knowledge without blocking the event loop on published-index I/O, narrowed to ``only`` when set."""
-    file_memory = await asyncio.to_thread(
-        resolve_agent_file_memory_knowledge,
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity,
+    # A narrowed resolution never searches file memory, so it skips building that overlay.
+    file_memory = (
+        None
+        if only is not None
+        else await asyncio.to_thread(
+            resolve_agent_file_memory_knowledge,
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity,
+        )
     )
     effective_config = file_memory.config if file_memory is not None else config
     base_ids = _agent_knowledge_base_ids(
