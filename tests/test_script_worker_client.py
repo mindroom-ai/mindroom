@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
+from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.worker_client import (
     ScriptWorkerClient,
     ScriptWorkerError,
@@ -77,7 +78,7 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
         "max_runtime_seconds": 3600,
         "private_agent_names": ["private-agent"],
         "config_snapshot": {"agents": {"private-agent": {"display_name": "Private"}}},
-        "protocol_version": 1,
+        "protocol_version": SCRIPT_PROTOCOL_VERSION,
     }
 
 
@@ -112,7 +113,7 @@ async def test_script_worker_client_returns_normalized_status_and_cancel_receipt
     assert status == WorkerScriptStatus(state="exited", output="done", exit_code=7)
     assert cancelled == WorkerScriptCancel(cancel_requested=False, already_finished=True, unknown_handle=False)
     # Access logs record request URLs, so the worker key, which names the requester, travels only in the body.
-    assert all(handle.worker_key not in str(request.url) for request in requests)
+    assert all(request.url.query == b"" for request in requests)
     assert all(json.loads(request.content)["worker_key"] == handle.worker_key for request in requests)
 
 

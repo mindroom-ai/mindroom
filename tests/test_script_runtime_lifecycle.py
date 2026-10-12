@@ -38,6 +38,7 @@ from mindroom.orchestration.script_runtime import (
     build_script_runtime,
 )
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
+from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import (
     ScriptCallState,
@@ -1139,6 +1140,22 @@ async def test_startup_interrupts_recovery_contract_mismatch(tmp_path: Path) -> 
     """An offline worker authority change cannot preserve the old process grant."""
     runtime, run, backend, client = _recovery_scenario(tmp_path)
     backend.signature = "changed-worker-authority"
+    try:
+        await runtime.start()
+        assert runtime.store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
+        assert client.exited is True
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_interrupts_a_run_from_an_earlier_script_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A surviving worker from an image with another script protocol is not polled through endpoints it lacks."""
+    runtime, run, _backend, client = _recovery_scenario(tmp_path)
+    monkeypatch.setattr("mindroom.script_runs.recovery.SCRIPT_PROTOCOL_VERSION", SCRIPT_PROTOCOL_VERSION + 1)
     try:
         await runtime.start()
         assert runtime.store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED

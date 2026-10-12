@@ -26,6 +26,7 @@ from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shell import supervisor as shell_supervisor_module
 from mindroom.shell.supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
@@ -109,7 +110,7 @@ def _write_run_files(workspace: Path, run_id: str, source: str) -> tuple[str, st
 def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, object]:
     _source_path, _token_path, source_digest = _write_run_files(workspace, run_id, source)
     return {
-        "protocol_version": 1,
+        "protocol_version": SCRIPT_PROTOCOL_VERSION,
         "run_id": run_id,
         "worker_key": _WORKER_KEY,
         "source_digest": source_digest,
@@ -118,7 +119,7 @@ def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, obje
     }
 
 
-@pytest.mark.parametrize("protocol_version", [0, 2])
+@pytest.mark.parametrize("protocol_version", [SCRIPT_PROTOCOL_VERSION - 1, SCRIPT_PROTOCOL_VERSION + 1])
 def test_worker_script_endpoint_rejects_mismatched_protocol_version(
     runner_client: tuple[TestClient, Path],
     protocol_version: int,
@@ -153,7 +154,7 @@ def test_worker_script_launch_rejects_invalid_maximum_runtime(
     with pytest.raises(ValidationError) as exc_info:
         sandbox_runner_scripts_module.SandboxScriptRunRequest.model_validate(
             {
-                "protocol_version": 1,
+                "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": f"script-{'0' * 32}",
                 "worker_key": _WORKER_KEY,
                 "source_digest": "a" * 64,
@@ -435,7 +436,7 @@ router:
             "/api/sandbox-runner/scripts/run",
             headers=_HEADERS,
             json={
-                "protocol_version": 1,
+                "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": run_id,
                 "worker_key": worker_key,
                 "state_scope_worker_key": state_scope_worker_key,
@@ -564,7 +565,7 @@ router:
             "/api/sandbox-runner/scripts/run",
             headers=_HEADERS,
             json={
-                "protocol_version": 1,
+                "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": run_id,
                 "worker_key": worker_key,
                 "state_scope_worker_key": state_scope_worker_key,
@@ -726,7 +727,7 @@ async def test_shared_runner_authenticates_before_revealing_script_topology(tmp_
         unauthenticated = await client.post(
             "/api/sandbox-runner/scripts/run",
             json={
-                "protocol_version": 1,
+                "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": f"script-{'a' * 32}",
                 "worker_key": _WORKER_KEY,
                 "source_digest": "0" * 64,
@@ -738,7 +739,7 @@ async def test_shared_runner_authenticates_before_revealing_script_topology(tmp_
             "/api/sandbox-runner/scripts/run",
             headers=_HEADERS,
             json={
-                "protocol_version": 1,
+                "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": f"script-{'a' * 32}",
                 "worker_key": _WORKER_KEY,
                 "source_digest": "0" * 64,
@@ -816,7 +817,7 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
         json={
-            "protocol_version": 1,
+            "protocol_version": SCRIPT_PROTOCOL_VERSION,
             "run_id": f"script-{'4' * 32}",
             "worker_key": "worker-b",
             "source_digest": "a" * 64,
@@ -1057,7 +1058,7 @@ def seeded_script_worker(
     )
     _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, _LIVE_SCRIPT_RUN_ID, source)
     payload: dict[str, object] = {
-        "protocol_version": 1,
+        "protocol_version": SCRIPT_PROTOCOL_VERSION,
         "run_id": _LIVE_SCRIPT_RUN_ID,
         "worker_key": worker_key,
         "state_scope_worker_key": _LIVE_SCRIPT_STATE_SCOPE,
