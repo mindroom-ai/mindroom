@@ -26,7 +26,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_backg
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.publication import JobStatePublisher
 from mindroom.tool_jobs.runtime import (
-    CONSUMED_RESULT_RETENTION,
+    ENDED_JOB_RETENTION,
     TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
@@ -332,7 +332,7 @@ class ToolJobRuntimeCoordinator:
             try:
                 await self._reconcile()
                 if asyncio.get_running_loop().time() >= next_retention:
-                    await self._expire_consumed_results()
+                    await self._expire_ended_jobs()
                     next_retention = asyncio.get_running_loop().time() + 3600
             except Exception:
                 logger.exception("Background tool job reconciliation failed; retrying")
@@ -373,8 +373,8 @@ class ToolJobRuntimeCoordinator:
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
 
-    async def _expire_consumed_results(self) -> None:
-        """Keep consumed jobs for the retention period and as long as response or approval work owns them."""
+    async def _expire_ended_jobs(self) -> None:
+        """Keep ended jobs for the retention period and as long as response or approval work owns them."""
         journal = self._journal
         if journal is None:
             return
@@ -403,8 +403,8 @@ class ToolJobRuntimeCoordinator:
                     finished[key] = False
             return finished[key]
 
-        expired = await self.runtime.expire_consumed(
-            before=datetime.now(UTC) - CONSUMED_RESULT_RETENTION,
+        expired = await self.runtime.expire_ended(
+            before=datetime.now(UTC) - ENDED_JOB_RETENTION,
             source_finished=source_finished,
         )
         await prune_job_approvals(expired)

@@ -311,7 +311,7 @@ Listing jobs does not count as reading their results.
 Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
 A reply that a crash or shutdown cuts short is answered again in place and told which calls its stopped attempt already finished, including detached job starts with their job IDs.
 Reading a result again returns its original output and does not repeat its effects.
-A result remains available for 30 days after it was last read; the job is then deleted once its turn has finished and no approval is pending in the conversation.
+A result remains available for 30 days after the job ended or was last read; the job is then deleted once its turn has finished and no approval is pending in the conversation.
 Active jobs and unread results are never deleted.
 A deleted job is unavailable like any unknown job, and its original tool call cannot run again.
 Jobs of a plugin tool require the same plugin installation path and current grants; moving the plugin directory makes them unavailable.

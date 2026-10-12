@@ -116,7 +116,7 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
         await runtime.acknowledge_wait(child.delegation_id, waited.claim)
         async with execution_resources():
             with tool_runtime_context(delegation_context):
-                await runtime.expire_consumed(
+                await runtime.expire_ended(
                     before=datetime.now(UTC) + timedelta(days=31),
                     source_finished=source_finished,
                 )

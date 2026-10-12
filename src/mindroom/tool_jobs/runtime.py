@@ -50,8 +50,8 @@ _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
 # A reattaching call must name exactly the operation its job was admitted for.
 _ADMITTED_OPERATION = attrgetter("tool_name", "toolkit_name", "kind", "source_event_id", "source_kind", "adapter")
-# Consumed jobs are deleted this long after their last change, once their originating turn has finished.
-CONSUMED_RESULT_RETENTION = timedelta(days=30)
+# Ended jobs, read or not, are deleted this long after their last change, once their originating turn has finished.
+ENDED_JOB_RETENTION = timedelta(days=30)
 logger = get_logger(__name__)
 # A ToolResultPayload encoded by `tool_jobs.results`; the runtime stores it without reading it.
 type EncodedResultPayload = dict[str, Any]
@@ -807,17 +807,17 @@ class ToolJobRuntime:
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
 
-    async def expire_consumed(
+    async def expire_ended(
         self,
         *,
         before: datetime,
         source_finished: Callable[[BackgroundJob], Awaitable[bool]],
     ) -> list[BackgroundJob]:
-        """Delete old consumed jobs whose originating turn has finished, which never lets their call run again.
+        """Delete old ended jobs, read or not, whose originating turn has finished, which never lets their call run again.
 
-        A claim is acknowledged only after the parent run saved a non-`None` result for the exact tool call, Agno runs
-        a call again only when its saved result is `None`, and `source_finished` refuses while the job's session has an
-        open approval continuation.
+        A finished turn saved a non-`None` result for the call, its outcome or the job's handle, Agno runs a call again
+        only when its saved result is `None`, and `source_finished` refuses while the job's session has an open approval
+        continuation. An unread result this old is not worth reporting any more.
         Returns the deleted jobs.
         """
         deleted: list[BackgroundJob] = []
@@ -846,7 +846,6 @@ class ToolJobRuntime:
         job = entry.job
         return (
             job.status in TERMINAL_STATUSES
-            and job.consumed
             and entry.claim is None
             and entry.saved
             and datetime.fromisoformat(job.updated_at) < before

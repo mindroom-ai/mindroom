@@ -506,15 +506,15 @@ async def test_expiry_rechecks_a_read_completed_during_source_lookup(tmp_path: P
         await runtime.acknowledge_wait("reread", waited.claim)
         cutoff = datetime.now(UTC) - timedelta(days=30)
         backdate_job(runtime, "reread", cutoff - timedelta(seconds=1))
-        await runtime.expire_consumed(before=cutoff, source_finished=source_finished)
+        await runtime.expire_ended(before=cutoff, source_finished=source_finished)
         assert (await lookup(runtime, "reread", owner=job_owner(), depth=0)).result == "saved"
     finally:
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_result_expiry_deletes_only_old_consumed_jobs_with_finished_sources(tmp_path: Path) -> None:
-    """Expiry deletes an old consumed job's files and entry; approval-owned, unread, recent, and claimed work stays."""
+async def test_result_expiry_deletes_only_old_ended_jobs_with_finished_sources(tmp_path: Path) -> None:
+    """Expiry deletes an old ended job's files and entry, read or not; approval-owned, recent, and claimed work stays."""
     runtime = await tool_job_runtime(tmp_path)
     payload = encode_result_payload(ToolResultPayload("saved"))
 
@@ -525,10 +525,11 @@ async def test_result_expiry_deletes_only_old_consumed_jobs_with_finished_source
         return job.job_id != "approval"
 
     cutoff = datetime.now(UTC) - timedelta(days=30)
-    kept = ("approval", "unread", "recent", "claimed")
+    kept = ("approval", "recent", "claimed")
+    expired = ("expire", "unread")
     claimed = None
     try:
-        for name in ("expire", *kept):
+        for name in (*expired, *kept):
             await start_job(
                 runtime,
                 name,
@@ -546,15 +547,16 @@ async def test_result_expiry_deletes_only_old_consumed_jobs_with_finished_source
             if name != "recent":
                 backdate_job(runtime, name, cutoff - timedelta(seconds=1))
         claimed = await runtime.wait("claimed", owner=job_owner(), depth=0)
-        await runtime.expire_consumed(before=cutoff, source_finished=source_finished)
-        assert "expire" not in runtime._entries
-        assert "expire" not in await saved_jobs(tmp_path)
-        assert await saved_payload(tmp_path, "expire") is None
-        with pytest.raises(runtime_module.JobAccessError, match="not available"):
-            await lookup(runtime, "expire", owner=job_owner(), depth=0)
+        await runtime.expire_ended(before=cutoff, source_finished=source_finished)
+        for name in expired:
+            assert name not in runtime._entries
+            assert name not in await saved_jobs(tmp_path)
+            assert await saved_payload(tmp_path, name) is None
+            with pytest.raises(runtime_module.JobAccessError, match="not available"):
+                await lookup(runtime, name, owner=job_owner(), depth=0)
         for name in kept:
             assert await runtime.read_payload(await lookup(runtime, name, owner=job_owner(), depth=0)) == payload
-        assert [job.job_id for job in pending_outcomes(runtime)] == ["unread"]
+        assert pending_outcomes(runtime) == []
     finally:
         if claimed is not None:
             await runtime.release_wait("claimed", claimed.claim)
@@ -625,7 +627,7 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
         async def source_finished(_job: runtime_module.BackgroundJob) -> bool:
             return True
 
-        await runtime.expire_consumed(before=datetime.now(UTC) - timedelta(days=30), source_finished=source_finished)
+        await runtime.expire_ended(before=datetime.now(UTC) - timedelta(days=30), source_finished=source_finished)
         assert await lookups(runtime) == ["b", "c", "unsourced"]
         assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation)] == ["b", "c", "unsourced"]
     finally:

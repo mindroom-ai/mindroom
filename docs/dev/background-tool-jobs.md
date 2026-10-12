@@ -85,7 +85,7 @@ Jobs live in the event journal's `tool_jobs` table, so they share the journal's 
 Job metadata stays in memory, while the outcome's payload is saved with that outcome in one statement and retrieval reads it on demand.
 Only work that a shutdown, restart, or event-loop teardown cut short is interrupted; a cancellation saved before a crash still settles as cancelled, and a child settlement saved before a crash stands.
 `tests/test_tool_job_fuzz.py` and `tests/test_delegation_job_fuzz.py` generate interleaved job and subagent lifecycles, including failed saves, client cancels, restarts, and crashes.
-Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.
+Ended jobs remain for 30 days after their last change, read or not, longer while response or approval ownership requires them.
 Expiry then deletes the job; its originating turn has finished, so the call cannot run again.
 Constructor identity is a digest, not a retained settings blob.
 

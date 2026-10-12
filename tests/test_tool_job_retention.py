@@ -137,7 +137,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         )
         assert await paused_for_approval(principal, continuation) is not None
     try:
-        await coordinator._expire_consumed_results()
+        await coordinator._expire_ended_jobs()
         expired = source_completed and not approval
         assert ("old" in runtime._entries) is not expired
         assert ("old" in await saved_jobs(bot.storage_path)) is not expired
