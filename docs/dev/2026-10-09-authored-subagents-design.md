@@ -50,7 +50,7 @@ Tool approval rules apply to the child exactly as they apply to the caller, beca
 | Workflow participant | A `subagent` participant in a Dynamic Workflow spec, inline or by `profile` | A caller with the `dynamic_workflow` tool |
 
 Authoring is self-only: `system_prompt`, `tools`, `skills`, `knowledge`, and `profile` are rejected when `agent_name` names another agent, because an authored prompt over another agent would hand the caller that agent's tools.
-An authored subagent's own tools, skills, and knowledge bases cap the copies it authors: they must lie within its own, a copy without `tools` inherits its tools, a copy without `tools` and `skills` or `knowledge` also inherits the skills or knowledge bases its caller still has, and while it lists any of them it cannot start an unauthored copy of the caller.
+An authored subagent's own tools, skills, and knowledge bases cap the copies it authors: they must lie within its own, a copy without `tools` inherits its tools, and one that also omits `skills` or `knowledge` inherits those, limited to what its caller still has, and while it lists any of them it cannot start an unauthored copy of the caller.
 A persona's `skills` names a subset of the caller's skills and its `knowledge` a subset of the caller's semantic knowledge bases; omitted, each follows the tool list, so a persona that names tools gets only the skills and knowledge bases it names and one that names neither keeps all of the caller's.
 A persona that names knowledge bases searches only those, without the caller's file-memory search source.
 Dynamic Workflow participants search no knowledge bases until workflow data grants exist.

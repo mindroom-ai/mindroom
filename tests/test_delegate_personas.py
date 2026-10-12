@@ -747,13 +747,19 @@ async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_native_authoring_checks_names_and_inherits_knowledge(tmp_path: Path) -> None:
     """The native path checks named knowledge bases against the caller's own and keeps them, and a copy inherits its parent's."""
-    base, resolve = _native_resolver(tmp_path, _config(knowledge_bases=("docs", "faq")))
+    config = _config(knowledge_bases=("docs", "faq"))
+    config.knowledge_bases["wiki"] = KnowledgeBaseConfig(path="./wiki")
+    config.knowledge_bases["notes"] = KnowledgeBaseConfig(path="./notes", mode="files")
+    config.agents["leader"].knowledge_bases.append("notes")
+    base, resolve = _native_resolver(tmp_path, config)
 
     refused = await resolve(base, knowledge=["wiki"])
+    refused_files = await resolve(base, knowledge=["notes"])
     named = await resolve(base, knowledge=["faq"])
     inherited = await resolve(replace(base, persona=inline_persona("P", None, None, ["docs"])))
 
     assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
+    assert refused_files == "Cannot delegate: unknown knowledge base 'notes'. Your knowledge bases: docs, faq."
     assert not isinstance(named, str)
     assert named.persona is not None
     assert named.persona.knowledge == ("faq",)

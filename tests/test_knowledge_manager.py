@@ -469,6 +469,8 @@ def test_default_merged_search_budget_is_bounded_while_representing_sources_that
     [
         pytest.param(None, {"docs", "faq", "file memory"}, id="all"),
         pytest.param(("faq",), {"faq"}, id="named"),
+        pytest.param(("docs", "faq"), {"docs", "faq"}, id="every-base-named"),
+        pytest.param(("faq", "wiki", "notes"), {"faq"}, id="only-its-own-semantic-bases"),
         pytest.param((), set(), id="none"),
     ],
 )
@@ -479,12 +481,13 @@ async def test_narrowed_agent_knowledge_searches_only_the_named_bases(
     only: tuple[str, ...] | None,
     expected_sources: set[str],
 ) -> None:
-    """A narrowed resolution searches only the named configured bases, without the file-memory overlay."""
+    """A narrowed resolution searches only the named semantic bases the agent has, without the file-memory overlay."""
     config = _file_memory_config(tmp_path, "helper")
-    config.agents["helper"].knowledge_bases = ["docs", "faq"]
+    config.agents["helper"].knowledge_bases = ["docs", "faq", "notes"]
     config.knowledge_bases.update(
-        {base_id: KnowledgeBaseConfig(path=str(tmp_path / base_id)) for base_id in ("docs", "faq")},
+        {base_id: KnowledgeBaseConfig(path=str(tmp_path / base_id)) for base_id in ("docs", "faq", "wiki")},
     )
+    config.knowledge_bases["notes"] = KnowledgeBaseConfig(path=str(tmp_path / "notes"), mode="files")
     runtime_paths = runtime_paths_for(config)
     monkeypatch.setattr(knowledge_utils, "get_published_index", _published_result_index)
 
