@@ -160,6 +160,8 @@ from mindroom.streaming import (
 from mindroom.teams import _TeamStreamPresentation, continue_paused_team_run
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
@@ -8977,12 +8979,27 @@ async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent"])
+@pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent", "a job follow-up"])
 async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
-    """Like cron runs in Hermes, automation and agent requests have no person to learn from."""
+    """Like cron runs in Hermes, automation, agent requests, and job follow-ups have no person to learn from."""
 
     def update(request: ResponseRequest) -> ResponseRequest:
         envelope = request.response_envelope
+        if requested_by == "a job follow-up":
+            key = ConversationKey(
+                "general",
+                envelope.target.room_id,
+                envelope.target.resolved_thread_id,
+                request.user_id or "",
+                silent=False,
+            )
+            follow_up = follow_up_envelope(
+                key,
+                follow_up_id="job-follow-up:1",
+                sender_id="@mindroom_general:localhost",
+                prompt="",
+            )
+            return replace(request, response_envelope=replace(envelope, origin=follow_up.origin))
         if requested_by in {"a schedule", "a hook"}:
             source_kind = SCHEDULED_SOURCE_KIND if requested_by == "a schedule" else HOOK_SOURCE_KIND
             return replace(

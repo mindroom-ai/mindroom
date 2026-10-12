@@ -172,7 +172,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -1071,10 +1071,14 @@ class _InboxResponseOwnership:
 def _requested_by_a_person(origin: TurnOrigin) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs and replies to other agents never count toward a review; they
-    have no human to learn from.
+    Like Hermes skipping cron reviews, automated runs, job follow-ups, and replies to other agents never count toward a
+    review; they have no human to learn from.
     """
-    return origin.requester_kind == SenderKind.USER and not is_automation_source_kind(origin.source_kind)
+    return (
+        origin.requester_kind == SenderKind.USER
+        and origin.intent is not TurnIntent.JOB_FOLLOW_UP
+        and not is_automation_source_kind(origin.source_kind)
+    )
 
 
 @dataclass
