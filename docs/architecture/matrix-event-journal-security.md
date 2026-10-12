@@ -90,6 +90,11 @@ The continuation is deleted after terminal delivery or cleanup, and a foreign-ke
 These tool traces contain redacted argument and result previews plus internal tool-call and member-scope identities; those internal identities are omitted from Matrix message metadata.
 A finished reply, its spans, and their tool calls are deleted with the handled-turn retention.
 
+`tool_jobs.job_json` keeps each background job's snapshot: its owner and conversation, the tool name, the call's unredacted arguments, a result summary of at most 500 characters, and for a background subagent the child's saved state.
+`tool_jobs.result_payload_json` keeps the job's full result, including returned media bytes, up to 64 MiB of encoded JSON.
+An ended job is deleted 30 days after its last change, read or not, once its turn has finished and no approval in its session is pending; redacting the message that started it or the bot leaving the room does not delete it sooner.
+`tool_job_owner` holds only the runtime generation that owns the jobs.
+
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
 The shared terminal-payload boundary removes full-argument transport fields and pending duration choices before freezing edits, preserving the compact argument preview and grant acknowledgement.
 Trusted model receipts distinguish human authorization, including matching timed windows, from policy-only approval without claiming that every authorized call displayed a card.

@@ -198,8 +198,6 @@ If a custom or plugin tool already declares that application parameter, exclude 
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
 Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `wait_timeout`.
-Waiting policy is decided when a call executes, so an approved call that resumes after a restart follows the exclusions configured at that point.
-If its toolkit became excluded meanwhile and the call carried a wait budget, it fails instead of running without the budget it asked for.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -260,7 +258,7 @@ A job a restart interrupted is reported as interrupted, with a warning that it m
 ### The `job` function
 
 The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
-The management function never backgrounds itself and never asks for approval, since it acts only on the caller's own jobs.
+The management function never asks for approval, since it acts only on the caller's own jobs.
 Enabling background jobs reserves the function name `job`; custom and plugin tools must use another function name.
 
 | Action | Behavior |
@@ -271,22 +269,18 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
-A job whose cleanup fails ends as failed.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.
 A team member sees only its own jobs.
 Changing a tool's authored settings, other than for MCP tools, cancels its still-running jobs and blocks access to their saved results until the settings match again.
 Include/exclude filters remain checked per function.
-Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and result delivery.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 `job(action="list")` rediscovers handles after compaction, later turns, and a restart.
 For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
-Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
 Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
-Remote service availability alone does not revoke access to a saved result.
 
 ### Approvals
 
@@ -304,10 +298,8 @@ A restart interrupts a job that waits for approval and denies its cards, like an
 Cards a job posts offer no automatic approval option, and automatic approvals granted on other cards do not apply to them.
 A message never counts as an approval, and current permissions are rechecked before a job's call runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
-Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
 Tools the model provider runs itself never become jobs.
 Tool calls made through `mindroom-agent` inside a shell command or during a voice call never become jobs, and a [minimal-mode](agent-cli.md) reply leaves background results to the agent's next standard reply.
-Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
 
 ### Retention and limits
 
@@ -316,7 +308,7 @@ Completed outcomes survive restart; abandoned local execution becomes interrupte
 A reply that a crash or shutdown cuts short is answered again in place and told which calls its stopped attempt already finished, including detached job starts with their job IDs.
 Reading a result again returns its original output and does not repeat its effects.
 A result remains available for 30 days after the job ended or was last read; the job is then deleted once its turn has finished and no approval is pending in the conversation.
-Active jobs and unread results are never deleted.
+Active jobs are never deleted.
 A deleted job is unavailable like any unknown job, and its original tool call cannot run again.
 Jobs of a plugin tool require the same plugin installation path and current grants; moving the plugin directory makes them unavailable.
 
