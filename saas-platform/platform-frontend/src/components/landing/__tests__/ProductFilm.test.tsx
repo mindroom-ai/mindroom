@@ -43,6 +43,28 @@ describe('ProductFilm', () => {
     play.mockRestore()
   })
 
+  it('moves keyboard focus to the player when the play button is pressed', () => {
+    ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
+    const play = jest.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    render(<ProductFilm />)
+    const button = screen.getByRole('button', { name: 'Play the MindRoom film' })
+    button.focus()
+
+    fireEvent.click(button)
+    fireEvent.play(film())
+
+    expect(film()).toHaveFocus()
+    play.mockRestore()
+  })
+
+  it('draws the play button focus ring inside the rounded frame', () => {
+    ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
+    render(<ProductFilm />)
+
+    // The frame clips overflow, so an outside ring would be invisible.
+    expect(screen.getByRole('button', { name: 'Play the MindRoom film' })).toHaveClass('focus-visible:outline-offset-[-6px]')
+  })
+
   it('shows the player controls once the film plays', () => {
     ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
     render(<ProductFilm />)

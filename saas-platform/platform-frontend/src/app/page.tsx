@@ -646,7 +646,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="why" className="bg-brand-950 py-20 text-white sm:py-24">
+      <section id="why" className="bg-brand-950 py-20 text-white [--focus-ring:var(--color-brand-200)] sm:py-24">
         <div className="mx-auto grid max-w-7xl gap-12 px-4 sm:px-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16 lg:px-8">
           <div className="lg:sticky lg:top-28 lg:self-start">
             <SectionHeading
@@ -730,7 +730,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="bg-brand-600 py-20 text-white dark:bg-brand-800">
+      <section className="bg-brand-600 py-20 text-white [--focus-ring:#ffffff] dark:bg-brand-800">
         <div className="mx-auto flex max-w-7xl flex-col gap-8 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
             <h2 className="font-display text-4xl font-semibold tracking-[-0.025em] text-white sm:text-5xl">

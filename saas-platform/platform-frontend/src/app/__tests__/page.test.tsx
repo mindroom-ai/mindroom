@@ -187,6 +187,13 @@ describe('LandingPage', () => {
     links.forEach((link) => expect(link.getAttribute('href')).toMatch(/^https:\/\/docs\.mindroom\.chat\/#/))
   })
 
+  it('uses a light focus ring on the violet sections', () => {
+    render(<LandingPage />)
+
+    expect(document.getElementById('why')).toHaveClass('[--focus-ring:var(--color-brand-200)]')
+    expect(screen.getByRole('heading', { name: 'Run MindRoom today.' }).closest('section')).toHaveClass('[--focus-ring:#ffffff]')
+  })
+
   it('links to MindRoom Chat from the header and the hero', () => {
     render(<LandingPage />)
 
