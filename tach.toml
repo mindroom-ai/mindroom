@@ -1014,8 +1014,8 @@ visibility = [
 path = "mindroom.session_storage.legacy_session_storage"
 depends_on = ["mindroom.usage.storage"]
 visibility = [
-    "mindroom.usage.legacy_usage_storage",
     "mindroom.session_storage.agent_storage",
+    "mindroom.usage.legacy_usage_storage",
     "mindroom.history.legacy_compaction_state",
     "mindroom.usage.stats_storage",
 ]
@@ -1123,6 +1123,7 @@ visibility = [
 path = "mindroom.history.run_visibility"
 depends_on = []
 visibility = [
+    "mindroom.history.summary_rows_schema",
     "mindroom.ai_runtime",
     "mindroom.history.replay",
     "mindroom.history.storage",
@@ -2616,7 +2617,7 @@ visibility = ["mindroom.history.archive", "mindroom.history.legacy_compaction_st
 
 [[modules]]
 path = "mindroom.history.summary_rows_schema"
-depends_on = ["mindroom.usage.storage"]
+depends_on = ["mindroom.history.run_visibility", "mindroom.usage.storage"]
 visibility = ["mindroom.history.legacy_compaction_state", "mindroom.session_storage.agno_compat_sqlite"]
 
 [[modules]]
@@ -8010,7 +8011,7 @@ expose = [
     "insert_run_row",
     "upsert_run_at_end",
     "run_deletion_transaction",
-    "read_conversation",
+    "read_session",
     "cached_run_counts",
 ]
 

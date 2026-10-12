@@ -10,9 +10,10 @@ It stays free of storage and runtime imports so ``session_storage`` can use it.
 
 from __future__ import annotations
 
+from mindroom.history.run_visibility import NON_VISIBLE_RUN_STATUSES
 from mindroom.usage.storage import quote_identifier
 
-NON_VISIBLE_RUN_STATUSES = ("PAUSED", "CANCELLED", "ERROR")
+NON_VISIBLE_RUN_STATUS_VALUES = tuple(sorted(status.value for status in NON_VISIBLE_RUN_STATUSES))
 
 
 def summary_rows_table_names(session_table: str) -> tuple[str, str]:

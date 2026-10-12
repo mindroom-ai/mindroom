@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from agno.db.utils import build_single_run_row, deserialize_session_json_fields
+from agno.db.base import SessionType
+from agno.db.utils import build_single_run_row, deserialize_session, deserialize_session_json_fields
 from sqlalchemy import and_, case, event, func, select
 from sqlalchemy.dialects.sqlite import insert
 
 from mindroom.history.summary_rows_schema import (
-    NON_VISIBLE_RUN_STATUSES,
+    NON_VISIBLE_RUN_STATUS_VALUES,
     run_scope_key_sql,
     summary_rows_schema_sql,
     summary_rows_table_names,
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.run.workflow import WorkflowRunOutput
+    from agno.session import Session as AgnoSession
     from sqlalchemy import Connection, Engine, Row, Table
     from sqlalchemy.orm import Session
 
@@ -130,9 +131,9 @@ def insert_run_row(
     statement = insert(runs).values(**row)
     becomes_visible = and_(
         runs.c.parent_run_id.is_(None),
-        runs.c.status.in_(NON_VISIBLE_RUN_STATUSES),
+        runs.c.status.in_(NON_VISIBLE_RUN_STATUS_VALUES),
         statement.excluded.parent_run_id.is_(None),
-        statement.excluded.status.not_in(NON_VISIBLE_RUN_STATUSES),
+        statement.excluded.status.not_in(NON_VISIBLE_RUN_STATUS_VALUES),
     )
     return transaction.execute(
         statement.on_conflict_do_update(
@@ -154,7 +155,7 @@ def insert_run_row(
 
 def _is_folded(connection: Connection, runs: str, summaries: str, run_id: str) -> bool:
     """Return whether a stored run, or the top-level run it belongs to, is visible and behind its scope's latest summary row."""
-    hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUSES)
+    hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
     return (
         connection.exec_driver_sql(
             "WITH RECURSIVE chain(run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id) "  # noqa: S608
@@ -221,27 +222,27 @@ def run_deletion_transaction(db: SqliteDb) -> Iterator[tuple[Session, Table | No
         yield session, runs_table
 
 
-@dataclass(frozen=True)
-class _ConversationRead:
-    """One session row with the runs a load returns, from one snapshot."""
-
-    session_row: dict[str, Any]
-    run_rows: list[tuple[str, str]]
-
-
 # AGNO_COMPAT: Session reads load every stored run, without one snapshot.
 # Reason: SqliteDb.get_session attaches every run row of the session (``runs_limit`` only takes the
 # last N), so it cannot stop at the latest summary row, and pysqlite opens no transaction for reads,
-# so its session-row and run reads can straddle a concurrent commit.
+# so its session-row and run reads can straddle a concurrent commit. Building the session here
+# reuses Agno's deserialization and its private run-object cache, as SqliteDb.get_session does.
 # Upstream issue: Tracking gap; no matching issue for boundary-filtered or snapshot session reads.
 # Upstream PR: None identified.
 # Remove when: Agno reads a session's row and a caller-filtered run set in one snapshot; keep the
 # owner's filter (runs after the scope's latest summary row, non-visible runs, and their descendants).
 # Coverage: tests/test_summary_rows.py::test_load_returns_runs_after_the_latest_summary_and_every_non_visible_run,
-# tests/test_summary_rows.py::test_load_keeps_member_rows_with_their_team_run, and
-# tests/test_summary_rows.py::test_load_reads_one_snapshot.
-def read_conversation(db: SqliteDb, session_id: str) -> _ConversationRead | None:
-    """Read one session row and the runs a load returns together."""
+# tests/test_summary_rows.py::test_load_keeps_member_rows_with_their_team_run,
+# tests/test_summary_rows.py::test_load_reads_one_snapshot, and
+# tests/test_summary_rows.py::test_load_finds_member_rows_without_scanning_the_session_per_run.
+def read_session(
+    db: SqliteDb,
+    session_id: str,
+    session_type: SessionType | None,
+    *,
+    deserialize: bool,
+) -> AgnoSession | dict[str, Any] | None:
+    """Read one session with the runs a load returns, from one snapshot, as Agno would build it."""
     sessions = _existing_table(db, "sessions")
     if sessions is None:
         return None
@@ -273,7 +274,15 @@ def read_conversation(db: SqliteDb, session_id: str) -> _ConversationRead | None
             )
         finally:
             connection.rollback()
-    return _ConversationRead(session_row=deserialize_session_json_fields(dict(row._mapping)), run_rows=run_rows)
+    session_raw = deserialize_session_json_fields(dict(row._mapping))
+    cached_runs = deserialize and session_raw.get("session_type") == SessionType.AGENT.value
+    session_raw["runs"] = None if cached_runs else [json.loads(run_data) for _run_id, run_data in run_rows]
+    if not deserialize:
+        return session_raw
+    session = deserialize_session(session_type, session_raw)
+    if cached_runs:
+        session.runs = db._run_object_cache.runs_from_rows(session_id, run_rows)  # type: ignore[union-attr]
+    return session
 
 
 def _loaded_run_rows(
@@ -284,7 +293,7 @@ def _loaded_run_rows(
 ) -> list[tuple[str, str]]:
     """Return ``(run_id, run_data text)`` of the runs after their scope's latest summary row, non-visible runs, and descendants."""
     runs_name = quote_identifier(runs.name)
-    hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUSES)
+    hidden = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
     # A database that has not written a run since it gained a sessions table has no summary rows yet.
     # A scope without summary rows, and a row without an index, compare as NULL and load.
     after_latest = (
@@ -294,11 +303,14 @@ def _loaded_run_rows(
         if summaries is not None
         else ""
     )
+    # The runs table has no parent index, so the descendant step searches a materialized child set
+    # (SQLite builds an automatic index on it) instead of scanning the session once per loaded run.
     rows = connection.exec_driver_sql(
-        f"WITH RECURSIVE loaded(run_id) AS (SELECT run.run_id FROM {runs_name} AS run "  # noqa: S608
+        "WITH RECURSIVE children(run_id, parent_run_id) AS MATERIALIZED ("  # noqa: S608
+        f"SELECT run_id, parent_run_id FROM {runs_name} WHERE session_id = ? AND parent_run_id IS NOT NULL), "
+        f"loaded(run_id) AS (SELECT run.run_id FROM {runs_name} AS run "
         f"WHERE run.session_id = ? AND run.parent_run_id IS NULL {after_latest}"
-        f"UNION SELECT child.run_id FROM {runs_name} AS child JOIN loaded ON child.parent_run_id = loaded.run_id "
-        "WHERE child.session_id = ?) "
+        "UNION SELECT children.run_id FROM loaded JOIN children ON children.parent_run_id = loaded.run_id) "
         f"SELECT run.run_id, CAST(run.run_data AS TEXT) FROM {runs_name} AS run "
         "WHERE run.session_id = ? AND run.run_id IN (SELECT run_id FROM loaded) "
         "ORDER BY run.run_index, run.created_at, run.run_id",

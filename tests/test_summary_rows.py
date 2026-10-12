@@ -216,3 +216,80 @@ def test_load_reads_one_snapshot(storage: SqliteDb, tmp_path: Path) -> None:
     assert writer_errors == ["database is locked"]
     assert session is not None
     assert [run.run_id for run in session.runs or []] == ["r0", "r1"]
+
+
+def test_cancelled_and_errored_runs_behind_the_summary_still_load(storage: SqliteDb, tmp_path: Path) -> None:
+    """Every non-visible run loads wherever it sits, as `main` keeps such runs live."""
+    runs = [_run("c0", status=RunStatus.cancelled), _run("e1", status=RunStatus.error), _run("r2"), _run("r3")]
+    seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r2"), summary="folded")
+
+    session = get_agent_session(storage, "s1")
+
+    assert session is not None
+    assert [run.run_id for run in session.runs or []] == ["c0", "e1", "r3"]
+
+
+def test_load_follows_member_rows_to_any_depth_and_drops_orphans(storage: SqliteDb, tmp_path: Path) -> None:
+    """A paused team run behind the summary loads with its members' members; a member without a stored parent does not."""
+
+    def member(run_id: str, parent: str) -> RunOutput:
+        return RunOutput(run_id=run_id, agent_id="helper", session_id="s1", parent_run_id=parent)
+
+    seed_session(
+        storage,
+        TeamSession(
+            session_id="s1",
+            team_id="eng",
+            runs=[
+                member("m0", "t0"),
+                member("m0-child", "m0"),
+                TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.paused),
+                member("orphan", "missing"),
+                TeamRunOutput(run_id="t1", team_id="eng", session_id="s1", status=RunStatus.completed),
+            ],
+        ),
+    )
+    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "t1"), summary="folded", scope_key="team:eng")
+
+    session = get_team_session(storage, "s1")
+
+    assert session is not None
+    assert [run.run_id for run in session.runs or []] == ["m0", "m0-child", "t0"]
+
+
+def test_a_run_without_an_index_loads_first(storage: SqliteDb, tmp_path: Path) -> None:
+    """A row an old writer stored without an index has no place behind a summary, so it loads."""
+    seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=[_run("r0"), _run("r1"), _run("r2")]))
+    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r1"), summary="folded")
+    with sqlite3.connect(_db_path(tmp_path)) as connection:
+        connection.execute("UPDATE code_sessions_runs SET run_index = NULL WHERE run_id = 'r0'")
+
+    session = get_agent_session(storage, "s1")
+
+    assert session is not None
+    assert [run.run_id for run in session.runs or []] == ["r0", "r2"]
+
+
+def test_load_finds_member_rows_without_scanning_the_session_per_run(storage: SqliteDb) -> None:
+    """The descendant step searches a materialized child set, so a load stays linear in the session's rows."""
+    seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=[_run("r0"), _run("r1")]))
+    statements: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture(_conn: object, _cursor: object, statement: str, parameters: object, *_args: object) -> None:
+        if "WITH RECURSIVE" in statement:
+            statements.append((statement, tuple(parameters)))  # type: ignore[arg-type]
+
+    event.listen(storage.db_engine, "before_cursor_execute", capture)
+    try:
+        get_agent_session(storage, "s1")
+    finally:
+        event.remove(storage.db_engine, "before_cursor_execute", capture)
+
+    assert len(statements) == 1
+    statement, parameters = statements[0]
+    with storage.db_engine.connect() as connection:
+        plan = [row[3] for row in connection.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", parameters)]
+    step = plan[plan.index("RECURSIVE STEP") + 1 :]
+    # The runs table is read once, to materialize the child set; each step only probes that set's index.
+    assert "SEARCH children USING AUTOMATIC COVERING INDEX (parent_run_id=?)" in step

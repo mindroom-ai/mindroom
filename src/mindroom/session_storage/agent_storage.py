@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
-from agno.db.utils import deserialize_session
 from agno.learn import LearningMachine
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -319,12 +318,9 @@ class _ConversationSqliteDb(SqliteDb):
     removes runs. MindRoom follows that model; :func:`save_runs` and
     :func:`replace_runs` are the two module-level helpers callers use when they
     edit or drop runs of a loaded session. The overrides here only adjust what
-    agno already does: prompt-role stripping and append-only indexing in
-    ``upsert_run``, a full read in ``get_session``, and an atomic ``delete_runs``.
-
-    Agno merges compatible 2.x ``runs`` blobs into every read alongside current
-    run rows. ``delete_runs`` scrubs deleted ids from both stores in one
-    transaction so removed history cannot reappear after reopening.
+    agno already does: prompt-role stripping and the conversation log's
+    insertion rules in ``upsert_run``, a snapshot read of the runs after each
+    scope's latest summary row in ``get_session``, and a subtree ``delete_runs``.
     """
 
     def __init__(
@@ -390,17 +386,7 @@ class _ConversationSqliteDb(SqliteDb):
         (compaction, replay, redaction) reasons over those runs.
         """
         del user_id, runs_limit
-        read = agno_compat_sqlite.read_conversation(self, session_id)
-        if read is None:
-            return None
-        session_raw = read.session_row
-        cached_runs = deserialize and session_raw.get("session_type") == SessionType.AGENT.value
-        session_raw["runs"] = None if cached_runs else [json.loads(run_data) for _run_id, run_data in read.run_rows]
-        if not deserialize:
-            return session_raw
-        session = deserialize_session(session_type, session_raw)
-        if cached_runs:
-            session.runs = self._run_object_cache.runs_from_rows(session_id, read.run_rows)  # type: ignore[union-attr]
+        session = agno_compat_sqlite.read_session(self, session_id, session_type, deserialize=bool(deserialize))
         if isinstance(session, (AgentSession, TeamSession)):
             agno_compat_session_metrics.seed_accounted_usage(session)
             drop_run_tool_schemas(session.runs or [])
@@ -439,7 +425,7 @@ class _ConversationSqliteDb(SqliteDb):
         )
 
     def delete_runs(self, run_ids: list[str]) -> None:
-        """Delete a run subtree and its legacy representations atomically."""
+        """Delete run subtrees atomically."""
         if not run_ids:
             return
         with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table):

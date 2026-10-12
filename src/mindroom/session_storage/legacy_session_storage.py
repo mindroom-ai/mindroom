@@ -54,7 +54,11 @@ def materialize_legacy_run_blobs(connection: Connection, runs: Table, session_ta
         # Agno's merge read blob entries first, table copies substituted, then table-only rows.
         merged = [*legacy, *(run_id for run_id in stored if run_id not in legacy)]
         for run_index, run_id in enumerate(merged):
-            connection.execute(runs.update().where(runs.c.run_id == run_id).values(run_index=run_index))
+            connection.execute(
+                runs.update()
+                .where(runs.c.session_id == session_id, runs.c.run_id == run_id)
+                .values(run_index=run_index),
+            )
         connection.exec_driver_sql(
             f"UPDATE {sessions} SET runs = NULL WHERE session_id = ?",  # noqa: S608
             (session_id,),
