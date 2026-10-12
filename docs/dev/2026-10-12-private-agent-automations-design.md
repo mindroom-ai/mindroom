@@ -57,5 +57,6 @@ An agent-level `context_files` entry of a private agent loads from the shared ag
 - Only the agent named by `personal_rooms.agent` can run automations as a private agent, because there is one personal-rooms agent per installation.
 - A requester who never got a personal room, or whose personal-room record cannot be read, is skipped.
 - A requester who reaches the agent through a bridge alias is skipped, because the personal-room record is keyed by the Matrix ID that joined onboarding while the private instance is keyed by the canonical requester; this fails closed.
+- An instance whose recorded requester later became an alias of another ID is skipped, because its prompts would run against the canonical ID's instance instead of the one the check measured.
 - A requester who left their personal room still gets prompts there, because the prompts maintain files the requester's other conversations with the agent use.
 - Access revoked while a chain is running is enforced by ingress on the next prompt, so that step times out after an hour instead of being skipped.

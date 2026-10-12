@@ -836,6 +836,18 @@ async def test_a_requester_without_a_personal_room_gets_no_prompt(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_a_requester_now_aliased_to_another_id_gets_no_prompt(tmp_path: Path) -> None:
+    """Ingress would run the prompt as the canonical ID, against another instance than the one the check measured."""
+    config, _paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
+    config.authorization.aliases = {"@alice-main:example.test": [ALICE]}
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [BOB_ROOM]
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_a_requester_the_agent_may_no_longer_answer_gets_no_prompt(tmp_path: Path) -> None:
     """Revoked access stops unattended runs on the requester's behalf before anything is posted."""
