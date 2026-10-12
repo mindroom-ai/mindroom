@@ -357,7 +357,6 @@ def _build_worker_routing_payload(
 
         worker_key = resolve_unscoped_worker_key(
             agent_name=effective_agent_name,
-            execution_identity=execution_identity,
             tenant_id=worker_target.tenant_id if worker_target is not None else None,
             account_id=worker_target.account_id if worker_target is not None else None,
         )

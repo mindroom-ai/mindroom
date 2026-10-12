@@ -538,20 +538,15 @@ def resolve_worker_key(
 
 def resolve_unscoped_worker_key(
     agent_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
     *,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Derive a stable backend worker key for unscoped sandbox execution."""
-    identity = execution_identity
-    tenant_key = normalize_worker_key_part(
-        tenant_id
-        or (identity.tenant_id if identity is not None else None)
-        or account_id
-        or (identity.account_id if identity is not None else None)
-        or "default",
-    )
+    """Derive a stable backend worker key for unscoped sandbox execution.
+
+    Pass the tenant and account of the resolved worker target, which already fall back to its execution identity's.
+    """
+    tenant_key = normalize_worker_key_part(tenant_id or account_id or "default")
     effective_agent_name = normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
