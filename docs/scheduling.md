@@ -296,7 +296,7 @@ agents:
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - A [private agent](configuration/agents.md#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](personal-rooms.md) with the agent.
   Only the agent named by `personal_rooms.agent` can run automations as a private agent, its entries cannot set `room`, and it inherits only default entries without `room`.
-  A requester without a personal room, whose adopted personal room keeps other participants, or whom the agent may no longer answer, is skipped.
+  A requester without a personal room, or whom the agent may no longer answer, is skipped, and no prompt is posted while anyone besides the requester and MindRoom's agents is in the room.
 - The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.

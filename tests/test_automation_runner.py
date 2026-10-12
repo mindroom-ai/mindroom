@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -31,12 +32,10 @@ from mindroom.constants import (
     primary_records_dir,
     resolve_runtime_paths,
 )
-from mindroom.matrix.personal_room_store import (
-    PersonalRoomAdoption,
-    PersonalRoomRecord,
-    personal_room_record_path,
-    write_personal_room,
-)
+from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
+from mindroom.matrix_identifiers import agent_username_localpart
+from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
@@ -67,6 +66,15 @@ class _Bot:
 
     sent: list[dict[str, Any]] = field(default_factory=list)
     client: Any = field(default_factory=lambda: MagicMock(user_id="@mindroom_mind:example.test"))
+    # Each room's joined members, as the homeserver reports them.
+    members: dict[str, set[str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
+            members = [nio.RoomMember(user_id, user_id, "") for user_id in sorted(self.members.get(room_id, set()))]
+            return nio.JoinedMembersResponse(members, room_id)
+
+        self.client.joined_members = joined_members
 
     async def _hook_send_message(
         self,
@@ -746,7 +754,8 @@ def _private_setup(
                 room_id=rooms[requester],
             )
             write_personal_room(personal_room_record_path(paths, "mind", requester), record)
-    bot = _Bot()
+    agent_id = MatrixID.from_username(agent_username_localpart("mind", paths), runtime_matrix_domain(paths)).full_id
+    bot = _Bot(members={room_id: {requester, agent_id} for requester, room_id in rooms.items()})
     runner = AutomationRunner(
         runtime_paths=paths,
         config_provider=lambda: config,
@@ -832,7 +841,7 @@ async def test_a_requester_without_a_personal_room_gets_no_prompt(tmp_path: Path
     assert ("mind", BOB) not in runner._active
     logger.warning.assert_not_called()
     logger.info.assert_any_call(
-        "Automation requester has no private personal room; skipped",
+        "Automation requester has no personal room; skipped",
         agent="mind",
         automation="prompt_curation",
         requester=BOB,
@@ -840,26 +849,31 @@ async def test_a_requester_without_a_personal_room_gets_no_prompt(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_a_requester_whose_adopted_room_keeps_other_participants_gets_no_prompt(tmp_path: Path) -> None:
-    """An adopted personal room may keep attested guests, who would read replies quoting the requester's files."""
-    _config, paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
-    record = PersonalRoomRecord(
-        user_id=BOB,
-        alias="#personal-bob:example.test",
-        source_room_id="!lobby:example.test",
-        room_id=BOB_ROOM,
-        adoption=PersonalRoomAdoption(
-            creator_user_id=BOB,
-            agent_user_id="@mindroom_mind:example.test",
-            additional_user_ids=["@carol:example.test"],
-        ),
-    )
-    write_personal_room(personal_room_record_path(paths, "mind", BOB), record)
+async def test_a_requester_whose_personal_room_has_someone_else_in_it_gets_no_prompt(tmp_path: Path) -> None:
+    """Replies quote the requester's files, so a room another person joined, such as an adopted room's guest, gets none."""
+    _config, _paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
+    bot.members[BOB_ROOM].add("@carol:example.test")
 
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
 
     assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_prompt_is_not_posted_once_someone_else_joined(tmp_path: Path) -> None:
+    """Each prompt checks the room again, so a re-check is not posted after another person joined."""
+    _config, _paths, runner, bot, roots = _private_setup(tmp_path, {ALICE: MEMORY})
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    (roots[ALICE] / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    bot.members[ALICE_ROOM].add("@carol:example.test")
+
+    runner.response_finished(["$event1"])
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
+
+    assert len(bot.sent) == 1
+    assert ("mind", ALICE) not in runner._active
 
 
 @pytest.mark.asyncio

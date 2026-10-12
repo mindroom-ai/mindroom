@@ -25,7 +25,7 @@ Shared agents keep one schedule and lock per agent and their existing state dire
 
 Each prompt and notice for a private instance goes to that requester's personal room with the agent, read from the primary-only personal-room record.
 Personal rooms are the only rooms MindRoom keeps private to one requester and the agent: it removes anyone else invited into rooms it created.
-An adopted personal room keeps its attested roster, which can include other people, so one with `additional_user_ids` gets no automations.
+MindRoom never removes anyone from an adopted personal room, whose attested roster can include other people, so each prompt is posted only while the room's joined members are the requester and MindRoom's agents.
 A private agent therefore needs `personal_rooms.agent` to name it before it may list or inherit automations, and its entries may not set `room`.
 
 Rejected alternatives:
