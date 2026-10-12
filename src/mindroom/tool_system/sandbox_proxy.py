@@ -375,7 +375,6 @@ def _build_worker_routing_payload(
         msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
         raise RuntimeError(msg)
 
-    effective_agent_name = routing_agent_name
     if worker_scope == "user_agent":
         worker_key, resolved_private_agent_names = _resolve_user_agent_worker_payload(
             tool_name=tool_name,
@@ -398,7 +397,7 @@ def _build_worker_routing_payload(
     return (
         {
             "worker_scope": worker_scope,
-            "routing_agent_name": effective_agent_name,
+            "routing_agent_name": routing_agent_name,
             "worker_key": worker_key,
             "execution_identity": to_json_compatible(asdict(execution_identity)),
             "private_agent_names": (
