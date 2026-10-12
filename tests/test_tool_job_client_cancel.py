@@ -222,6 +222,9 @@ async def test_jobs_command_lists_this_conversations_jobs(tmp_path: Path) -> Non
         assert "`job_here`" in reply
         assert "run_tests" in reply
         assert "job_elsewhere" not in reply
+        # Without a jobs bar, the listing is where a person learns how to stop them.
+        assert "`!cancel_job <id>`" in reply
+        assert "`!cancel_job all`" in reply
     finally:
         await runtime.shutdown()
 
