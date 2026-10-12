@@ -140,9 +140,10 @@ _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
 
 
 _VOICE_STYLE_ADDENDUM = (
-    "You are participating in a live voice call. Everything you say is spoken "
-    "aloud: keep responses short, conversational, and natural, and never use markdown, "
-    "lists, or other written formatting."
+    "You are participating in a live voice call. Everything you say is spoken aloud: give the answer first "
+    "in at most three short sentences, about 60 words, unless the caller asks for detail or a longer answer. "
+    "Speak conversationally in plain sentences, without markdown, lists, links, file paths, code, "
+    "or other written formatting."
 )
 
 _LIVE_VOICE_INSTRUCTIONS = (

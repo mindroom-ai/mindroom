@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
 import uvicorn
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
+from pydantic_core import PydanticCustomError
 
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.api.agent_cli import router as agent_cli_router
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.json_utils import has_only_finite_numbers
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
@@ -86,6 +88,16 @@ class ScriptToolCallRequestModel(BaseModel):
     toolkit_name: str = Field(min_length=1, max_length=128)
     function_name: str = Field(min_length=1, max_length=128)
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @field_validator("arguments")
+    @classmethod
+    def _reject_non_finite_numbers(cls, arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        # Pydantic's JSON parser accepts NaN, Infinity, and overflowing numbers such as 1e400,
+        # which the broker's strict-JSON call digest cannot encode.
+        if not has_only_finite_numbers(arguments):
+            # A custom error, unlike a ValueError, carries no exception object that the 422 body cannot render.
+            raise PydanticCustomError("finite_number", "Arguments must contain only finite numbers")  # noqa: EM101
+        return arguments
 
     def to_domain(self) -> ScriptToolCallRequest:
         """Build the token-free domain request authenticated only from the header."""

@@ -255,7 +255,7 @@ expose = [
 
 [[modules]]
 path = "mindroom.agent_cli.json_io"
-depends_on = []
+depends_on = ["mindroom.json_utils"]
 visibility = [
     "mindroom.agent_cli.client",
     "mindroom.agent_cli.main",
@@ -1769,6 +1769,7 @@ depends_on = [
     "mindroom.api.agent_cli",
     "mindroom.background_tasks",
     "mindroom.bounded_bytes",
+    "mindroom.json_utils",
     "mindroom.logging_config",
     "mindroom.script_runs.broker",
     "mindroom.script_runs.models",
@@ -7277,7 +7278,7 @@ visibility = ["mindroom.ai"]
 [[modules]]
 path = "mindroom.json_utils"
 depends_on = []
-visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim"]
+visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim", "mindroom.api.script_gateway", "mindroom.agent_cli.json_io"]
 
 [[modules]]
 path = "mindroom.providers.tool_policy"
