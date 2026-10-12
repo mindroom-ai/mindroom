@@ -172,7 +172,7 @@ def _request_client_ip(request: Request | None) -> str:
 
 
 def _refuse_locked_out_client(client_ip: str) -> None:
-    """Refuse a client whose recent failed authentications locked it out, on every authenticated path."""
+    """Refuse a client whose recent failed authentications locked it out, on both Supabase-token verification paths."""
     if auth_monitor.is_blocked(client_ip):
         record_auth_event(actor="user", outcome="blocked_request")
         raise HTTPException(status_code=429, detail="Too many failed attempts. Please try again later.")

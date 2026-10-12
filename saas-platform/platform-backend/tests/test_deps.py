@@ -367,10 +367,16 @@ class TestDeps:
         assert exc_info.value.status_code == 401
         assert get_admin_metric("unauthorized") == 1
 
+    @staticmethod
+    def _reject_tokens(mock_auth_client: MagicMock, status: int = 403) -> None:
+        """Make Supabase reject every token as it does for a bad or expired JWT."""
+        mock_auth_client.auth.get_user.side_effect = AuthApiError("invalid JWT", status, "bad_jwt")
+
     @pytest.mark.asyncio
     async def test_failed_admin_checks_lock_the_client_out(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
-        """Failed admin token checks count toward the same lockout as user checks."""
-        mock_auth_client.auth.get_user.return_value = None
+        """Rejected admin tokens count toward the same lockout as user checks, and a locked-out client is refused."""
+        reset_security_metrics()
+        self._reject_tokens(mock_auth_client)
 
         for _ in range(auth_monitor.MAX_FAILURES):
             with pytest.raises(HTTPException) as exc_info:
@@ -379,13 +385,17 @@ class TestDeps:
 
         with pytest.raises(HTTPException) as exc_info:
             await verify_admin("Bearer guessed-token")
+
         assert exc_info.value.status_code == 429
-        assert auth_monitor.is_blocked("unknown")
+        assert mock_auth_client.auth.get_user.call_count == auth_monitor.MAX_FAILURES
+        assert get_admin_metric("unauthorized") == auth_monitor.MAX_FAILURES
+        assert get_admin_metric("error") == 0
+        assert get_admin_metric("blocked") == 1
 
     @pytest.mark.asyncio
     async def test_locked_out_client_is_refused_on_the_admin_path(self, mock_auth_client: MagicMock):
-        """A client locked out by failed user checks cannot keep guessing on admin routes."""
-        mock_auth_client.auth.get_user.return_value = None
+        """A client locked out by rejected user tokens cannot keep guessing on admin routes."""
+        self._reject_tokens(mock_auth_client)
         for _ in range(auth_monitor.MAX_FAILURES):
             with pytest.raises(HTTPException):
                 await verify_user("Bearer guessed-token")
@@ -397,32 +407,46 @@ class TestDeps:
         assert mock_auth_client.auth.get_user.call_count == auth_monitor.MAX_FAILURES
 
     @pytest.mark.asyncio
-    async def test_invalid_user_token_counts_once(self, mock_auth_client: MagicMock):
-        """One rejected token is one failed attempt, so the lockout threshold means what it says."""
-        mock_auth_client.auth.get_user.return_value = None
+    async def test_malformed_admin_header_counts_toward_the_lockout(self):
+        """A missing or malformed admin header is a failed attempt like a malformed user header."""
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_admin("invalid")
 
-        with pytest.raises(HTTPException):
-            await verify_user("Bearer guessed-token")
+        assert exc_info.value.status_code == 401
+        assert len(auth_monitor.failed_attempts["unknown"]) == 1
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [401, 403])
+    @pytest.mark.parametrize("verify", [verify_user, verify_admin])
+    async def test_supabase_token_rejection_counts_once(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify, status: int
+    ):
+        """Supabase rejecting a token is exactly one failed attempt."""
+        self._reject_tokens(mock_auth_client, status)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify("Bearer guessed-token")
+
+        assert exc_info.value.status_code == 401
         assert len(auth_monitor.failed_attempts["unknown"]) == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("verify", [verify_user, verify_admin])
-    async def test_supabase_token_rejection_counts_but_outage_does_not(
+    async def test_supabase_outage_does_not_count_toward_the_lockout(
         self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify
     ):
-        """Supabase rejecting a token is a failed attempt; Supabase failing to answer is not."""
+        """Supabase failing to answer is not a failed attempt, so an outage cannot lock out every client."""
+        reset_security_metrics()
         mock_auth_client.auth.get_user.side_effect = AuthRetryableError("upstream unavailable", 503)
+
         with pytest.raises(HTTPException) as exc_info:
             await verify("Bearer some-token")
+
         assert exc_info.value.status_code == 401
         assert not auth_monitor.failed_attempts.get("unknown")
-
-        mock_auth_client.auth.get_user.side_effect = AuthApiError("invalid JWT", 401, "bad_jwt")
-        with pytest.raises(HTTPException) as exc_info:
-            await verify("Bearer some-token")
-        assert exc_info.value.status_code == 401
-        assert len(auth_monitor.failed_attempts["unknown"]) == 1
+        if verify is verify_admin:
+            assert get_admin_metric("error") == 1
+            assert get_admin_metric("unauthorized") == 0
 
     def test_ensure_supabase(self):
         """Test ensure_supabase returns client."""
