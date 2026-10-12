@@ -237,17 +237,21 @@ def test_invalid_amounts_are_rejected(budget_client: tuple[TestClient, BudgetMon
     assert monitor.caps.entries() == {}
 
 
-@pytest.mark.parametrize("amount", ["NaN", "Infinity", "1e400"])
-def test_non_finite_amounts_are_rejected(budget_client: tuple[TestClient, BudgetMonitor], amount: str) -> None:
+@pytest.mark.parametrize(
+    "body",
+    ['{"limit_usd": NaN}', '{"limit_usd": Infinity}', '{"limit_usd": 1e400}', "[NaN]", "NaN"],
+)
+def test_non_finite_amounts_are_rejected(budget_client: tuple[TestClient, BudgetMonitor], body: str) -> None:
     client, monitor = budget_client
 
     response = client.put(
         f"/api/budgets/users/{ALICE}",
-        content=f'{{"limit_usd": {amount}}}',
+        content=body,
         headers={**_HEADERS, "Content-Type": "application/json"},
     )
 
     assert response.status_code == 422
+    assert all("input" not in error for error in response.json()["detail"])
     assert monitor.caps.entries() == {}
 
 

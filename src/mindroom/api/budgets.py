@@ -1,11 +1,10 @@
 """Budget status and per-user caps for the dashboard and the dedicated budget service."""
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_budget_service, verify_user
@@ -38,18 +37,6 @@ class _CapRequest(BaseModel):
     limit_usd: float = Field(ge=0, allow_inf_nan=False, strict=True)
 
 
-def _cap_amount(body: dict[str, Any]) -> float:
-    """Validate a cap body without echoing its input, which can be a non-JSON value such as NaN."""
-    try:
-        return _CapRequest.model_validate(body).limit_usd
-    except ValidationError as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            exc.errors(include_input=False, include_context=False, include_url=False),
-            headers=_NO_STORE,
-        ) from exc
-
-
 @router.get("", dependencies=[Depends(verify_user)], response_model=None)
 def get_budgets(request: Request) -> JSONResponse:
     """Return budget settings and each user's month-to-date spend to the dashboard."""
@@ -63,15 +50,15 @@ def get_service_budgets(request: Request) -> JSONResponse:
 
 
 @router.put("/users/{user_id}", dependencies=[Depends(verify_user)], response_model=None)
-def set_user_cap(request: Request, user_id: str, body: Annotated[dict[str, Any], Body()]) -> JSONResponse:
+def set_user_cap(request: Request, user_id: str, body: _CapRequest) -> JSONResponse:
     """Create or replace one user's cap from the dashboard."""
-    return _set_cap(request, user_id, _cap_amount(body), updated_by=_DASHBOARD_UPDATED_BY)
+    return _set_cap(request, user_id, body.limit_usd, updated_by=_DASHBOARD_UPDATED_BY)
 
 
 @router.put("/service/users/{user_id}", dependencies=[Depends(require_budget_service)], response_model=None)
-def set_service_user_cap(request: Request, user_id: str, body: Annotated[dict[str, Any], Body()]) -> JSONResponse:
+def set_service_user_cap(request: Request, user_id: str, body: _CapRequest) -> JSONResponse:
     """Create or replace one user's cap for the budget service."""
-    return _set_cap(request, user_id, _cap_amount(body), updated_by=_SERVICE_UPDATED_BY)
+    return _set_cap(request, user_id, body.limit_usd, updated_by=_SERVICE_UPDATED_BY)
 
 
 @router.delete("/users/{user_id}", dependencies=[Depends(verify_user)], response_model=None)
