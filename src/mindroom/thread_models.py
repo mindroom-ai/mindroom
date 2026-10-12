@@ -74,6 +74,15 @@ def _configured_entities(config: Config) -> set[str]:
     return {*config.agents, *config.teams, ROUTER_AGENT_NAME}
 
 
+def _kept_fields(record: OverrideRecord, removed: set[str]) -> OverrideRecord:
+    """Return the record's model selections and ``set_at``, leaving out ``removed`` and any other key."""
+    return {
+        field: value
+        for field, value in record.items()
+        if (field == "set_at" or field.startswith(_ENTITY_MODEL_PREFIX)) and field not in removed
+    }
+
+
 def _unconfigured_entity_fields(record: OverrideRecord, config: Config) -> set[str]:
     """Return the record's model fields of entities that are no longer configured."""
     configured_entities = _configured_entities(config)
@@ -141,9 +150,8 @@ def set_thread_model_override(
     path = _store_path(runtime_paths)
     overrides = _load_overrides(path)
     current = overrides.get(thread_id, {})
-    unconfigured = _unconfigured_entity_fields(current, config)
     record = {
-        **{field: value for field, value in current.items() if field not in unconfigured},
+        **_kept_fields(current, _unconfigured_entity_fields(current, config)),
         **dict.fromkeys(_entity_fields(entity_names), model_name),
         "set_at": datetime.now(UTC).isoformat(),
     }
@@ -170,10 +178,5 @@ def clear_thread_model_override(
     removed = fields | _unconfigured_entity_fields(record, config)
     if removed.isdisjoint(record):
         return False
-    _save_thread_record(
-        path,
-        overrides,
-        thread_id,
-        {field: value for field, value in record.items() if field not in removed},
-    )
+    _save_thread_record(path, overrides, thread_id, _kept_fields(record, removed))
     return not fields.isdisjoint(record)
