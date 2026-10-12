@@ -133,6 +133,7 @@ Three earlier restart runs failed on stale harness assumptions, not production d
 `20260906T183941Z` (Tuwunel) and `20260906T184117Z` (Synapse) timed out waiting for entity replacements that the planner correctly did not request, because the room/model configuration update applies in place.
 `20260906T184417Z` (Tuwunel) waited for the retired Classic checkpoint file.
 The harness corrections (`04bc7105d`, `9883dba3a`) changed no production source, and the four matched capacity controls retain their original committed source and harness hashes.
+The corrected restart check reads exact event projection together with the producer's committed cursor and empty input and batch tables; because a completion batch replaces producer input atomically, that proves acknowledgement without an intermediate false-ready state and without requiring an idle server to change an opaque position.
 
 ### Reproduce the Sliding comparison
 

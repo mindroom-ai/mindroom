@@ -35,7 +35,7 @@ Concurrent preparation was a measured candidate for reducing that delay, not a p
 
 ## Limitations
 
-- Bypass commands handled in the gate wait for the same requester's older detached preparations, but commands routed outside the gate are not ordered against them.
+- Bypass commands handled in the gate wait for older detached preparations with the same coalescing key (same room and requester), but commands routed outside the gate are not ordered against them.
 - Bounded shutdown cancels preparations cooperatively and returns at its budget without waiting for callbacks that resist cancellation.
 - Concurrent preparation alone did not shorten startup for the 200-root workload; its critical serialization point was the handled-turn ledger lock (see [Resolution](#resolution)).
 - None of these controls qualifies 1,000 concurrent replies.

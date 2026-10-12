@@ -1,11 +1,11 @@
 # Frontend Security Review - MindRoom SaaS Platform
 
 September 2025 review of the SaaS platform portal frontend: CSP and security headers, re-authentication, route authorization, cookies, client-side storage, and Subresource Integrity.
-It keeps the reasoning behind one accepted risk and the findings still open when re-checked against the code on 2026-10-12.
+It keeps the reasoning that refutes one reported finding and the findings still open when re-checked against the code on 2026-10-12.
 
-## Accepted risk: development mock user
+## Refuted finding: development mock user
 
-The `NEXT_PUBLIC_DEV_AUTH` mock user was reported as a critical authentication bypass, but it only fakes client-side state.
+The review reported the `NEXT_PUBLIC_DEV_AUTH` mock user as a critical authentication bypass and recommended removing it, but it only fakes client-side state.
 It applies only when `NODE_ENV` is `development`, and Next.js inlines `NEXT_PUBLIC_` values when the bundle is built, so setting the variable on a running deployment cannot enable it.
 The mock user has no Supabase session, so backend API calls made under it carry no valid token and are rejected.
 
