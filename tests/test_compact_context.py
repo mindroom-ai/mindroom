@@ -19,7 +19,6 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
@@ -36,6 +35,7 @@ from mindroom.history.types import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import (

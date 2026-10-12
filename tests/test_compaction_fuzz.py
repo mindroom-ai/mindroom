@@ -24,7 +24,6 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom import constants
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history import archive
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
@@ -33,6 +32,7 @@ from mindroom.history.storage import (
     reconcile_compaction_state,
 )
 from mindroom.history.types import HistoryScope
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from tests.conftest import seed_session
 from tests.history_helpers import archived_run_ids
 

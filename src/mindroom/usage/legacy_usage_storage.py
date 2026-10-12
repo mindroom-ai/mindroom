@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
-from mindroom.legacy_session_storage import decode_persisted_session_json
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:

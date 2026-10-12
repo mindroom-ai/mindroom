@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
+from mindroom.attachments.storage import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.coalescing import gate as coalescing
 from mindroom.coalescing.batch import (
     CoalescingKey,

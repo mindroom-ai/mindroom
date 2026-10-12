@@ -10,19 +10,19 @@ from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
-from mindroom.agent_storage import (
-    create_session_storage,
-    get_agent_session,
-    get_team_session,
-    run_session_storage_operation,
-    save_runs,
-)
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
+from mindroom.session_storage.agent_storage import (
+    create_session_storage,
+    get_agent_session,
+    get_team_session,
+    run_session_storage_operation,
+    save_runs,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable

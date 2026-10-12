@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.attachments import _attachment_id_for_event, register_local_attachment
+from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import ResponderCandidatePermissions
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config

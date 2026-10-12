@@ -7,9 +7,9 @@ from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.attachment_ids import merge_attachment_ids
-from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
-from mindroom.attachments import (
+from mindroom.attachments.ids import merge_attachment_ids
+from mindroom.attachments.media import attachment_records_to_media, resolve_scoped_attachments
+from mindroom.attachments.storage import (
     format_attachments_prompt,
     format_voice_transcript_attachment_guidance,
     parse_attachment_ids_from_thread_history,

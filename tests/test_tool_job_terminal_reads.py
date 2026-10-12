@@ -12,7 +12,6 @@ from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
@@ -20,6 +19,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime

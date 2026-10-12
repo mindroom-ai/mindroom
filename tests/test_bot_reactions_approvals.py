@@ -17,7 +17,6 @@ from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom import interactive
-from mindroom.agent_storage import create_session_storage
 from mindroom.ai import _attach_blocking_pause_presentation
 from mindroom.approval import manager as approval_manager
 from mindroom.approval import transport as approval_transport
@@ -67,6 +66,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (

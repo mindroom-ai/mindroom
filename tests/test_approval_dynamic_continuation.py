@@ -13,7 +13,6 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput, ToolCa
 from agno.run.base import RunStatus
 from agno.tools.calculator import CalculatorTools
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response
 from mindroom.approval.execution import (
@@ -38,6 +37,7 @@ from mindroom.response_turn import (
     ResumedAttempt,
     paused_attempt_from_response,
 )
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StructuredStreamChunk,

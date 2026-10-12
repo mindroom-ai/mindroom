@@ -22,18 +22,18 @@ from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
 from sqlalchemy.dialects.sqlite import insert
 
-from mindroom import (
+from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.history.legacy_compaction_state import migrate_compaction_database
+from mindroom.logging_config import get_logger
+from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.session_storage import (
     agno_compat_run_messages,
     agno_compat_session_metrics,
     agno_compat_session_persistence,
     agno_compat_sqlite,
 )
-from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.history.legacy_compaction_state import migrate_compaction_database
-from mindroom.legacy_session_storage import scrub_legacy_run_blobs
-from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.session_storage_preflight import session_storage_preflight
+from mindroom.session_storage.legacy_session_storage import scrub_legacy_run_blobs
+from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.storage import project_usage, usage_table_sql, usage_upsert_sql
 

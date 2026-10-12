@@ -15,7 +15,6 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.execution_preparation import (
@@ -47,6 +46,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,

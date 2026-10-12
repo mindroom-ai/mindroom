@@ -12,8 +12,8 @@ from agno.media import File, Image
 from agno.models.anthropic import Claude
 from agno.models.message import Message
 
-from mindroom.attachment_media import attachment_records_to_media
-from mindroom.attachments import AttachmentRecord
+from mindroom.attachments.media import attachment_records_to_media
+from mindroom.attachments.storage import AttachmentRecord
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.providers import claude_prompt_cache

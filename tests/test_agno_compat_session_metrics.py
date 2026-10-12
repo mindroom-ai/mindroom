@@ -21,10 +21,10 @@ from agno.team import Team
 from agno.team._run import _cleanup_and_store
 from agno.tools.function import Function
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.usage.stats import collect_admin_usage
 from tests.history_helpers import RecordingModel
 

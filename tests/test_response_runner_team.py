@@ -14,7 +14,6 @@ from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 
 from mindroom import reply_lifecycle as rl
-from mindroom.agent_storage import get_team_session
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.models import ModelConfig, ModelPricing
@@ -42,6 +41,7 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.room_model_overrides import set_room_model_override
+from mindroom.session_storage.agent_storage import get_team_session
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.turn_policy import _ResponderAvailability

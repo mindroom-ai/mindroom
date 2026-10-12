@@ -22,7 +22,6 @@ from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.approval.receipt import install_approval_receipt_hooks
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import (
@@ -72,6 +71,7 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import (

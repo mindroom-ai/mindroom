@@ -3,6 +3,9 @@ export interface BudgetUserStatus {
   spend_usd: number;
   limit_usd: number | null;
   over_budget: boolean;
+  override_usd: number | null; // The user's own cap; null when the default applies
+  updated_at: string | null;
+  updated_by: string | null;
 }
 
 export interface UnpricedModelUsage {

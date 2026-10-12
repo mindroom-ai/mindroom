@@ -12,7 +12,6 @@ from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import get_agent_session
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.execution_preparation import _finalize_prepared_history
 from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry, compact_scope_history
@@ -27,6 +26,7 @@ from mindroom.history.storage import archive_compaction_chunk, reconcile_compact
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import _ALL_HISTORY_SETTINGS, _agent, _completed_run, _make_config, _session

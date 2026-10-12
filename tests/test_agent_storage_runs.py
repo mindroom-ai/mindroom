@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import (
+from mindroom.session_storage.agent_storage import (
     create_state_storage,
     get_agent_session,
     get_team_session,
@@ -562,7 +562,7 @@ def test_cache_diagnostics_count_history_without_retaining_closed_adapters(
     """Counts cover current adapters, not closed stores or private conversation identifiers."""
     from structlog.testing import capture_logs  # noqa: PLC0415
 
-    from mindroom import agent_storage  # noqa: PLC0415
+    from mindroom.session_storage import agent_storage  # noqa: PLC0415
 
     # Scope diagnostics to this test's adapters; other tests may retain an
     # otherwise unreachable Agno adapter cycle until the next GC collection.
@@ -598,7 +598,7 @@ def test_cache_diagnostics_ignore_read_finishing_after_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A read paused before publishing cannot restore a closed adapter's snapshot."""
-    from mindroom import agent_storage  # noqa: PLC0415
+    from mindroom.session_storage import agent_storage  # noqa: PLC0415
 
     storage = _storage(tmp_path)
     seed_session(storage, _session("s1", ["r1"]))

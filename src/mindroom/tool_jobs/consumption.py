@@ -12,9 +12,9 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.tools.function import FunctionCall, ToolResult
 
-from mindroom.agent_storage import run_session_storage_operation
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.agent_storage import run_session_storage_operation
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
 from mindroom.tool_jobs.execution_authority import current_tool_call
 from mindroom.tool_jobs.results import read_result_payload

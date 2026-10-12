@@ -25,12 +25,12 @@ from agno.tools import Toolkit
 from agno.tools.function import FunctionCall, ToolResult
 from pydantic import BaseModel
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import HookRegistry
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import agno_execution, results
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority

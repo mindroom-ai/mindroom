@@ -2,7 +2,6 @@
 # Names vulture would otherwise report as unused; each line names the files where vulture reports it.
 _.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_budgets  # Pydantic model validator (src/mindroom/config/main.py)
-_._validate_user_ids  # Pydantic field validator (src/mindroom/config/budgets.py)
 _.validate_template  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_cron  # Pydantic field validator (src/mindroom/config/automations.py)
@@ -317,11 +316,11 @@ _._validate_connection  # Pydantic validator (src/mindroom/config/voice.py)
 # vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
-_.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
-_.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
+_.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
+_.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
 _.external_execution_silent  # Agno suppresses the internal delegation wait message (src/mindroom/agents.py)
 _.external_execution_required  # Agno reads the retained tool pause flags (src/mindroom/delegation/execution.py, src/mindroom/delegation/recovery.py)
-_enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
+_enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/session_storage/agent_storage.py)
 
 export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)
 

@@ -22,7 +22,6 @@ from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
@@ -135,6 +134,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
+from mindroom.session_storage.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,

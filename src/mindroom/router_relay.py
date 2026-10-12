@@ -6,8 +6,8 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.attachment_ids import merge_attachment_ids
-from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.attachments.ids import merge_attachment_ids
+from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,

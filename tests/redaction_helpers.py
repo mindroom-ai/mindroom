@@ -5,10 +5,10 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.response_turn import ResponseTurnContext, _remove_history_of_redacted_events
+from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 
 if TYPE_CHECKING:
     from agno.db.base import BaseDb

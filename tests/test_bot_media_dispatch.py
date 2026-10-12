@@ -12,7 +12,7 @@ import nio
 import pytest
 from agno.media import Image
 
-from mindroom.attachments import _attachment_id_for_event, register_local_attachment
+from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate, LaneSlot, ReadyPendingEvent
 from mindroom.constants import (

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from agno.models.message import Message
 
 from mindroom import ai_runtime
-from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
+from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.team import Team
 
-    from mindroom.attachments import AttachmentRecord
+    from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState

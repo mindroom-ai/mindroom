@@ -12,7 +12,7 @@ import nio
 import pytest
 from agno.media import Audio
 
-from mindroom.attachments import _attachment_id_for_event, load_attachment
+from mindroom.attachments.storage import _attachment_id_for_event, load_attachment
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig

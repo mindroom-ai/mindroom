@@ -19,7 +19,6 @@ from agno.run.base import RunStatus
 from agno.session.summary import SessionSummary
 from agno.utils.models.claude import format_messages as format_claude_messages
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -61,6 +60,7 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import (

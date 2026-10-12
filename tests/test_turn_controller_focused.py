@@ -28,7 +28,7 @@ from pydantic import ValidationError
 
 from mindroom import constants, interactive
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.attachments import register_local_attachment
+from mindroom.attachments.storage import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot

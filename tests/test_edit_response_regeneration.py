@@ -20,7 +20,6 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import interactive
-from mindroom.agent_storage import get_agent_session
 from mindroom.coalescing.batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
@@ -47,6 +46,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.teams import TeamMode, TeamOutcome, TeamResolution
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access

@@ -26,10 +26,10 @@ from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation,
 from mindroom.agent_cli.session import CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import create_state_storage
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.ai import _process_stream_events, _StreamingAttemptState, collect_streamed_response_content
-from mindroom.attachment_media import resolve_scoped_attachments
+from mindroom.attachments.media import resolve_scoped_attachments
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context

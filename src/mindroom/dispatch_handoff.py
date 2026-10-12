@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import nio
 
-from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,

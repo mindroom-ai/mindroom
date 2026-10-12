@@ -36,7 +36,6 @@ from mindroom.agent_cli.protocol import (
 )
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
-from mindroom.agent_storage import create_session_storage
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -51,6 +50,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.providers import stream_retry as provider_stream_retry
 from mindroom.response_turn import apply_exact_approval_decisions
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (

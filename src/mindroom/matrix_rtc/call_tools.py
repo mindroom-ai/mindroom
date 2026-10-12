@@ -34,7 +34,6 @@ from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agent_storage import create_session_storage, run_session_storage_operation, save_independent_usage
 from mindroom.agents import create_agent
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.approval.tool_approval import tool_may_require_approval
@@ -62,6 +61,11 @@ from mindroom.providers.claude_prompt_cache import (
     arefresh_session_backed_bedrock_async_client,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.agent_storage import (
+    create_session_storage,
+    run_session_storage_operation,
+    save_independent_usage,
+)
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,

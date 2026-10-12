@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.memory._semantic_file_search as semantic_file_search
-from mindroom.agent_storage import load_agent_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -24,6 +23,7 @@ from mindroom.memory import (
 )
 from mindroom.memory.auto_flush import _build_existing_memory_context
 from mindroom.memory.functions import append_agent_daily_memory
+from mindroom.session_storage.agent_storage import load_agent_session
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -961,7 +961,7 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
         captured["storage"] = storage
         return storage
 
-    monkeypatch.setattr("mindroom.agent_storage.create_session_storage", _fake_create_session_storage)
+    monkeypatch.setattr("mindroom.session_storage.agent_storage.create_session_storage", _fake_create_session_storage)
 
     assert (
         load_agent_session(
@@ -991,9 +991,9 @@ def test_load_agent_session_uses_canonical_session_helper(
     def _fake_create_session_storage(*_args: object, **_kwargs: object) -> object:
         return storage
 
-    monkeypatch.setattr("mindroom.agent_storage.create_session_storage", _fake_create_session_storage)
+    monkeypatch.setattr("mindroom.session_storage.agent_storage.create_session_storage", _fake_create_session_storage)
     monkeypatch.setattr(
-        "mindroom.agent_storage.get_agent_session",
+        "mindroom.session_storage.agent_storage.get_agent_session",
         lambda actual_storage, session_id: (
             sentinel if actual_storage is storage and session_id == "session-1" else None
         ),

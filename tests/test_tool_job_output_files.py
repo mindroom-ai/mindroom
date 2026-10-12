@@ -11,7 +11,6 @@ import pytest_asyncio
 from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -19,6 +18,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_outcome
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources

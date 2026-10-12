@@ -15,7 +15,7 @@ from agno.session.agent import AgentSession
 from agno.tools.function import Function
 
 from mindroom import execution_preparation
-from mindroom.attachments import _attachment_id_for_event, register_local_attachment
+from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (

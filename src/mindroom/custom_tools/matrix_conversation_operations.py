@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
-from mindroom.attachments import AttachmentRecord
+from mindroom.attachments.storage import AttachmentRecord
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,

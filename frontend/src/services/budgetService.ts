@@ -1,4 +1,4 @@
-import { API_BASE_URL } from "@/lib/api";
+import { API_BASE_URL, fetchJSON } from "@/lib/api";
 import type { BudgetStatus } from "@/types/budgets";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -18,7 +18,8 @@ function isBudgetStatus(value: unknown): value is BudgetStatus {
         isRecord(user) &&
         typeof user.user_id === "string" &&
         typeof user.spend_usd === "number" &&
-        typeof user.over_budget === "boolean",
+        typeof user.over_budget === "boolean" &&
+        (user.override_usd === null || typeof user.override_usd === "number"),
     ) &&
     Array.isArray(value.unpriced_models)
   );
@@ -61,4 +62,24 @@ export async function fetchBudgets(
     throw new Error("Could not read budget status from the server. Try again.");
   }
   return payload;
+}
+
+function userCapUrl(userId: string): string {
+  return `${API_BASE_URL}/api/budgets/users/${encodeURIComponent(userId)}`;
+}
+
+/** Create or replace one user's monthly cap. */
+export async function setUserCap(
+  userId: string,
+  limitUsd: number,
+): Promise<void> {
+  await fetchJSON<void>(userCapUrl(userId), {
+    method: "PUT",
+    body: JSON.stringify({ limit_usd: limitUsd }),
+  });
+}
+
+/** Remove one user's cap, so the default cap applies to them. */
+export async function clearUserCap(userId: string): Promise<void> {
+  await fetchJSON<void>(userCapUrl(userId), { method: "DELETE" });
 }

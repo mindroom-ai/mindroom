@@ -49,14 +49,6 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import (
-    get_agent_session,
-    get_team_session,
-    replace_runs,
-    runs_without,
-    save_compaction_usage,
-    save_runs,
-)
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -73,6 +65,14 @@ from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.agent_storage import (
+    get_agent_session,
+    get_team_session,
+    replace_runs,
+    runs_without,
+    save_compaction_usage,
+    save_runs,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence

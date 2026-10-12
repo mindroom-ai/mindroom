@@ -34,7 +34,6 @@ from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent, enable_all_history_replay, team_job_controls
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
@@ -119,6 +118,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.session_storage.agent_storage import get_team_session
 from mindroom.system_prompt import render_date_context
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,

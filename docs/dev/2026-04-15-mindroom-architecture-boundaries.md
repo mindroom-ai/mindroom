@@ -94,7 +94,7 @@ This domain is responsible for control-plane interaction, not low-level storage 
 
 This domain owns attachments, streaming, auth checks, logging, background tasks, and other supporting runtime services that cross multiple features.
 
-Representative modules include `attachments.py`, `streaming.py`, `authorization.py`, `background_tasks.py`, and related support code.
+Representative modules include `attachments/storage.py`, `streaming.py`, `authorization.py`, `background_tasks.py`, and related support code.
 
 This domain should stay infrastructural and should not absorb domain-specific policy unless that policy is truly shared.
 

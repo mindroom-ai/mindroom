@@ -17,7 +17,6 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import ai_runtime
-from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     EMPTY_RESPONSE_NOTICE,
@@ -31,6 +30,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import make_turn_context, seed_session
 

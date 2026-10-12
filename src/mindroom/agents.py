@@ -12,7 +12,7 @@ from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 
 import mindroom.tools  # noqa: F401
-from mindroom import agent_storage, constants
+from mindroom import constants
 from mindroom.agent_cli.cli_shell_agent import (
     STANDARD_CLI_NOTE,
     CliShellAgent,
@@ -56,6 +56,7 @@ from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
 )
+from mindroom.session_storage import agent_storage
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_call_budget import install_model_call_cap

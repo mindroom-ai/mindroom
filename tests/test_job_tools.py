@@ -13,7 +13,6 @@ from agno.models.response import ModelResponse
 from agno.team import Team
 from agno.tools.function import ToolResult
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -21,6 +20,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_outcome
 from mindroom.event_journal import ToolJobStore
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import consumption as consumption_module
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage

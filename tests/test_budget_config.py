@@ -40,17 +40,10 @@ def test_pricing_rejects_infinite_prices() -> None:
         ModelPricing(input=float("inf"), output=1.0)
 
 
-def test_budgets_parse_default_overrides_and_fallback() -> None:
-    config = Config(
-        models=_models(),
-        budgets={"monthly_limit_usd": 20, "fallback_model": "luna", "users": {"@alice:example.test": 100}},
-    )
+def test_budgets_parse_default_cap_and_fallback() -> None:
+    config = Config(models=_models(), budgets={"monthly_limit_usd": 20, "fallback_model": "luna"})
 
-    assert config.budgets == BudgetsConfig(
-        monthly_limit_usd=20.0,
-        fallback_model="luna",
-        users={"@alice:example.test": 100.0},
-    )
+    assert config.budgets == BudgetsConfig(monthly_limit_usd=20.0, fallback_model="luna")
 
 
 def test_budgets_are_disabled_by_default() -> None:
@@ -62,14 +55,12 @@ def test_budgets_reject_unknown_fallback_model() -> None:
         Config(models=_models(), budgets={"fallback_model": "missing"})
 
 
-def test_budgets_reject_non_matrix_user_keys() -> None:
-    with pytest.raises(ValidationError, match="concrete Matrix user IDs"):
-        Config(models=_models(), budgets={"fallback_model": "luna", "users": {"alice": 5}})
+def test_budgets_reject_per_user_caps_in_config() -> None:
+    with pytest.raises(ValidationError, match="users"):
+        Config(models=_models(), budgets={"fallback_model": "luna", "users": {"@alice:example.test": 5}})
 
 
-def test_budgets_reject_negative_limits() -> None:
-    with pytest.raises(ValidationError):
-        Config(models=_models(), budgets={"fallback_model": "luna", "users": {"@alice:example.test": -1}})
+def test_budgets_reject_a_negative_default_cap() -> None:
     with pytest.raises(ValidationError):
         Config(models=_models(), budgets={"fallback_model": "luna", "monthly_limit_usd": -1})
 
