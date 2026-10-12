@@ -309,6 +309,27 @@ def test_thread_mode_help_accepts_command_aliases() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_mode_show_reports_the_room_override(tmp_path: Path) -> None:
+    """`!thread_mode show` names the room's override, or says configured modes apply without one."""
+    context = _thread_mode_context(tmp_path, AsyncMock())
+    command = Command(type=CommandType.THREAD_MODE, args={"args_text": "show"}, raw_text="!thread_mode show")
+
+    async def show() -> str:
+        await handle_command(
+            context=context,
+            room=SimpleNamespace(room_id=ROOM_ID),
+            event=_thread_mode_event("@user:localhost", "!thread_mode show"),
+            command=command,
+            requester_user_id="@user:localhost",
+        )
+        return context.send_response.await_args.args[0]
+
+    assert (await show()).startswith("No room thread mode override is set.")
+    set_room_thread_mode_override(context.runtime_paths, room_id=ROOM_ID, mode="room")
+    assert (await show()).startswith("This room uses the `room` thread mode override.")
+
+
+@pytest.mark.asyncio
 async def test_thread_mode_command_requires_room_admin_for_set(tmp_path: Path) -> None:
     """Only Matrix room admins should be able to change a room thread mode override."""
     client = AsyncMock()

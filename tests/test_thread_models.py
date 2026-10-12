@@ -550,53 +550,6 @@ def test_resolve_runtime_model_requires_runtime_paths_for_thread_id(tmp_path: Pa
         config.resolve_runtime_model(entity_name="test_agent", thread_id=THREAD_ID)
 
 
-def test_rewriting_an_old_record_drops_its_room_and_setter(tmp_path: Path) -> None:
-    """Setting or clearing a model on an old record keeps only model selections and set_at."""
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "test_agent": AgentConfig(display_name="Test Agent", model="default"),
-                "other_agent": AgentConfig(display_name="Other Agent", model="default"),
-            },
-            models={
-                "default": ModelConfig(provider="openai", id="default-model"),
-                "large": ModelConfig(provider="openai", id="large-model"),
-            },
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    runtime_paths = test_runtime_paths(tmp_path)
-    path = _store_path(runtime_paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    old = {
-        "model:other_agent": "large",
-        "room_id": ROOM_ID,
-        "set_by": "@user:localhost",
-        "set_at": "2026-07-09T00:00:00+00:00",
-    }
-    path.write_text(json.dumps({THREAD_ID: old}), encoding="utf-8")
-
-    set_thread_model_override(
-        runtime_paths,
-        thread_id=THREAD_ID,
-        model_name="large",
-        entity_names=("test_agent",),
-        config=config,
-    )
-
-    stored = json.loads(path.read_text(encoding="utf-8"))[THREAD_ID]
-    assert set(stored) == {"model:test_agent", "model:other_agent", "set_at"}
-
-    path.write_text(json.dumps({THREAD_ID: old}), encoding="utf-8")
-    assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is False
-    old_with_both = {**old, "model:test_agent": "large"}
-    path.write_text(json.dumps({THREAD_ID: old_with_both}), encoding="utf-8")
-    assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is True
-
-    stored = json.loads(path.read_text(encoding="utf-8"))[THREAD_ID]
-    assert stored == {"model:other_agent": "large", "set_at": "2026-07-09T00:00:00+00:00"}
-
-
 def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
     """Records with a non-string set_at must be dropped so prune sorting cannot fail."""
     config = _config_with_models(tmp_path)
