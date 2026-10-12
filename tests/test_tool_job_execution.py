@@ -1349,3 +1349,53 @@ async def test_a_refused_job_fails_its_call_not_the_reply(
         assert ran == []
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_while_its_reply_waits_tells_the_model_not_to_run_it_again(tmp_path: Path) -> None:
+    """A person's cancel of a call the reply still waits on reaches the model as a reason, never an empty failure."""
+    started = asyncio.Event()
+
+    async def slow_tool() -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "finished"
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("slow_tool", "call")]), ModelResponse(content="done")],
+    )
+    install_tool_job_execution(model)
+    toolkit = Toolkit(name="slow", tools=[slow_tool])
+    bind_toolkit_authority(toolkit, authored_name="slow")
+    owner = build_execution_identity_from_runtime_context(context)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", context.config, paths, owner)
+
+    storage = storage_factory()
+    agent = Agent(id="leader", model=model, tools=[toolkit], db=storage)
+
+    @owned_tool_execution()
+    async def reply() -> RunOutput:
+        set_consumption_storage(storage_factory)
+        return await agent.arun("start", session_id=context.session_id)
+
+    try:
+        with tool_runtime_context(context), pending_human_messages_context(asyncio.Event()):
+            running = asyncio.create_task(reply())
+            await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+            (job,) = runtime.retained_jobs()
+            await runtime.request_cancel(job.job_id)
+            response = await asyncio.wait_for(running, JOB_TEST_TIMEOUT)
+        [message] = [message for message in response.messages or [] if message.role == "tool"]
+        assert "cancelled" in str(message.content)
+        assert "do not call it again" in str(message.content)
+    finally:
+        storage.close()
+        await runtime.shutdown()

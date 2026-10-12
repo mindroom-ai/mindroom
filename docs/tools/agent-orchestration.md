@@ -239,6 +239,7 @@ Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop
 **Stop**, an edit, or deleting a message stops only that reply; its jobs keep running until they are cancelled.
 Removing the agent from a room cancels its jobs there.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
+The agent is told a cancelled call was cancelled, and not to run it again unless you ask.
 Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
 
 ### How results reach the agent

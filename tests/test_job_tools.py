@@ -379,6 +379,32 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_job_wait_on_a_cancelled_job_says_it_was_cancelled(tmp_path: Path) -> None:
+    """Waiting on a job a person cancelled returns why it has no result, so the model does not run it again."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    tools = JobTools(paths, owner)
+    try:
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        await runtime.request_cancel("ordinary")
+        with tool_runtime_context(context):
+            result = await tools.job("wait", "ordinary", wait_timeout=None)
+        assert "cancelled" in str(result)
+        assert "do not call it again" in str(result)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("interruption", ["cancelled", "missing"])
 async def test_interrupted_payload_read_releases_the_wait_claim(
     tmp_path: Path,

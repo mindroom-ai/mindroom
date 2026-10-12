@@ -161,6 +161,13 @@ def job_summary(job: BackgroundJob) -> dict[str, Any]:
     return summary
 
 
+# A cancelled call's text, so the model does not take an empty failure as a reason to run it again.
+_CANCELLED_REASON = (
+    "This call was cancelled before it returned a result. Its effects so far stand: do not call it again unless "
+    "the user asks."
+)
+
+
 def _interrupted_reason(cause: Literal["restart", "shutdown"]) -> str:
     """Tell the model what an interrupted call may have done, so it repeats only a read-only one."""
     return (
@@ -446,7 +453,11 @@ class ToolJobRuntime:
                     # Only work the restart cut short is interrupted by it; a cancellation saved before it is not.
                     cancelled = entry.job.status == "cancel_requested"
                     reason = _interrupted_reason("restart")
-                    default = BackgroundOutcome("cancelled") if cancelled else BackgroundOutcome("interrupted", reason)
+                    default = (
+                        BackgroundOutcome("cancelled", _CANCELLED_REASON)
+                        if cancelled
+                        else BackgroundOutcome("interrupted", reason)
+                    )
                     entry.control.cancel(shutdown=not cancelled)
                     outcome = await self._cleanup(entry)
                     await self._publish_outcome(entry, self._settled(entry, outcome, default))
@@ -550,7 +561,7 @@ class ToolJobRuntime:
                 if (task := asyncio.current_task()) is not None and task.cancelling():
                     raise  # Requested cancellation: runtime-owned, or external teardown.
                 # The operation raised cancellation itself; settle it so waiters and delivery see an outcome.
-                outcome = BackgroundOutcome("cancelled")
+                outcome = BackgroundOutcome("cancelled", _CANCELLED_REASON)
             async with self._lock:
                 if not entry.control.cancelled and entry.job.status not in TERMINAL_STATUSES:
                     try:
@@ -719,7 +730,7 @@ class ToolJobRuntime:
         try:
             if entry.task is not None:
                 await asyncio.gather(entry.task, return_exceptions=True)
-            await self._settle(entry, BackgroundOutcome("cancelled"))
+            await self._settle(entry, BackgroundOutcome("cancelled", _CANCELLED_REASON))
             async with self._lock:
                 return await self._snapshot(entry)
         finally:
@@ -875,7 +886,9 @@ class ToolJobRuntime:
             try:
                 await self._settle(
                     entry,
-                    BackgroundOutcome("cancelled") if stopped else BackgroundOutcome("interrupted", reason),
+                    BackgroundOutcome("cancelled", _CANCELLED_REASON)
+                    if stopped
+                    else BackgroundOutcome("interrupted", reason),
                 )
             except Exception as error:
                 # A blocked native child stays unsettled for the next recovery; other jobs still settle.
