@@ -13,7 +13,7 @@ from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.identity import MatrixID
 from mindroom.tool_jobs.publication import JobStatePublisher, _jobs_state_content
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
-from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import completed_delegation_job, job_owner, start_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,6 +59,15 @@ def test_content_lists_live_jobs_without_arguments() -> None:
     assert jobs[0]["kind"] == "tool"
     assert jobs[0]["thread_id"] == "$thread"
     assert jobs[1]["status"] == "awaiting_approval"
+
+
+def test_a_subagent_job_is_published_under_its_agents_name() -> None:
+    """A person sees which agent a subagent job runs, not the tool that started it."""
+    job = replace(completed_delegation_job(), status="running")
+    content = _jobs_state_content([job])
+    jobs = content["jobs"]
+    assert isinstance(jobs, list)
+    assert (jobs[0]["kind"], jobs[0]["tool"]) == ("subagent", "worker")
 
 
 @pytest.mark.asyncio

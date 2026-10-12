@@ -7927,6 +7927,7 @@ visibility = [
     "mindroom.tool_jobs.execution_authority",
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.approvals",
+    "mindroom.tool_jobs.notices",
 ]
 
 [[modules]]
@@ -8303,7 +8304,9 @@ path = "mindroom.tool_jobs.notices"
 depends_on = [
     "mindroom.agno_compat_model_hooks",
     "mindroom.hooks.types",
+    "mindroom.logging_config",
     "mindroom.tool_jobs.conversation",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
 ]
 visibility = [

@@ -115,7 +115,8 @@ async def start_delegation(
 
     return await runtime.start(
         child.delegation_id,
-        tool_name="delegate",
+        # A subagent job is known by the agent it runs.
+        tool_name=child.child_agent_name,
         depth=child.depth - 1,
         kind="delegation",
         source_event_id=context.membership_turn_id if context is not None else None,

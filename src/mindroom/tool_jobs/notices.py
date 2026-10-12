@@ -11,6 +11,7 @@ from mindroom.agno_compat_model_hooks import install_tool_result_callback
 from mindroom.hooks.types import EnrichmentItem
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
+from mindroom.tool_jobs.runtime import describe_job
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -56,7 +57,7 @@ def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
     for job in jobs:
         # A restart stopped an interrupted job at an unknown point, and it is never run again on its own.
         partly = "; it may have partly run" if job.status == "interrupted" else ""
-        lines.append(f"`{job.job_id}` ({job.tool_name}) {job.status}{partly}")
+        lines.append(f"{describe_job(job)} {job.status}{partly}")
     return "\n".join([*lines, notice])
 
 

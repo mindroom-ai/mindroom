@@ -67,13 +67,9 @@ def _status(runtime: ToolJobRuntime, job_id: str) -> str:
 
 def test_parse_accepts_one_job_or_all_and_rejects_anything_else() -> None:
     """A cancel names one job or all of its thread's jobs; anything else is not a cancel."""
-    assert _parse_job_cancel({"job_id": "a"}) == JobCancelRequest(job_id="a", cancel_all=False, thread_id=None)
+    assert _parse_job_cancel({"job_id": "a"}) == JobCancelRequest(job_id="a", thread_id=None)
     thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
-    assert _parse_job_cancel({"all": True, **thread}) == JobCancelRequest(
-        job_id=None,
-        cancel_all=True,
-        thread_id="$root",
-    )
+    assert _parse_job_cancel({"all": True, **thread}) == JobCancelRequest(job_id=None, thread_id="$root")
     assert _parse_job_cancel({}) is None
     assert _parse_job_cancel({"job_id": 3}) is None
     assert _parse_job_cancel({"all": "yes"}) is None
@@ -234,11 +230,11 @@ async def test_jobs_command_outside_a_thread_lists_the_whole_rooms_jobs(tmp_path
     """In a room that answers in threads, `!jobs` sent at the top level lists every job of the room."""
     runtime = await _command_runtime(tmp_path)
     try:
-        await _start(runtime, "in_a_thread", thread="$thread")
-        await _start(runtime, "in_another", thread="$other")
+        await _start(runtime, "thread_1", thread="$thread")
+        await _start(runtime, "thread_2", thread="$other")
         reply = await _command(tmp_path, "!jobs", thread=None)
-        assert "`in_a_thread`" in reply
-        assert "`in_another`" in reply
+        assert "`thread_1`" in reply
+        assert "`thread_2`" in reply
     finally:
         await runtime.shutdown()
 
@@ -252,6 +248,25 @@ async def test_cancel_job_command_cancels_one_job_and_replies(tmp_path: Path) ->
         reply = await _command(tmp_path, "!cancel_job job_a")
         assert "`job_a`" in reply
         await wait_for_status(runtime, "job_a", "cancelled")
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_jobs_lists_short_ids_that_cancel_job_accepts(tmp_path: Path) -> None:
+    """`!jobs` shows each job by a short ID, and `!cancel_job` takes any prefix that names one job."""
+    runtime = await _command_runtime(tmp_path)
+    try:
+        await _start(runtime, "a1b2c3d4e5f60718")
+        await _start(runtime, "a1ffffffffffffff")
+        listing = await _command(tmp_path, "!jobs")
+        assert "`a1b2c3d4`" in listing
+        assert "a1b2c3d4e5f60718" not in listing
+        assert "several" in await _command(tmp_path, "!cancel_job a1")
+        assert _status(runtime, "a1b2c3d4e5f60718") == "running"
+        assert "`a1b2c3d4`" in await _command(tmp_path, "!cancel_job a1b2c3d4")
+        await wait_for_status(runtime, "a1b2c3d4e5f60718", "cancelled")
+        assert _status(runtime, "a1ffffffffffffff") == "running"
     finally:
         await runtime.shutdown()
 

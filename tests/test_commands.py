@@ -210,11 +210,11 @@ def test_background_job_commands() -> None:
     command = command_parser.parse("!cancel_job abc123")
     assert command is not None
     assert command.type == CommandType.CANCEL_JOB
-    assert command.args == {"job_id": "abc123", "cancel_all": False}
+    assert command.args == {"job_id": "abc123"}
     command = command_parser.parse("!cancel-job all")
     assert command is not None
     assert command.type == CommandType.CANCEL_JOB
-    assert command.args == {"job_id": None, "cancel_all": True}
+    assert command.args == {"job_id": None}
 
 
 def test_cancel_schedule_command() -> None:

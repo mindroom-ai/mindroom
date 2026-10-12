@@ -129,7 +129,6 @@ async def _background_jobs_command(
 
     request = JobCancelRequest(
         job_id=command.args["job_id"],
-        cancel_all=command.args["cancel_all"],
         thread_id=thread_id,
     )
     return await cancel_jobs_command(

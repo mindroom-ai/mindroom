@@ -340,7 +340,7 @@ def completed_delegation_job() -> BackgroundJob:
     )
     return BackgroundJob(
         job_id="job_123",
-        tool_name="delegate",
+        tool_name="worker",
         depth=0,
         kind="delegation",
         adapter={"child": asdict(child)},

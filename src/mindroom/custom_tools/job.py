@@ -12,7 +12,13 @@ from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
 from mindroom.tool_jobs.conversation import current_conversation, ended_jobs
-from mindroom.tool_jobs.runtime import JobAccessError, format_job_handle, get_background_runtime, job_summary
+from mindroom.tool_jobs.runtime import (
+    JobAccessError,
+    describe_job,
+    format_job_handle,
+    get_background_runtime,
+    job_summary,
+)
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -72,13 +78,13 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any
             value, payload = await consume_tool_job(runtime, waited.job, waited.claim)
         except ValueError:
             # Unavailable or undecodable; its claim is released, so a later collect reads it, and the others arrive now.
-            sections.append(f"`{job.job_id}` ({job.tool_name}) {job.status}: its result could not be read now")
+            sections.append(f"{describe_job(job)} {job.status}: its result could not be read now")
             continue
         if isinstance(value, ToolResult):
             collected.append(value)
             value = value.content
         detail = payload.error or value or ""
-        sections.append(f"`{job.job_id}` ({job.tool_name}) {job.status}:\n{detail}".rstrip())
+        sections.append(f"{describe_job(job)} {job.status}:\n{detail}".rstrip())
     if not sections:
         return "No ended background jobs."
     content = "\n\n".join(sections)

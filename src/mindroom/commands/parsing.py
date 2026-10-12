@@ -211,10 +211,9 @@ class _CommandParser:
         match = self.CANCEL_JOB_PATTERN.match(message)
         if match:
             target = match.group(1).strip()
-            cancel_all = target.lower() == "all"
             return Command(
                 type=CommandType.CANCEL_JOB,
-                args={"job_id": None if cancel_all else target, "cancel_all": cancel_all},
+                args={"job_id": None if target.lower() == "all" else target},
                 raw_text=message,
             )
 

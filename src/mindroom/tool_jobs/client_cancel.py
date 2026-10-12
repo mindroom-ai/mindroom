@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.requester_identity import is_managed_entity_id
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, describe_job
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,10 +21,9 @@ BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 
 @dataclass(frozen=True)
 class JobCancelRequest:
-    """One job to cancel, or every job of the thread the request was sent in, or of the room outside any thread."""
+    """One job to cancel, or, with no ``job_id``, every job of the thread it was sent in, or of the room outside any."""
 
     job_id: str | None
-    cancel_all: bool
     thread_id: str | None
 
 
@@ -37,9 +36,9 @@ def _parse_job_cancel(content: Mapping[str, object]) -> JobCancelRequest | None:
         thread_id = event_id if isinstance(event_id, str) else None
     job_id = content.get("job_id")
     if isinstance(job_id, str) and job_id:
-        return JobCancelRequest(job_id=job_id, cancel_all=False, thread_id=thread_id)
+        return JobCancelRequest(job_id=job_id, thread_id=thread_id)
     if content.get("all") is True:
-        return JobCancelRequest(job_id=None, cancel_all=True, thread_id=thread_id)
+        return JobCancelRequest(job_id=None, thread_id=thread_id)
     return None
 
 
@@ -71,7 +70,7 @@ async def _cancel_jobs(
 ) -> tuple[BackgroundJob, ...]:
     """Cancel the agent's live jobs a request names in a room, and return them."""
     live = _live_jobs(runtime, agent_name=agent_name, room_id=room_id)
-    if request.cancel_all:
+    if request.job_id is None:
         targets = [job for job in live if request.thread_id in {None, job.owner.resolved_thread_id}]
     else:
         targets = [job for job in live if job.job_id == request.job_id]
@@ -119,7 +118,7 @@ def jobs_listing(jobs: list[BackgroundJob]) -> str:
     """Describe a conversation's live jobs for a chat reply."""
     if not jobs:
         return "No background jobs are running here."
-    lines = [f"- `{job.job_id}` {job.owner.recipient}: {job.tool_name} ({job.status})" for job in jobs]
+    lines = [f"- {describe_job(job, short=True)} {job.status}, by {job.owner.recipient}" for job in jobs]
     return "Background jobs running here:\n" + "\n".join(lines)
 
 
@@ -132,18 +131,19 @@ async def cancel_jobs_command(
     may_cancel: Callable[[BackgroundJob], bool],
 ) -> str:
     """Cancel the jobs a chat command names that its sender may stop, and describe what it cancelled."""
-    if request.cancel_all:
+    prefix = request.job_id
+    if prefix is None:
         targets = conversation_jobs(runtime, room_id=room_id, thread_id=thread_id)
     else:
-        # A job ID names one job, wherever in the room it runs.
+        # A job ID, or any start of one, names one job, wherever in the room it runs.
         targets = [
-            job
-            for job in runtime.retained_jobs()
-            if job.job_id == request.job_id and job.status not in TERMINAL_STATUSES and job.owner.room_id == room_id
+            job for job in conversation_jobs(runtime, room_id=room_id, thread_id=None) if job.job_id.startswith(prefix)
         ]
+        if len(targets) > 1:
+            return "That ID matches several background jobs here; use more of it."
     allowed = [job for job in targets if may_cancel(job)]
     if not allowed:
-        return "No background jobs to cancel here." if request.cancel_all else "No such background job here."
+        return "No background jobs to cancel here." if prefix is None else "No such background job here."
     for job in allowed:
         await runtime.request_cancel(job.job_id)
-    return "Cancelling " + ", ".join(f"`{job.job_id}` ({job.tool_name})" for job in allowed) + "."
+    return "Cancelling " + ", ".join(describe_job(job, short=True) for job in allowed) + "."

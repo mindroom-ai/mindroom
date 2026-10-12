@@ -504,7 +504,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert set(handle) == {"job_id", "subagent_id", "status", "tool", "summary", "summary_truncated"}
                 assert handle["job_id"] == child.delegation_id
                 assert handle["subagent_id"] == child.subagent_id
-                assert handle["tool"] == "delegate"
+                assert handle["tool"] == "code"
                 assert handle["status"] == "running"
                 assert not completed.is_set()
                 assert DelegationState.from_metadata(result.metadata).children == []

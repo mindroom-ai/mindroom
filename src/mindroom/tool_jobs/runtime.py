@@ -135,6 +135,16 @@ def _encoded(job: BackgroundJob, payload: EncodedResultPayload | None) -> tuple[
     return json.dumps(asdict(job)), None if payload is None else json.dumps(payload)
 
 
+# People see a job by the start of its ID; `!cancel_job` accepts any prefix that names one job.
+_SHORT_JOB_ID_LENGTH = 8
+
+
+def describe_job(job: BackgroundJob, *, short: bool = False) -> str:
+    """Name a job in text by its ID, shortened for people, and its tool or the agent a subagent job runs."""
+    tool = f"{job.tool_name} subagent" if job.kind == "delegation" else job.tool_name
+    return f"`{job.job_id[:_SHORT_JOB_ID_LENGTH] if short else job.job_id}` ({tool})"
+
+
 def job_summary(job: BackgroundJob) -> dict[str, Any]:
     """Describe a job for the model with its bounded outcome summary and, for a subagent, its reusable ID."""
     summary: dict[str, Any] = {
