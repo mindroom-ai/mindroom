@@ -9,6 +9,10 @@ jest.mock('@/components/DarkModeToggle', () => ({
   DarkModeToggle: () => <button type="button">Toggle dark mode</button>,
 }))
 
+jest.mock('@/components/PlausibleAnalytics', () => ({
+  PlausibleAnalytics: () => <div data-testid="plausible" />,
+}))
+
 jest.mock('@/hooks/useDarkMode', () => ({
   useDarkMode: () => ({ isDarkMode: false }),
 }))
@@ -192,6 +196,12 @@ describe('LandingPage', () => {
 
     expect(document.getElementById('why')).toHaveClass('[--focus-ring:var(--color-brand-200)]')
     expect(screen.getByRole('heading', { name: 'Run MindRoom today.' }).closest('section')).toHaveClass('[--focus-ring:#ffffff]')
+  })
+
+  it('loads Plausible analytics', () => {
+    render(<LandingPage />)
+
+    expect(screen.getByTestId('plausible')).toBeInTheDocument()
   })
 
   it('links to MindRoom Chat from the header and the hero', () => {

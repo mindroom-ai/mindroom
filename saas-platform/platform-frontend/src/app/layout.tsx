@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Bricolage_Grotesque, Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
-import { PlausibleAnalytics } from "@/components/PlausibleAnalytics";
 import { DarkModeProvider } from "@/hooks/useDarkMode";
 import { getServerRuntimeConfig, serializeRuntimeConfig } from "@/lib/runtime-config";
 
@@ -46,7 +45,6 @@ export default function RootLayout({
         <DarkModeProvider>
           {children}
         </DarkModeProvider>
-        <PlausibleAnalytics />
       </body>
     </html>
   );

@@ -11,7 +11,8 @@ jest.mock('next/script', () => ({
   ),
 }))
 
-type PlausibleStub = { o?: { transformRequest?: (request: { u: string }) => { u: string } | null } }
+type PlausibleRequest = { u: string; r?: string | null }
+type PlausibleStub = { o?: { logging?: boolean; transformRequest?: (request: PlausibleRequest) => PlausibleRequest | null } }
 
 function initOptions() {
   const { getByTestId } = render(<PlausibleAnalytics />)
@@ -44,5 +45,26 @@ describe('PlausibleAnalytics', () => {
     for (const path of ['/dashboard', '/dashboard/billing', '/admin/accounts/3f2c9a1e-account-id', '/auth/complete', '/privacy-old']) {
       expect(transform?.({ u: `https://app.mindroom.chat${path}` })).toBeNull()
     }
+  })
+
+  it('sends only the path and campaign parameters, never other query parameters or the fragment', () => {
+    const transform = initOptions()?.transformRequest
+
+    expect(transform?.({ u: 'https://app.mindroom.chat/auth/login?redirect_to=https%3A%2F%2Fabc123.mindroom.chat%2Fsso#state' })?.u)
+      .toBe('https://app.mindroom.chat/auth/login')
+    expect(transform?.({ u: 'https://app.mindroom.chat/?utm_source=hn&utm_campaign=launch&session=secret' })?.u)
+      .toBe('https://app.mindroom.chat/?utm_source=hn&utm_campaign=launch')
+  })
+
+  it('drops referrers from MindRoom hosts, which name hosted instances, and keeps outside ones', () => {
+    const transform = initOptions()?.transformRequest
+
+    expect(transform?.({ u: 'https://app.mindroom.chat/auth/login', r: 'https://abc123.mindroom.chat/' })?.r).toBeNull()
+    expect(transform?.({ u: 'https://app.mindroom.chat/', r: 'https://mindroom.chat/' })?.r).toBeNull()
+    expect(transform?.({ u: 'https://app.mindroom.chat/', r: 'https://news.ycombinator.com/' })?.r).toBe('https://news.ycombinator.com/')
+  })
+
+  it('keeps dropped events out of the browser console', () => {
+    expect(initOptions()?.logging).toBe(false)
   })
 })

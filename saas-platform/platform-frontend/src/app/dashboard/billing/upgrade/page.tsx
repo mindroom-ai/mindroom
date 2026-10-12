@@ -187,7 +187,7 @@ export default function UpgradePage() {
               onClick={() => !isCurrentPlan && !downgrade && setSelectedPlan(plan.id)}
               className={`
                 relative rounded-lg border-2 p-6 cursor-pointer transition-all
-                ${selectedPlan === plan.id ? 'border-brand-600 bg-brand-50 dark:bg-brand-900/10' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}
+                ${selectedPlan === plan.id ? 'border-brand-600 bg-brand-50 dark:border-brand-400 dark:bg-brand-900/10' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}
                 ${isCurrentPlan ? 'opacity-50 cursor-not-allowed' : ''}
                 ${downgrade ? 'opacity-50 cursor-not-allowed' : ''}
               `}

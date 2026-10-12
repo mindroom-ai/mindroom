@@ -46,7 +46,7 @@ If you use MindRoom's hosted control plane, it also processes account profile an
 These records support service operation, billing, security, fraud prevention, compliance, and the preferences you select.
 Hosted account and instance data is stored with Supabase, and payment processing is handled by Stripe.
 
-This documentation site and the public pages of app.mindroom.chat (not the signed-in dashboard) count page views with a self-hosted instance of Plausible Analytics, which sets no cookies and reports only aggregate statistics.
+This documentation site and the public pages of app.mindroom.chat (not the signed-in dashboard) count page views, link clicks, downloads, and form submissions (never their contents) with a self-hosted instance of Plausible Analytics, which sets no cookies and reports only aggregate statistics.
 
 ## Matrix and Homeservers
 

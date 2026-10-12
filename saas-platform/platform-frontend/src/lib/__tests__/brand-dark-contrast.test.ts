@@ -19,7 +19,11 @@ describe('brand colors in dark mode', () => {
   it('gives every dark brand text, border, or ring color a dark-mode override in the same class string', () => {
     const offenders: string[] = []
     for (const file of sourceFiles(SRC)) {
-      const literals = readFileSync(file, 'utf8').match(/'[^'\n]*'|"[^"\n]*"|`[^`]*`/g) ?? []
+      // Each quoted string is checked on its own, and a template literal only by its static text, so an
+      // override in one ternary branch cannot excuse a dark color in the other.
+      const source = readFileSync(file, 'utf8')
+      const templates = (source.match(/`[^`]*`/g) ?? []).map((template) => template.replace(/\$\{[^{}]*\}/g, ' '))
+      const literals = [...(source.match(/'[^'\n]*'|"[^"\n]*"/g) ?? []), ...templates]
       for (const literal of literals) {
         for (const [, kind, shade] of literal.matchAll(DARK_INK)) {
           const lightInBothThemes = /(?<![\w:-])bg-white(?![\w/-])/.test(literal) && !literal.includes('dark:bg-')

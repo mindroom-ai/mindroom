@@ -6,6 +6,7 @@ import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
 import { ProductPreview } from '@/components/landing/ProductPreview'
+import { PlausibleAnalytics } from '@/components/PlausibleAnalytics'
 import { AgentAvatar, type AvatarName } from '@/components/landing/AgentAvatar'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useLiquidGlass } from '@/components/glass/useLiquidGlass'
@@ -526,6 +527,7 @@ function MobileMenu() {
 export default function LandingPage() {
   return (
     <main className="min-h-screen bg-white text-gray-950 dark:bg-gray-950 dark:text-white">
+      <PlausibleAnalytics />
       <nav className="sticky top-0 z-50 border-b border-gray-950/8 bg-white/80 backdrop-blur-xl dark:border-white/8 dark:bg-gray-950/80">
         <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3 sm:px-6 lg:px-8">
           <div className="flex flex-1 items-center">
