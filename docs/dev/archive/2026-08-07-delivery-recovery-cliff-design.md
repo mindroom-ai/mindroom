@@ -1,6 +1,6 @@
 # Delivery Recovery Cliff Design
 
-Dated record of the fix that keeps durable response-delivery recovery from blocking Matrix receive progress, and of the live acceptance profile that exercises the production-shaped workload which exposed it.
+Dated record of the fix that keeps durable response-delivery recovery from blocking Matrix receive progress, and of the live acceptance profile that exercised the production-shaped workload which exposed it.
 Implementation base: `6a994538f684fac01fa5dec26fd440a479de6aad`, whose lock pinned mindroom-nio 0.37.0.
 The live run preceded a final rebase onto that base whose intervening delta changed only test isolation.
 
@@ -33,7 +33,7 @@ Moving bot-ready and orchestrator-ready work off the first-sync path, and the br
 
 ## Evidence: acceptance workload
 
-The live `recovery-cliff` profile that this work added to `scripts/testing/fuzz_live_matrix.py` (merged in `e1d1624ca`, #1800) exercises this production-shaped workload:
+The live `recovery-cliff` profile that this work added to `scripts/testing/fuzz_live_matrix.py` (merged in `e1d1624ca`, #1800, and removed in `259ad76df`, #1878) exercised this production-shaped workload:
 
 - Sliding Sync with a timeline limit of 100.
 - A managed sender account and a distinct managed responder on the built-in `synthetic` provider: seed 1, 4,000 to 4,800 response characters in 40-character chunks at 80 characters per second (about 50 to 60 seconds per stream), tool-call probability 0.2, and shell execution pinned to the isolated local runtime.
