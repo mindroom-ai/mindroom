@@ -1694,6 +1694,7 @@ class TestAgentBot(AgentBotTestBase):
             *,
             runtime_ready: Callable[[], Awaitable[object]],
         ) -> list[asyncio.Task[None]]:
+            assert runtime_ready == mock_orchestrator.wait_until_runtime_ready
             tasks = start_heap_tasks(paths, runtime_ready=runtime_ready)
             started_tasks.extend(tasks)
             return tasks

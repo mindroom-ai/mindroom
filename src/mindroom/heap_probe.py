@@ -158,8 +158,8 @@ def freeze_startup_heap() -> None:
 
     Call audio is pumped on the event loop, and a full collection that walks every
     imported module pauses agent speech for hundreds of milliseconds. Run this
-    before any bot exists, so runtime objects, including bots a config reload
-    replaces, stay collectable.
+    before any bot exists, so runtime objects stay collectable until the runtime
+    heap refreeze takes them over.
     """
     started = time.perf_counter()
     gc.collect()
@@ -205,9 +205,10 @@ def _refreeze_runtime_heap() -> None:
     Unfreezing first makes objects frozen earlier collectable, such as bots a
     config reload replaced; collecting before freezing keeps garbage out of
     the frozen set. Objects still alive here that later become cyclic garbage,
-    such as a reply in flight, wait for the next refreeze. The collection walks
-    the whole heap once, so it pauses the loop about as long as one full
-    collection did before.
+    such as a reply in flight, wait for the next refreeze together with
+    everything they reference. The collection walks the whole heap once,
+    including the import-time heap frozen at startup, so it pauses the loop a
+    little longer than one full collection did before.
     """
     started = time.perf_counter()
     gc.unfreeze()
