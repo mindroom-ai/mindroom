@@ -151,14 +151,11 @@ def save_webhook_secret(webhook):
             f.writelines(lines)
         print("✅ Updated .env file with webhook secret")
 
-    # Also provide instructions for Kubernetes
-    print("\n📋 To update Kubernetes secret, run:")
-    print("   kubectl patch secret platform-secrets -n mindroom-staging \\")
-    print(f'     -p \'{{"data":{{"STRIPE_WEBHOOK_SECRET":"{secret}"}}}}\' --type=merge')
-
-    print("\n   Or add to your Helm values:")
+    # A chart-managed platform-secrets is rendered from the values, so a direct Secret patch would not survive an upgrade.
+    print("\n📋 To deploy it, set it in the platform Helm values:")
     print("   stripe:")
     print(f"     webhookSecret: {secret}")
+    print("   With an external platform Secret, store it under the stripe_webhook_secret key instead.")
 
 
 def test_webhook_connectivity():
