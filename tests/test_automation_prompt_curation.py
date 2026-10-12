@@ -13,7 +13,8 @@ from mindroom.automations.prompt_curation import (
     _plan_curation,
     _verify_curation,
 )
-from mindroom.config.agent import AgentConfig
+from mindroom.automations.steps import automation_execution_identity
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -304,3 +305,26 @@ def test_reorganizing_an_archive_without_losing_content_is_accepted(tmp_path: Pa
     result = _verify_curation(plan)
 
     assert (result.changed, result.findings) == (True, ())
+
+
+def test_a_private_instance_curates_its_own_context_files_not_the_shared_ones(tmp_path: Path) -> None:
+    """A private agent's agent-level context files load from the workspace every requester shares, so no one run cuts them."""
+    automation = PromptCurationAutomation(trigger_tokens=1_000)
+    agent = AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        context_files=["SHARED.md"],
+        private=AgentPrivateConfig(per="user_agent", context_files=["SOUL.md"]),
+    )
+    config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    identity = automation_execution_identity(paths, "mind", "@alice:example.test")
+    root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
+    assert root is not None
+    for name, text in (("MEMORY.md", MEMORY), ("SOUL.md", SOUL), ("SHARED.md", MEMORY)):
+        (root / name).write_text(text, encoding="utf-8")
+
+    plan = _plan_curation(config, root, "mind", automation)
+
+    assert plan is not None
+    assert list(plan.curated) == ["MEMORY.md", "SOUL.md"]

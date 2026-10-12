@@ -12,11 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from mindroom.automations.registry import automation
-from mindroom.automations.steps import Ask, AutomationContext, Done
+from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
 from mindroom.logging_config import get_logger
 from mindroom.memory import read_scope_memory_files
@@ -91,8 +90,7 @@ def _memory_dir_tokens(root: Path, exclude: Iterable[str]) -> int:
 
 
 def _curated_paths(config: Config, agent_name: str) -> list[str]:
-    paths = [_ENTRYPOINT, *(PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files)]
-    return list(dict.fromkeys(paths))
+    return list(dict.fromkeys([_ENTRYPOINT, *workspace_context_files(config, agent_name)]))
 
 
 def _plan_curation(

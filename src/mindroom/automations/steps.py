@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -35,6 +36,17 @@ def automation_execution_identity(
         resolved_thread_id=None,
         session_id=None,
     )
+
+
+def workspace_context_files(config: Config, agent_name: str) -> list[str]:
+    """Return the always-loaded context files in the workspace an automation maintains, as workspace-relative paths.
+
+    A private agent's are its ``private.context_files``; its agent-level ``context_files`` load from the shared agent
+    workspace that every requester reads, which no requester's run maintains.
+    """
+    agent = config.get_agent(agent_name)
+    paths = (agent.private.context_files or []) if agent.private is not None else agent.context_files
+    return [PurePosixPath(path).as_posix() for path in paths]
 
 
 @dataclass(frozen=True)
