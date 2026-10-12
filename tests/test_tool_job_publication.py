@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +14,14 @@ from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.identity import MatrixID
 from mindroom.tool_jobs.publication import JobStatePublisher, _jobs_state_content
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
-from tests.tool_job_helpers import completed_delegation_job, job_owner, start_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    completed_delegation_job,
+    job_coordinator,
+    job_owner,
+    start_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,6 +140,29 @@ async def test_recovered_interrupted_jobs_leave_the_published_state(tmp_path: Pa
         call = bots[owner.recipient].client.room_put_state.await_args.kwargs
         assert call["room_id"] == owner.room_id
         assert call["content"] == {"jobs": []}
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_orderly_shutdown_clears_the_published_jobs(tmp_path: Path) -> None:
+    """Jobs a shutdown interrupts leave the rooms' state at once, so no client lists them while MindRoom is down."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    bot = _bot(owner.recipient)
+    bot.client.rooms = {owner.room_id: MagicMock()}
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(runtime, "job_1", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
+        await coordinator._publisher.publish(coordinator.bot_provider, runtime.retained_jobs())
+        assert bot.client.room_put_state.await_args.kwargs["content"]["jobs"]
+        await coordinator.quiesce()
+        assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": []}
     finally:
         await runtime.shutdown()
 

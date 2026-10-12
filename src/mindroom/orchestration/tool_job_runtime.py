@@ -317,6 +317,8 @@ class ToolJobRuntimeCoordinator:
             await asyncio.gather(task, return_exceptions=True)
         if self._runtime is not None:
             await self._runtime.quiesce()
+            # The jobs it interrupted leave the rooms' state now, not at the next start, which may have jobs off.
+            await self._publisher.publish(self.bot_provider, self._runtime.retained_jobs())
 
     async def stop(self) -> None:
         """Release the service after response finalization has stopped using its receipts."""
