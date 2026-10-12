@@ -13,6 +13,9 @@ jest.mock('@/hooks/useDarkMode', () => ({
   useDarkMode: () => ({ isDarkMode: false }),
 }))
 
+const hero = () => within(document.querySelector('section') as HTMLElement)
+const selfHost = () => within(document.getElementById('self-host') as HTMLElement)
+
 describe('LandingPage', () => {
   it('links to the public documentation', () => {
     render(<LandingPage />)
@@ -56,12 +59,12 @@ describe('LandingPage', () => {
     expect(screen.getByLabelText('MindRoom product film')).toHaveAttribute('controls')
   })
 
-  it('copies the install command', async () => {
+  it('copies the install command from the hero', async () => {
     const writeText = jest.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     render(<LandingPage />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Copy command' }))
+    fireEvent.click(hero().getByRole('button', { name: 'Copy command' }))
 
     expect(writeText).toHaveBeenCalledWith('uvx mindroom run')
     const copied = await screen.findByRole('button', { name: 'Copied' })
@@ -73,14 +76,22 @@ describe('LandingPage', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     render(<LandingPage />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'macOS app' }))
+    fireEvent.click(selfHost().getByRole('button', { name: 'macOS app' }))
 
-    expect(screen.getByRole('button', { name: 'macOS app' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByText('mindroom-ai/tap/mindroom').closest('pre')).toHaveTextContent('$ brew install --cask mindroom-ai/tap/mindroom')
-    expect(screen.getByRole('link', { name: /Read the macOS app guide/ })).toHaveAttribute('href', 'https://docs.mindroom.chat/installation/macos-app/')
-    fireEvent.click(screen.getByRole('button', { name: 'Copy command' }))
+    expect(selfHost().getByRole('button', { name: 'macOS app' })).toHaveAttribute('aria-pressed', 'true')
+    expect(selfHost().getByText('mindroom-ai/tap/mindroom').closest('pre')).toHaveTextContent('$ brew install --cask mindroom-ai/tap/mindroom')
+    expect(selfHost().getByRole('link', { name: /Read the macOS app guide/ })).toHaveAttribute('href', 'https://docs.mindroom.chat/installation/macos-app/')
+    fireEvent.click(selfHost().getByRole('button', { name: 'Copy command' }))
     expect(writeText).toHaveBeenCalledWith('brew install --cask mindroom-ai/tap/mindroom')
-    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+    expect(await selfHost().findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+  })
+
+  it('puts the install card in the self-host section', () => {
+    render(<LandingPage />)
+
+    expect(selfHost().getByRole('heading', { name: 'Your computer + MindRoom Chat' })).toBeInTheDocument()
+    expect(selfHost().getByRole('group', { name: 'Install with' })).toBeInTheDocument()
+    expect(hero().queryByRole('group', { name: 'Install with' })).not.toBeInTheDocument()
   })
 
   it('selects the install command when the clipboard is refused', async () => {
@@ -88,10 +99,10 @@ describe('LandingPage', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     render(<LandingPage />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Copy command' }))
+    fireEvent.click(hero().getByRole('button', { name: 'Copy command' }))
 
     await waitFor(() => expect(window.getSelection()?.toString()).toBe('uvx mindroom run'))
-    expect(screen.getByRole('button', { name: 'Copy command' })).toHaveTextContent('Copy')
+    expect(hero().getByRole('button', { name: 'Copy command' })).toHaveTextContent('Copy')
   })
 
   it('opens a menu with every page link and closes it on Escape', () => {
@@ -151,6 +162,12 @@ describe('LandingPage', () => {
     fireEvent.click(within(document.getElementById('mobile-menu') as HTMLElement).getByRole('link', { name: 'Hosted' }))
 
     expect(document.getElementById('mobile-menu')).toBeNull()
+  })
+
+  it('shows the product preview in the hero', () => {
+    render(<LandingPage />)
+
+    expect(hero().getByRole('img', { name: /MindRoom Chat/ })).toBeInTheDocument()
   })
 
   it('links to MindRoom Chat from the header and the hero', () => {

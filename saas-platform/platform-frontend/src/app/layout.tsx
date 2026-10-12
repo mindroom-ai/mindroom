@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Instrument_Sans, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
 import { DarkModeProvider } from "@/hooks/useDarkMode";
 import { getServerRuntimeConfig, serializeRuntimeConfig } from "@/lib/runtime-config";
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
+const instrumentSans = Instrument_Sans({ subsets: ["latin"], variable: "--font-instrument-sans" });
+const instrumentSerif = Instrument_Serif({ weight: "400", style: "italic", subsets: ["latin"], variable: "--font-instrument-serif" });
+const jetbrainsMono = JetBrains_Mono({ weight: "500", subsets: ["latin"], variable: "--font-jetbrains-mono" });
 
 const title = "MindRoom: open-source AI agents in a chat app you can self-host";
 const description =
@@ -31,7 +33,7 @@ export default function RootLayout({
   const serializedConfig = serializeRuntimeConfig(runtimeConfig)
 
   return (
-    <html lang="en" className={inter.variable} suppressHydrationWarning>
+    <html lang="en" className={`${instrumentSans.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
       <body className="min-h-screen bg-background text-foreground antialiased transition-colors">
         <Script
           id="mindroom-runtime-config"

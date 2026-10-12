@@ -5,6 +5,7 @@ import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
+import { ProductPreview } from '@/components/landing/ProductPreview'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useLiquidGlass } from '@/components/glass/useLiquidGlass'
 import {
@@ -201,6 +202,8 @@ const setups: (IconItem & { cta: string })[] = [
   },
 ]
 
+const [localSetup, ...otherSetups] = setups
+
 const plans: PricePlan[] = [
   {
     name: 'Your own keys',
@@ -237,37 +240,31 @@ const footerLinks = [
   { href: 'https://pypi.org/project/mindroom/', label: 'PyPI' },
 ]
 
-const primaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200'
-const secondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white/70 px-5 py-3 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10'
+const primaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-lg bg-brand-600 px-5 py-3 text-sm font-semibold text-white shadow-sm shadow-brand-900/20 transition-colors hover:bg-brand-700 dark:bg-brand-400 dark:text-brand-950 dark:hover:bg-brand-300'
+const secondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white/70 px-5 py-3 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10'
 const darkPrimaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white bg-white px-5 py-3 text-sm font-semibold text-gray-950 transition-colors hover:bg-gray-200'
 const darkSecondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/14 bg-transparent px-5 py-3 text-sm font-semibold text-white/82 transition-colors hover:bg-white/8 hover:text-white'
-const textLinkClass = 'inline-flex items-center gap-1 text-sm font-semibold text-orange-700 hover:text-orange-800 dark:text-orange-300 dark:hover:text-orange-200'
+const textLinkClass = 'inline-flex items-center gap-1 text-sm font-semibold text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200'
 
-function SectionHeading({
-  eyebrow,
-  title,
-  body,
-}: {
-  eyebrow: string
-  title: string
-  body: string
-}) {
+// The film's typographic accent: a phrase set in italic serif, in MindRoom Chat's violet.
+function Em({ children }: { children: ReactNode }) {
+  return <em className="font-serif text-[1.08em] font-normal italic tracking-normal text-brand-600 dark:text-brand-300">{children}</em>
+}
+
+function SectionHeading({ title, body }: { title: ReactNode; body: string }) {
   return (
     <div className="max-w-2xl">
-      <p className="text-sm font-semibold uppercase tracking-normal text-orange-700 dark:text-orange-400">
-        {eyebrow}
-      </p>
-      <h2 className="mt-3 text-3xl font-semibold text-gray-950 dark:text-white sm:text-4xl">
+      <h2 className="text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.03em] text-gray-950 dark:text-white sm:text-[2.75rem]">
         {title}
       </h2>
-      <p className="mt-4 text-base leading-7 text-gray-600 dark:text-gray-300">
+      <p className="mt-5 text-pretty text-base leading-7 text-gray-600 dark:text-gray-300 sm:text-lg sm:leading-8">
         {body}
       </p>
     </div>
   )
 }
 
-function CopyCommand({ command }: { command: string }) {
+function CopyCommand({ command, large = false }: { command: string; large?: boolean }) {
   const [copied, setCopied] = useState(false)
   const commandRef = useRef<HTMLSpanElement>(null)
 
@@ -288,10 +285,14 @@ function CopyCommand({ command }: { command: string }) {
   }
 
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md bg-gray-950 py-2 pl-4 pr-2 dark:bg-black">
-      <pre className="min-w-0 overflow-x-auto whitespace-pre-wrap font-mono text-sm text-gray-100">
+    <div
+      className={`flex items-center justify-between gap-3 bg-gray-950 pr-2 dark:bg-black ${
+        large ? 'rounded-xl py-3 pl-5 shadow-lg shadow-brand-950/20 dark:ring-1 dark:ring-white/12' : 'rounded-md py-2 pl-4'
+      }`}
+    >
+      <pre className={`min-w-0 overflow-x-auto whitespace-pre-wrap font-mono text-gray-100 ${large ? 'text-base' : 'text-sm'}`}>
         <code>
-          <span className="select-none text-emerald-400">$ </span>
+          <span className="select-none text-brand-300">$ </span>
           <span ref={commandRef}>
             {/* Wrap long commands only between words, never at a hyphen. */}
             {command.split(' ').map((word, index) => (
@@ -329,7 +330,7 @@ function ChatAppLinks() {
             <Icon className="h-3.5 w-3.5" />
             {label}
             {beta && (
-              <span className="rounded bg-orange-100 px-1 text-[10px] font-semibold uppercase text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
+              <span className="rounded bg-brand-100 px-1 text-[11px] font-semibold uppercase text-brand-700 dark:bg-brand-400/15 dark:text-brand-300">
                 Beta
               </span>
             )}
@@ -351,25 +352,27 @@ function ChatAppLinks() {
   )
 }
 
-function RunItYourself() {
+function RunItYourself({ setup }: { setup: IconItem }) {
   const [option, setOption] = useState(installOptions[0])
   const steps = [...option.steps, ['Talk to your agents', 'In MindRoom Chat on the web or in the native apps.']]
   const glass = useLiquidGlass<HTMLDivElement>()
+  const Icon = setup.icon
 
   return (
     <div ref={glass} className="liquid-glass relative overflow-hidden rounded-2xl">
-      <div className="flex items-center justify-between border-b border-gray-950/8 px-4 py-3 dark:border-white/10">
-        <div className="flex items-center gap-2">
-          <span className="h-3 w-3 rounded-full bg-red-400" />
-          <span className="h-3 w-3 rounded-full bg-yellow-400" />
-          <span className="h-3 w-3 rounded-full bg-green-400" />
+      <div className="border-b border-gray-950/8 px-5 py-5 dark:border-white/10 sm:px-6">
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-100 text-brand-700 dark:bg-brand-400/15 dark:text-brand-300">
+            <Icon className="h-5 w-5" />
+          </span>
+          <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{setup.title}</h3>
         </div>
-        <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Run it yourself</span>
+        <p className="mt-3 text-sm leading-6 text-gray-600 dark:text-gray-300">{setup.body}</p>
       </div>
       <div className="p-5 sm:p-6">
         <div role="group" aria-label="Install with" className="mb-4 inline-flex rounded-lg bg-gray-950/5 p-1 dark:bg-white/8">
           {installOptions.map((item) => {
-            const Icon = item.icon
+            const ItemIcon = item.icon
             const selected = item === option
             return (
               <button
@@ -381,7 +384,7 @@ function RunItYourself() {
                   selected ? 'bg-white text-gray-950 shadow-sm dark:bg-white/14 dark:text-white' : 'text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white'
                 }`}
               >
-                <Icon className="h-3.5 w-3.5" />
+                <ItemIcon className="h-3.5 w-3.5" />
                 {item.label}
               </button>
             )
@@ -392,7 +395,7 @@ function RunItYourself() {
         <ol className="mt-6 space-y-5">
           {steps.map(([title, body], index) => (
             <li key={title} className="flex gap-4">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-orange-100 text-sm font-semibold text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-100 font-mono text-xs font-semibold text-brand-700 dark:bg-brand-400/15 dark:text-brand-300">
                 {index + 1}
               </span>
               <div>
@@ -526,38 +529,46 @@ function MobileMenu() {
 export default function LandingPage() {
   return (
     <main className="min-h-screen bg-white text-gray-950 dark:bg-gray-950 dark:text-white">
-      <nav className="sticky top-0 z-50 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-          <Link href="/" className="group flex items-center gap-3" aria-label="MindRoom home">
-            <MindRoomLogo className="transition-transform duration-200 group-hover:scale-105" size={32} />
-            <span className="text-lg font-semibold max-[359px]:sr-only">MindRoom</span>
-          </Link>
-          <div className="hidden items-center gap-7 xl:flex">
+      <nav className="sticky top-0 z-50 border-b border-gray-950/8 bg-white/80 backdrop-blur-xl dark:border-white/8 dark:bg-gray-950/80">
+        <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3 sm:px-6 lg:px-8">
+          <div className="flex flex-1 items-center">
+            <Link href="/" className="group flex items-center gap-3" aria-label="MindRoom home">
+              <MindRoomLogo className="transition-transform duration-200 group-hover:scale-105" size={32} />
+              <span className="text-lg font-semibold tracking-tight max-[359px]:sr-only">MindRoom</span>
+            </Link>
+          </div>
+          <div className="hidden items-center gap-6 xl:flex">
             {navLinks.map((link) => (
-              <Link key={link.href} href={link.href} className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
+              <Link key={link.href} href={link.href} className="text-sm font-medium text-gray-600 transition-colors hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
                 {link.label}
               </Link>
             ))}
-          </div>
-          <div className="flex items-center gap-1 sm:gap-3">
-            <a href={showcaseUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white xl:inline-flex">
+            <a href={showcaseUrl} className="text-sm font-medium text-gray-600 transition-colors hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
               Showcase
             </a>
-            <a href={docsUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
+            <a href={docsUrl} className="text-sm font-medium text-gray-600 transition-colors hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
               Docs
             </a>
-            <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white lg:inline-flex">
+            <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-gray-600 transition-colors hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
+              GitHub
+            </a>
+          </div>
+          <div className="flex flex-1 items-center justify-end gap-1 sm:gap-3">
+            <a href={docsUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex xl:hidden">
+              Docs
+            </a>
+            <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:text-gray-950 dark:text-gray-300 dark:hover:text-white lg:inline-flex xl:hidden">
               GitHub
             </a>
             <DarkModeToggle />
-            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white md:inline-flex">
+            <Link href="/auth/login" className="hidden whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white md:inline-flex">
               Sign in
             </Link>
-            <a href={chatUrl} className="hidden items-center gap-2 whitespace-nowrap rounded-md border border-gray-300 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10 sm:inline-flex">
+            <a href={chatUrl} className="hidden items-center gap-2 whitespace-nowrap rounded-lg border border-gray-300 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10 sm:inline-flex">
               <MessageSquare className="h-4 w-4" />
               Open Chat
             </a>
-            <a href={installGuideUrl} className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200 sm:px-4">
+            <a href={installGuideUrl} className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg bg-brand-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 dark:bg-brand-400 dark:text-brand-950 dark:hover:bg-brand-300 sm:px-4">
               Get started
               <ArrowRight className="hidden h-4 w-4 sm:block" />
             </a>
@@ -566,20 +577,23 @@ export default function LandingPage() {
         </div>
       </nav>
 
-      <section className="relative overflow-hidden border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950">
+      <section className="relative overflow-hidden border-b border-gray-950/8 bg-paper dark:border-white/8 dark:bg-gray-950">
         <HeroParticleBackground />
-        <div className="relative z-10 mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-12 lg:px-8 lg:py-16">
-          <h1 className="text-4xl font-semibold tracking-tight text-gray-950 dark:text-white lg:text-5xl">
-            <span className="block text-balance">AI agents that know you and your work,</span>{' '}
-            <span className="block text-balance text-gray-500 dark:text-gray-400">in a chat app anyone can use.</span>
-          </h1>
-          <div className="mt-8 grid gap-10 lg:grid-cols-[1fr_0.9fr] lg:items-start">
-          <div>
-            <p className="max-w-xl text-pretty text-base leading-7 text-gray-600 dark:text-gray-300 sm:text-lg sm:leading-8">
+        <div className="relative z-10 mx-auto max-w-7xl px-4 pt-14 sm:px-6 sm:pt-20 lg:px-8 lg:pt-24">
+          <div className="mx-auto max-w-6xl text-center">
+            <h1 className="text-balance text-[2.6rem] font-semibold leading-[1.05] tracking-[-0.03em] text-gray-950 dark:text-white sm:text-6xl lg:text-[4.1rem]">
+              <span className="lg:block">AI agents that know you and your work,</span>{' '}
+              <span className="lg:block">in a <Em>chat app anyone can use.</Em></span>
+            </h1>
+            <p className="mx-auto mt-6 max-w-2xl text-pretty text-base leading-7 text-gray-600 dark:text-gray-300 sm:text-lg sm:leading-8">
               A personal agent for your calendar, notes, trips, and homelab, and shared agents for your team&apos;s email, documents, and code.
               Pick a local model for your private life or a frontier model for hard problems.
             </p>
-            <div className="mt-7 flex flex-col gap-3 sm:flex-row">
+            <div className="mx-auto mt-9 max-w-md text-left">
+              <CopyCommand command={installOptions[0].command} large />
+              <p className="mt-2.5 text-center text-xs leading-5 text-gray-500 dark:text-gray-400">{installOptions[0].note}</p>
+            </div>
+            <div className="mt-7 flex flex-col justify-center gap-3 sm:flex-row">
               <a href={installGuideUrl} className={primaryCtaClass}>
                 Get started
                 <ArrowRight className="h-4 w-4" />
@@ -589,38 +603,39 @@ export default function LandingPage() {
                 View on GitHub
               </a>
             </div>
-            <p className="mt-4 text-sm text-gray-600 dark:text-gray-400">
-              Already have agents?{' '}
-              <a href={chatUrl} className="font-semibold text-orange-700 hover:text-orange-800 dark:text-orange-300 dark:hover:text-orange-200">
-                Open MindRoom Chat
-              </a>
-            </p>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-              Rather not run it yourself?{' '}
-              <Link href="#hosted" className="font-semibold text-orange-700 hover:text-orange-800 dark:text-orange-300 dark:hover:text-orange-200">
-                Try hosted MindRoom
-              </Link>
-            </p>
-            <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-medium text-gray-500 dark:text-gray-400">
-              {heroFacts.map((fact, index) => (
-                <div key={fact} className="flex items-center gap-2.5 sm:gap-4">
-                  <span className={`h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-700 ${index === 0 ? 'sm:hidden' : ''}`} />
-                  <span>{fact}</span>
-                </div>
-              ))}
+            <div className="mt-6 flex flex-col items-center gap-1 text-sm text-gray-600 dark:text-gray-400 sm:flex-row sm:justify-center sm:gap-5">
+              <p>
+                Already have agents?{' '}
+                <a href={chatUrl} className="font-semibold text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200">
+                  Open MindRoom Chat
+                </a>
+              </p>
+              <span className="hidden h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-700 sm:block" />
+              <p>
+                Rather not run it yourself?{' '}
+                <Link href="#hosted" className="font-semibold text-brand-700 hover:text-brand-800 dark:text-brand-300 dark:hover:text-brand-200">
+                  Try hosted MindRoom
+                </Link>
+              </p>
             </div>
           </div>
-          <div className="relative">
-            <RunItYourself />
+          <div className="relative mx-auto mt-14 max-w-6xl sm:mt-16">
+            <ProductPreview />
           </div>
-          </div>
+          <ul className="flex flex-wrap justify-center gap-x-7 gap-y-2 py-10 text-sm font-medium text-gray-600 dark:text-gray-400">
+            {heroFacts.map((fact) => (
+              <li key={fact} className="flex items-center gap-2">
+                <Check className="h-3.5 w-3.5 text-brand-600 dark:text-brand-300" />
+                {fact}
+              </li>
+            ))}
+          </ul>
         </div>
       </section>
 
       <section id="use-cases" className="border-b border-gray-200 py-16 dark:border-gray-800">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
-            eyebrow="What people use it for"
             title="Your assistant at home, your team's memory at work."
             body="Personal agents for your own life and shared agents for your team, each with its own model, memory, and access."
           />
@@ -637,7 +652,6 @@ export default function LandingPage() {
       <section id="why" className="border-b border-gray-200 bg-gray-50 py-16 dark:border-gray-800 dark:bg-gray-900/30">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
-            eyebrow="Why MindRoom"
             title="Agents that remember and stay yours."
             body="MindRoom builds the whole stack, from the chat app to the server to the AI backend, so it can be private, extensible, and built for agents from end to end."
           />
@@ -647,30 +661,32 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="self-host" className="border-b border-gray-200 py-16 dark:border-gray-800">
+      <section id="self-host" className="border-b border-gray-950/8 py-20 dark:border-white/8 sm:py-24">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
-            eyebrow="Run it your way"
-            title="Start on your laptop, grow to your own servers."
+            title={<>Start on your laptop, grow to your <Em>own servers.</Em></>}
             body="MindRoom is open source under the Apache 2.0 license, and every option runs the same software."
           />
-          <div className="mt-10 grid gap-6 lg:grid-cols-3">
-            {setups.map((setup) => {
-              const Icon = setup.icon
-              return (
-                <article key={setup.title} className="flex flex-col rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-md bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
-                    <Icon className="h-5 w-5" />
-                  </div>
-                  <h3 className="mt-4 text-lg font-semibold text-gray-950 dark:text-white">{setup.title}</h3>
-                  <p className="mt-2 flex-1 text-sm leading-6 text-gray-600 dark:text-gray-300">{setup.body}</p>
-                  <a href={setup.href} className={`mt-5 ${textLinkClass}`}>
-                    {setup.cta}
-                    <ArrowRight className="h-4 w-4" />
-                  </a>
-                </article>
-              )
-            })}
+          <div className="mt-12 grid gap-10 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:items-start">
+            <RunItYourself setup={localSetup} />
+            <div className="divide-y divide-gray-950/8 border-y border-gray-950/8 dark:divide-white/8 dark:border-white/8">
+              {otherSetups.map((setup) => {
+                const Icon = setup.icon
+                return (
+                  <article key={setup.title} className="py-7">
+                    <div className="flex items-center gap-3">
+                      <Icon className="h-5 w-5 shrink-0 text-brand-600 dark:text-brand-300" />
+                      <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{setup.title}</h3>
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{setup.body}</p>
+                    <a href={setup.href} className={`mt-4 ${textLinkClass}`}>
+                      {setup.cta}
+                      <ArrowRight className="h-4 w-4" />
+                    </a>
+                  </article>
+                )
+              })}
+            </div>
           </div>
         </div>
       </section>
@@ -678,7 +694,6 @@ export default function LandingPage() {
       <section id="hosted" className="bg-gray-50 py-16 dark:bg-gray-900/30">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
-            eyebrow="Hosted"
             title="Prefer us to host it?"
             body="Nothing to install: bring your own model keys or include AI usage in your plan, and try MindRoom free for 3 days."
           />
