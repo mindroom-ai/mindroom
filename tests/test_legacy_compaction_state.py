@@ -248,3 +248,34 @@ def test_opening_storage_adopts_a_team_row_with_tombstones(tmp_path: Path) -> No
         assert stored.metadata == {}
     finally:
         storage.close()
+
+
+def test_opening_storage_turns_pre_archive_blob_runs_into_rows_without_tombstoned_ones(tmp_path: Path) -> None:
+    """Agno 2 blob runs stay in the conversation, except the copy of a run the destructive compactor deleted."""
+    seeding = _open(tmp_path)
+    seed_session(
+        seeding,
+        AgentSession(
+            session_id="session",
+            agent_id="code",
+            summary=SessionSummary(summary="legacy summary"),
+            metadata=_compaction_metadata(_SCOPE.key, {"compacted_run_ids": ["gone"]}),
+        ),
+    )
+    seeding.close()
+    _as_pre_archive(tmp_path)
+    blob = [{"run_id": run_id, "agent_id": "code", "session_id": "session"} for run_id in ("gone", "kept")]
+    with sqlite3.connect(tmp_path / "sessions" / "code.db") as connection:
+        connection.execute("ALTER TABLE code_sessions ADD COLUMN runs JSON")
+        connection.execute("UPDATE code_sessions SET runs = ?", (json.dumps(json.dumps(blob)),))
+
+    storage = _open(tmp_path)
+    try:
+        stored = get_agent_session(storage, "session")
+        assert stored is not None
+        assert stored_run_ids(storage, "session") == ["kept"]
+        assert [run.run_id for run in stored.runs or []] == ["kept"]
+        assert stored.summary is not None
+        assert stored.summary.summary == "legacy summary"
+    finally:
+        storage.close()

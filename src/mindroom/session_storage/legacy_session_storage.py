@@ -39,29 +39,41 @@ def materialize_legacy_run_blobs(connection: Connection, runs: Table, session_ta
         f"SELECT session_id, runs FROM {sessions} WHERE runs IS NOT NULL",  # noqa: S608
     ).fetchall()
     for session_id, blob in blobs:
-        stored = list(
-            connection.execute(
-                select(runs.c.run_id)
-                .where(runs.c.session_id == session_id)
-                .order_by(runs.c.run_index, runs.c.created_at, runs.c.run_id),
-            ).scalars(),
-        )
+        stored = ordered_run_ids(connection, runs, session_id)
         legacy = _legacy_entries(blob)
         for run_id, entry in legacy.items():
             if run_id not in stored:
-                row = build_single_run_row(entry, session_id=session_id, user_id=entry.get("user_id"), run_index=None)
-                connection.execute(insert(runs).values(**row).on_conflict_do_nothing(index_elements=["run_id"]))
+                insert_run_entry(connection, runs, entry, session_id=session_id)
         # Agno's merge read blob entries first, table copies substituted, then table-only rows.
-        merged = [*legacy, *(run_id for run_id in stored if run_id not in legacy)]
-        for run_index, run_id in enumerate(merged):
-            connection.execute(
-                runs.update()
-                .where(runs.c.session_id == session_id, runs.c.run_id == run_id)
-                .values(run_index=run_index),
-            )
+        renumber_runs(connection, runs, session_id, [*legacy, *(run_id for run_id in stored if run_id not in legacy)])
         connection.exec_driver_sql(
             f"UPDATE {sessions} SET runs = NULL WHERE session_id = ?",  # noqa: S608
             (session_id,),
+        )
+
+
+def ordered_run_ids(connection: Connection, runs: Table, session_id: str) -> list[str]:
+    """Return one session's run rows in the order Agno reads them, rows without an index first."""
+    return list(
+        connection.execute(
+            select(runs.c.run_id)
+            .where(runs.c.session_id == session_id)
+            .order_by(runs.c.run_index, runs.c.created_at, runs.c.run_id),
+        ).scalars(),
+    )
+
+
+def insert_run_entry(connection: Connection, runs: Table, entry: dict[str, Any], *, session_id: str) -> None:
+    """Write one serialized run as a run row without an index, unless a row already has its id."""
+    row = build_single_run_row(entry, session_id=session_id, user_id=entry.get("user_id"), run_index=None)
+    connection.execute(insert(runs).values(**row).on_conflict_do_nothing(index_elements=["run_id"]))
+
+
+def renumber_runs(connection: Connection, runs: Table, session_id: str, run_ids: list[str]) -> None:
+    """Give one session's run rows consecutive indexes in the order of ``run_ids``."""
+    for run_index, run_id in enumerate(run_ids):
+        connection.execute(
+            runs.update().where(runs.c.session_id == session_id, runs.c.run_id == run_id).values(run_index=run_index),
         )
 
 

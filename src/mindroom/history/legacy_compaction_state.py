@@ -10,14 +10,20 @@ from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX
 from mindroom.history.summary_rows_schema import summary_rows_schema_sql, summary_rows_table_names
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage import agno_compat_sqlite
-from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json, materialize_legacy_run_blobs
+from mindroom.session_storage.legacy_session_storage import (
+    decode_persisted_session_json,
+    insert_run_entry,
+    materialize_legacy_run_blobs,
+    ordered_run_ids,
+    renumber_runs,
+)
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Collection
 
     from agno.db.sqlite import SqliteDb
-    from sqlalchemy import Connection
+    from sqlalchemy import Connection, Table
 
 # LEGACY_COMPAT: Destructive compaction state without an archive.
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
@@ -54,7 +60,9 @@ def migrate_to_summary_rows(db: SqliteDb) -> None:
             materialize_legacy_run_blobs(connection, runs, session_table)
             for statement in summary_rows_schema_sql(session_table):
                 connection.exec_driver_sql(statement)
-            if f"{session_table}_compactions" not in _tables(connection):
+            if f"{session_table}_compactions" in _tables(connection):
+                _convert_archive(connection, session_table, runs)
+            else:
                 _adopt_legacy_sessions(connection, session_table, runs.name)
         connection.commit()
 
@@ -93,7 +101,7 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
             )
             scopes.setdefault(summary_scope, ())
         tombstoned = {run_id for ids in scopes.values() for run_id in ids}
-        _drop_tombstoned_runs(connection, runs_table, session_id, tombstoned)
+        _drop_runs(connection, runs_table, session_id, tombstoned)
         adopted_metadata = _without_adopted_state(metadata, scopes, summary_scope)
         if adopted_metadata != metadata:
             connection.exec_driver_sql(
@@ -102,8 +110,101 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
             )
 
 
-def _drop_tombstoned_runs(connection: Connection, runs_table: str, session_id: str, run_ids: set[str]) -> None:
-    """Drop stored copies of runs the destructive compactor deleted, with their member runs."""
+# LEGACY_COMPAT: Compacted runs moved out of the runs table into an archive.
+# Legacy format: ``<session_table>_compactions`` generations (cumulative summary, model, ``legacy`` flag,
+# captured ``legacy_event_ids``) and ``<session_table>_compacted_runs`` rows holding each folded run's JSON
+# and event ids, or a content-free tombstone without ``run_data``; ``session.summary`` cached the newest
+# generation's text, and a generation without text ended the summaries before it.
+# Last legacy release: v2026.10.273; replacement: the next release keeps every run in the runs table with
+# summary rows beside it.
+# Handling: ``migrate_to_summary_rows`` runs once per conversation database when storage opens, before any
+# response uses it. It drops stored copies of every archived or tombstoned run with their member runs,
+# restores the archived runs ahead of the live ones in archive order, renumbers each session, and turns each
+# generation into a summary row after its last restored top-level run (legacy generations before every run),
+# with the event ids of its archived runs, then drops both archive tables. Replay, seen ids, and redaction
+# candidates match what the archive gave; tombstones are not carried over.
+# Coverage: tests/test_archive_migration.py.
+def _convert_archive(connection: Connection, session_table: str, runs: Table) -> None:
+    compactions = quote_identifier(f"{session_table}_compactions")
+    compacted_runs = quote_identifier(f"{session_table}_compacted_runs")
+    archived: dict[str, list[tuple[str, str | None]]] = {}
+    for session_id, run_id, run_data in connection.exec_driver_sql(
+        f"SELECT session_id, run_id, run_data FROM {compacted_runs} ORDER BY id",  # noqa: S608
+    ):
+        archived.setdefault(session_id, []).append((run_id, run_data))
+    for session_id, entries in archived.items():
+        # A stale save or blob residue can hold a copy that reconcile had not pruned yet.
+        _drop_runs(connection, runs.name, session_id, {run_id for run_id, _ in entries})
+        restored: list[str] = []
+        for run_id, run_data in entries:
+            if run_data is not None:
+                insert_run_entry(connection, runs, json.loads(run_data), session_id=session_id)
+                restored.append(run_id)
+        live = [run_id for run_id in ordered_run_ids(connection, runs, session_id) if run_id not in restored]
+        renumber_runs(connection, runs, session_id, [*restored, *live])
+    _insert_generation_rows(connection, session_table, runs)
+    connection.exec_driver_sql(f"DROP TABLE {compacted_runs}")
+    connection.exec_driver_sql(f"DROP TABLE {compactions}")
+
+
+def _insert_generation_rows(connection: Connection, session_table: str, runs: Table) -> None:
+    compactions = quote_identifier(f"{session_table}_compactions")
+    compacted_runs = quote_identifier(f"{session_table}_compacted_runs")
+    summaries = quote_identifier(summary_rows_table_names(session_table)[0])
+    positions: dict[tuple[str, str], int] = {}
+    generations = connection.exec_driver_sql(
+        f"SELECT id, session_id, scope_key, summary, summary_model, legacy, created_at FROM {compactions} ORDER BY id",  # noqa: S608
+    ).fetchall()
+    for generation_id, session_id, scope_key, summary, summary_model, legacy, created_at in generations:
+        newest_run = connection.exec_driver_sql(
+            f"SELECT MAX(run.run_index) FROM {compacted_runs} AS archived "  # noqa: S608
+            f"JOIN {quote_identifier(runs.name)} AS run "
+            "ON run.session_id = archived.session_id AND run.run_id = archived.run_id "
+            "WHERE archived.compaction_id = ? AND archived.run_data IS NOT NULL AND run.parent_run_id IS NULL",
+            (generation_id,),
+        ).scalar()
+        if legacy:
+            position = -1
+        elif newest_run is not None:
+            position = newest_run
+        else:
+            position = positions.get((session_id, scope_key), -1)
+        positions[session_id, scope_key] = position
+        connection.exec_driver_sql(
+            f"INSERT INTO {summaries} (session_id, scope_key, after_run_index, summary, summary_model, legacy, "  # noqa: S608
+            "event_ids, seen_event_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                scope_key,
+                position,
+                summary,
+                summary_model,
+                legacy,
+                json.dumps(_generation_event_ids(connection, session_table, generation_id, "event_ids")),
+                json.dumps(_generation_event_ids(connection, session_table, generation_id, "seen_event_ids")),
+                created_at,
+            ),
+        )
+
+
+def _generation_event_ids(connection: Connection, session_table: str, generation_id: int, column: str) -> list[str]:
+    """Return the event ids a generation's archived runs carry in ``column``, plus a legacy generation's own."""
+    compactions = quote_identifier(f"{session_table}_compactions")
+    compacted_runs = quote_identifier(f"{session_table}_compacted_runs")
+    return sorted(
+        value
+        for (value,) in connection.exec_driver_sql(
+            f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.{column}) "  # noqa: S608
+            "WHERE archived.compaction_id = ? "
+            f"UNION SELECT value FROM {compactions} AS generation, json_each(generation.legacy_event_ids) "
+            "WHERE generation.id = ? AND generation.legacy = 1",
+            (generation_id, generation_id),
+        )
+    )
+
+
+def _drop_runs(connection: Connection, runs_table: str, session_id: str, run_ids: set[str]) -> None:
+    """Drop stored copies of runs compaction removed, with their member runs."""
     runs = quote_identifier(runs_table)
     frontier = sorted(run_ids)
     while frontier:
