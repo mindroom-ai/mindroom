@@ -24,7 +24,6 @@ from mindroom.session_storage.agent_storage import (
     create_state_storage,
     get_agent_session,
     get_team_session,
-    replace_runs,
     runs_without,
     save_runs,
 )
@@ -176,35 +175,6 @@ def test_get_session_ignores_runs_limit(tmp_path: Path) -> None:
     assert [run.run_id for run in limited.runs or []] == ["r1", "r2", "r3"]
 
 
-def test_replace_runs_deletes_only_the_dropped_rows(tmp_path: Path) -> None:
-    """Removing runs deletes their rows and leaves the survivors' rows unwritten."""
-    storage = _storage(tmp_path)
-    db_path = tmp_path / "sessions" / "code.db"
-    try:
-        seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
-        connection = sqlite3.connect(db_path)
-        try:
-            before = dict(connection.execute("SELECT run_id, updated_at FROM code_sessions_runs").fetchall())
-        finally:
-            connection.close()
-        session = get_agent_session(storage, "s1")
-        assert session is not None
-        removed = replace_runs(storage, session, [run for run in session.runs or [] if run.run_id != "r2"])
-        connection = sqlite3.connect(db_path)
-        try:
-            after = dict(connection.execute("SELECT run_id, updated_at FROM code_sessions_runs").fetchall())
-        finally:
-            connection.close()
-        reloaded_ids = _loaded_run_ids(storage, "s1")
-    finally:
-        storage.close()
-
-    assert removed == ["r2"]
-    assert [run.run_id for run in session.runs or []] == ["r1", "r3"]
-    assert reloaded_ids == ["r1", "r3"]
-    assert after == {"r1": before["r1"], "r3": before["r3"]}
-
-
 def test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors(tmp_path: Path) -> None:
     """Agno passes the run's position in the shortened session; the row must still come last."""
     storage = _storage(tmp_path)
@@ -213,7 +183,7 @@ def test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors(tmp_
         seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
         session = get_agent_session(storage, "s1")
         assert session is not None
-        replace_runs(storage, session, [run for run in session.runs or [] if run.run_id == "r3"])
+        storage.delete_runs(["r1", "r2"])
         # Position 1 in ["r3", "r4"] would sort before the surviving r3 (index 2).
         storage.upsert_run(run=_run("s1", "r4"), session_id="s1", user_id="@alice:example.test", run_index=1)
         loaded_ids = _loaded_run_ids(storage, "s1")
@@ -415,7 +385,7 @@ def test_agno_2_blob_runs_become_rows_once(tmp_path: Path) -> None:
         assert [run.run_id for run in loaded.runs or []] == ["run-1", "run-2", "run-3"]
         assert _run_rows(db_path) == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
         assert _blob(db_path) is None
-        replace_runs(storage, loaded, [run for run in loaded.runs or [] if run.run_id != "run-2"])
+        storage.delete_runs(["run-2"])
         save_runs(storage, loaded, [_run("session-1", "run-4")])
     finally:
         storage.close()
@@ -520,6 +490,14 @@ def _summary_after(db_path: Path, run_id: str) -> None:
             (run_id,),
         )
         connection.commit()
+    finally:
+        connection.close()
+
+
+def _stored_run_ids(db_path: Path, runs_table: str) -> list[str]:
+    connection = sqlite3.connect(db_path)
+    try:
+        return [row[0] for row in connection.execute(f"SELECT run_id FROM {runs_table} ORDER BY run_id")]  # noqa: S608
     finally:
         connection.close()
 
@@ -710,12 +688,9 @@ def test_failed_run_writes_leave_the_session_as_loaded() -> None:
     original_runs = list(session.runs or [])
     storage = MagicMock()
     storage.upsert_run.side_effect = RuntimeError("disk full")
-    storage.delete_runs.side_effect = RuntimeError("disk full")
 
     with pytest.raises(RuntimeError):
         save_runs(storage, session, [_run("s1", "r3")])
-    with pytest.raises(RuntimeError):
-        replace_runs(storage, session, original_runs[:1])
 
     assert session.runs == original_runs
 
@@ -740,20 +715,19 @@ def test_deleting_a_team_run_takes_its_member_rows_along(tmp_path: Path) -> None
     team_run = TeamRunOutput(run_id="team1", team_id="eng", session_id="t1")
     other = TeamRunOutput(run_id="team2", team_id="eng", session_id="t1")
     try:
-        session = seed_session(
+        seed_session(
             storage,
             TeamSession(session_id="t1", team_id="eng", runs=[team_run, member, grandchild, other]),
         )
-        kept = runs_without(session.runs or [], ["team1"])
-        removed = replace_runs(storage, session, kept)
+        storage.delete_runs(["team1"])
         reloaded = get_team_session(storage, "t1")
+        stored = _stored_run_ids(tmp_path / "sessions" / "eng.db", "eng_sessions_runs")
         storage.delete_runs(["team2"])
         after_direct_delete = get_team_session(storage, "t1")
     finally:
         storage.close()
 
-    assert [run.run_id for run in kept] == ["team2"]
-    assert sorted(removed) == ["m1", "m1-child", "team1"]
+    assert stored == ["team2"]
     assert reloaded is not None
     assert [run.run_id for run in reloaded.runs or []] == ["team2"]
     assert after_direct_delete is not None

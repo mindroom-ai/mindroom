@@ -65,12 +65,10 @@ __all__ = [
     "create_session_storage",
     "create_state_engine",
     "create_state_storage",
-    "delete_run_subtrees",
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
     "load_agent_session",
-    "replace_runs",
     "run_session_storage_operation",
     "runs_without",
     "save_compaction_usage",
@@ -314,9 +312,9 @@ class _ConversationSqliteDb(SqliteDb):
 
     Agno 3 stores runs as rows of ``<session_table>_runs``: ``upsert_session``
     writes the session row only, ``upsert_run`` writes one run, ``delete_runs``
-    removes runs. MindRoom follows that model; :func:`save_runs` and
-    :func:`replace_runs` are the two module-level helpers callers use when they
-    edit or drop runs of a loaded session. The overrides here only adjust what
+    removes runs. MindRoom follows that model; :func:`save_runs` is the
+    module-level helper callers use when they edit runs of a loaded session.
+    The overrides here only adjust what
     agno already does: prompt-role stripping and the conversation log's
     insertion rules in ``upsert_run``, a snapshot read of the runs after each
     scope's latest summary row in ``get_session``, and a subtree ``delete_runs``.
@@ -439,10 +437,10 @@ class _ConversationSqliteDb(SqliteDb):
         if not run_ids:
             return
         with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table):
-            delete_run_subtrees(sess, runs_table, run_ids)
+            _delete_run_subtrees(sess, runs_table, run_ids)
 
 
-def delete_run_subtrees(
+def _delete_run_subtrees(
     transaction: OrmSession,
     runs_table: Table | None,
     run_ids: Collection[str],
@@ -542,30 +540,6 @@ def save_runs(
         merged.append(replacements.pop(run_id, existing) if run_id else existing)
     merged.extend(replacements.values())
     session.runs = merged
-
-
-def replace_runs(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    runs: Iterable[RunOutput | TeamRunOutput],
-) -> list[str]:
-    """Make ``runs`` the session's run list and delete the rows of the runs it dropped.
-
-    Surviving runs are not rewritten; only removal is persisted, and it is
-    persisted before ``session.runs`` changes so a failed delete leaves the
-    session as loaded. Returns the removed run ids.
-    """
-    kept = list(runs)
-    kept_ids = {run.run_id for run in kept}
-    removed = [
-        run.run_id
-        for run in session.runs or []
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id and run.run_id not in kept_ids
-    ]
-    if removed:
-        storage.delete_runs(removed)
-    session.runs = kept
-    return removed
 
 
 def _run_has_prompt_messages(run: object, prompt_roles: frozenset[str]) -> bool:

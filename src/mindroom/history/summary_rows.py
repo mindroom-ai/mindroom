@@ -170,9 +170,10 @@ def append_summary(
 ) -> int | None:
     """Append one summary row after the newest covered run, unless its input went stale; return its id.
 
-    The input is stale when the scope's latest row is no longer ``based_on`` or a covered run is gone or
-    changed status or place since it was read. The row's event sets come from the covered rows as they are
-    stored now, so metadata written during the summary call, such as a reply's response event id, counts.
+    The input is stale when the scope's latest row is no longer ``based_on``, a covered run is gone or
+    changed status or place since it was read, or a covered run sorts at or behind the latest row. The
+    row's event sets come from the covered rows as they are stored now, so metadata written during the
+    summary call, such as a reply's response event id, counts.
     """
     db = _sqlite(storage)
     tables = _tables(db)
@@ -180,7 +181,9 @@ def append_summary(
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         _ensure_tables(connection, db)
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
-        if (rows[-1].id if rows else None) != based_on:
+        previous_index = rows[-1].after_run_index if rows else -1
+        # A row never sorts behind the latest one: that would return what it folded to replay.
+        if (rows[-1].id if rows else None) != based_on or any(run.run_index <= previous_index for run in covered):
             return None
         stored = {
             run_id: (run_index, status, metadata)
@@ -199,7 +202,6 @@ def append_summary(
             seen |= seen_event_ids(metadata)
             event_ids |= seen_event_ids(metadata) | source_event_ids(metadata)
         # With nothing covered (a mid-turn fold of a first turn), the row sorts where the latest one does.
-        previous_index = rows[-1].after_run_index if rows else -1
         after_run_index = max((run.run_index for run in covered), default=previous_index)
         row_id = connection.exec_driver_sql(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, after_run_index, summary, summary_model, "  # noqa: S608
@@ -343,30 +345,9 @@ def _cut(
     cut: _Key,
 ) -> None:
     """Delete every top-level run and non-barrier row at or after ``cut``, with descendants, and record the removed runs."""
-    segments = dict(
-        cast(
-            "list[tuple[int, str]]",
-            connection.exec_driver_sql(
-                f"SELECT id, segment_run_id FROM {tables.summaries} "  # noqa: S608
-                "WHERE session_id = ? AND scope_key = ? AND segment_run_id IS NOT NULL",
-                (session_id, scope_key),
-            ).all(),
-        ),
-    )
-    while True:
-        top_level = _top_level_from(connection, tables, session_id, scope_key, cut)
-        deleted_rows = [row for row in rows if row.summary is not None and (row.after_run_index, row.id) >= cut]
-        owners = set(top_level) | {segments[row.id] for row in deleted_rows if row.id in segments}
-        # A run is deleted whole, so a segment it owns before the cut moves the cut back to that row.
-        earlier = [
-            (row.after_run_index, row.id)
-            for row in rows
-            if segments.get(row.id) in owners and (row.after_run_index, row.id) < cut
-        ]
-        if not earlier:
-            break
-        cut = min(earlier)
-    removed = owners | _descendants(connection, tables, session_id, set(top_level))
+    top_level = set(_top_level_from(connection, tables, session_id, scope_key, cut))
+    deleted_rows = [row for row in rows if row.summary is not None and (row.after_run_index, row.id) >= cut]
+    removed = top_level | _descendants(connection, tables, session_id, top_level)
     for start in range(0, len(sorted(removed)), _ID_CHUNK_SIZE):
         chunk = sorted(removed)[start : start + _ID_CHUNK_SIZE]
         placeholders = ", ".join("?" for _ in chunk)
@@ -440,12 +421,6 @@ def _folded_holder(
         for run_index, metadata in _range_runs(connection, tables, session_id, scope_key, start, row.after_run_index):
             if _holds(metadata, event_id, match):
                 return (run_index, 0)
-        segment = connection.exec_driver_sql(
-            f"SELECT json_extract(segment, '$.metadata') FROM {tables.summaries} WHERE id = ?",  # noqa: S608
-            (row.id,),
-        ).scalar()
-        if segment is not None and _holds(json.loads(segment), event_id, match):
-            return (row.after_run_index, row.id)
     return None
 
 

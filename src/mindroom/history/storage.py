@@ -409,7 +409,7 @@ def _remove_redacted_event_from_history(
     target_session = _latest_persisted_session(storage, session)
     _replace_scope_seen_event_ids(target_session, scope, set())
     storage.upsert_session(target_session)
-    _adopt_session_fields(session, _latest_persisted_session(storage, session))
+    _adopt_session_fields(session, target_session)
     return True
 
 

@@ -2635,7 +2635,6 @@ path = "mindroom.history.legacy_compaction_state"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.summary_rows_schema",
-    "mindroom.history.types",
     "mindroom.session_storage.agno_compat_sqlite",
     "mindroom.session_storage.legacy_session_storage",
     "mindroom.usage.storage",
@@ -8004,7 +8003,6 @@ from = ["mindroom.session_storage.agno_compat_sqlite"]
 expose = [
     "remove_default_pragmas",
     "owned_table",
-    "insert_run_row",
     "upsert_run_at_end",
     "run_deletion_transaction",
     "read_session",

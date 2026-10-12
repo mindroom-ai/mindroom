@@ -326,8 +326,8 @@ async def prepare_scope_history(
     session = scope_context.session
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_start")
-    # Archive reconciliation reads and writes SQLite; keep it off the event loop and let
-    # an in-flight write finish before cancellation propagates.
+    # Preparing the scope state may write the session row; keep it off the event loop and
+    # let an in-flight write finish before cancellation propagates.
     state = await run_blocking_until_complete(
         partial(
             _prepare_scope_state_for_run,
@@ -337,7 +337,6 @@ async def prepare_scope_history(
             execution_plan=execution_plan,
         ),
     )
-    # The native route names the summary generation, which reconciliation may have refreshed.
     native_model = configure_native(session=session)
     if state.force_compact_before_next_run and native_model is not None:
         native_model.configure_native_compaction(threshold=None)

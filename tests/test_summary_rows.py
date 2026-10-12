@@ -406,6 +406,29 @@ def test_a_chunk_builds_on_the_summary_it_loaded(storage: SqliteDb) -> None:
     assert [run.run_id for run in basis.covered] == ["r1", "r2"]
 
 
+def test_append_never_sorts_behind_the_latest_row(storage: SqliteDb) -> None:
+    """A chunk whose runs another compaction folded meanwhile writes nothing, even when that summary reads the same."""
+    _seed_events(storage, [_event_run(f"r{index}") for index in range(4)])
+    assert _fold(storage, ["r0"], "S") is not None
+    covered = summary_rows.covered_runs(storage, session_id="s1", run_ids=["r1"])
+    assert _fold(storage, ["r1", "r2", "r3"], "S") is not None
+    latest = summary_rows.latest_row(storage, session_id="s1", scope_key=_SCOPE.key)
+    assert latest is not None
+
+    raced = summary_rows.append_summary(
+        storage,
+        session_id="s1",
+        scope_key=_SCOPE.key,
+        based_on=latest.id,
+        covered=covered,
+        summary="S and r1",
+        summary_model="model",
+    )
+
+    assert raced is None
+    assert _loaded_ids(storage) == []
+
+
 def test_append_refuses_a_stale_base(storage: SqliteDb) -> None:
     """A chunk built on a summary another append replaced writes nothing."""
     _seed_events(storage, [_event_run("r0"), _event_run("r1")])

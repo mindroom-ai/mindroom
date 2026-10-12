@@ -857,7 +857,7 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
-    # Compacted history's seen ids are read from the archive; keep that SQLite read off the loop.
+    # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
     seen_event_ids = await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
     scheduled_history_budget = ctx.scheduled_history_budget
     if scheduled_history_budget is not None:
