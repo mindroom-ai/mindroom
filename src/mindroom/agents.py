@@ -30,7 +30,7 @@ from mindroom.approval.tool_approval import (
 )
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
-from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.job import JobTools, is_job_function
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     persona_allows,
@@ -1296,7 +1296,7 @@ def apply_tool_approval_capability(
         # A scheduled call runs only with the approval its requester gave when it was scheduled.
         is_scheduled_call_runner = registered_tool_name == "scheduler" and function.name == "run_scheduled_call"
         # The job controls act only on the caller's own jobs, each of which passed its own approval.
-        is_job_controls = registered_tool_name == "job"
+        is_job_controls = is_job_function(function)
         return (
             not is_matrix_room_runtime_function
             and not is_scheduled_call_runner

@@ -10,8 +10,9 @@ import pytest
 from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.team import Team
+from agno.tools import Toolkit
 
-from mindroom.agents import team_job_controls
+from mindroom.agents import apply_tool_approval_capability, team_job_controls
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
@@ -355,3 +356,21 @@ async def test_the_job_tool_never_asks_for_approval(tmp_path: Path) -> None:
         assert job.approval_type is None
     finally:
         await runtime.shutdown()
+
+
+def test_a_plugin_toolkit_named_job_still_asks_for_approval(tmp_path: Path) -> None:
+    """Only the reserved job controls skip approval; a same-named plugin toolkit does not."""
+    config = managed_team_config(tmp_path)
+    config.tool_approval.default = "require_approval"
+
+    def run_job() -> str:
+        return "ran"
+
+    toolkit = apply_tool_approval_capability(
+        Toolkit(name="job", tools=[run_job]),
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name="job",
+    )
+    assert toolkit is not None
+    assert toolkit.get_functions()["run_job"].requires_confirmation is True
