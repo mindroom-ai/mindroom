@@ -15,6 +15,5 @@ The core dashboard's JavaScript dependencies (`pnpm audit`, 1,148 packages) had 
 ## Open findings
 
 - Scanning does not gate changes: the CI Python dependency audit and secret scan report findings without failing the build, so a vulnerable lock file or a committed secret still merges.
-- The CI Python audit covers only the root `uv.lock`; the platform backend's separate `uv.lock` is not audited.
 - JavaScript dependencies, where the 2025 audit found every advisory, and built container images are not scanned in CI, so new advisories there surface only through manual audits.
 - The `uv` build stage uses the `ghcr.io/astral-sh/uv:latest` image, so a rebuild can pick up an unreviewed `uv` release.

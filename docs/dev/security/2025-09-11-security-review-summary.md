@@ -26,5 +26,5 @@ Each report holds its category's assumptions, decisions, and open findings; this
 
 ## Secret-rotation cautions
 
-- `scripts/rotate-api-keys.sh` and `scripts/apply-rotated-keys.sh` write Secret names and keys that the current charts do not read, so they must not be used; rotate through the current Helm, provisioner, or external-secret workflow, and verify the rotation in a disposable namespace before granting production access.
+- Rotate platform secrets through the current Helm, provisioner, or external-secret workflow, and verify the rotation in a disposable namespace before granting production access.
 - Rewriting the shared Git history to purge the leaked keys is destructive and needs repository-owner coordination, a tested backup, and a repository-specific plan, so no generic force-push procedure applies.

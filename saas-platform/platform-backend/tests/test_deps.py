@@ -18,6 +18,7 @@ from backend.deps import (
     verify_user_allow_deleted,
 )
 from backend.metrics import get_admin_metric, get_auth_metric, reset_security_metrics
+from supabase_auth.errors import AuthApiError, AuthRetryableError
 from main import app
 
 
@@ -365,6 +366,63 @@ class TestDeps:
 
         assert exc_info.value.status_code == 401
         assert get_admin_metric("unauthorized") == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_admin_checks_lock_the_client_out(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
+        """Failed admin token checks count toward the same lockout as user checks."""
+        mock_auth_client.auth.get_user.return_value = None
+
+        for _ in range(auth_monitor.MAX_FAILURES):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_admin("Bearer guessed-token")
+            assert exc_info.value.status_code == 401
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_admin("Bearer guessed-token")
+        assert exc_info.value.status_code == 429
+        assert auth_monitor.is_blocked("unknown")
+
+    @pytest.mark.asyncio
+    async def test_locked_out_client_is_refused_on_the_admin_path(self, mock_auth_client: MagicMock):
+        """A client locked out by failed user checks cannot keep guessing on admin routes."""
+        mock_auth_client.auth.get_user.return_value = None
+        for _ in range(auth_monitor.MAX_FAILURES):
+            with pytest.raises(HTTPException):
+                await verify_user("Bearer guessed-token")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_admin("Bearer guessed-token")
+
+        assert exc_info.value.status_code == 429
+        assert mock_auth_client.auth.get_user.call_count == auth_monitor.MAX_FAILURES
+
+    @pytest.mark.asyncio
+    async def test_invalid_user_token_counts_once(self, mock_auth_client: MagicMock):
+        """One rejected token is one failed attempt, so the lockout threshold means what it says."""
+        mock_auth_client.auth.get_user.return_value = None
+
+        with pytest.raises(HTTPException):
+            await verify_user("Bearer guessed-token")
+
+        assert len(auth_monitor.failed_attempts["unknown"]) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verify", [verify_user, verify_admin])
+    async def test_supabase_token_rejection_counts_but_outage_does_not(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify
+    ):
+        """Supabase rejecting a token is a failed attempt; Supabase failing to answer is not."""
+        mock_auth_client.auth.get_user.side_effect = AuthRetryableError("upstream unavailable", 503)
+        with pytest.raises(HTTPException) as exc_info:
+            await verify("Bearer some-token")
+        assert exc_info.value.status_code == 401
+        assert not auth_monitor.failed_attempts.get("unknown")
+
+        mock_auth_client.auth.get_user.side_effect = AuthApiError("invalid JWT", 401, "bad_jwt")
+        with pytest.raises(HTTPException) as exc_info:
+            await verify("Bearer some-token")
+        assert exc_info.value.status_code == 401
+        assert len(auth_monitor.failed_attempts["unknown"]) == 1
 
     def test_ensure_supabase(self):
         """Test ensure_supabase returns client."""
