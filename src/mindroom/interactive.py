@@ -313,7 +313,7 @@ def _render_question_text(question: str, options: list[dict[str, str]], *, inclu
     return "\n".join(parts)
 
 
-def _remove_inline_unparsed_interactive_fences(text: str) -> str:
+def _remove_inline_unparsed_interactive_fences(text: str, *, warn_unparsed: bool) -> str:
     """Remove inline interactive JSON fences that the block parser cannot render."""
     cleaned_text, count = re.subn(
         _INLINE_INTERACTIVE_JSON_FENCE_PATTERN,
@@ -324,10 +324,11 @@ def _remove_inline_unparsed_interactive_fences(text: str) -> str:
     if count == 0:
         return text
 
-    logger.warning(
-        "Interactive block not parsed",
-        preview=_preview_text(text),
-    )
+    if warn_unparsed:
+        logger.warning(
+            "Interactive block not parsed",
+            preview=_preview_text(text),
+        )
     return cleaned_text.strip()
 
 
@@ -359,14 +360,15 @@ def _interactive_block_matches(text: str) -> list[re.Match[str]]:
     return matches
 
 
-def hide_unfinished_interactive(text: str) -> str:
+def hide_unfinished_interactive(formatted_text: str) -> str:
     """Cut an interactive block that is still streaming, so its partial JSON stays out of the message.
 
-    When the text ends inside a fenced block marked exactly ``interactive`` or ``interactive json``, the text is
-    cut where that block opens; the text before it stays and the question appears once the block closes. Closed
-    blocks, interactive or not, and every other code block are left as written.
+    Complete blocks are already rendered as questions. When the text ends inside a fenced block marked exactly
+    ``interactive`` or ``interactive json``, the text is cut where that block opens; the text before it stays and
+    the question appears once the block closes. Closed blocks, even ones the parser could not use, and every
+    other code block are left as written.
     """
-    lines = text.split("\n")
+    lines = formatted_text.split("\n")
     open_fence: tuple[int, int, str] | None = None  # line, backtick count, and marker of the block the text ends in
     for index, line in enumerate(lines):
         # One fence line: its backticks and info string. Info strings cannot contain backticks.
@@ -380,16 +382,21 @@ def hide_unfinished_interactive(text: str) -> str:
         elif not info and ticks >= open_fence[1]:
             open_fence = None
     if open_fence is None:
-        return text
+        return formatted_text
     index, _, marker = open_fence
     if not marker and index + 1 < len(lines):
         marker = lines[index + 1]  # a bare fence may carry its marker on the next line
     if not _is_interactive_marker(marker):
-        return text
+        return formatted_text
     return "\n".join(lines[:index]).rstrip()
 
 
-def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:
+def parse_and_format_interactive(
+    response_text: str,
+    extract_mapping: bool = False,
+    *,
+    warn_unparsed: bool = True,
+) -> _InteractiveResponse:
     """Parse and format interactive content from response text.
 
     Each interactive block is replaced in place with its formatted question so
@@ -400,6 +407,8 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     Args:
         response_text: The response text containing interactive JSON
         extract_mapping: Whether to extract option mapping and return options list
+        warn_unparsed: Whether to log interactive-looking blocks the parser could not use.
+            Pass False for text that is still streaming, where a block that has not closed yet is not malformed.
 
     Returns:
         The formatted response and any prompt metadata extracted from it.
@@ -408,7 +417,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     matches = _interactive_block_matches(response_text)
 
     if not matches:
-        if _should_warn_unparsed_interactive(response_text):
+        if warn_unparsed and _should_warn_unparsed_interactive(response_text):
             logger.warning(
                 "Interactive block not parsed",
                 preview=_preview_text(response_text),
@@ -469,7 +478,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         parts.append(replacement)
         last_end = match.end()
     parts.append(response_text[last_end:])
-    final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip())
+    final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip(), warn_unparsed=warn_unparsed)
 
     return _InteractiveResponse(final_text, interactive_metadata)
 

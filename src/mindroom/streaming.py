@@ -480,13 +480,18 @@ def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
     """Format one outbound payload from immutable stream state."""
     text_to_send = snapshot.accumulated_text if snapshot.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
-    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
-        # An interactive block still arriving is raw JSON, not a malformed block, so it is cut before parsing;
-        # its question renders once the block closes.
-        text_to_send = interactive.hide_unfinished_interactive(text_to_send) or _PROGRESS_PLACEHOLDER
 
-    response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
+    in_progress = snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES
+    # A block still arriving is unfinished, not malformed, so only the final text warns about unparsed blocks.
+    response = interactive.parse_and_format_interactive(
+        text_to_send,
+        extract_mapping=True,
+        warn_unparsed=not in_progress,
+    )
     display_text = response.formatted_text
+    if in_progress:
+        # An interactive block still arriving is raw JSON; its question renders once the block closes.
+        display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
 
     latest_for_message = (
         snapshot.latest_thread_event_id if snapshot.event_id is None and not snapshot.room_mode else None
@@ -519,7 +524,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         extra_content=extra_content,
         markdown_renderer=snapshot.markdown_renderer,
     )
-    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+    if in_progress:
         # Matrix suppresses m.notice before evaluating mention rules. Streaming
         # updates may already contain mentions, so using m.text here would make
         # every progressive edit eligible for a push notification.

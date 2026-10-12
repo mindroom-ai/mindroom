@@ -786,6 +786,36 @@ def test_only_a_final_edit_warns_about_an_unfinished_interactive_block(config: C
     assert mock_warning.call_args.args == ("Interactive block not parsed",)
 
 
+_PICK_BLOCK_JSON = '{"question": "Pick one", "options": [{"emoji": "✅", "label": "Yes", "value": "yes"}]}'
+
+
+@pytest.mark.parametrize(
+    "streamed",
+    [
+        # An introduction on the opening fence line, then a second block still arriving.
+        f'Please choose: ```interactive\n{_PICK_BLOCK_JSON}\n```\n\n```interactive\n{{"question": "Second',
+        # A four-backtick opener closed by three backticks, which the parser accepts.
+        f"Before.\n````interactive\n{_PICK_BLOCK_JSON}\n```",
+    ],
+)
+def test_in_progress_edits_render_every_complete_interactive_block(config: Config, streamed: str) -> None:
+    """Edits show each block the parser accepts as its question and keep a block still arriving hidden."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = streamed
+    snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    assert snapshot is not None
+
+    shown = streaming_mod._prepare_delivery_from_snapshot(snapshot).display_text
+
+    assert "Pick one" in shown
+    assert "Second" not in shown
+    assert "```" not in shown
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("terminal", ["restart", "user_stop", "error"])
