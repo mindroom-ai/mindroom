@@ -2333,7 +2333,6 @@ depends_on = [
 path = "mindroom.execution_preparation"
 depends_on = [
     "mindroom.ai_runtime",
-    "mindroom.attachments.media",
     "mindroom.attachments.storage",
     "mindroom.background_tasks",
     "mindroom.constants",
@@ -5131,7 +5130,7 @@ visibility = ["mindroom.turn_controller"]
 [[modules]]
 path = "mindroom.response_payload_preparation"
 depends_on = [
-    "mindroom.attachments.storage",
+    "mindroom.attachments.ids",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
     "mindroom.timing",
@@ -5250,7 +5249,6 @@ visibility = [
 [[modules]]
 path = "mindroom.voice.readiness"
 depends_on = [
-    "mindroom.attachments.storage",
     "mindroom.constants",
     "mindroom.dispatch_handoff",
     "mindroom.dispatch_source",

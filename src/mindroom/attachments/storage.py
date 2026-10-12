@@ -1,4 +1,4 @@
-"""Attachment persistence and media conversion helpers."""
+"""Attachment persistence, registration, and context-scoped resolution."""
 
 from __future__ import annotations
 
