@@ -1473,6 +1473,18 @@ async def run_delegated_child_response(
         )
 
 
+def _with_background_tool_jobs(
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ResponseTurnContext:
+    """Run the turn's managed calls as background jobs while the instance runs them, except in a voice call."""
+    return replace(
+        ctx,
+        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
+    )
+
+
 async def ai_response(  # noqa: C901, PLR0915
     ctx: ResponseTurnContext,
     prompt: str,
@@ -1552,10 +1564,7 @@ async def ai_response(  # noqa: C901, PLR0915
         Agent response string
 
     """
-    ctx = replace(
-        ctx,
-        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
-    )
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.agent_mode == "minimal":
@@ -2092,10 +2101,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
-    ctx = replace(
-        ctx,
-        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
-    )
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _require_turn_session_id(ctx)

@@ -793,12 +793,12 @@ async def _await_background_child(
     depth: int,
     wait_timeout: float | None,
     settle: Callable[[str], Awaitable[None]],
-    finished: Callable[[object], Awaitable[None]],
+    record_return: Callable[[object], Awaitable[None]],
     parent_call: _ParentCall,
 ) -> None:
     """Hand a new child to its job, or find the job a crash left it with, then wait for it as the parent's call.
 
-    ``finished`` records on the reply what the parent's call returned.
+    ``record_return`` records on the reply what the parent's call returned.
 
     The parent's liveness claim ends once the job owns the child: the job claims liveness itself while it runs the
     child, and a parent claim held across the wait would block cancel cleanup.
@@ -825,7 +825,7 @@ async def _await_background_child(
             raise
         # Revoked access or a closed runtime ends this wait; the parent's call reports it.
         await settle(str(error))
-        await finished(str(error))
+        await record_return(str(error))
         return
     except BaseException:
         await background.release_wait(child.delegation_id, claim)
@@ -834,7 +834,7 @@ async def _await_background_child(
         result = await delegation_result(background, waited.job) if waited.claim is not None else None
         returned = result or format_job_handle(waited.job)
         await settle(returned)
-        await finished(returned)
+        await record_return(returned)
         if waited.claim is not None:
             # The outcome counts as read once the parent run saves this call's result, as a native call's does.
             await retain_parent_call_claim(
@@ -1257,7 +1257,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             try:
                 # The reply records a background child's call before its job starts, as for any managed call: the
                 # child's own tools run unrecorded in its job, so a restart's account names the delegation.
-                finished = (
+                record_return = (
                     await record_call(tool.tool_name or "run_subagent", application_arguments(tool.tool_args) or {})
                     if background is not None
                     else None
@@ -1274,7 +1274,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     # Persist the child before execution, with startup covered by cleanup.
                     await persist(state)
                 if background is not None:
-                    assert finished is not None
+                    assert record_return is not None
                     await _await_background_child(
                         background,
                         child,
@@ -1301,7 +1301,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         ),
                         # The job already applied the output policy to the child's result.
                         settle=lambda result: detach(result=resolve_result(result, output_request=None)),
-                        finished=finished,
+                        record_return=record_return,
                     )
                     return False
                 child_outcome = await _run_child(
