@@ -49,9 +49,11 @@ Tool approval rules apply to the child exactly as they apply to the caller, beca
 | Profile | File `subagents/<name>.md` in the caller's workspace, run with `run_subagent(profile="<name>")` | Same as inline, and only for the workspace's own agent |
 | Workflow participant | A `subagent` participant in a Dynamic Workflow spec, inline or by `profile` | A caller with the `dynamic_workflow` tool |
 
-Authoring is self-only: `system_prompt`, `tools`, `skills`, and `profile` are rejected when `agent_name` names another agent, because an authored prompt over another agent would hand the caller that agent's tools.
-An authored subagent's own tools and skills cap the copies it authors: their tools and skills must lie within its own, a copy without `tools` inherits its tools, a copy without `tools` or `skills` also inherits the skills its caller still has, and while it lists either it cannot start an unauthored copy of the caller.
-A persona's `skills` names a subset of the caller's skills; omitted, it follows the tool list as knowledge search does, so a persona that names tools gets only the skills it names and one that names neither keeps every caller skill.
+Authoring is self-only: `system_prompt`, `tools`, `skills`, `knowledge`, and `profile` are rejected when `agent_name` names another agent, because an authored prompt over another agent would hand the caller that agent's tools.
+An authored subagent's own tools, skills, and knowledge bases cap the copies it authors: they must lie within its own, a copy without `tools` inherits its tools, a copy without `tools` and `skills` or `knowledge` also inherits the skills or knowledge bases its caller still has, and while it lists any of them it cannot start an unauthored copy of the caller.
+A persona's `skills` names a subset of the caller's skills and its `knowledge` a subset of the caller's semantic knowledge bases; omitted, each follows the tool list, so a persona that names tools gets only the skills and knowledge bases it names and one that names neither keeps all of the caller's.
+A persona that names knowledge bases searches only those, without the caller's file-memory search source.
+Dynamic Workflow participants search no knowledge bases until workflow data grants exist.
 The cap comes from the running child's frozen persona, so restarts and approval resumes keep it.
 Persona entries match concrete toolkit names, so a toolkit reached through a preset or as an implied tool is selected by its own name, and preset names never count as toolkits.
 
@@ -125,7 +127,7 @@ Both delegation paths, the direct `DelegateTools` call and the native driver in 
 
 - The child's system message is built by Agno's normal prompt builder, like every agent's: the persona's `system_prompt` is Agno's `description`, so it leads, and `resolve_in_context` is off so braces in the prompt are never treated as session-state variables.
 - The prompt replaces the agent's identity: MindRoom's identity block, the configured role and instructions, and personality and context files are left out; the skills listing shows only the skills the persona keeps.
-- Runtime guidance stays true to what the child can call: no skill-authoring note, since writing workspace skills belongs to the configured agent, and with a `tools` list no knowledge-search or deferred-loading guidance, since `search_knowledge_base` and `dynamic_tools` are then unavailable; file-mode knowledge guidance stays, because file tools read those bases.
+- Runtime guidance stays true to what the child can call: no skill-authoring note, since writing workspace skills belongs to the configured agent, with a `tools` list no deferred-loading guidance, since `dynamic_tools` is then unavailable, and knowledge-search guidance only for the knowledge bases the persona keeps; file-mode knowledge guidance stays, because file tools read those bases.
 - The runtime sections every agent gets still follow: the tool execution environment, MindRoom's runtime notes, the date context, toolkit instructions, and the session summary.
 - Tool schemas still reach the model through the provider's tool API, so the child sees every function in its tool subset with its normal description.
 - The persona's `tools` compose with the existing `tool_function_filter` through each function's owning toolkit.

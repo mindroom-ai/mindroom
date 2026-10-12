@@ -290,8 +290,8 @@ def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_pa
     """A model that fills every optional argument with empty values starts a plain copy, or runs its profile."""
     _profile_file(tmp_path, "critic.md", "---\ndescription: Critic.\ntools: [file]\n---\nCritic prompt.\n")
 
-    plain = _resolve(tmp_path, system_prompt="", tools=[], skills=[], profile="")
-    profiled = _resolve(tmp_path, system_prompt="", tools=[], skills=[], profile="critic")
+    plain = _resolve(tmp_path, system_prompt="", tools=[], skills=[], knowledge=[], profile="")
+    profiled = _resolve(tmp_path, system_prompt="", tools=[], skills=[], knowledge=[], profile="critic")
 
     assert plain == PersonaRequest(persona=None, model=None, agent_mode="standard")
     assert isinstance(profiled, PersonaRequest)

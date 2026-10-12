@@ -18,6 +18,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
@@ -35,7 +36,7 @@ from tests.test_delegation_envelopes import _InstructionRecordingModel
 from tests.test_delegation_execution import DelegationModel, _call, _saved_approval_calls
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from agno.db.base import BaseDb
@@ -53,7 +54,12 @@ You are a hostile critic.
 """
 
 
-def _config(*, tools: tuple[str | dict[str, object], ...] = ("file",), approval: bool = False) -> Config:
+def _config(
+    *,
+    tools: tuple[str | dict[str, object], ...] = ("file",),
+    approval: bool = False,
+    knowledge_bases: tuple[str, ...] = (),
+) -> Config:
     return Config(
         agents={
             "leader": AgentConfig(
@@ -62,9 +68,11 @@ def _config(*, tools: tuple[str | dict[str, object], ...] = ("file",), approval:
                 tools=list(tools),
                 delegate_to=["leader", "child"],
                 memory_backend="file",
+                knowledge_bases=list(knowledge_bases),
             ),
             "child": AgentConfig(display_name="Child"),
         },
+        knowledge_bases={base_id: KnowledgeBaseConfig(path=f"./{base_id}") for base_id in knowledge_bases},
         defaults=DefaultsConfig(tools=[], learning=False),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
@@ -230,8 +238,8 @@ def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monke
     def properties(toolkit: DelegateTools) -> set[str]:
         return set(toolkit.async_functions["run_subagent"].parameters["properties"])
 
-    assert {"system_prompt", "tools", "skills", "profile"}.isdisjoint(properties(other_only))
-    assert {"system_prompt", "tools", "skills", "profile"} <= properties(self_allowed)
+    assert {"system_prompt", "tools", "skills", "knowledge", "profile"}.isdisjoint(properties(other_only))
+    assert {"system_prompt", "tools", "skills", "knowledge", "profile"} <= properties(self_allowed)
     assert "system_prompt" not in other_only.async_functions["run_subagent"].description
     assert "system_prompt" in self_allowed.async_functions["run_subagent"].description
 
@@ -698,15 +706,14 @@ async def test_authored_skills_are_checked_against_the_callers_skills(
 
 
 @pytest.mark.asyncio
-async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> None:
-    """The native path checks named skills against the caller's own, and a copy without skills inherits its parent's."""
-    _write_skill(tmp_path, "research")
-    _write_skill(tmp_path, "writing")
-    config = _config()
+def _native_resolver(
+    tmp_path: Path,
+    config: Config,
+) -> tuple[ToolRuntimeContext, Callable[..., Awaitable[_DelegationTarget | str]]]:
+    """Return the caller's tool context and a resolver for its native run_subagent calls with system_prompt Q."""
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
-    base = _delegate_runtime_context(config, paths, execution_identity=identity)
 
     async def resolve(context: ToolRuntimeContext, **arguments: object) -> _DelegationTarget | str:
         with tool_runtime_context(context):
@@ -719,6 +726,16 @@ async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> No
                 depth=0,
             )
 
+    return _delegate_runtime_context(config, paths, execution_identity=identity), resolve
+
+
+@pytest.mark.asyncio
+async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> None:
+    """The native path checks named skills against the caller's own, and a copy without skills inherits its parent's."""
+    _write_skill(tmp_path, "research")
+    _write_skill(tmp_path, "writing")
+    base, resolve = _native_resolver(tmp_path, _config())
+
     refused = await resolve(base, skills=["absent"])
     inherited = await resolve(replace(base, persona=inline_persona("P", None, ["writing"], None)))
 
@@ -729,23 +746,30 @@ async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_native_authoring_checks_names_and_inherits_knowledge(tmp_path: Path) -> None:
+    """The native path checks named knowledge bases against the caller's own and keeps them, and a copy inherits its parent's."""
+    base, resolve = _native_resolver(tmp_path, _config(knowledge_bases=("docs", "faq")))
+
+    refused = await resolve(base, knowledge=["wiki"])
+    named = await resolve(base, knowledge=["faq"])
+    inherited = await resolve(replace(base, persona=inline_persona("P", None, None, ["docs"])))
+
+    assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
+    assert not isinstance(named, str)
+    assert named.persona is not None
+    assert named.persona.knowledge == ("faq",)
+    assert not isinstance(inherited, str)
+    assert inherited.persona is not None
+    assert inherited.persona.knowledge == ("docs",)
+
+
+@pytest.mark.asyncio
 async def test_authored_knowledge_narrows_the_childs_knowledge_bases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A named knowledge base must be one of the caller's, and the child resolves only the bases it keeps."""
-    base = _config()
-    config = base.model_copy(
-        update={
-            "agents": {
-                **base.agents,
-                "leader": base.agents["leader"].model_copy(update={"knowledge_bases": ["docs", "faq"]}),
-            },
-            "knowledge_bases": {"docs": {"path": "./docs"}, "faq": {"path": "./faq"}},
-        },
-    )
-    config = Config.model_validate(config.model_dump())
-    harness = _Harness(tmp_path, monkeypatch, config)
+    harness = _Harness(tmp_path, monkeypatch, _config(knowledge_bases=("docs", "faq")))
     requested: list[tuple[str, ...] | None] = []
     resolve = ai_module.resolve_agent_knowledge_access_async
 

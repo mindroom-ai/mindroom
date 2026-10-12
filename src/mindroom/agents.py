@@ -1961,7 +1961,7 @@ def create_agent(
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
-        persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool and skill subsets.
+        persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
