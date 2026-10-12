@@ -1,6 +1,7 @@
 """The prompt_curation automation: when an agent's always-loaded files grow too large, ask it to condense them.
 
-The check measures `MEMORY.md` and the agent's `context_files` with the estimate behind `static_prompt_tokens`.
+The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
+for a private agent) with the estimate behind `static_prompt_tokens`.
 When they exceed the trigger, the prompt asks the agent for a bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
 the result is outside the bounds, asks the agent once to re-check its change.

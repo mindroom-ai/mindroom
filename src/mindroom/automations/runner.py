@@ -169,7 +169,7 @@ def _check(
     if definition.requires_file_memory and config.resolve_entity(agent_name).memory_backend != "file":
         logger.warning("Automation needs file memory; skipped", agent=agent_name, automation=automation.name)
         return None
-    # The same identity the prompt's turn resolves, so the check and the run work on the same files.
+    # The requester the prompt's turn runs as, so the check and the run resolve the same private instance.
     identity = (
         None
         if chain.requester_id is None

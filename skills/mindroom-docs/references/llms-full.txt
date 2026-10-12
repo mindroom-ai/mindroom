@@ -15028,7 +15028,7 @@ from mindroom.automations import Ask, AutomationContext, Done, automation
 from mindroom.path_confinement import read_regular_file_within_root
 
 
-# Only agents with file memory have a workspace for the digest.
+# The digest lives in the agent's file memory, so skip agents without it.
 @automation("weekly_digest", requires_file_memory=True)
 def check(ctx: AutomationContext) -> Ask | None:
     if ctx.workspace is None or not ctx.workspace.is_dir():

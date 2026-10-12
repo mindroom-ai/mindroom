@@ -4,12 +4,12 @@
 
 Let requester-private agents run `prompt_curation`, `dreaming`, and plugin automations, so a private agent such as a per-user `mind` keeps each requester's own memory and prompt files in shape.
 Before this change config validation refused automations on private agents, because the runner had no requester to run them as and could only maintain one shared workspace per agent.
-Success means each requester's private instance gets its own scheduled checks, prompts, and follow-up steps, the prompts and replies are visible only to that requester, and nothing one requester's run reads or writes reaches another requester's instance.
+Success means each requester's private instance gets its own scheduled checks, prompts, and follow-up steps, the prompts and replies stay in that requester's personal room and reach no other room, and nothing one requester's run reads or writes reaches another requester's instance.
 
 ## Constraints
 
 - A private agent's workspace, file memory, and knowledge resolve from the requester identity of the turn, so a prompt can only maintain an instance when its turn runs as that instance's requester.
-- An automation's reply quotes the private files it works on, so it must be posted where only the requester and the agent can read it.
+- An automation's reply quotes the private files it works on, so it must be posted in a room that belongs to the requester, never a shared one.
 - Worker code can write directories and owner records under `private_instances/`, so the list of requesters must come from the copy of each owner record the primary keeps below `tracking/`, as the thread exporter already does.
 - Requester authorization still applies to unattended work done on a requester's behalf.
 
