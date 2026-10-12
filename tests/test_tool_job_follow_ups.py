@@ -22,6 +22,7 @@ from mindroom.tool_jobs.follow_ups import (
     follow_up_envelope,
     follow_up_event,
     follow_up_event_id,
+    follow_up_streak,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
@@ -108,11 +109,11 @@ async def test_jobs_ending_together_share_one_follow_up(tmp_path: Path) -> None:
         await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
         await _ended(runtime, "job_b", BackgroundOutcome("failed", "b"))
         await coordinator._admit_follow_ups(runtime)
-        key, follow_up_id, streak = bot.admit_job_follow_up.await_args.args
+        key, follow_up_id = bot.admit_job_follow_up.await_args.args
         assert key == _key(job_owner())
         jobs = [job for job in runtime.retained_jobs() if job.job_id in {"job_a", "job_b"}]
-        assert follow_up_id == follow_up_event_id(key, jobs)
-        assert streak == 1
+        assert follow_up_id == follow_up_event_id(key, jobs, 1)
+        assert follow_up_streak(follow_up_id) == 1
     finally:
         await runtime.shutdown()
 
@@ -197,21 +198,19 @@ async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp
     owner = job_owner()
     key = _key(owner)
     try:
-        last = follow_up_event(key, "job-follow-up:last", sender_id="@mindroom_parent:test", now_ms=1, streak=20)
-        await principal.admit(last)
-        await _ended(runtime, "from_the_last", BackgroundOutcome("completed", "a"), source_event_id=last.event_id)
+        last = follow_up_event_id(key, [], FOLLOW_UP_LIMIT)
+        await _ended(runtime, "from_the_last", BackgroundOutcome("completed", "a"), source_event_id=last)
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_not_awaited()
 
-        before = follow_up_event(key, "job-follow-up:before", sender_id="@mindroom_parent:test", now_ms=1, streak=19)
-        await principal.admit(before)
+        before = follow_up_event_id(key, [], FOLLOW_UP_LIMIT - 1)
         other = replace(owner, requester_id="@bob:example.org")
         await _ended(
             runtime,
             "from_the_one_before",
             BackgroundOutcome("completed", "b"),
             owner=other,
-            source_event_id=before.event_id,
+            source_event_id=before,
         )
         await _ended(
             runtime,
@@ -221,8 +220,36 @@ async def test_follow_ups_stop_after_twenty_in_a_row_without_a_human_message(tmp
             source_event_id="$human",
         )
         await coordinator._admit_follow_ups(runtime)
-        streaks = {call.args[0].requester_id: call.args[2] for call in bot.admit_job_follow_up.await_args_list}
+        streaks = {
+            call.args[0].requester_id: follow_up_streak(call.args[1])
+            for call in bot.admit_job_follow_up.await_args_list
+        }
         assert streaks == {"@bob:example.org": FOLLOW_UP_LIMIT, "@carol:example.org": 1}
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_job_a_finished_follow_up_started_gets_its_own_follow_up(tmp_path: Path) -> None:
+    """A follow-up's turn that started work and settled still counts once, so that work is followed up in turn."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    assert coordinator._journal is not None
+    principal = coordinator._journal.principal("@mindroom_parent:test")
+    bot.journal_principal = MagicMock(return_value=principal)
+    try:
+        await _ended(runtime, "first", BackgroundOutcome("completed", "a"), source_event_id="$human")
+        await coordinator._admit_follow_ups(runtime)
+        first_key, first_id, *_ = bot.admit_job_follow_up.await_args.args
+        await principal.admit(follow_up_event(first_key, first_id, sender_id="@mindroom_parent:test", now_ms=1))
+        collected = await runtime.wait("first", owner=job_owner(), depth=0, timeout=0)
+        await runtime.acknowledge_wait("first", collected.claim)
+        await principal.settle(first_id)
+        await _ended(runtime, "second", BackgroundOutcome("completed", "b"), source_event_id=first_id)
+        await coordinator._admit_follow_ups(runtime)
+        assert bot.admit_job_follow_up.await_count == 2
+        _key_arg, second_id = bot.admit_job_follow_up.await_args.args
+        assert follow_up_streak(second_id) == 2
     finally:
         await runtime.shutdown()
 
@@ -237,15 +264,14 @@ async def test_a_capped_job_does_not_hold_back_a_later_one(tmp_path: Path) -> No
     bot.journal_principal = MagicMock(return_value=principal)
     key = _key(job_owner())
     try:
-        last = follow_up_event(key, "job-follow-up:last", sender_id="@mindroom_parent:test", now_ms=1, streak=20)
-        await principal.admit(last)
-        await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last.event_id)
+        last = follow_up_event_id(key, [], FOLLOW_UP_LIMIT)
+        await _ended(runtime, "capped", BackgroundOutcome("completed", "a"), source_event_id=last)
         await _ended(runtime, "fresh", BackgroundOutcome("completed", "b"), source_event_id="$human")
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_awaited_once()
-        _key_arg, follow_up_id, streak = bot.admit_job_follow_up.await_args.args
+        _key_arg, follow_up_id = bot.admit_job_follow_up.await_args.args
         fresh = [job for job in runtime.retained_jobs() if job.job_id == "fresh"]
-        assert (follow_up_id, streak) == (follow_up_event_id(key, fresh), 1)
+        assert follow_up_id == follow_up_event_id(key, fresh, 1)
     finally:
         await runtime.shutdown()
 
@@ -304,7 +330,7 @@ def _runner_owner(key: ConversationKey) -> ToolExecutionIdentity:
 
 async def _follow_up(principal: PrincipalStore, key: ConversationKey, follow_up_id: str) -> JournalEvent:
     await principal.admit(
-        follow_up_event(key, follow_up_id, sender_id="@mindroom_general:localhost", now_ms=1, streak=1),
+        follow_up_event(key, follow_up_id, sender_id="@mindroom_general:localhost", now_ms=1),
     )
     event = await principal.load_event(follow_up_id)
     assert event is not None

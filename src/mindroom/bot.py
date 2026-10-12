@@ -1132,11 +1132,11 @@ class AgentBot:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
 
-    async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str, streak: int) -> None:
+    async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str) -> None:
         """Admit a follow-up for jobs that ended in one of this bot's conversations, and wake the journal worker."""
         now_ms = int(time.time() * 1000)
         await self.journal_principal().admit(
-            follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms, streak=streak),
+            follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms),
         )
         self._journal_dispatcher.wake()
 

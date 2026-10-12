@@ -26,10 +26,18 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-def follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> str:
-    """Name the follow-up for one set of ended jobs, so admitting it again changes nothing."""
+_FOLLOW_UP_ID_PREFIX = "job-follow-up:"
+
+
+def follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob], streak: int) -> str:
+    """Name the follow-up for one set of ended jobs, so admitting it again changes nothing.
+
+    The name ends with ``streak``, how many follow-ups in a row it is, so a job its turn starts can count it from the
+    job's own source after the follow-up settled.
+    """
     conversation = "\n".join((key.recipient, key.room_id, key.thread_id or "", key.requester_id))
-    return f"job-follow-up:{_digest(conversation)}:{_digest(','.join(sorted(job.job_id for job in jobs)))}"
+    jobs_digest = _digest(",".join(sorted(job.job_id for job in jobs)))
+    return f"{_FOLLOW_UP_ID_PREFIX}{_digest(conversation)}:{jobs_digest}:{streak}"
 
 
 def follow_up_event(
@@ -38,9 +46,8 @@ def follow_up_event(
     *,
     sender_id: str,
     now_ms: int,
-    streak: int,
 ) -> InboundEvent:
-    """Return a follow-up's journal source, which is not a Matrix event; ``streak`` counts it among those in a row."""
+    """Return a follow-up's journal source, which is not a Matrix event."""
     return InboundEvent(
         event_id=follow_up_id,
         room_id=key.room_id,
@@ -49,7 +56,7 @@ def follow_up_event(
         event_class=EventClass.ACTIONABLE,
         sender=sender_id,
         origin_server_ts=now_ms,
-        source={"requester_id": key.requester_id, "streak": streak},
+        source={"requester_id": key.requester_id},
     )
 
 
@@ -67,12 +74,11 @@ def follow_up_key(event: JournalEvent, recipient: str) -> ConversationKey | None
     )
 
 
-def follow_up_streak(event: JournalEvent | None) -> int:
-    """Return how many follow-ups in a row an admitted event ends, which is none for anything but a follow-up."""
-    if event is None or event.kind is not EventKind.JOB_FOLLOW_UP:
+def follow_up_streak(source_event_id: str | None) -> int:
+    """Return how many follow-ups in a row the turn that started a job ends, which is none for a human message."""
+    if source_event_id is None or not source_event_id.startswith(_FOLLOW_UP_ID_PREFIX):
         return 0
-    streak = event.source.get("streak")
-    return streak if isinstance(streak, int) else FOLLOW_UP_LIMIT
+    return int(source_event_id.rsplit(":", 1)[1])
 
 
 def follow_up_envelope(key: ConversationKey, *, follow_up_id: str, sender_id: str, prompt: str) -> MessageEnvelope:

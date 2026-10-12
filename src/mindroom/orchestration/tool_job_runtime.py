@@ -359,22 +359,16 @@ class ToolJobRuntimeCoordinator:
             bot = self.bot_provider(key.recipient)
             if not jobs or bot is None:
                 continue
-            principal = bot.journal_principal()
-            streaks = {
-                job.job_id: 0
-                if job.source_event_id is None
-                else follow_up_streak(await principal.load_event(job.source_event_id))
-                for job in jobs
-            }
+            streaks = {job.job_id: follow_up_streak(job.source_event_id) for job in jobs}
             # A job a chain at the limit started waits for a human message; it holds back no other job.
             reported = [job for job in jobs if streaks[job.job_id] < FOLLOW_UP_LIMIT]
             if not reported:
                 continue
-            follow_up_id = follow_up_event_id(key, reported)
+            follow_up_id = follow_up_event_id(key, reported, 1 + max(streaks[job.job_id] for job in reported))
             due.add(follow_up_id)
             if follow_up_id in self._admitted_follow_ups:
                 continue
-            await bot.admit_job_follow_up(key, follow_up_id, 1 + max(streaks[job.job_id] for job in reported))
+            await bot.admit_job_follow_up(key, follow_up_id)
             self._admitted_follow_ups.add(follow_up_id)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
