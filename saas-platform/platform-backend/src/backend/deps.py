@@ -20,7 +20,7 @@ from backend.utils.audit import AuditActor, record_audit_actor
 from fastapi import Header, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from supabase_auth.errors import AuthApiError
+from supabase import AuthApiError
 
 if TYPE_CHECKING:
     from supabase import Client

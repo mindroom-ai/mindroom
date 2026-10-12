@@ -156,6 +156,7 @@ def save_webhook_secret(webhook):
     print("   stripe:")
     print(f"     webhookSecret: {secret}")
     print("   With an external platform Secret, store it under the stripe_webhook_secret key instead.")
+    print("   The backend reads it at startup, so restart the platform backend afterwards.")
 
 
 def test_webhook_connectivity():

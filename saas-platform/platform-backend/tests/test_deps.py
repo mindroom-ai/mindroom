@@ -18,7 +18,7 @@ from backend.deps import (
     verify_user_allow_deleted,
 )
 from backend.metrics import get_admin_metric, get_auth_metric, reset_security_metrics
-from supabase_auth.errors import AuthApiError, AuthRetryableError
+from supabase import AuthApiError, AuthRetryableError
 from main import app
 
 
@@ -367,6 +367,7 @@ class TestDeps:
 
         assert exc_info.value.status_code == 401
         assert get_admin_metric("unauthorized") == 1
+        assert len(auth_monitor.failed_attempts["unknown"]) == 1
 
     @staticmethod
     async def _lock_out_with_malformed_headers(verify) -> None:
@@ -390,15 +391,6 @@ class TestDeps:
             assert exc_info.value.status_code == 429
         mock_auth_client.auth.get_user.assert_not_called()
         assert get_admin_metric("blocked") == 1
-
-    @pytest.mark.asyncio
-    async def test_malformed_admin_header_counts_toward_the_lockout(self):
-        """A missing or malformed admin header is a failed attempt like a malformed user header."""
-        with pytest.raises(HTTPException) as exc_info:
-            await verify_admin("invalid")
-
-        assert exc_info.value.status_code == 401
-        assert len(auth_monitor.failed_attempts["unknown"]) == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
