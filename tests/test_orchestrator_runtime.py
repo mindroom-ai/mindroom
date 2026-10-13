@@ -45,6 +45,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
+from mindroom.config.calls import RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.matrix import EventJournalConfig
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -2751,6 +2752,16 @@ class TestMultiAgentOrchestrator:
         config_path = tmp_path / "custom-config.yaml"
         mock_config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
         mock_config.calls.enabled = calls_enabled
+        # A realtime call agent runs LiveKit in this process, so startup loads its plugins.
+        mock_config.calls.profiles = {
+            "realtime": RealtimeCallProfile(
+                backend="realtime",
+                model="gpt-realtime-2.1",
+                credentials_service="openai",
+                voice="marin",
+            ),
+        }
+        mock_config.calls.agents = {ROUTER_AGENT_NAME: "realtime"}
         call_import_threads: list[threading.Thread] = []
         original_import = builtins.__import__
 
