@@ -563,7 +563,7 @@ def _pairing_display(console: Console) -> Iterator[Callable[[DevicePairSession],
 
 
 def _print_plain_pairing_request(console: Console, session: DevicePairSession, *, with_qr: bool) -> None:
-    """Print the approval link on its own line with the pair code, for logs and the macOS app."""
+    """Print the approval link on its own line with the pair code, for logs, the macOS app, and dumb terminals."""
     console.print("\nConnect this machine to MindRoom:")
     console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
     console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)

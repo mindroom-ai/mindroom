@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import pty
+import select
 import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -122,3 +125,36 @@ def test_dumb_terminals_get_line_prompts(monkeypatch: pytest.MonkeyPatch, term: 
     monkeypatch.setenv("TERM", term)
 
     assert interactive._arrow_keys_work() is expected
+
+
+def test_keys_typed_before_a_prompt_are_not_its_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An Enter pressed while pairing waits must not accept "Is this your account?" once it appears."""
+    primary, secondary = pty.openpty()
+    with os.fdopen(secondary, "r") as terminal_input:
+        monkeypatch.setattr(sys, "stdin", terminal_input)
+        os.write(primary, b"\r")
+        assert select.select([terminal_input], [], [], 1)[0]
+
+        interactive._discard_typeahead()
+
+        assert not select.select([terminal_input], [], [], 0)[0]
+    os.close(primary)
+
+
+def test_every_prompt_discards_typeahead_before_asking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each prompt drops earlier keys first, so none of them answers with a stray Enter."""
+    discarded: list[str] = []
+    monkeypatch.setattr(interactive, "_discard_typeahead", lambda: discarded.append("discard"))
+    with CliRunner().isolation(input="ollama\nsk-test\nn\n"):
+        interactive.select("Provider?", _CHOICES)
+        interactive.secret("API key")
+        interactive.confirm("Continue?", default=True)
+
+    assert discarded == ["discard", "discard", "discard"]
+
+
+def test_piped_answers_survive_the_typeahead_discard() -> None:
+    """Only terminal input is discarded; answers piped in ahead of time are still read."""
+    with CliRunner().isolation(input="n\n"):
+        interactive._discard_typeahead()
+        assert interactive.confirm("Continue?", default=True) is False
