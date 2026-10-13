@@ -216,7 +216,6 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             self._voice_started_at = time.time()
             self._voice_usage: dict[str, LiveVoiceUsage] = {}
             self._usage_tasks: set[asyncio.Task[None]] = set()
-            self._usage_lock = asyncio.Lock()
 
         async def on_enter(self) -> None:
             session = self.duplex_session
@@ -290,8 +289,7 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
         async def _record_usage(self, usage: LiveVoiceUsage) -> None:
             # The call audio process only forwards usage to MindRoom, which retries failed saves.
             if options.record_usage is not None:
-                async with self._usage_lock:
-                    await options.record_usage(usage)
+                await options.record_usage(usage)
 
         async def on_exit(self) -> None:
             self._exiting = True
