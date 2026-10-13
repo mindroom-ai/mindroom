@@ -8,13 +8,18 @@ import re
 import socket
 import time
 import webbrowser
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 import yaml
+from rich.console import Group
 from rich.markup import escape
+from rich.table import Table
+from rich.text import Text
 
 from mindroom import constants
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
@@ -24,13 +29,14 @@ from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.provisioning_env import provisioning_url_from_env
 
 from .env_file import env_path_for_config, upsert_env_values
+from .interactive import section
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
 
     import httpx
-    from rich.console import Console
+    from rich.console import Console, RenderableType
 
     from mindroom.constants import RuntimePaths
 
@@ -59,6 +65,10 @@ _EXPIRY_GRACE_SECONDS = 60
 _PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 _HOSTED_MATRIX_DOMAIN = "mindroom.chat"
 _LOCAL_MINDROOM_SETTINGS = "MindRoom Chat → Settings → Local MindRoom"
+# Terminals narrower than the QR code plus this gap and details width stack the details below the code.
+# A pairing link's QR code is 37 columns wide, so 80-column terminals fit the details beside it.
+_PAIRING_DETAILS_GAP = 3
+_PAIRING_DETAILS_MIN_WIDTH = 36
 _LOST_APPROVAL_WARNING = (
     "The previous approval could not be received; starting a new pairing. "
     f"You can revoke the unused entry in {_LOCAL_MINDROOM_SETTINGS}."
@@ -470,28 +480,24 @@ def pair_local_install(
     ).strip()
     name = (client_name or "").strip() or socket.gethostname()
 
-    def announce(session: DevicePairSession) -> None:
-        console.print("\nConnect this machine to MindRoom:")
-        console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
-        console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)
-        console.print(f"  Approve only if the page shows code {session.pair_code}", markup=False)
-        if console.is_terminal:
-            console.print(render_qr(session.approve_url), markup=False, highlight=False)
-        console.print("Waiting for approval (Ctrl+C to cancel)…")
-        if open_browser:
-            webbrowser.open(session.approve_url)
+    with _pairing_display(console) as show_pair_code:
 
-    result = run_device_pairing(
-        provisioning_url=resolved_url,
-        client_name=name,
-        client_fingerprint=local_client_fingerprint(config_path=runtime_paths.config_path),
-        announce=announce,
-        post_request=post_request,
-        sleep=sleep,
-        renew_expired=renew_expired,
-        stop_waiting=stop_waiting,
-        warn=lambda message: console.print(f"[yellow]Warning:[/yellow] {escape(message)}"),
-    )
+        def announce(session: DevicePairSession) -> None:
+            show_pair_code(session)
+            if open_browser:
+                webbrowser.open(session.approve_url)
+
+        result = run_device_pairing(
+            provisioning_url=resolved_url,
+            client_name=name,
+            client_fingerprint=local_client_fingerprint(config_path=runtime_paths.config_path),
+            announce=announce,
+            post_request=post_request,
+            sleep=sleep,
+            renew_expired=renew_expired,
+            stop_waiting=stop_waiting,
+            warn=lambda message: console.print(f"[yellow]Warning:[/yellow] {escape(message)}"),
+        )
     if result is None:
         console.print("This machine was paired by another MindRoom process; continuing.")
         return None
@@ -530,6 +536,62 @@ def pair_local_install(
     else:
         _print_exports(console, resolved_url, result)
     return result
+
+
+@contextmanager
+def _pairing_display(console: Console) -> Iterator[Callable[[DevicePairSession], None]]:
+    """Yield the callback that shows each pair code, spinning in a terminal until pairing ends.
+
+    Anywhere else it prints plain lines, which logs keep and the macOS app reads the link from.
+    `FORCE_COLOR` makes Rich treat pipes as terminals, so the output must also be a TTY, and not a dumb one.
+    """
+    if not (console.is_interactive and console.file.isatty()):
+        yield partial(_print_plain_pairing_request, console)
+        return
+    console.print(section("Connect to MindRoom Chat"))
+    with console.status("Requesting a pair code…") as waiting:
+
+        def show_pair_code(session: DevicePairSession) -> None:
+            # Printing while the spinner runs keeps the spinner below; restarting it would erase lines above it.
+            console.print(_terminal_pairing_request(session, width=console.width))
+            expires_at = session.expires_at.astimezone().strftime("%H:%M")
+            waiting.update(f"Waiting for approval · the code expires at {expires_at} · Ctrl+C to cancel")
+
+        yield show_pair_code
+
+
+def _print_plain_pairing_request(console: Console, session: DevicePairSession) -> None:
+    """Print the approval link on its own line with the pair code, for logs and the macOS app."""
+    console.print("\nConnect this machine to MindRoom:")
+    console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
+    console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)
+    console.print(f"  Approve only if the page shows code {session.pair_code}", markup=False)
+    console.print("Waiting for approval (Ctrl+C to cancel)…")
+
+
+def _terminal_pairing_request(session: DevicePairSession, *, width: int) -> Group:
+    """Return the approval link on its own unwrapped line, then the QR code beside the pair code to check."""
+    qr_code = render_qr(session.approve_url).rstrip("\n")
+    qr_width = max(len(line) for line in qr_code.splitlines())
+    details = Text.assemble(
+        ("Pair code  ", "dim"),
+        (session.pair_code, "bold cyan"),
+        "\n\n",
+        f"Approve only if the page shows\ncode {session.pair_code}.\n\n",
+        ("Or enter the code in MindRoom Chat\n→ Settings → Local MindRoom.", "dim"),
+    )
+    if width < qr_width + _PAIRING_DETAILS_GAP + _PAIRING_DETAILS_MIN_WIDTH:
+        codes: RenderableType = Group(Text(qr_code, no_wrap=True), details)
+    else:
+        codes = Table.grid(padding=(0, _PAIRING_DETAILS_GAP))
+        codes.add_column(no_wrap=True, vertical="middle")
+        codes.add_column(vertical="middle")
+        codes.add_row(Text(qr_code), details)
+    return Group(
+        "Open this link or scan the QR code, then approve this machine in MindRoom Chat:",
+        Text(f"  {session.approve_url}", no_wrap=True, overflow="ignore"),
+        codes,
+    )
 
 
 def _confirm_approver_or_raise(

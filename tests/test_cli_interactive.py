@@ -1,0 +1,116 @@
+"""Tests for the prompts that interactive setup asks in a terminal."""
+
+from __future__ import annotations
+
+import sys
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+import pytest
+import typer
+from click.testing import CliRunner
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
+
+from mindroom.cli import interactive
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+_CHOICES = (("openai", "OpenAI"), ("anthropic", "Anthropic"), ("ollama", "Ollama"))
+_DOWN = "\x1b[B"
+_ENTER = "\r"
+_CTRL_C = "\x03"
+
+
+@pytest.fixture
+def keys(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
+    """Answer arrow-key prompts with typed keys, as a person at a terminal would."""
+    monkeypatch.setattr(interactive, "_arrow_keys_work", lambda: True)
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        yield pipe.send_text
+
+
+def test_select_moves_from_the_default_with_arrow_keys(keys: Callable[[str], None]) -> None:
+    """The pointer starts on the default, so one step down picks the next choice."""
+    keys(_DOWN + _ENTER)
+
+    assert interactive.select("Provider?", _CHOICES, default="anthropic") == "ollama"
+
+
+def test_select_returns_the_default_on_enter(keys: Callable[[str], None]) -> None:
+    """Enter alone accepts the default choice."""
+    keys(_ENTER)
+
+    assert interactive.select("Provider?", _CHOICES, default="anthropic") == "anthropic"
+
+
+def test_secret_returns_the_typed_text(keys: Callable[[str], None]) -> None:
+    """Hidden input still returns what was typed."""
+    keys("sk-test" + _ENTER)
+
+    assert interactive.secret("API key") == "sk-test"
+
+
+def test_secret_returns_empty_text_on_enter(keys: Callable[[str], None]) -> None:
+    """Enter alone skips the hidden prompt."""
+    keys(_ENTER)
+
+    assert interactive.secret("API key") == ""
+
+
+@pytest.mark.parametrize(("typed", "expected"), [("n", False), ("y", True), (_ENTER, True)])
+def test_confirm_reads_yes_no_and_the_default(keys: Callable[[str], None], typed: str, expected: bool) -> None:
+    """A key answers the question directly, and Enter takes the default."""
+    keys(typed)
+
+    assert interactive.confirm("Continue?", default=True) is expected
+
+
+@pytest.mark.parametrize(
+    "ask",
+    [
+        lambda: interactive.select("Provider?", _CHOICES, default="openai"),
+        lambda: interactive.secret("API key"),
+        lambda: interactive.confirm("Continue?", default=True),
+    ],
+)
+def test_ctrl_c_aborts_like_a_line_prompt(keys: Callable[[str], None], ask: Callable[[], object]) -> None:
+    """Ctrl+C raises the same abort as typer's prompts, so callers handle both alike."""
+    keys(_CTRL_C)
+
+    with pytest.raises(typer.Abort):
+        ask()
+
+
+def test_piped_input_answers_line_prompts() -> None:
+    """Arrow-key prompts would silently take the default from a pipe, so piped answers get line prompts."""
+    with CliRunner().isolation(input="ollama\nsk-test\nn\n"):
+        assert interactive.select("Provider?", _CHOICES, default="openai") == "ollama"
+        assert interactive.secret("API key") == "sk-test"
+        assert interactive.confirm("Continue?", default=True) is False
+
+
+def test_piped_select_asks_again_after_an_unknown_choice() -> None:
+    """A line answer must name one of the choices."""
+    with CliRunner().isolation(input="gemini\nanthropic\n") as (_, _, output):
+        assert interactive.select("Provider?", _CHOICES, default="openai") == "anthropic"
+        assert b"is not one of" in output.getvalue()
+
+
+def test_terminal_is_interactive_requires_stdin_and_stdout_ttys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Services and piped runs never get arrow-key prompts, even when only one stream is a terminal."""
+    for stdin_tty, stdout_tty, expected in ((True, True, True), (True, False, False), (False, True, False)):
+        monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda value=stdin_tty: value))
+        monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda value=stdout_tty: value))
+        assert interactive.terminal_is_interactive() is expected
+
+
+@pytest.mark.parametrize(("term", "expected"), [("xterm-256color", True), ("dumb", False), ("unknown", False)])
+def test_dumb_terminals_get_line_prompts(monkeypatch: pytest.MonkeyPatch, term: str, expected: bool) -> None:
+    """Terminals such as Emacs shell buffers cannot draw arrow-key prompts, so they get line prompts."""
+    monkeypatch.setattr(interactive, "terminal_is_interactive", lambda: True)
+    monkeypatch.setenv("TERM", term)
+
+    assert interactive._arrow_keys_work() is expected

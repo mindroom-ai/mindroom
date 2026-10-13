@@ -40,6 +40,7 @@ from .config_bundle import (
 from .config_reload import config_check_applied, config_fingerprint
 from .debug_report import debug_report
 from .desktop import desktop_app
+from .interactive import confirm, section, terminal_is_interactive
 from .local_stack import local_stack_setup
 from .migrate import config_migrate
 from .plugins import plugins_app
@@ -204,13 +205,14 @@ def run(
         raise typer.Exit(2)
     # Fail before setup and pairing ask a person for anything when this machine cannot run the service.
     service_manager = require_login_service() if service else None
+    console.print(make_banner())
     if bootstrap_config_bundle is not None:
         initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
 
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    interactive = _terminal_is_interactive()
+    interactive = terminal_is_interactive()
     first_run = not ensure_writable_config_path(runtime_paths=runtime_paths) and (interactive or provider is not None)
     if first_run:
         try:
@@ -318,9 +320,7 @@ async def _run(
     # Validate again: pairing may have rewritten owner placeholders in the config.
     _load_active_config_or_exit(runtime_paths)
 
-    console.print(make_banner())
-    console.print()
-    console.print(f"Starting Mindroom (log level: {log_level})...")
+    console.print(section(f"Starting MindRoom (log level: {log_level})"))
     if api:
         from mindroom.frontend_assets import ensure_frontend_dist_dir  # noqa: PLC0415
 
@@ -794,11 +794,6 @@ def _stdin_is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def _terminal_is_interactive() -> bool:
-    """Whether a person can answer prompts and see their output; services, Docker, and the macOS app cannot."""
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
 def _paired_elsewhere(config_path: Path | None, storage_path: Path | None) -> bool:
     """Whether another process made pairing unnecessary since this run resolved its runtime."""
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
@@ -815,15 +810,15 @@ def _approver_confirmation() -> Callable[[], bool] | None:
     if not _stdin_is_interactive():
         return None
 
-    def confirm() -> bool:
+    def confirm_account() -> bool:
         try:
-            return typer.confirm("Is this your account?", default=True)
+            return confirm("Is this your account?", default=True)
         except typer.Abort:
             # Ctrl+C or EOF is not a yes: discard the credentials with the revoke hint instead of a bare abort.
             console.print()
             return False
 
-    return confirm
+    return confirm_account
 
 
 app.command("local-stack-setup")(local_stack_setup)

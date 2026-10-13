@@ -33,8 +33,8 @@ uvx mindroom run
 
 When no config exists and MindRoom runs in a terminal, it asks a few setup questions:
 
-1. Choose a model provider preset (default `openai`; the choices are listed under [`config init`](https://docs.mindroom.chat/cli/#config-init)).
-2. For `anthropic`, `openai`, or `openrouter`, paste the API key; input is hidden.
+1. Pick a model provider from the menu (default OpenAI).
+2. For Anthropic, OpenAI, or OpenRouter, paste the API key; input is hidden.
    Press Enter to skip, then connect the provider later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider), or add the key to `~/.mindroom/.env` and restart `mindroom run`.
    MindRoom does not ask when the key is already set in your environment.
    Other presets print their remaining step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
@@ -45,7 +45,7 @@ MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hoste
 
 MindRoom prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-After approval, MindRoom prints the approving account and asks `Is this your account? [Y/n]` before saving anything.
+After approval, MindRoom prints the approving account and asks `Is this your account?` before saving anything.
 Pair codes expire after 10 minutes, and `mindroom run` prints a new one when that happens.
 See [connect](https://docs.mindroom.chat/deployment/hosted-matrix/#connect) for pairing details, the credentials it saves, and how to revoke a pairing.
 

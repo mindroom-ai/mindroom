@@ -287,6 +287,7 @@ Matrix sync callback
 | `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
 | `cli/debug_report.py` | `mindroom debug-report` command: bug report parsing, config-only storage location, and JSON output |
 | `cli/doctor.py` | Doctor command implementation |
+| `cli/interactive.py` | Arrow-key prompts and step headers for terminal setup, with line prompts for piped input |
 | `cli/local_stack.py` | Local stack setup command |
 | `credentials/sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |

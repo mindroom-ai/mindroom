@@ -52,7 +52,7 @@ A pair code is valid for 10 minutes.
 `connect` makes one attempt and then exits with `Approval timed out. Run the command again to get a new link.`, while `run` keeps printing new codes.
 
 After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
-In a terminal it then asks `Is this your account? [Y/n]`.
+In a terminal it then asks `Is this your account?`.
 Pressing Enter or answering `y` saves the credentials.
 Answering `n`, pressing Ctrl+C, or closing input discards them without writing `.env` or `config.yaml`, and the command exits with an error (`run` does not start); revoke that connection in MindRoom Chat → Settings → Local MindRoom.
 Without a terminal, such as under a service or the macOS app, or when the provisioning service does not name the approving account, nothing is asked and MindRoom prints the same revoke hint.
