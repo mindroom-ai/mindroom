@@ -238,6 +238,56 @@ async def test_queue_change_during_reaction_still_requests_wrap_up(
 
 
 @pytest.mark.asyncio
+async def test_a_wait_judges_again_a_queue_that_changed_during_its_defer_reaction() -> None:
+    """A message that arrives while Matrix acknowledges another is judged with it, so one that can wait ends no wait."""
+    state = _QueuedMessageState()
+    judged: list[tuple[str | None, ...]] = []
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        judged.append(tuple(message.text for message in state.pending_message_snapshot()))
+        return "Stop" not in judged[-1]
+
+    async def acknowledge(event_id: str) -> None:
+        if event_id == "$thanks":
+            state.add_waiting_human_message("$norush", text="No rush")
+
+    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
+    waiter = asyncio.create_task(state.wait())
+    state.add_waiting_human_message("$thanks", text="Thanks")
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert not waiter.done()
+    assert judged == [("Thanks",), ("Thanks", "No rush")]
+    state.add_waiting_human_message("$stop", text="Stop")
+    await asyncio.wait_for(waiter, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_wait_judges_again_a_queue_that_lost_a_message_during_its_judgment() -> None:
+    """A decision counts only for the queue it judged, so a queue that shrank meanwhile is judged again at once."""
+    state = _QueuedMessageState()
+    judged: list[tuple[str | None, ...]] = []
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        judged.append(tuple(message.text for message in state.pending_message_snapshot()))
+        if judged[-1] == ("Thanks", "Stop"):
+            # The thanks no longer waits for this reply, as when its own turn is dropped.
+            state.consume_waiting_human_message("$thanks")
+        return "Stop" not in judged[-1]
+
+    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
+    waiter = asyncio.create_task(state.wait())
+    state.add_waiting_human_message("$thanks", text="Thanks")
+    for _ in range(100):
+        await asyncio.sleep(0)
+    state.add_waiting_human_message("$stop", text="Stop")
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert waiter.done()
+    assert judged == [("Thanks",), ("Thanks", "Stop"), ("Stop",)]
+
+
+@pytest.mark.asyncio
 async def test_queued_message_freezes_visible_progress_at_admission() -> None:
     """Later stream edits must not change the context of an earlier human message."""
     evidence: list[dict] = []

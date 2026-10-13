@@ -25,6 +25,8 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Cancellation is saved before cleanup and stays pending until owned work settles, so a crash during cleanup still reports the job cancelled.
   Only work that a shutdown, restart, or event-loop teardown cut short is interrupted, and a child settlement saved before a crash stands.
 - Cancelling or restarting a job that waits for approval denies its open cards, so no card outlives the call it would approve.
+- A job-gated call never runs inline: one that cannot become a job fails, and the agent CLI never offers it, because such a function asks for no confirmation of its own and its job's approval phase is its only approval gate.
+- A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
 - Revocation stops execution through internal ownership although discovery and control are no longer authorized, so losing access never leaves work running unseen.
   A config reload keeps active jobs, and controls and result reads check current authorization.
 - A follow-up is named by its conversation and the set of jobs it reports, so admitting it again changes nothing.

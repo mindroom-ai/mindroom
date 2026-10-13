@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 import pytest
@@ -31,7 +31,7 @@ from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import JobControl, job_control_context, pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
@@ -42,6 +42,7 @@ from tests.tool_job_helpers import (
     saved_jobs,
     tool_job_runtime,
     wait_for_status,
+    write_saved_job,
 )
 
 if TYPE_CHECKING:
@@ -50,7 +51,6 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
-    from mindroom.tool_jobs.runtime import BackgroundJob
 
 
 class _NativeTools(Toolkit):
@@ -418,6 +418,67 @@ async def test_shutdown_while_a_call_waits_for_approval_says_it_did_not_run(
     [(card_run_id, _, _)] = run.cards.requested
     assert card_run_id in run.cards.settled
     assert run.effects == []
+
+
+@pytest.mark.asyncio
+async def test_a_call_stopped_after_its_approval_may_have_taken_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved call's job no longer waits for approval, so a stop never tells the model a call that ran did not."""
+    async with (
+        _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0, gate=asyncio.Event()) as run,
+        execution_resources(),
+    ):
+        with tool_runtime_context(run.context):
+            response = await run.agent().arun("Write", session_id=run.context.session_id)
+            job_id = json.loads(_tool_result(response))["job_id"]
+            await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+            run.decide("approved")
+            while not run.effects:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            assert run.runtime._entries[job_id].job.status == "running"
+    # Leaving the run shuts its runtime down while the approved call still runs.
+    job = (await saved_jobs(tmp_path))[job_id]
+    assert job.status == "interrupted"
+    assert "did not run" not in (job.result or "")
+    assert run.effects == ["q3"]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_denies_the_card_a_crashed_call_waited_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card a stopped process posted would stay answerable, and answering it would do nothing."""
+    job = BackgroundJob(
+        job_id="j" * 64,
+        owner=job_owner(),
+        tool_name="write_report",
+        depth=0,
+        toolkit_name="reports",
+        source_event_id="$turn",
+        source_kind="message",
+        status="awaiting_approval",
+    )
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
+    cards = _Cards(asyncio.get_running_loop().create_future())
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+
+    async def interrupt(saved: BackgroundJob) -> BackgroundOutcome | None:
+        return await end_tool_call_approval(runtime, saved)
+
+    runtime = await tool_job_runtime(tmp_path, cancel=interrupt)
+    try:
+        await runtime.recover()
+    finally:
+        await runtime.shutdown()
+    recovered = (await saved_jobs(tmp_path))[job.job_id]
+    assert (recovered.status, recovered.result) == (
+        "interrupted",
+        "The runtime stopped while this call waited for its approval, so it did not run.",
+    )
+    assert cards.settled == [f"tool-job:{job.job_id}"]
 
 
 @pytest.mark.asyncio

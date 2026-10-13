@@ -145,8 +145,8 @@ class _QueuedMessageState:
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
     mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
-    # Replaced on every admission, so each waiter wakes once per newly queued message.
-    _added: asyncio.Event = field(default_factory=asyncio.Event)
+    # Replaced on every change of the queue, so each waiter wakes once per change.
+    _changed: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
@@ -179,14 +179,18 @@ class _QueuedMessageState:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
         self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
-        self._added.set()
-        self._added = asyncio.Event()
+        self._notify_changed()
         return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
             return
         del self._pending_messages[source_event_id]
+        self._notify_changed()
+
+    def _notify_changed(self) -> None:
+        self._changed.set()
+        self._changed = asyncio.Event()
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -197,20 +201,25 @@ class _QueuedMessageState:
     async def wait(self) -> None:
         """Return once a queued message needs the reply's attention; the mid-turn judge can let messages wait."""
         while True:
-            added = self._added
+            changed = self._changed
             if await self._interrupts():
                 return
-            await added.wait()
+            # A queue that changed while it was judged or acknowledged is judged again at once.
+            await changed.wait()
 
     async def _interrupts(self) -> bool:
         pending = self.pending_message_snapshot()
         if not pending:
             return False
         gate = self.mid_turn_gate
-        return gate is None or not await gate.defers(
-            pending,
-            current=lambda: pending == self.pending_message_snapshot(),
-        )
+        if gate is None:
+            return True
+
+        def still_queued() -> bool:
+            return pending == self.pending_message_snapshot()
+
+        # A decision counts only for the queue it judged.
+        return not await gate.defers(pending, current=still_queued) and still_queued()
 
     async def wait_until_idle(self) -> None:
         await self._idle_event.wait()
