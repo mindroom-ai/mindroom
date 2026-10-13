@@ -2406,6 +2406,35 @@ async def test_preload_builds_the_token_encoder_off_the_event_loop(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_preload_imports_livekit_only_for_in_process_call_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GPT-Live calls run LiveKit in their own process, so a live-only config never loads it here."""
+    imported: list[str] = []
+
+    class RecordingPlugins(ModuleType):
+        def __getattr__(self, name: str) -> ModuleType:
+            if name.startswith("__"):
+                raise AttributeError(name)
+            imported.append(name)
+            return ModuleType(name)
+
+    monkeypatch.setitem(sys.modules, "livekit.plugins", RecordingPlugins("livekit.plugins"))
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: True)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.o200k_encoding", lambda: None)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.prewarm_call_audio_process", lambda: None)
+    live_only = _config()
+    live_only.calls.profiles = {
+        "live": LiveCallProfile(backend="live", model="gpt-live-1", credentials_service="openai_live", voice="marin"),
+    }
+    live_only.calls.agents["helper"] = "live"
+
+    await preload_matrix_call_dependencies(live_only)
+    assert imported == []
+
+    await preload_matrix_call_dependencies(_config())
+    assert imported == ["openai"]
+
+
+@pytest.mark.asyncio
 async def test_preload_prewarms_the_call_audio_process_only_for_live_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     """Startup starts an idle call audio process only when some agent answers calls with GPT-Live."""
     livekit_plugins = ModuleType("livekit.plugins")

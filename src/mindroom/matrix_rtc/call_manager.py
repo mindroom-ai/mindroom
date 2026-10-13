@@ -251,13 +251,15 @@ async def preload_matrix_call_dependencies(config: Config) -> None:
     """Load optional call SDKs and the call token encoder before bots start syncing."""
     if not config.calls.enabled or not matrix_calls_dependencies_available():
         return
+    backends = {config.calls.resolve_agent_config(agent).backend for agent in config.calls.agents}
     try:
-        # LiveKit registers plugins on the main thread, so this import must not be offloaded.
-        from livekit.plugins import openai  # noqa: F401, PLC0415
+        if backends - {"live"}:
+            # Realtime and cascaded calls run LiveKit in this process; it registers plugins on the main thread.
+            from livekit.plugins import openai  # noqa: F401, PLC0415
 
-        # Call setup counts tokens; building the encoder on the loop would stall call audio.
+        # Call setup counts tokens; building the encoder on the event loop would stall it for about 300 ms.
         await asyncio.to_thread(o200k_encoding)
-        if any(config.calls.resolve_agent_config(agent).backend == "live" for agent in config.calls.agents):
+        if "live" in backends:
             # The first GPT-Live call would otherwise wait for its audio process to import the LiveKit Agents SDK.
             prewarm_call_audio_process()
     except Exception:
