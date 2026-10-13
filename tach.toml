@@ -2115,6 +2115,7 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
+    "mindroom.thread_summary",
 ]
 
 [[modules]]
