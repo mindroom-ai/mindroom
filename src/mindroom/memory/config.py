@@ -266,7 +266,8 @@ async def create_memory_instance(
     # Mem0 expects a dict for configuration, not config objects
     if config.memory.embedder.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)
-        # Mem0 builds its own SentenceTransformer, which imports the optional local embedding packages.
+    if config_dict["embedder"]["provider"] == "huggingface":
+        # Mem0's huggingface embedder builds its own SentenceTransformer, which imports optional local packages.
         with optional_dependency_environment():
             memory = AsyncMemory.from_config(config_dict)
     else:
