@@ -174,7 +174,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                         "room_id": "!legacy:example.org",
                         "thread_id": "$legacy-thread",
                         "dirty": True,
-                        "in_flight": False,
                         "first_dirty_at": 100,
                         "last_seen_at": 200,
                         "last_session_updated_at": 190,
@@ -191,7 +190,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                         "worker_key": None,
                         "execution_identity": None,
                         "dirty": False,
-                        "in_flight": False,
                         "first_dirty_at": 110,
                         "last_seen_at": 210,
                         "consecutive_failures": 0,
@@ -216,7 +214,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                 "worker_key": None,
                 "execution_identity": None,
                 "dirty": True,
-                "in_flight": False,
                 "first_dirty_at": 100,
                 "last_seen_at": 200,
                 "last_session_updated_at": 190,
@@ -233,7 +230,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                 "worker_key": None,
                 "execution_identity": None,
                 "dirty": False,
-                "in_flight": False,
                 "first_dirty_at": 110,
                 "last_seen_at": 210,
                 "consecutive_failures": 0,
@@ -333,19 +329,18 @@ async def test_worker_respects_batch_limits(
 
 
 @pytest.mark.asyncio
-async def test_worker_start_releases_a_flush_interrupted_by_a_crash(
+async def test_a_flush_mark_left_by_an_older_release_does_not_block_flushing(
     tmp_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A session whose flush was in flight when the process died is flushed again after restart."""
+    """A session an older release left marked in flight after a crash is flushed after restart."""
     storage_path = tmp_path
     mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
     state_file = storage_path / "memory_flush_state.json"
     payload = json.loads(state_file.read_text(encoding="utf-8"))
     payload["sessions"]["general:s1"]["in_flight"] = True
     state_file.write_text(json.dumps(payload), encoding="utf-8")
-    # A later turn marks the session dirty again and must not keep the stale mark alive forever.
     mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
 
     fake_session = _FakeSession(
@@ -368,22 +363,14 @@ async def test_worker_start_releases_a_flush_interrupted_by_a_crash(
 
     monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
 
-    worker: MemoryAutoFlushWorker
-
-    def _config_then_stop() -> Config:
-        worker.stop()
-        return config
-
     worker = MemoryAutoFlushWorker(
         storage_path=storage_path,
         runtime_paths=runtime_paths_for(config),
-        config_provider=_config_then_stop,
+        config_provider=lambda: config,
     )
-    await asyncio.wait_for(worker.run(), timeout=10)
+    await worker._run_cycle(config)
 
     assert len(writes) == 1
-    session_state = json.loads(state_file.read_text(encoding="utf-8"))["sessions"]["general:s1"]
-    assert session_state["in_flight"] is False
 
 
 @pytest.mark.asyncio
@@ -698,7 +685,6 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
     session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is True
-    assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
 
 
@@ -757,7 +743,6 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
     session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is False
-    assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
     assert session_state["last_session_updated_at"] == 200
     assert append_calls == []
