@@ -83,10 +83,11 @@ def test_no_log_call_passes_a_raw_worker_key() -> None:
 
 
 def _is_message_fstring(parent: ast.AST | None) -> bool:
-    # Ruff's EM rules move every exception message into a variable first, whatever its name.
+    # Ruff's EM rules move a positional exception message into a variable first, whatever its name.
     if isinstance(parent, ast.Assign | ast.AnnAssign):
         return True
-    return isinstance(parent, ast.keyword) and parent.arg == "name"
+    # Thread names, and HTTP error details that the primary logs when a worker returns them.
+    return isinstance(parent, ast.keyword) and parent.arg in {"name", "detail"}
 
 
 def test_no_error_message_or_thread_name_embeds_a_raw_worker_key() -> None:
