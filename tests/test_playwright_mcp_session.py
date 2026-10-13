@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import shutil
@@ -18,6 +19,8 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent
 from mindroom.browser import playwright_mcp_session
 from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
+
+_TURN_OWNER: contextvars.ContextVar[object] = contextvars.ContextVar("turn_owner")
 
 
 @pytest.fixture
@@ -72,6 +75,35 @@ async def test_shared_actor_serializes_calls_and_closes(transport: list[str]) ->
     await asyncio.gather(actor.call_tool("one", {}), actor.call_tool("two", {}))
     await actor.close()
     assert transport == ["session", "initialize", "one", "one:done", "two", "two:done", "closed", "reaped"]
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_keep_the_context_of_the_call_that_opened_it(
+    transport: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The long-lived actor serves later calls, so it must not hold the opening turn's contextvars."""
+    contexts: list[contextvars.Context] = []
+    session_type = playwright_mcp_session.ClientSession
+    original_call_tool = session_type.call_tool
+
+    async def recording_call_tool(self: object, name: str, arguments: dict[str, object], **kwargs: object) -> object:
+        contexts.append(contextvars.copy_context())
+        return await original_call_tool(self, name, arguments, **kwargs)
+
+    monkeypatch.setattr(session_type, "call_tool", recording_call_tool)
+    actor = PlaywrightMCPSession(StdioServerParameters(command="unused"), call_timeout_seconds=1)
+
+    async def turn() -> None:
+        _TURN_OWNER.set(object())
+        await actor.call_tool("one", {})
+
+    await asyncio.create_task(turn())
+    await actor.call_tool("two", {})
+    await actor.close()
+    assert transport[-2:] == ["closed", "reaped"]
+    assert len(contexts) == 2
+    assert all(_TURN_OWNER not in context for context in contexts)
 
 
 @pytest.mark.asyncio
