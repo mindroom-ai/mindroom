@@ -44,7 +44,11 @@ if TYPE_CHECKING:
 def _runtime_paths(storage_path: Path) -> RuntimePaths:
     config_path = storage_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
+    )
 
 
 def _make_config(storage_path: Path) -> Config:

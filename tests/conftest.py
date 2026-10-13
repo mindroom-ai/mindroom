@@ -2972,7 +2972,7 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     Tests use ':localhost' Matrix IDs and non-namespaced localparts unless they
     explicitly opt into a different runtime context.
     """
-    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+    monkeypatch.setenv("MATRIX_HOMESERVER", "http://localhost:8008")
     monkeypatch.delenv("MATRIX_SERVER_NAME", raising=False)
     monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)

@@ -23,6 +23,7 @@ ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
+DEFAULT_MATRIX_HOMESERVER = "https://mindroom.chat"
 # Raise the per-room Classic Sync timeline limit above the homeserver default
 # (~10) so a room has to flood much harder before the server truncates its
 # timeline and forces a limited-sync gap backfill.
@@ -906,7 +907,7 @@ def runtime_env_flag(
 
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
-    return runtime_paths.env_value("MATRIX_HOMESERVER", default="http://localhost:8008") or "http://localhost:8008"
+    return runtime_paths.env_value("MATRIX_HOMESERVER", default=DEFAULT_MATRIX_HOMESERVER) or DEFAULT_MATRIX_HOMESERVER
 
 
 def runtime_matrix_ssl_verify(runtime_paths: RuntimePaths) -> bool:

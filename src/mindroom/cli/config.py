@@ -111,9 +111,9 @@ _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
 }
 
 _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
-    ("MATRIX_HOMESERVER", "https://mindroom.chat"),
+    ("MATRIX_HOMESERVER", constants.DEFAULT_MATRIX_HOMESERVER),
     ("MATRIX_SERVER_NAME", "mindroom.chat"),
-    ("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
+    ("MINDROOM_PROVISIONING_URL", constants.DEFAULT_MATRIX_HOMESERVER),
     ("MINDROOM_NAMESPACE", ""),
     ("MATRIX_REGISTRATION_TOKEN", ""),
 )
@@ -1299,12 +1299,12 @@ def _env_template(
     """
     api_key = _new_dashboard_api_key()
     if matrix_server == "mindroom.chat":
-        matrix_homeserver = "https://mindroom.chat"
+        matrix_homeserver = constants.DEFAULT_MATRIX_HOMESERVER
         extra_matrix = (
             "# Matrix server_name override (needed when federation hostname differs)\n"
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
             "# Hosted provisioning API; lets `mindroom run` pair with your MindRoom Chat account\n"
-            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
+            f"MINDROOM_PROVISIONING_URL={constants.DEFAULT_MATRIX_HOMESERVER}\n\n"
             "# Optional hosted installation namespace. Leave blank for existing unnamespaced rooms.\n"
             "MINDROOM_NAMESPACE=\n\n"
             "# Leave MATRIX_REGISTRATION_TOKEN empty on mindroom.chat; pairing replaces it.\n"

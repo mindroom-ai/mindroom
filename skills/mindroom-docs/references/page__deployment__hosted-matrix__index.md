@@ -13,7 +13,7 @@ For prerequisites and first-run install steps, see [Getting Started](https://doc
 | `uvx mindroom run` | Your machine or server | Agent orchestration, tools, model calls |
 
 `mindroom config init` (default `--matrix-server mindroom.chat`) and first-run `mindroom run` write the hosted defaults to `~/.mindroom/.env`: `MATRIX_HOMESERVER=https://mindroom.chat`, `MATRIX_SERVER_NAME=mindroom.chat`, and `MINDROOM_PROVISIONING_URL=https://mindroom.chat`.
-`mindroom run` pairs automatically before starting when `MINDROOM_PROVISIONING_URL` is set and none of `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or saved pairing credentials are present.
+`mindroom run` pairs automatically before starting when it uses hosted `mindroom.chat` or `MINDROOM_PROVISIONING_URL` is set, and none of `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or saved pairing credentials are present.
 After pairing, MindRoom creates its agent accounts on `mindroom.chat`, joins or creates the configured rooms, and starts answering.
 While `run` waits for approval, the API port answers health and readiness probes, so container health checks do not restart it with a new code (see [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness)).
 To run code-execution tools in Docker workers on the same machine, see [Dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
@@ -81,7 +81,7 @@ Add `--force` to pair again without asking.
 
 Pairing is only for hosted `mindroom.chat` or your own provisioning service.
 When neither `MINDROOM_PROVISIONING_URL` nor `--provisioning-url` is set and `MATRIX_HOMESERVER` is not `mindroom.chat`, `connect` refuses without contacting anything or writing files.
-This includes an unset `MATRIX_HOMESERVER`, which defaults to `http://localhost:8008`, so run `mindroom config init --matrix-server mindroom.chat` first for hosted defaults.
+With no homeserver configured, `connect` pairs with MindRoom Chat.
 Self-hosted servers without a provisioning service register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead (see [Configuration](https://docs.mindroom.chat/configuration/)).
 
 ## Pairing Credentials
