@@ -6,6 +6,7 @@ This module stays free of Matrix and HTTP client imports because `mindroom servi
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from mindroom.constants import DEFAULT_MATRIX_HOMESERVER, runtime_env_path, runtime_matrix_homeserver
 
@@ -20,13 +21,20 @@ def _permanent_startup_error(message: str) -> ValueError:
     return matrix_startup_error(message, permanent=True)
 
 
+def is_hosted_homeserver(homeserver: str) -> bool:
+    """Return whether a homeserver uses the hosted MindRoom Chat domain or one of its subdomains."""
+    hostname = urlparse(homeserver if "://" in homeserver else f"https://{homeserver}").hostname or ""
+    hosted_hostname = urlparse(DEFAULT_MATRIX_HOMESERVER).hostname
+    return hostname == hosted_hostname or hostname.endswith(f".{hosted_hostname}")
+
+
 def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get the configured provisioning URL, defaulting to hosted provisioning for MindRoom Chat."""
     url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip()
     if url:
         return url.rstrip("/") or None
-    homeserver = runtime_matrix_homeserver(runtime_paths).strip().rstrip("/")
-    return DEFAULT_MATRIX_HOMESERVER if homeserver == DEFAULT_MATRIX_HOMESERVER else None
+    homeserver = runtime_matrix_homeserver(runtime_paths).strip()
+    return DEFAULT_MATRIX_HOMESERVER if is_hosted_homeserver(homeserver) else None
 
 
 def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:

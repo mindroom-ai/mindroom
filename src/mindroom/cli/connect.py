@@ -21,7 +21,7 @@ from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeho
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.http_error_detail import error_detail_from_response
-from mindroom.matrix.provisioning_env import provisioning_url_from_env
+from mindroom.matrix.provisioning_env import is_hosted_homeserver, provisioning_url_from_env
 
 from .env_file import env_path_for_config, upsert_env_values
 
@@ -57,7 +57,6 @@ _MAX_BACKOFF_SECONDS = 30
 _EXPIRY_GRACE_SECONDS = 60
 # Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract test.
 _PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
-_HOSTED_MATRIX_DOMAIN = "mindroom.chat"
 _LOCAL_MINDROOM_SETTINGS = "MindRoom Chat → Settings → Local MindRoom"
 _LOST_APPROVAL_WARNING = (
     "The previous approval could not be received; starting a new pairing. "
@@ -600,21 +599,17 @@ def _should_note_missing_administrator(config_path: Path, owner_user_id: str) ->
     return isinstance(administrators, list) and owner_user_id not in administrators
 
 
-def _is_hosted_homeserver(homeserver: str) -> bool:
-    hostname = urlparse(homeserver if "://" in homeserver else f"https://{homeserver}").hostname or ""
-    return hostname == _HOSTED_MATRIX_DOMAIN or hostname.endswith(f".{_HOSTED_MATRIX_DOMAIN}")
-
-
 def self_hosted_pairing_error(runtime_paths: RuntimePaths) -> str | None:
     """Explain why pairing does not apply to a self-hosted homeserver with no provisioning service configured."""
     if provisioning_url_from_env(runtime_paths) is not None:
         return None
     homeserver = constants.runtime_matrix_homeserver(runtime_paths).strip()
-    if _is_hosted_homeserver(homeserver):
+    if is_hosted_homeserver(homeserver):
         return None
+    hosted_hostname = urlparse(constants.DEFAULT_MATRIX_HOMESERVER).hostname
     return (
-        f"The Matrix homeserver is {homeserver} (MATRIX_HOMESERVER), not hosted {_HOSTED_MATRIX_DOMAIN}. "
-        f"Pairing is for hosted {_HOSTED_MATRIX_DOMAIN}; self-hosted servers register agents with "
+        f"The Matrix homeserver is {homeserver} (MATRIX_HOMESERVER), not hosted {hosted_hostname}. "
+        f"Pairing is for hosted {hosted_hostname}; self-hosted servers register agents with "
         "MATRIX_REGISTRATION_TOKEN or MATRIX_REGISTRATION_SHARED_SECRET instead. "
         "For hosted defaults, run `mindroom config init --matrix-server mindroom.chat`; "
         "to pair with your own provisioning service, pass --provisioning-url."
