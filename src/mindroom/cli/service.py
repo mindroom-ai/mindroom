@@ -18,6 +18,7 @@ from mindroom.runtime_env_policy import is_unset_env_value
 
 from .config import DEFAULT_API_HOST, DEFAULT_API_PORT, warn_dashboard_without_key, worker_dashboard_api_key_needed
 from .env_file import upsert_env_values
+from .interactive import confirm, section
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,11 +64,10 @@ def _manager_or_exit() -> ServiceManager:
 def _confirm_action(message: str) -> bool:
     """Ask for confirmation and return whether the user accepted."""
     try:
-        answer = _console.input(f"[bold]{message} [Y/n]: [/bold]").strip().lower()
-    except (KeyboardInterrupt, EOFError):
+        return confirm(message, default=True)
+    except typer.Abort:
         _console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit(0) from None
-    return answer in {"", "y", "yes"}
 
 
 def _ensure_uv_installed(manager: ServiceManager, *, no_confirm: bool) -> bool:
@@ -225,7 +225,7 @@ def _ask_for_login_service() -> ServiceManager | None:
     # Installing would fail without systemd, or repoint a service that already runs another setup.
     if not manager.is_available() or manager.get_service_status().installed:
         return None
-    _console.print()
+    _console.print(section("Keep running"))
     if not _confirm_action(f"Run MindRoom in the background and start it at login ({manager.description})?"):
         return None
     return manager

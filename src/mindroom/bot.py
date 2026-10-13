@@ -532,6 +532,7 @@ class AgentBot:
                     self.wait_for_admission_or_shutdown,
                 ),
                 on_configured_room_joined=self._post_join_room_setup,
+                get_conversation_reader=lambda: self._conversation_reader,
             ),
         )
         self._init_runtime_components()

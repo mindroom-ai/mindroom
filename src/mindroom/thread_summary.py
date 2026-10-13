@@ -1035,6 +1035,28 @@ async def _send_thread_summary_event(
     return None
 
 
+async def send_welcome_thread_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    welcome_event_id: str,
+    conversation_reader: ConversationReader,
+) -> None:
+    """Title the router welcome without counting it toward automatic summaries.
+
+    A zero count keeps the first reply in the welcome thread due for an
+    automatic summary, which then replaces this unpinned title.
+    """
+    await _send_thread_summary_event(
+        client,
+        room_id,
+        welcome_event_id,
+        "Welcome to MindRoom",
+        0,
+        "manual",
+        conversation_reader,
+    )
+
+
 async def set_manual_thread_summary(
     client: nio.AsyncClient,
     room_id: str,
