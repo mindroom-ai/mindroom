@@ -552,7 +552,7 @@ def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -
     return build_tool_execution_identity(
         channel="matrix",
         agent_name=context.agent_name,
-        transport_agent_name=context.transport_agent_name or context.agent_name,
+        transport_agent_name=context.transport_agent_name,
         runtime_paths=context.runtime_paths,
         requester_id=context.requester_id,
         room_id=target.room_id,
