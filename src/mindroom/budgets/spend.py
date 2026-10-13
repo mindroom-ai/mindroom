@@ -55,7 +55,7 @@ def collect_monthly_spend(
 ) -> SpendSnapshot:
     """Price each requester's dated usage in the current UTC month."""
     start, end = month_bounds(now)
-    # Runs that began the day before can still make requests dated in this month.
+    # Usage dated by its start, such as a voice call that began the day before, can hold requests in this month.
     since = datetime.combine(start - timedelta(days=1), time(), UTC).timestamp()
     report = collect_admin_usage(config=config, runtime_paths=runtime_paths, include_daily=True, since=since)
     spend: defaultdict[str, float] = defaultdict(float)

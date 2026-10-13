@@ -46,7 +46,6 @@ Invariants enforced here (every resolver in the repo must go through this module
 6. A root proof built from thread history whose read source is the explicit degraded fallback
    (``THREAD_HISTORY_SOURCE_DEGRADED``, i.e. an empty fail-open read) is PROOF_UNAVAILABLE, never
    NOT_A_THREAD_ROOT: an empty degraded read must not demote an existing thread to room level.
-   Stale-cache history (``stale_cache`` source) remains acceptable proof material.
 
 7. A room scan that completes without ever seeing the candidate root
    (``ThreadRoomScanRootNotFoundError``) is definitive NOT_A_THREAD_ROOT, not a proof failure.

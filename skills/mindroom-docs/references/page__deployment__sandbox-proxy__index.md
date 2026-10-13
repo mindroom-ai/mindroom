@@ -330,8 +330,8 @@ Adding, removing, or re-scoping a `worker_scope: user` agent changes every user 
 ### Dashboard credentials and worker scopes
 
 The dashboard's generic credential forms work only for unscoped agents and agents with `worker_scope: shared`.
-The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary runtime.
-GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
+OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](https://docs.mindroom.chat/oauth-framework/) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime; the Spotify and Home Assistant integrations are not framework providers and stay shared-only.
+GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Saved tool settings are stored by the primary per agent for `shared`, per requester across agents for `user`, and per requester-agent pair for `user_agent`, and reach worker-routed calls through [credential leases](#credential-leases).
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so configure them in authored config (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) or through shared settings granted with `defaults.worker_grantable_credentials`.
 Only unscoped and `shared` agents are available through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/#model-selection).

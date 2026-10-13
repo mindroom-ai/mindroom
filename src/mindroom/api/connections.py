@@ -55,7 +55,7 @@ class ConnectionTool(BaseModel):
     description: str
     icon: str | None
     provider: str | None
-    requires_room_context: bool
+    mcp_available: bool
 
 
 class AgentConnections(BaseModel):
@@ -158,7 +158,7 @@ def _agent_connections(
                 description=tool.description,
                 icon=tool.icon,
                 provider=provider.id if provider is not None else None,
-                requires_room_context=tool.requires_room_context,
+                mcp_available=tool.mcp_available,
             ),
         )
         if provider is None:

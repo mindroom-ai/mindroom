@@ -1,116 +1,56 @@
 # Matrix Event Cache Live Evidence
 
-This evidence was collected on 2026-07-18 against the production `mindroom-chat` service and `https://mindroom.chat`.
+This records one audit run of the Matrix event cache on 2026-07-18 against the production `mindroom-chat` service and `https://mindroom.chat`, using the harness from PR #1586.
+It is a record, not a procedure: the event cache, the contract document that specified the run, and the harness were removed when the event journal and the visible-message projection replaced the cache.
 
-The deployed service source was commit `7098e66daec37df4ea511060541db69aeebece97`.
+## Provenance and safety
 
-The audit harness source was commit `686f983c0117b1764594fd402ae9834dae30f921` from PR #1586.
-
-The hosted result is production-baseline evidence rather than a claim that PR #1586 was deployed.
-
-PR-specific interaction classification is proven by the owning-seam SQLite and PostgreSQL test matrix.
-
-No deployment, restart, direct database edit, or existing room was used.
-
-The live service cache was opened only through SQLite `mode=ro` with `PRAGMA query_only`, and every cache evidence query ran in one read transaction.
-
-The strict read sequence used a new disposable isolated SQLite database under `/tmp`.
-
-All Matrix tokens remained inside the remote shell, and the durable artifact contains no credentials or message bodies.
-
-The complete sanitized summary is stored in `docs/dev/evidence/2026-07-18-matrix-event-cache-live-summary.json`.
+- The deployed service source was commit `7098e66daec37df4ea511060541db69aeebece97`, and the audit harness was commit `686f983c0117b1764594fd402ae9834dae30f921` from PR #1586, which was squash-merged as `34fae3688`, so the harness and validator commits are not in this repository.
+- The result is production-baseline evidence, not a claim that PR #1586 was deployed; PR #1586's interaction classification was proven by its owning-seam SQLite and PostgreSQL test matrix.
+- No deployment, restart, direct database edit, or existing room was used, and the service stayed active with `NRestarts=0`.
+- The live service cache was opened only through SQLite `mode=ro` with `PRAGMA query_only`, and every cache evidence query ran in one read transaction.
+- Strict thread reads used a new disposable isolated SQLite database under `/tmp`; the harness refused an existing strict-cache path or the service-cache path.
+- The harness failed before writing evidence on any declared expectation that disagreed with observed state, on unpaired invite identity and token configuration, and on missing or cache-only event accounting.
+- All Matrix tokens stayed inside the remote shell, and the durable artifact contains no credentials or message bodies.
+- The complete sanitized summary, including the interaction families, cache row counts, and raw-evidence SHA-256, is [`docs/dev/evidence/2026-07-18-matrix-event-cache-live-summary.json`](evidence/2026-07-18-matrix-event-cache-live-summary.json).
 
 ## Disposable room
 
-The new private room was `!g178yDFmvMAT2iDiBn:mindroom.chat`.
+The new private room was `!g178yDFmvMAT2iDiBn:mindroom.chat`, created by `@mindroom_code:mindroom.chat`, with primary thread root `$RLlVnt7Z04PV8IdyDQbwEZmk--UcNL_SCdU01fGiPi8`.
+Authenticated `/joined_members` returned only that user.
+The pinned harness did not query membership itself: the response was captured out-of-band alongside the harness output and copied into the summary, and the 76-request count below does not include it.
 
-The room was created by `@mindroom_code:mindroom.chat`, and authenticated membership verification returned only that user.
+## Interactions
 
-For the checked-in run, the authenticated `/joined_members` response was captured alongside the harness output and copied into the sanitized summary.
-
-The harness version used for the checked-in run performed the same authenticated query fail-closed and recorded the sorted joined-member IDs in its raw evidence.
-
-The primary thread root was `$RLlVnt7Z04PV8IdyDQbwEZmk--UcNL_SCdU01fGiPi8`.
-
-The service remained active with `NRestarts=0`.
-
-## Interaction evidence
-
-The harness emitted 58 controlled interaction records through 76 authenticated requests.
-
-The executable validation compared all 58 records across 459 assertions and returned `passed`.
-
-The stricter validator from commit `d3e48585c59083874eb99998b8bc2df38ad1d6f6` replayed the sanitized raw artifact across 491 assertions and also returned `passed`.
-
+The harness emitted 58 controlled interaction records through 76 authenticated requests, and its validation passed 459 assertions across all 58.
+The stricter validator from commit `d3e48585c59083874eb99998b8bc2df38ad1d6f6` replayed the sanitized raw artifact across 491 assertions and also passed.
 That replay additionally required zero accounting gaps, identical first and second visible snapshots, zero second-read homeserver work, the exact third-read rejection reason, and removal of the redacted child.
 
-The matrix covered member, name, topic, avatar, power, join, history, guest, alias, encryption, pin, generic state, and room creation state supplied by `createRoom`.
+The hosted run did not cover:
 
-The matrix covered text, notice, emote, location, explicit thread, relation-less reply, root edit, child edit, reply edit, message reference, reaction, and reaction redaction.
-
-The matrix covered valid file, PNG image, WAV voice audio, WebM video, sticker, poll start, poll response, poll end, beacon info, and beacon.
-
-The matrix covered call invite, candidates, answer, select, reject, negotiate, hangup, RTC membership with focus data, and RTC notification.
-
-The matrix covered message redaction, original redaction with dependent edit, edit-only redaction, custom timeline data, and four opaque encrypted thread, edit, reply, and reference relations.
-
-The matrix included a dedicated strict-read child and its redaction so rejection evidence could not disturb the relation-less reply, edit, or reference cases.
-
-Typing, receipt, presence, global account data, room account data, and to-device events were emitted but did not enter timeline accounting.
-
-Complete joined state, invite and leave timelines, and device-list changes are covered by deterministic owning-seam tests rather than destructive hosted membership changes.
+- Typing, receipt, presence, global and room account data, and to-device events, which were emitted but did not enter timeline accounting.
+- Complete joined state, invite and leave timelines, and device-list changes, which were left to deterministic owning-seam tests rather than destructive hosted membership changes.
+- A homeserver outage, which the run intentionally did not manufacture; refill failure and the stale-cache fallback were proven only by PR #1586's SQLite and PostgreSQL contract tests.
 
 ## Real media
 
-The 68-byte PNG passed checksum and decompression validation.
-
-The 364-byte WAV decoded as non-empty mono audio.
-
-The 522-byte WebM was validated by `ffprobe`.
-
+The 68-byte PNG passed checksum and decompression validation, the 364-byte WAV decoded as non-empty mono audio, and the 522-byte WebM was validated by `ffprobe`.
 Each uploaded MXC was downloaded through the authenticated client media endpoint and matched its original SHA-256 digest.
 
 ## Strict thread reads
 
-The first strict read had no cache state and completed a one-page authenticated homeserver refill in 541.383 ms.
+A dedicated strict-read child and its redaction kept rejection evidence from disturbing the relation-less reply, edit, and reference cases.
+Before the third read, the harness redacted that child through Matrix and applied the same target removal and stale marker through the isolated cache API.
 
-The first homeserver fetch took 516.9 ms and scanned 25 events.
-
-The second unchanged strict read completed in 1.895 ms from the isolated cache.
-
-The second read recorded 1.6 ms of cache time, zero homeserver fetch time, zero scan pages, and zero scanned events.
-
-The harness then redacted the dedicated child through Matrix and applied the same target removal and stale marker through the isolated cache API.
-
-The third strict read rejected the isolated snapshot with `thread_invalidated_after_validation` and completed a one-page homeserver refill in 213.323 ms.
+| Read | Outcome | Elapsed | Breakdown |
+| --- | --- | ---: | --- |
+| 1, no cache state | One-page authenticated homeserver refill | 541.383 ms | 516.9 ms homeserver fetch, 25 events scanned |
+| 2, unchanged | Served from the isolated cache | 1.895 ms | 1.6 ms cache time, no homeserver fetch, pages, or scanned events |
+| 3, after redaction | Rejected with `thread_invalidated_after_validation`, then one-page homeserver refill | 213.323 ms | |
 
 All three reads reported `degraded=false` and no error.
 
-The hosted run intentionally did not manufacture a homeserver outage.
-
-The owning-seam SQLite and PostgreSQL contract test `test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it` deterministically forces refill failure and proves that advisory reads return labeled degraded `stale_cache` history while dispatch reads reject that fallback and propagate the failure.
-
 ## Read-only service-cache validation
 
-The final room snapshot contained 55 active events, six tombstones, three edit indexes, 11 event-to-thread indexes, and one thread state row.
-
-The read-only integrity query returned `ok`.
-
-The room had zero orphan edit rows, zero orphan thread rows, zero cache-only event IDs, and zero accounting gaps.
-
-The clean accounting result supersedes both the earlier unsafe draft run and the superseded pre-transaction snapshot.
-
-The sanitized raw evidence SHA-256 was `8e43c3ade26b3a2797b7a329614c08571994b40fc827214820022a5c30f5afd1`.
-
-## Reproduction boundary
-
-The hosted service database had to remain read-only to the harness.
-
-Strict thread reads had to use `--strict-read-cache-db` with a new path that differed from `--cache-db`.
-
-The harness rejected an existing strict-cache path, rejected the service-cache path, and failed before writing evidence when any declared interaction expectation disagreed with observed state.
-
-The harness also rejected unpaired invite identity/token configuration and any missing or cache-only event accounting.
-
-This is a record of one audit run, not a live procedure.
-The subsystem it measured, the contract document that specified the run, and the harness itself were all removed when the event cache was replaced by the event journal and the visible-message projection.
+The read-only integrity query returned `ok`, and the room had zero orphan edit rows, orphan thread rows, cache-only event IDs, and accounting gaps.
+This clean accounting supersedes an earlier unsafe draft run and a pre-transaction snapshot.

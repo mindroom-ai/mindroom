@@ -7,7 +7,7 @@ You are doing a follow-up architecture refactor, not a bug fix.
 
 Read first:
 - AGENTS.md
-- docs/dev/runtime-path-architecture-refactor-prompt.md
+- docs/dev/archive/2026-03-14-runtime-path-architecture-refactor-prompt.md
 
 Goal:
 Collapse the remaining split between `Config` and `RuntimePaths`.

@@ -1,115 +1,45 @@
 # Delivery Recovery Cliff Design
 
-Implementation base: `6a994538f684fac01fa5dec26fd440a479de6aad` after the final user-requested rebase to the current PR tip.
+Dated record of the fix that keeps durable response-delivery recovery from blocking Matrix receive progress, and of the live acceptance profile that exercised the production-shaped workload which exposed it.
+Implementation base: `6a994538f684fac01fa5dec26fd440a479de6aad`, whose lock pinned mindroom-nio 0.37.0.
+The live run preceded a final rebase onto that base whose intervening delta changed only test isolation.
 
-## Purpose
+## Why
 
-Prevent durable response recovery from blocking Matrix receive progress, and add a live acceptance profile that exercises the production-shaped workload which exposed the cycle.
+Awaiting response-outbox recovery from the nio sync response callback stalled receive progress, because nio awaits that callback before requesting the next Sliding Sync response.
+When a room still had an open recovery gap, nio refused an ordinary send with `SendRetryError`, and MindRoom retries such a send for up to 30 seconds.
+The next sync response may be the only event that can advance the room gap, so the callback waited for progress that it prevented.
+The outbox scan walks owed deliveries serially, so several blocked rows turned the per-row retry window into cross-room head-of-line blocking of receive progress.
 
-The implementation must fix the receive-loop dependency rather than raise Matrix timeline limits or shorten the existing delivery retry window.
+## Decisions
 
-## Verified failure
+The fix had to remove the receive-loop dependency itself rather than tune around it: recovery runs in one owner-scoped background task per bot that each sync response wakes, so a sync callback never waits for a recovery send.
+A new sync wake interrupts the retry backoff of an incomplete pass, because new sync progress is what can unblock a refused send.
+The response outbox stays the only durable statement that delivery work is owed: the wake is transient, and no second source of recovery truth, durable retry flag, queue, second worker framework, or pending-worker dependency was added.
 
-MindRoom currently awaits response-outbox recovery from the nio sync response callback.
+## Rejected alternatives
 
-nio awaits that callback before requesting the next Sliding Sync response.
+Because each of these tunes the cliff instead of removing the dependency, the fix deliberately does not:
 
-When a room still has an open recovery gap, nio refuses an ordinary send with `SendRetryError`, and MindRoom retries that send for up to 30 seconds.
+- raise the Sliding Sync timeline limit;
+- reduce streaming edits or change edit throttling;
+- shorten or replace the 30-second send retry window;
+- parallelize the outbox scan across rooms.
 
-The next sync response may be the only event that can advance the room gap, so the callback can wait for progress that it prevents.
+## Limitations and open questions
 
-`ResponseDelivery` scans owed deliveries serially, so multiple blocked rows turn the per-row retry window into cross-room head-of-line blocking.
+Recovery scans owed deliveries serially, so a row inside its retry window delays recovery of later rows in other rooms, but not receive progress.
+Moving bot-ready and orchestrator-ready work off the first-sync path, and the broader question of whether first-sync hooks should avoid outbound Matrix I/O, were deferred to a separate review, because moving readiness changes startup ordering beyond the every-response regression.
 
-## Runtime design
+## Evidence: acceptance workload
 
-The response outbox remains the only durable statement that delivery work is owed.
+The live `recovery-cliff` profile that this work added to `scripts/testing/fuzz_live_matrix.py` (merged in `e1d1624ca`, #1800, and removed in `259ad76df`, #1878) exercised this production-shaped workload:
 
-`AgentBot` owns one transient `asyncio.Event` wake and at most one owner-scoped recovery task.
+- Sliding Sync with a timeline limit of 100.
+- A managed sender account and a distinct managed responder on the built-in `synthetic` provider: seed 1, 4,000 to 4,800 response characters in 40-character chunks at 80 characters per second (about 50 to 60 seconds per stream), tool-call probability 0.2, and shell execution pinned to the isolated local runtime.
+- After one warm-up turn, the runtime is paused at a confirmed process-group boundary, a derived 601-event context gap is sent, and the runtime resumes after 100 distinct thread roots, each mentioning the responder and carrying a unique run and thread marker, all sent before awaiting any response.
 
-Every accepted sync response sets the wake, even when a recovery task is already running.
-
-The task clears the wake before each pass, asks the outbox for recoverable deliveries, and performs at most one coalesced follow-up pass for any number of wakes that arrived during the preceding pass.
-
-An exception or an incomplete recovery result schedules another pass with capped exponential backoff.
-
-A fresh sync wake interrupts that backoff so recovery can retry immediately after nio advances its room state.
-
-The task is created through `create_background_task` with the bot runtime view as owner.
-
-Sync shutdown marks the runtime as shutting down and wakes the task, while the existing owner-scoped shutdown drain finishes or cancels it.
-
-No second worker framework, durable retry flag, queue, or pending-worker dependency is introduced.
-
-The first-sync room-member callback registration stays synchronous because later responses must not pass before it is installed.
-
-Bot-ready and orchestrator-ready work retains its current lifecycle path in this change.
-
-The broader rule that first-sync hooks should not perform outbound Matrix I/O belongs to a separate review because moving readiness changes startup ordering beyond the reproduced every-response regression.
-
-## Deterministic regression contract
-
-The central test drives two real sync responses in sequence.
-
-The first recovery pass waits on an event that only the second response can set.
-
-The first callback must return before that event is set, proving that recovery no longer owns receive-loop progress.
-
-A second test parks one pass, delivers multiple sync wakes, and requires exactly one non-overlapping follow-up pass.
-
-A third test proves that the task is owned by the bot shutdown lifecycle and receives cancellation when the bounded owner drain expires.
-
-The existing retry test remains responsible for exception, incomplete, successful, and later-new-debt outcomes, but it waits for owner-scoped background work after each response.
-
-Tests use causal `asyncio.Event` boundaries rather than short wall-clock timeouts.
-
-## Live acceptance profile
-
-The existing `saturation` profile is renamed `short-stream-correctness` because it proves short streamed reply correctness, not production capacity.
-
-A separate `recovery-cliff` profile uses Sliding Sync with a timeline limit of 100.
-
-The stack configures a managed sender account and a distinct managed responder using the built-in `synthetic` provider.
-
-The responder uses deterministic variable responses paced at 80 characters per second for approximately 50 to 60 seconds, with the normal optional tool-call phase enabled and shell execution pinned to the isolated local runtime.
-
-The harness authenticates as the already managed sender account and emits 100 distinct thread roots that mention the responder before awaiting any response.
-
-Every root carries a unique run and thread marker.
-
-The observer advances one raw-event cursor only after forward `/messages` enumeration proves the complete positioned sync interval, retaining reply and edit evidence omitted from limited or compacted `/sync` timelines.
-
-The observer correlates each responder original to its exact source event through the Matrix thread relation and requires exactly one canonical response per source.
-
-The workload is valid only if the exact room logs a post-warm `Waiting to retry Matrix delivery after sync recovery` marker, at least one workload FINAL outbox row is observed attempted and unacknowledged, the `general` detached worker later resends delivery, and the room records no recovery abandonment.
-
-After all responses complete, the harness waits through one fixed bounded drain window and requires zero unacknowledged response-outbox rows and zero actionable pending journal rows.
-
-The health endpoint must remain healthy while waiting and after drain, no sync-watchdog stall may occur, and sync progress must advance once more after load.
-
-MindRoom must then stop cleanly within its fixed shutdown bound.
-
-The live profile uses a fixed overall service-level deadline and never extends that deadline because partial replies continue arriving.
-
-## Deliberate exclusions
-
-The change does not raise the Sliding Sync timeline limit.
-
-The change does not reduce streaming edits or alter edit throttling.
-
-The change does not parallelize the durable outbox scan across rooms.
-
-The change does not replace the 30-second send retry window.
-
-The change does not add a second in-export Matrix reducer or a second source of recovery truth.
-
-## Acceptance
-
-The focused delivery tests must fail on the published PR head and pass with the runtime fix.
-
-Harness unit tests must prove the new profile selects Sliding Sync, uses the built-in synthetic responder, launches all roots before waiting, enforces exact canonical replies, and rejects unhealthy or undrained completion.
-
-The full `test_sync_task_cancellation.py` and all harness-focused tests must pass serially.
-
-Ruff, format checks, `git diff --check`, and Tach boundaries must pass.
-
-The live `recovery-cliff` run is the final behavioral acceptance test when the local Matrix stack and host capacity are available.
+A run counted as exercising the failure only if the room logged a post-warm `Waiting to retry Matrix delivery after sync recovery` marker, at least one workload FINAL outbox row was observed attempted and unacknowledged, the responder's detached recovery worker later logged a resend, and the room recorded no recovery abandonment.
+PASS also required exactly one completed canonical reply per root, zero unacknowledged outbox rows and zero pending journal rows after one fixed drain window, a healthy health endpoint throughout, no sync-watchdog stall, sync progress after load, and clean shutdown within MindRoom's shutdown bound.
+The run command was `uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --reply-timeout 180`, whose 180-second overall service-level deadline was fixed and was not extended because partial replies kept arriving.
+The observer enumerated each positioned sync interval forward through `/messages`, because limited or compacted `/sync` timelines omit reply and edit evidence.

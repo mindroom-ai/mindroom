@@ -210,7 +210,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `worker_scope` | `null` |
 | `file_access` | `workspace` |
 | `allow_self_config` | `false` |
-| `automations` | `[]`; private agents never inherit them, and agents without file memory skip the built-ins. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
+| `automations` | `[]`; private agents inherit them only as `personal_rooms.agent`, and agents without file memory skip the built-ins. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 
 `defaults.tools` (default `[scheduler]`) is added to every agent with `include_default_tools: true`; set it to `[]` to add nothing.
 It accepts the same per-tool overrides as `agents.<name>.tools`.

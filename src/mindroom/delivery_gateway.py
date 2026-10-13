@@ -586,7 +586,7 @@ class DeliveryGatewayDeps:
     resolver: ConversationResolver
     response_hooks: ResponseHookService
     outbox: MatrixDeliveryView
-    # Contract 2's handoff: the journal owns an actionable source until the
+    # The outbox-enqueue handoff: the journal owns an actionable source until the
     # turn's answer is durably owed to a room, and this is where that becomes
     # true. Everything after it is the outbox's to recover.
     turn_handoff: TurnHandoff
