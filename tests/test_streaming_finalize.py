@@ -353,6 +353,21 @@ async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behi
 
 
 @pytest.mark.asyncio
+async def test_user_stopped_terminal_update_gets_a_second_attempt(tmp_path: Path) -> None:
+    """Only a restart interruption gives up after one terminal attempt; a user stop retries once."""
+    streaming = _streaming_response(_config(tmp_path))
+    streaming.event_id = "$placeholder"
+    streaming.accumulated_text = "partial answer"
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=None)) as mock_edit:
+        outcome = await streaming.finalize(_client(), cancelled=True, cancel_source="user_stop")
+
+    assert mock_edit.await_count == 2
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.terminal_update_committed is False
+
+
+@pytest.mark.asyncio
 async def test_transport_restart_interrupted_terminal_update_reports_committed(tmp_path: Path) -> None:
     """A landed restart interruption must carry explicit terminal-update proof."""
     streaming = _streaming_response(_config(tmp_path))

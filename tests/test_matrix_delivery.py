@@ -461,7 +461,8 @@ async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() 
         (nio.UploadResponse("mxc://server/uncached-sidecar-2"), None),
     ]
     client._send.return_value = nio.RoomSendResponse("$raw", "!room:localhost")
-    client.room_send.return_value = nio.RoomSendResponse("$encrypted", "!room:localhost")
+    # nio refuses an encrypted send to a room missing from its cache, so only the attempted payload is checked.
+    client.room_send.side_effect = nio.LocalProtocolError("No such room with id !room:localhost found.")
 
     outcome = await send_message_outcome(
         client,
@@ -469,14 +470,14 @@ async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() 
         {"body": "x" * 100_000, "msgtype": "m.text"},
     )
 
-    assert isinstance(outcome, DeliveredMatrixEvent)
-    assert outcome.event_id == "$encrypted"
-    encrypted_file = cast("dict[str, object]", outcome.content_sent["file"])
+    assert outcome == MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "local delivery exception")
+    content_sent = client.room_send.await_args.kwargs["content"]
+    encrypted_file = cast("dict[str, object]", content_sent["file"])
     assert encrypted_file["url"] == "mxc://server/uncached-sidecar-2"
     assert encrypted_file["key"]
     assert encrypted_file["iv"]
     assert encrypted_file["hashes"]
-    assert "url" not in outcome.content_sent
+    assert "url" not in content_sent
     assert [call.kwargs["content_type"] for call in client.upload.await_args_list] == [
         "application/json",
         "application/octet-stream",

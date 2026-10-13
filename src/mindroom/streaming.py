@@ -1022,9 +1022,8 @@ class StreamingResponse:
             "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
         )
         try:
-            retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
-            retry_terminal_update_immediately = (
-                final_stream_status != STREAM_STATUS_COMPLETED and resolved_cancel_source != "sync_restart"
+            retry_terminal_update = (
+                final_stream_status == STREAM_STATUS_COMPLETED or resolved_cancel_source != "sync_restart"
             )
             send_succeeded = await self._send_or_edit_message(
                 client,
@@ -1032,7 +1031,6 @@ class StreamingResponse:
                 allow_empty_progress=has_placeholder,
                 stream_status=final_stream_status,
                 retry_on_failure=retry_terminal_update,
-                retry_without_backoff=retry_terminal_update_immediately,
             )
         except asyncio.CancelledError as cancelled_error:
             terminal_cancel_source = resolved_cancel_source or classify_cancel_source(cancelled_error)
@@ -1117,7 +1115,6 @@ class StreamingResponse:
         allow_empty_progress: bool = False,
         stream_status: str | None = None,
         retry_on_failure: bool = False,
-        retry_without_backoff: bool = False,
         boundary_refresh: bool = False,
         force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
@@ -1141,7 +1138,6 @@ class StreamingResponse:
             force_nonterminal_delivery=force_nonterminal_delivery,
             capture_completions=capture_completions,
             retry_on_failure=retry_on_failure and is_final,
-            retry_without_backoff=retry_without_backoff and is_final,
         )
 
     async def _send_prepared_delivery(
@@ -1155,7 +1151,6 @@ class StreamingResponse:
         force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
         retry_on_failure: bool = False,
-        retry_without_backoff: bool = False,
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
@@ -1199,7 +1194,6 @@ class StreamingResponse:
                 content=prepared_delivery.content,
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
-                retry_without_backoff=retry_without_backoff,
                 is_final=durable_terminal,
                 progress=_progress_state(prepared_delivery.committed_state) if self.durable_reply else None,
             )
@@ -1502,7 +1496,6 @@ class StreamingResponse:
         content: dict[str, Any],
         display_text: str,
         retry_on_failure: bool = False,
-        retry_without_backoff: bool = False,
         is_final: bool = False,
         progress: ProgressState | None = None,
     ) -> bool:
@@ -1512,7 +1505,7 @@ class StreamingResponse:
         and for a durable reply also its cancelled or error notice. A cancelled
         or failed stream of any other kind ends with a direct edit.
         """
-        total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
+        total_attempts = 2 if retry_on_failure else 1
         for attempt in range(1, total_attempts + 1):
             try:
                 if self.event_id is None:

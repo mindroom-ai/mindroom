@@ -1016,7 +1016,8 @@ class TestSendMessageResult:
     async def test_encrypted_sidecar_keeps_cached_state_across_reset_race(self) -> None:
         """A cache reset after inspection cannot downgrade sidecar encryption."""
         client = _mock_client(encrypted=True)
-        client.room_send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+        # nio refuses an encrypted send to a room missing from its cache.
+        client.room_send.side_effect = nio.LocalProtocolError("No such room with id !room:localhost found.")
 
         async def prepare(
             _client: nio.AsyncClient,
@@ -1036,8 +1037,7 @@ class TestSendMessageResult:
                 {"body": "hello", "msgtype": "m.text"},
             )
 
-        assert result is not None
-        assert result.event_id == "$evt:localhost"
+        assert result is None
         client.room_send.assert_awaited_once()
         client._send.assert_not_awaited()
 
@@ -1056,7 +1056,8 @@ class TestSendMessageResult:
             "",
             "!room:localhost",
         )
-        client.room_send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+        # nio refuses an encrypted send to a room missing from its cache, so only the attempted payload is checked.
+        client.room_send.side_effect = nio.LocalProtocolError("No such room with id !room:localhost found.")
         uploaded: list[tuple[bytes, str, str]] = []
 
         async def upload(**kwargs: object) -> tuple[nio.UploadResponse, None]:
@@ -1102,11 +1103,12 @@ class TestSendMessageResult:
                     {"body": secret_body, "msgtype": "m.text"},
                 )
 
-        assert result is not None
-        assert result.event_id == "$evt:localhost"
+        assert result is None
+        client._send.assert_not_awaited()
         assert uploaded == [(encrypted_sidecar, "application/octet-stream", "message-content.json.enc")]
         encrypt_attachment.assert_called_once()
-        inner = result.content_sent["m.new_content"] if is_edit else result.content_sent
+        content_sent = client.room_send.await_args.kwargs["content"]
+        inner = content_sent["m.new_content"] if is_edit else content_sent
         file_info = inner["file"]
         assert file_info["url"] == "mxc://localhost/encrypted-sidecar"
         assert file_info["key"] == encryption_keys["key"]

@@ -7,7 +7,7 @@ The live run preceded a final rebase onto that base whose intervening delta chan
 ## Why
 
 Awaiting response-outbox recovery from the nio sync response callback stalled receive progress, because nio awaits that callback before requesting the next Sliding Sync response.
-When a room still had an open recovery gap, nio refused an ordinary send with `SendRetryError`, and MindRoom retries such a send for up to 30 seconds.
+When a room still had an open recovery gap, nio refused an ordinary send with `SendRetryError`, and MindRoom retried such a send for up to 30 seconds.
 The next sync response may be the only event that can advance the room gap, so the callback waited for progress that it prevented.
 The outbox scan walks owed deliveries serially, so several blocked rows turned the per-row retry window into cross-room head-of-line blocking of receive progress.
 
