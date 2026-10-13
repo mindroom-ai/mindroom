@@ -150,15 +150,36 @@ def test_keys_typed_before_a_prompt_are_not_its_answer(monkeypatch: pytest.Monke
 
 
 def test_every_prompt_discards_typeahead_before_asking(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each prompt drops earlier keys first, so none of them answers with a stray Enter."""
-    discarded: list[str] = []
-    monkeypatch.setattr(interactive, "_discard_typeahead", lambda: discarded.append("discard"))
-    with CliRunner().isolation(input="ollama\nsk-test\nn\n"):
-        interactive.select("Provider?", _CHOICES)
-        interactive.secret("API key")
-        interactive.confirm("Continue?", default=True)
+    """Each prompt drops earlier keys before it reads, so none of them answers with a stray Enter."""
+    events: list[str] = []
 
-    assert discarded == ["discard", "discard", "discard"]
+    def ask(*_args: object, default: object, **_kwargs: object) -> object:
+        events.append("ask")
+        return default
+
+    monkeypatch.setattr(interactive, "_discard_typeahead", lambda: events.append("discard"))
+    monkeypatch.setattr(typer, "prompt", ask)
+    monkeypatch.setattr(typer, "confirm", ask)
+
+    interactive.select("Provider?", _CHOICES)
+    interactive.secret("API key")
+    interactive.confirm("Continue?", default=True)
+
+    assert events == ["discard", "ask"] * 3
+
+
+def test_windows_drains_the_console_input_without_termios(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows has no termios, so the keys waiting in the console are read off instead."""
+    waiting_keys = ["y", "\r"]
+    console_input = SimpleNamespace(kbhit=lambda: bool(waiting_keys), getwch=waiting_keys.pop)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", console_input)
+    # Importing termios would now raise, as it does on Windows.
+    monkeypatch.setitem(sys.modules, "termios", None)
+
+    interactive._discard_typeahead()
+
+    assert waiting_keys == []
 
 
 def test_piped_answers_survive_the_typeahead_discard(monkeypatch: pytest.MonkeyPatch) -> None:
