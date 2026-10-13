@@ -1349,7 +1349,8 @@ def test_run_device_pairing_times_out_at_expiry_while_the_service_is_unreachable
         ({"MATRIX_HOMESERVER": "http://localhost:8008"}, "http://localhost:8008"),
         ({"MATRIX_HOMESERVER": "https://matrix.example.org", "MINDROOM_PROVISIONING_URL": "https://p.example"}, None),
         ({"MATRIX_HOMESERVER": "https://mindroom.chat"}, None),
-        ({"MATRIX_HOMESERVER": "https://matrix.mindroom.chat/"}, None),
+        ({"MATRIX_HOMESERVER": "https://matrix.mindroom.chat/"}, "https://matrix.mindroom.chat/"),
+        ({"MATRIX_HOMESERVER": "https://mindroom.chat:443"}, "https://mindroom.chat:443"),
     ],
 )
 def test_self_hosted_pairing_error(tmp_path: Path, env: dict[str, str], refused_homeserver: str | None) -> None:

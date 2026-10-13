@@ -697,6 +697,7 @@ class TestResolveConfigRelativePath:
         [
             ({}, None, "https://mindroom.chat"),
             ({"MATRIX_HOMESERVER": ""}, None, "https://mindroom.chat"),
+            ({"MATRIX_HOMESERVER": " https://mindroom.chat/ "}, None, "https://mindroom.chat"),
             ({}, "http://localhost:8008", "http://localhost:8008"),
             ({"MATRIX_HOMESERVER": "https://matrix.example.org"}, None, "https://matrix.example.org"),
             ({"MATRIX_HOMESERVER": "http://localhost:8008"}, "https://mindroom.chat", "http://localhost:8008"),

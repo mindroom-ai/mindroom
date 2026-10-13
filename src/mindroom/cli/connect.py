@@ -21,7 +21,7 @@ from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeho
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.http_error_detail import error_detail_from_response
-from mindroom.matrix.provisioning_env import is_hosted_homeserver, provisioning_url_from_env
+from mindroom.matrix.provisioning_env import provisioning_url_from_env
 
 from .env_file import env_path_for_config, upsert_env_values
 
@@ -604,12 +604,13 @@ def self_hosted_pairing_error(runtime_paths: RuntimePaths) -> str | None:
     if provisioning_url_from_env(runtime_paths) is not None:
         return None
     homeserver = constants.runtime_matrix_homeserver(runtime_paths).strip()
-    if is_hosted_homeserver(homeserver):
+    if constants.is_hosted_matrix_homeserver(homeserver):
         return None
     hosted_hostname = urlparse(constants.DEFAULT_MATRIX_HOMESERVER).hostname
     return (
-        f"The Matrix homeserver is {homeserver} (MATRIX_HOMESERVER), not hosted {hosted_hostname}. "
-        f"Pairing is for hosted {hosted_hostname}; self-hosted servers register agents with "
+        f"The Matrix homeserver URL is {homeserver} (MATRIX_HOMESERVER); "
+        f"hosted {hosted_hostname} pairing requires {constants.DEFAULT_MATRIX_HOMESERVER}. "
+        "Self-hosted servers register agents with "
         "MATRIX_REGISTRATION_TOKEN or MATRIX_REGISTRATION_SHARED_SECRET instead. "
         "For hosted defaults, run `mindroom config init --matrix-server mindroom.chat`; "
         "to pair with your own provisioning service, pass --provisioning-url."
