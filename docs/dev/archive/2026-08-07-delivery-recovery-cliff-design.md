@@ -28,7 +28,7 @@ Because each of these tunes the cliff instead of removing the dependency, the fi
 
 ## Limitations and open questions
 
-Recovery scans owed deliveries serially, so a row inside its retry window delays recovery of later rows in other rooms, but not receive progress.
+Recovery scanned owed deliveries serially, so a row inside its retry window delayed recovery of later rows in other rooms, but not receive progress.
 Moving bot-ready and orchestrator-ready work off the first-sync path, and the broader question of whether first-sync hooks should avoid outbound Matrix I/O, were deferred to a separate review, because moving readiness changes startup ordering beyond the every-response regression.
 
 ## Evidence: acceptance workload

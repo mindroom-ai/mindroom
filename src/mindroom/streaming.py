@@ -1022,9 +1022,7 @@ class StreamingResponse:
             "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
         )
         try:
-            retry_terminal_update = (
-                final_stream_status == STREAM_STATUS_COMPLETED or resolved_cancel_source != "sync_restart"
-            )
+            retry_terminal_update = resolved_cancel_source != "sync_restart"
             send_succeeded = await self._send_or_edit_message(
                 client,
                 is_final=True,
