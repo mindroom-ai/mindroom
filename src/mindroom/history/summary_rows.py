@@ -181,7 +181,7 @@ def append_summary(
     with db.db_engine.connect() as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         _ensure_tables(connection, db)
-        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
+        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
         previous_index = rows[-1].after_run_index if rows else -1
         # A row never sorts behind the latest one: that would return what it folded to replay.
         if (rows[-1].id if rows else None) != based_on or any(run.run_index <= previous_index for run in covered):
