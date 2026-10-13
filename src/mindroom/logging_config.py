@@ -6,8 +6,10 @@ import logging
 import logging.config
 import os
 import sys
+import traceback
 from datetime import UTC, datetime
 from io import StringIO
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import structlog
@@ -16,7 +18,6 @@ from mindroom.redaction import redact_log_event, redact_sensitive_text
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
-    from pathlib import Path
     from typing import TextIO
 
     from structlog.typing import ExceptionRenderer, ExcInfo, Processor
@@ -27,6 +28,7 @@ __all__ = [
     "bound_log_context",
     "configure_default_logging",
     "current_log_file",
+    "exception_frames",
     "get_logger",
     "setup_logging",
     "setup_subprocess_logging",
@@ -407,6 +409,14 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
         # No Agno logger name has a parent below the root, so only an exact override or the root level applies.
         level = cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
         agno_logger.addFilter(_AgnoLevelFilter(level))
+
+
+def exception_frames(error: BaseException) -> list[str]:
+    """Return an exception's stack locations without its message, source lines, or locals."""
+    return [
+        f"{Path(frame.filename).name}:{frame.lineno} ({frame.name})"
+        for frame in traceback.extract_tb(error.__traceback__)
+    ]
 
 
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:

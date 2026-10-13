@@ -176,11 +176,12 @@ class _AudioChild:
         if self._closed:
             return
         self._closed = True
-        if self._bridge is not None:
-            await self._bridge.aclose()
+        # An agent start still running holds the session lock that closing the bridge needs.
         for request in list(self._requests):
             request.cancel()
         await asyncio.gather(*self._requests, return_exceptions=True)
+        if self._bridge is not None:
+            await self._bridge.aclose()
         for response in self._responses.values():
             response.cancel()
 
@@ -218,7 +219,7 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _die_with_parent()
     setup_subprocess_logging(log_file=Path(args.log_file) if args.log_file else None)
-    # Importing the agent stack takes about 1.5 s; MindRoom starts this process before a call needs it.
+    # Importing the LiveKit Agents SDK takes about 1.5 s; MindRoom starts this process before a call needs it.
     # LiveKit registers its plugins only on the main thread.
     from livekit.plugins import openai  # noqa: F401, PLC0415
 

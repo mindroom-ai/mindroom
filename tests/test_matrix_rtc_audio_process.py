@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -116,6 +117,10 @@ class FakeLiveBridge:
         self.connect_error: Exception | None = None
         self.on_close: Callable[[], Awaitable[None]] | None = None
         self.closed = False
+        self.block_start = False
+        self.start_cancelled = False
+        # LiveKit's AgentSession holds one lock through both start and close.
+        self._session_lock = asyncio.Lock()
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
         """Record the roster."""
@@ -132,14 +137,22 @@ class FakeLiveBridge:
         self.calls.append(("key", participant_identity, key, key_index))
 
     async def start_agent(self, options: LiveVoiceAgentOptions) -> None:
-        """Keep the options the child built."""
-        self.options = options
+        """Keep the options the child built, then hang if configured to."""
+        async with self._session_lock:
+            self.options = options
+            try:
+                if self.block_start:
+                    await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.start_cancelled = True
+                raise
 
     async def aclose(self) -> None:
         """Run the configured close hook."""
-        if self.on_close is not None:
-            await self.on_close()
-        self.closed = True
+        async with self._session_lock:
+            if self.on_close is not None:
+                await self.on_close()
+            self.closed = True
 
 
 @dataclass
@@ -417,6 +430,23 @@ class MainSide:
     respond_started: asyncio.Event
     respond_cancelled: asyncio.Event
     fail_usage: bool = False
+    cleanup_gate: asyncio.Event | None = None
+
+    async def _answer(self, prompt: str) -> CallAgentResponse:
+        """Answer one prompt: hang, fail, or return the configured response."""
+        if prompt == "hang":
+            await asyncio.Event().wait()
+        if prompt == "denied":
+            msg = "caller lost access"
+            raise PermissionError(msg)
+        return self.responses[prompt]
+
+    async def _on_cancel(self) -> None:
+        """Record the cancel, then finish cleanup like a cancelled agent turn persisting its interrupted run."""
+        self.respond_cancelled.set()
+        if self.cleanup_gate is not None:
+            await asyncio.shield(self.cleanup_gate.wait())
+            self.events.append("cleanup_done")
 
     def options(self) -> LiveVoiceAgentOptions:
         """Build main-side options whose callables record what the proxy does."""
@@ -429,11 +459,9 @@ class MainSide:
             assert on_tools is on_tools_executed
             self.respond_started.set()
             try:
-                if prompt == "hang":
-                    await asyncio.Event().wait()
-                return self.responses[prompt]
+                return await self._answer(prompt)
             except asyncio.CancelledError:
-                self.respond_cancelled.set()
+                await self._on_cancel()
                 raise
 
         async def record_usage(usage: LiveVoiceUsage) -> None:
@@ -652,6 +680,135 @@ async def test_aclose_kills_a_hung_child(monkeypatch: pytest.MonkeyPatch) -> Non
     assert main.events[-1] == "close_responder"
 
 
+@pytest.mark.asyncio
+async def test_aclose_lets_a_cancelled_delegation_finish_its_cleanup() -> None:
+    """Closing never cancels a delegation a second time while it persists its interrupted run."""
+    main = _main_side()
+    main.cleanup_gate = asyncio.Event()
+    async with proxy_bridge() as (bridge, bridges, _children):
+        await bridge.start_agent(main.options())
+        child_options = bridges[0].options
+        assert child_options is not None
+        delegation = asyncio.create_task(child_options.respond("hang", None))
+        await asyncio.wait_for(main.respond_started.wait(), 5)
+        delegation.cancel()
+        await asyncio.wait_for(main.respond_cancelled.wait(), 5)
+        closing = asyncio.create_task(bridge.aclose())
+        await _until(lambda: bridges[0].closed)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert "close_responder" not in main.events
+        main.cleanup_gate.set()
+        await asyncio.wait_for(closing, 5)
+    assert main.events[-2:] == ["cleanup_done", "close_responder"]
+
+
+@pytest.mark.asyncio
+async def test_failed_delegation_logs_its_real_error_type_in_main() -> None:
+    """A delegation that fails in the main process is logged there with its own type, not the child's."""
+    main = _main_side()
+    with patch("mindroom.matrix_rtc.audio_process.logger.warning") as warning:
+        async with proxy_bridge() as (bridge, bridges, _children):
+            await bridge.start_agent(main.options())
+            child_options = bridges[0].options
+            assert child_options is not None
+            with pytest.raises(RuntimeError, match="PermissionError"):
+                await child_options.respond("denied", None)
+    failures = [call for call in warning.call_args_list if call.args == ("call_live_delegation_failed",)]
+    assert len(failures) == 1
+    assert failures[0].kwargs["error_type"] == "PermissionError"
+    assert "caller lost access" not in str(failures[0].kwargs)
+
+
+@pytest.mark.asyncio
+async def test_proxy_retries_each_provider_sessions_failed_usage_at_close() -> None:
+    """A failed usage save is retried at close even after another provider session saved."""
+    main = _main_side()
+    main.fail_usage = True
+    first = LiveVoiceUsage("sess-1", "gpt-live-1", 1.0, 5.0, finalized=False)
+    second = LiveVoiceUsage("sess-2", "gpt-live-1", 9.0, 3.0, finalized=False)
+    async with proxy_bridge() as (bridge, bridges, _children):
+        await bridge.start_agent(main.options())
+        child_options = bridges[0].options
+        assert child_options is not None
+        assert child_options.record_usage is not None
+        await child_options.record_usage(first)
+        await child_options.record_usage(second)
+        await _until(lambda: main.usage == [second])
+    assert main.usage == [second, first]
+
+
+@pytest.mark.asyncio
+async def test_proxy_logs_an_unexpected_channel_failure() -> None:
+    """A malformed reply that breaks the channel is logged before the call ends."""
+    ends: list[socket.socket] = []
+
+    def start_child() -> tuple[socket.socket, IdleProcess]:
+        main_socket, child_socket = socket.socketpair()
+        ends.append(child_socket)
+        return main_socket, IdleProcess()
+
+    with patch("mindroom.matrix_rtc.audio_process.logger.warning") as warning:
+        bridge = ProcessLiveVoiceBridge(local_identity="@bot:x:DEV", e2ee_enabled=True, start_child=start_child)
+        ends[0].sendall(encode_frame({"type": "Ok"}))
+        await _until(lambda: warning.called)
+        ends[0].close()
+        await asyncio.wait_for(bridge.aclose(), 5)
+    assert warning.call_args_list[0].args == ("call_audio_channel_failed",)
+
+
+def test_spawn_keeps_native_library_paths_and_drops_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audio process can load native libraries from the loader paths, but never sees provider keys."""
+    for name in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "NIX_LD_LIBRARY_PATH"):
+        monkeypatch.setenv(name, f"/nix/{name}")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    launched: list[dict[str, str]] = []
+
+    class RecordingPopen:
+        pid = 1
+
+        def __init__(self, _args: list[str], **kwargs: object) -> None:
+            env = kwargs["env"]
+            assert isinstance(env, dict)
+            launched.append(env)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.audio_process.subprocess.Popen", RecordingPopen)
+    main_socket, child_socket = socket.socketpair()
+    _spawn_audio_child(child_socket)
+    main_socket.close()
+    assert {
+        name: launched[0].get(name) for name in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "NIX_LD_LIBRARY_PATH")
+    } == {
+        "LD_LIBRARY_PATH": "/nix/LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH": "/nix/DYLD_LIBRARY_PATH",
+        "NIX_LD_LIBRARY_PATH": "/nix/NIX_LD_LIBRARY_PATH",
+    }
+    assert "OPENAI_API_KEY" not in launched[0]
+
+
+@pytest.mark.asyncio
+async def test_child_close_cancels_a_pending_agent_start_first() -> None:
+    """Close cancels an agent start still in flight, so teardown never waits behind it."""
+    async with child_channel() as channel:
+        bridge = await channel.started()
+        bridge.block_start = True
+        channel.send(
+            {
+                "type": "StartAgent",
+                "id": 7,
+                "model": "gpt-live-1",
+                "api_key": "sk-test",
+                "voice": "marin",
+                "instructions": "be brief",
+            },
+        )
+        await _until(lambda: bridge.options is not None)
+        channel.send({"type": "Close"})
+        assert await channel.recv() == {"type": "Closed"}
+        assert bridge.start_cancelled
+        assert bridge.closed
+
+
 def test_audio_child_imports_without_the_agent_stack() -> None:
     """The child entrypoint itself stays clear of agents, Matrix and the call manager."""
     assert _loaded_agent_stack("mindroom.matrix_rtc.audio_child") == []
@@ -726,3 +883,24 @@ def test_warm_audio_process_replaces_an_idle_child_that_died() -> None:
     main_socket.close()
     assert child is spawned[1]
     assert len(spawned) == 3
+
+
+def test_warm_audio_process_hands_over_the_idle_child_when_its_replacement_fails() -> None:
+    """A call keeps the idle process even when starting the next one fails."""
+    spawned, spawn = _idle_spawner()
+    attempts: list[int] = []
+
+    def flaky_spawn(child_socket: socket.socket) -> IdleProcess:
+        attempts.append(1)
+        if len(attempts) > 1:
+            child_socket.close()
+            msg = "fork failed"
+            raise BlockingIOError(msg)
+        return spawn(child_socket)
+
+    warm = _WarmAudioProcess(flaky_spawn)
+    warm.prewarm()
+    main_socket, child = warm.take()
+    main_socket.close()
+    assert child is spawned[0]
+    assert len(attempts) == 2

@@ -258,7 +258,7 @@ async def preload_matrix_call_dependencies(config: Config) -> None:
         # Call setup counts tokens; building the encoder on the loop would stall call audio.
         await asyncio.to_thread(o200k_encoding)
         if any(config.calls.resolve_agent_config(agent).backend == "live" for agent in config.calls.agents):
-            # The first GPT-Live call would otherwise wait for its audio process to import the agent stack.
+            # The first GPT-Live call would otherwise wait for its audio process to import the LiveKit Agents SDK.
             prewarm_call_audio_process()
     except Exception:
         logger.warning("calls_dependency_preload_failed", exc_info=True)
@@ -934,10 +934,15 @@ class CallManager:
             )
             return "skip"
         # Created first, so the live backend's audio process starts while the slow steps below run.
-        bridge = self._bridge_factory(
-            f"{self._client.user_id}:{device_id}",
-            room.encrypted,
-        )
+        try:
+            bridge = self._bridge_factory(
+                f"{self._client.user_id}:{device_id}",
+                room.encrypted,
+            )
+        except OSError as error:
+            # Starting the audio process can fail while the host is short on processes or memory.
+            logger.warning("call_bridge_start_failed", room_id=room_id, agent=self._agent_name, error=str(error))
+            return "retry"
         session_owns_bridge = False
         try:
             try:

@@ -8,8 +8,8 @@ resolving instructions, running delegations, storing transcripts and usage,
 and closing the delegate. Stalls on the main event loop then delay only those
 steps, never the call audio.
 
-A new audio process spends about 1.5 s importing the agent stack, so one idle
-process is kept started ahead of the next call.
+A new audio process spends about 1.5 s importing the LiveKit Agents SDK, so
+one idle process is kept started ahead of the next call.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.logging_config import current_log_file, get_logger, subprocess_logging_env
-from mindroom.matrix_rtc.audio_protocol import AudioProtocolError, encode_frame, encode_key, read_frame
+from mindroom.logging_config import current_log_file, exception_frames, get_logger, subprocess_logging_env
+from mindroom.matrix_rtc.audio_protocol import encode_frame, encode_key, read_frame
 from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions, LiveVoiceUsage
 
 if TYPE_CHECKING:
@@ -41,6 +41,9 @@ _CHILD_ENV_KEYS = (
     "PATH",
     "HOME",
     "PYTHONPATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "NIX_LD_LIBRARY_PATH",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "HTTP_PROXY",
@@ -120,14 +123,22 @@ class _WarmAudioProcess:
                 return
             self._idle[0].close()
         main_socket, child_socket = socket.socketpair()
-        self._idle = (main_socket, self._spawn(child_socket))
+        try:
+            self._idle = (main_socket, self._spawn(child_socket))
+        except OSError:
+            main_socket.close()
+            child_socket.close()
+            raise
 
     def take(self) -> tuple[socket.socket, _ChildProcess]:
         """Hand the idle process to a call and start the next call's process."""
         self.prewarm()
         assert self._idle is not None
         taken, self._idle = self._idle, None
-        self.prewarm()
+        try:
+            self.prewarm()
+        except OSError:
+            logger.warning("call_audio_prewarm_failed", exc_info=True)
         return taken
 
 
@@ -158,7 +169,7 @@ class ProcessLiveVoiceBridge:
         self._termination_reported = False
         self._responds: dict[int, asyncio.Task[None]] = {}
         self._usage_saves: asyncio.Task[None] | None = None
-        self._unsaved_usage: LiveVoiceUsage | None = None
+        self._unsaved_usage: dict[str, LiveVoiceUsage] = {}
         self._channel = asyncio.get_running_loop().create_task(self._run_channel(main_socket))
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
@@ -208,10 +219,9 @@ class ProcessLiveVoiceBridge:
             await asyncio.wait_for(self._child.wait(), _EXIT_TIMEOUT_S)
         except TimeoutError:
             self._child.kill()
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._channel, _EXIT_TIMEOUT_S)
-        for respond in list(self._responds.values()):
-            respond.cancel()
+        self._cancel_responds()
         await asyncio.gather(*self._responds.values(), return_exceptions=True)
         await self._finish_usage_saves()
         if self._options is not None and self._options.close_responder is not None:
@@ -226,7 +236,7 @@ class ProcessLiveVoiceBridge:
             self._queued.clear()
             while (message := await read_frame(reader)) is not None:
                 self._dispatch(message)
-        except (AudioProtocolError, OSError):
+        except Exception:
             logger.warning("call_audio_channel_failed", exc_info=True)
         finally:
             if self._writer is not None:
@@ -307,7 +317,13 @@ class ProcessLiveVoiceBridge:
         except asyncio.CancelledError:
             return
         except Exception as error:
-            self._send({"type": "RespondError", "req": request, "message": str(error) or type(error).__name__})
+            # The child sees only the type; the main process logs where it failed, without the message.
+            logger.warning(
+                "call_live_delegation_failed",
+                error_type=type(error).__name__,
+                traceback_frames=exception_frames(error),
+            )
+            self._send({"type": "RespondError", "req": request, "message": type(error).__name__})
         else:
             self._send(
                 {
@@ -322,7 +338,7 @@ class ProcessLiveVoiceBridge:
             self._responds.pop(request, None)
 
     async def _save_usage(self, usage: LiveVoiceUsage, previous: asyncio.Task[None] | None) -> None:
-        """Store usage snapshots in order; remember the newest one whose save failed."""
+        """Store usage snapshots in order; remember each provider session's newest failed snapshot."""
         if previous is not None:
             await asyncio.gather(previous, return_exceptions=True)
         options = self._options
@@ -332,17 +348,19 @@ class ProcessLiveVoiceBridge:
             await options.record_usage(usage)
         except Exception:
             logger.warning("call_audio_usage_save_failed", exc_info=True)
-            self._unsaved_usage = usage
+            self._unsaved_usage[usage.provider_session_id] = usage
         else:
-            self._unsaved_usage = None
+            self._unsaved_usage.pop(usage.provider_session_id, None)
 
     async def _finish_usage_saves(self) -> None:
-        """Wait for pending usage saves, then retry the newest snapshot once if its save failed."""
+        """Wait for pending usage saves, then retry each failed provider session's snapshot once."""
         if self._usage_saves is not None:
             await asyncio.gather(self._usage_saves, return_exceptions=True)
-        usage, self._unsaved_usage = self._unsaved_usage, None
+        unsaved, self._unsaved_usage = list(self._unsaved_usage.values()), {}
         options = self._options
-        if usage is not None and options is not None and options.record_usage is not None:
+        if options is None or options.record_usage is None:
+            return
+        for usage in unsaved:
             try:
                 await options.record_usage(usage)
             except Exception:
@@ -356,11 +374,16 @@ class ProcessLiveVoiceBridge:
                 reply.set_exception(RuntimeError("call audio process exited"))
         if self._closing:
             return
-        for respond in list(self._responds.values()):
-            respond.cancel()
+        self._cancel_responds()
         if self._agent_started:
             logger.warning("call_audio_child_exited_unexpectedly")
             self._report_termination(retryable=True)
+
+    def _cancel_responds(self) -> None:
+        """Cancel running delegations; one already cancelling keeps running its cleanup."""
+        for respond in self._responds.values():
+            if not respond.cancelling():
+                respond.cancel()
 
     def _report_termination(self, *, retryable: bool) -> None:
         if self._termination_reported:

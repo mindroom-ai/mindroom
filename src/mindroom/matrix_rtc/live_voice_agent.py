@@ -5,13 +5,11 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-import traceback
 from collections import deque
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import exception_frames, get_logger
 from mindroom.matrix_rtc.spoken_turns import merge_spoken_turns
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
@@ -31,14 +29,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
 _EMPTY_DELEGATION_RESPONSE = "No response is available from the agent for this request."
-
-
-def _exception_frames(error: BaseException) -> list[str]:
-    """Retain stack locations without exception text, source lines, or locals."""
-    return [
-        f"{Path(frame.filename).name}:{frame.lineno} ({frame.name})"
-        for frame in traceback.extract_tb(error.__traceback__)
-    ]
 
 
 def _commentary_chunks(text: str) -> Iterator[str]:
@@ -148,7 +138,7 @@ class _LiveDelegationRunner:
                     "call_live_delegation_failed",
                     delegation_id=delegation.id,
                     error_type=type(error).__name__,
-                    traceback_frames=_exception_frames(error),
+                    traceback_frames=exception_frames(error),
                 )
                 if self._closed or generation != self._generation:
                     return
@@ -188,7 +178,7 @@ class _LiveDelegationRunner:
             logger.warning(
                 "call_live_delegation_delivery_failed",
                 error_type=type(error).__name__,
-                traceback_frames=_exception_frames(error),
+                traceback_frames=exception_frames(error),
             )
 
     def on_reconnected(self) -> None:

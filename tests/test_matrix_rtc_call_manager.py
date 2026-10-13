@@ -5607,6 +5607,25 @@ async def test_join_closes_bridge_when_service_discovery_fails(
 
 
 @pytest.mark.asyncio
+async def test_join_retries_when_the_audio_process_cannot_start(tmp_path: Path) -> None:
+    """A bridge that cannot start its audio process makes the join retry instead of failing silently."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    manager = _manager(client, FakeBridge(), tmp_path)
+
+    def fail_spawn(_identity: str, _e2ee: bool) -> FakeBridge:
+        msg = "fork failed"
+        raise BlockingIOError(msg)
+
+    manager._bridge_factory = fail_spawn
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert ROOM_ID in manager._retry_tasks
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_join_closes_bridge_when_tooling_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
