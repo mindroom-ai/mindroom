@@ -21,7 +21,7 @@ from mindroom.api.credentials_target import (
     save_credentials_for_target,
 )
 from mindroom.spotify_tokens import current_spotify_credentials
-from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -72,11 +72,13 @@ def _ensure_spotify_packages(
 ) -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
     """Lazily import Spotify packages, auto-installing if needed."""
     ensure_tool_deps(["spotipy"], "spotify", runtime_paths)
-    spotipy_module = importlib.import_module("spotipy")
+    with optional_dependency_environment():
+        spotipy_module = importlib.import_module("spotipy")
 
     def spotify_oauth(**kwargs: str) -> _SpotifyOAuthClientProtocol:
         # MindRoom stores the tokens itself; spotipy's default file cache would return its first token for every code.
-        return spotipy_module.SpotifyOAuth(cache_handler=spotipy_module.MemoryCacheHandler(), **kwargs)
+        with optional_dependency_environment():
+            return spotipy_module.SpotifyOAuth(cache_handler=spotipy_module.MemoryCacheHandler(), **kwargs)
 
     return (
         cast("_SpotifyClientFactoryProtocol", spotipy_module.Spotify),

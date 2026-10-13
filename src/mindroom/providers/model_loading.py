@@ -21,7 +21,7 @@ from mindroom.runtime_env_policy import (
     AZURE_OPENAI_ENV_BY_KEY,
     VERTEXAI_CLAUDE_ENV_BY_KEY,
 )
-from mindroom.tool_system.dependencies import ensure_optional_deps
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from agno.models.base import Model
@@ -308,9 +308,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             missing_message="Missing AWS Bedrock dependencies. Install with: pip install 'mindroom[aws_bedrock]'",
         )
         _populate_bedrock_claude_runtime_kwargs(extra_kwargs, runtime_paths)
-        from mindroom.providers.bedrock_claude import MindRoomBedrockClaude  # noqa: PLC0415
+        with optional_dependency_environment():
+            from mindroom.providers.bedrock_claude import MindRoomBedrockClaude  # noqa: PLC0415
 
-        return MindRoomBedrockClaude(id=model_id, **extra_kwargs)
+            return MindRoomBedrockClaude(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "openai":
         from mindroom.providers.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415

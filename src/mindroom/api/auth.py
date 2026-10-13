@@ -29,7 +29,11 @@ from mindroom.matrix.identity import (
     validate_email_to_matrix_mapping,
 )
 from mindroom.origins import normalized_origin
-from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
+from mindroom.tool_system.dependencies import (
+    auto_install_enabled,
+    auto_install_optional_extra_for_import_retry,
+    optional_dependency_environment,
+)
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -260,7 +264,8 @@ def _init_supabase_auth(
         return None
 
     try:
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
     except ModuleNotFoundError:
         disabled_hint = ""
         if not auto_install_enabled(runtime_paths):
@@ -271,9 +276,11 @@ def _init_supabase_auth(
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
             )
             raise ImportError(msg) from None
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
 
-    return cast("_SupabaseClientProtocol", create_client(*credentials))
+    with optional_dependency_environment():
+        return cast("_SupabaseClientProtocol", create_client(*credentials))
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

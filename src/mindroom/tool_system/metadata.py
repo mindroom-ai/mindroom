@@ -735,7 +735,8 @@ def _build_tool_instance(
     )
 
     metadata = TOOL_METADATA[tool_name]
-    tool_class = TOOL_REGISTRY[tool_name]()
+    with optional_dependency_environment():
+        tool_class = TOOL_REGISTRY[tool_name]()
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         metadata,
         runtime_paths,
@@ -783,7 +784,8 @@ def _build_tool_instance(
     )
     include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
 
-    toolkit = cast("Any", tool_class)(**init_kwargs)
+    with optional_dependency_environment():
+        toolkit = cast("Any", tool_class)(**init_kwargs)
     _apply_implicit_toolkit_filters(
         toolkit,
         include_tools=include_tools,
@@ -865,40 +867,39 @@ def get_tool_by_name(
         worker_target=worker_target,
     )
 
-    with optional_dependency_environment():
-        # Pre-check dependencies using find_spec (no side effects) before importing
-        metadata = TOOL_METADATA.get(tool_name)
-        deps = metadata.dependencies if metadata and metadata.dependencies else []
-        if deps:
-            missing = ", ".join(deps)
-            try:
-                installed = ensure_tool_deps(
-                    deps,
-                    tool_name,
-                    runtime_paths,
-                    missing_message=f"Missing dependencies for tool '{tool_name}': {missing}",
-                )
-            except ImportError:
-                logger.warning("tool_dependencies_missing", tool_name=tool_name, missing_dependencies=missing)
-                logger.warning("tool_dependency_install_required", tool_name=tool_name)
-                raise
-            if installed:
-                logger.info("tool_optional_dependencies_auto_installed", tool_name=tool_name)
+    # Pre-check dependencies using find_spec (no side effects) before importing
+    metadata = TOOL_METADATA.get(tool_name)
+    deps = metadata.dependencies if metadata and metadata.dependencies else []
+    if deps:
+        missing = ", ".join(deps)
+        try:
+            installed = ensure_tool_deps(
+                deps,
+                tool_name,
+                runtime_paths,
+                missing_message=f"Missing dependencies for tool '{tool_name}': {missing}",
+            )
+        except ImportError:
+            logger.warning("tool_dependencies_missing", tool_name=tool_name, missing_dependencies=missing)
+            logger.warning("tool_dependency_install_required", tool_name=tool_name)
+            raise
+        if installed:
+            logger.info("tool_optional_dependencies_auto_installed", tool_name=tool_name)
 
+    try:
+        return build()
+    except ImportError as first_error:
+        if not auto_install_optional_extra_for_import_retry(tool_name, runtime_paths):
+            logger.warning("tool_import_failed", tool_name=tool_name, error=str(first_error))
+            logger.warning("tool_dependency_install_required", tool_name=tool_name)
+            raise
+
+        logger.info("auto_installing_tool_optional_dependencies", tool_name=tool_name)
         try:
             return build()
-        except ImportError as first_error:
-            if not auto_install_optional_extra_for_import_retry(tool_name, runtime_paths):
-                logger.warning("tool_import_failed", tool_name=tool_name, error=str(first_error))
-                logger.warning("tool_dependency_install_required", tool_name=tool_name)
-                raise
-
-            logger.info("auto_installing_tool_optional_dependencies", tool_name=tool_name)
-            try:
-                return build()
-            except ImportError as second_error:
-                logger.warning("tool_auto_install_failed", tool_name=tool_name, error=str(second_error))
-                raise second_error from first_error
+        except ImportError as second_error:
+            logger.warning("tool_auto_install_failed", tool_name=tool_name, error=str(second_error))
+            raise second_error from first_error
 
 
 @dataclass(frozen=True)

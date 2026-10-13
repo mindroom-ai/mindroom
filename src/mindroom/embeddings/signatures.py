@@ -94,11 +94,11 @@ def _serialized_sentence_transformers_class() -> Callable[..., Embedder]:
         """Local embedder that admits one thread at a time into torch."""
 
         def get_embedding(self, text: str) -> list[float]:
-            with _LOCAL_EMBEDDING_LOCK:
+            with optional_dependency_environment(), _LOCAL_EMBEDDING_LOCK:
                 return cast("list[float]", super().get_embedding(text))
 
         def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-            with _LOCAL_EMBEDDING_LOCK:
+            with optional_dependency_environment(), _LOCAL_EMBEDDING_LOCK:
                 return cast("tuple[list[float], dict[str, Any] | None]", super().get_embedding_and_usage(text))
 
     return cast("Callable[..., Embedder]", SerializedSentenceTransformerEmbedder)
@@ -111,8 +111,8 @@ def create_sentence_transformers_embedder(
     dimensions: int | None = None,
 ) -> Embedder:
     """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
+    ensure_sentence_transformers_dependencies(runtime_paths)
     with optional_dependency_environment(), _LOCAL_EMBEDDING_LOCK:
-        ensure_sentence_transformers_dependencies(runtime_paths)
         embedder_class = _serialized_sentence_transformers_class()
         kwargs: dict[str, Any] = {"id": model}
         if dimensions is not None:

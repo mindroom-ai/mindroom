@@ -169,18 +169,10 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
 ) -> None:
     """Concurrent index handles should share one expensive local model client."""
     construction_lock = threading.Lock()
-    dependency_checks_active = 0
-    max_dependency_checks_active = 0
     model_constructions = 0
 
     def _ensure(_runtime_paths: object) -> None:
-        nonlocal dependency_checks_active, max_dependency_checks_active
-        with construction_lock:
-            dependency_checks_active += 1
-            max_dependency_checks_active = max(max_dependency_checks_active, dependency_checks_active)
-        time.sleep(0.02)
-        with construction_lock:
-            dependency_checks_active -= 1
+        pass
 
     class DummyEmbedder:
         def __init__(
@@ -218,7 +210,6 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
         )
 
     assert model_constructions == 1
-    assert max_dependency_checks_active == 1
     assert len({id(embedder) for embedder in embedders}) == 8
     assert len({id(embedder.sentence_transformer_client) for embedder in embedders}) == 1
     assert {embedder.dimensions for embedder in embedders} == {384, 768}

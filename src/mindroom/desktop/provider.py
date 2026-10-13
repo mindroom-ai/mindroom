@@ -21,6 +21,7 @@ from mindroom.desktop.accessibility import (
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError, display_for_region, macos_displays
 from mindroom.desktop.input import DESKTOP_SCROLL_DIRECTIONS, normalize_key_chord
+from mindroom.tool_system.dependencies import optional_dependency_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,8 +45,10 @@ def request_macos_desktop_permissions() -> tuple[str, ...]:
     if sys.platform != "darwin":
         return ()
 
-    import ApplicationServices  # noqa: PLC0415
-    import Quartz  # noqa: PLC0415
+    with optional_dependency_environment():
+        import ApplicationServices  # noqa: PLC0415
+    with optional_dependency_environment():
+        import Quartz  # noqa: PLC0415
 
     accessibility_allowed = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[unresolved-attribute]
     if not accessibility_allowed:
@@ -211,7 +214,8 @@ class PyAutoGuiDesktopProvider:
             msg = "jpeg_quality must be between 40 and 95."
             raise ValueError(msg)
         try:
-            import pyautogui  # noqa: PLC0415
+            with optional_dependency_environment():
+                import pyautogui  # noqa: PLC0415
         except ImportError as exc:
             msg = "Desktop bridge support is missing. Install MindRoom with the 'desktop' extra."
             raise DesktopProviderError(msg) from exc
@@ -590,7 +594,8 @@ def _validate_region(region: DesktopRect, *, screen_width: int, screen_height: i
 
 def _capture_macos_primary_screen() -> PillowImage:
     """Capture the primary macOS display without spawning an unbounded child process."""
-    import Quartz  # noqa: PLC0415
+    with optional_dependency_environment():
+        import Quartz  # noqa: PLC0415
 
     if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
@@ -604,7 +609,8 @@ def _capture_macos_primary_screen() -> PillowImage:
 
 def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
     """Capture the one on-screen Core Graphics window matching the revalidated AX target."""
-    import Quartz  # noqa: PLC0415
+    with optional_dependency_environment():
+        import Quartz  # noqa: PLC0415
 
     if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
@@ -622,7 +628,8 @@ def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
 
 def _macos_window_id(process_id: int, region: DesktopRect) -> int:
     """Resolve the exact on-screen window without capturing unrelated pixels."""
-    import Quartz  # noqa: PLC0415
+    with optional_dependency_environment():
+        import Quartz  # noqa: PLC0415
 
     on_screen_only = Quartz.kCGWindowListOptionOnScreenOnly  # ty: ignore[unresolved-attribute]
     exclude_desktop = Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[unresolved-attribute]
@@ -656,7 +663,8 @@ def _macos_window_id(process_id: int, region: DesktopRect) -> int:
 
 def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
     """Decode an in-memory PNG without assuming CGImage byte order or padding."""
-    import AppKit  # noqa: PLC0415
+    with optional_dependency_environment():
+        import AppKit  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
     bitmap = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(cg_image)  # ty: ignore[unresolved-attribute]
@@ -673,7 +681,8 @@ def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
 
 def _type_macos_unicode(text: str, *, before_chunk: Callable[[], None]) -> None:
     """Post layout-independent Unicode keyboard events to the active macOS app after each focus check."""
-    import Quartz  # noqa: PLC0415
+    with optional_dependency_environment():
+        import Quartz  # noqa: PLC0415
 
     for offset in range(0, len(text), _MACOS_UNICODE_CHUNK_LENGTH):
         before_chunk()

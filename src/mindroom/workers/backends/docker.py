@@ -41,7 +41,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
 )
-from mindroom.tool_system.dependencies import ensure_optional_deps
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     resolved_worker_key_scope,
@@ -351,8 +351,9 @@ def _load_docker_client_and_errors(
     if ensure_dependencies:
         ensure_docker_dependencies(runtime_paths)
     try:
-        docker_module = importlib.import_module("docker")
-        docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
+        with optional_dependency_environment():
+            docker_module = importlib.import_module("docker")
+            docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
     except ModuleNotFoundError as exc:
         msg = (
             "The Docker worker backend could not import the Docker SDK. "

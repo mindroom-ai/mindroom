@@ -44,7 +44,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
-from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
@@ -336,7 +336,8 @@ class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
 
     def _copy_supplied_google_credentials(self, credentials: Any) -> GoogleOAuthCredentials:  # noqa: ANN401
         """Copy supported caller credentials into private blocking credentials."""
-        from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
+        with optional_dependency_environment():
+            from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
 
         if type(credentials) is not GoogleOAuthCredentials:
             msg = "Google creds must be an exact google.oauth2.credentials.Credentials instance"
@@ -423,9 +424,9 @@ class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
 
     def _raw_credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
         """Create an unwrapped Google credential adapter from stored token data."""
-        from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
-
         ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
+        with optional_dependency_environment():
+            from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
         client_config = self._oauth_provider.client_config(self._runtime_paths)
         if client_config is None:
             msg = f"{self._oauth_provider.display_name} OAuth client config is missing."

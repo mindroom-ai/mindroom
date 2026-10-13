@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import tomllib
 from contextlib import contextmanager
@@ -28,36 +29,43 @@ if TYPE_CHECKING:
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_ENVIRONMENT_THREAD_LOCK = threading.RLock()
 
 
 class _EnvironmentLockState(threading.local):
     lock_path: Path | None = None
+    exclusive: bool = False
 
 
 _ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
 
 
 @contextmanager
-def optional_dependency_environment() -> Iterator[None]:
-    """Keep optional installs and imports from observing a partially updated environment.
+def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None]:
+    """Coordinate same-user optional imports and installs for one Python environment.
 
-    All runtimes sharing one interpreter use the same cross-process lock.
-    Nested dependency checks reuse the current thread's lock.
+    Imports share the lock; installers own it exclusively. Install before entering
+    an import scope, so no reader attempts a non-atomic upgrade to a write lock.
+    The OS temporary directory also works when HOME or the environment is read-only.
     """
     environment = str(Path(sys.prefix).resolve()).encode()
     key = hashlib.sha256(environment).hexdigest()
-    lock_path = Path.home() / ".cache" / "mindroom" / "optional-dependencies" / f"{key}.lock"
-    with _ENVIRONMENT_THREAD_LOCK:
-        if _ENVIRONMENT_LOCK_STATE.lock_path == lock_path:
+    lock_path = Path(tempfile.gettempdir()) / "mindroom-optional-dependencies" / f"{key}.lock"
+    if _ENVIRONMENT_LOCK_STATE.lock_path == lock_path:
+        if exclusive and not _ENVIRONMENT_LOCK_STATE.exclusive:
+            msg = "Release the optional dependency import scope before installing dependencies."
+            raise RuntimeError(msg)
+        yield
+        return
+    with advisory_file_lock(lock_path, exclusive=exclusive):
+        previous_path = _ENVIRONMENT_LOCK_STATE.lock_path
+        previous_exclusive = _ENVIRONMENT_LOCK_STATE.exclusive
+        _ENVIRONMENT_LOCK_STATE.lock_path = lock_path
+        _ENVIRONMENT_LOCK_STATE.exclusive = exclusive
+        try:
             yield
-            return
-        with advisory_file_lock(lock_path):
-            _ENVIRONMENT_LOCK_STATE.lock_path = lock_path
-            try:
-                yield
-            finally:
-                _ENVIRONMENT_LOCK_STATE.lock_path = None
+        finally:
+            _ENVIRONMENT_LOCK_STATE.lock_path = previous_path
+            _ENVIRONMENT_LOCK_STATE.exclusive = previous_exclusive
 
 
 # Packages where the pip install name differs from the Python import name.
@@ -250,9 +258,9 @@ def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
     Prefers ``uv sync --locked`` when uv.lock is available (exact pinned versions).
     Falls back to ``uv pip install`` or ``pip install`` otherwise.
     """
-    with optional_dependency_environment():
-        if not extras:
-            return False
+    if not extras:
+        return False
+    with optional_dependency_environment(exclusive=True):
         if _is_uv_tool_install():
             current_extras = _get_current_uv_tool_extras()
             merged_by_name = {_normalize_extra_name(extra): extra for extra in current_extras}
@@ -266,13 +274,13 @@ def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
 
 def _auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -> bool:
     """Auto-install an optional extra when supported and enabled."""
+    if not auto_install_enabled(runtime_paths):
+        return False
     with optional_dependency_environment():
-        if not auto_install_enabled(runtime_paths):
-            return False
         resolved_extra_name = _resolve_optional_extra_name(extra_name)
-        if resolved_extra_name is None:
-            return False
-        return _install_optional_extras([resolved_extra_name], quiet=True)
+    if resolved_extra_name is None:
+        return False
+    return _install_optional_extras([resolved_extra_name], quiet=True)
 
 
 def auto_install_optional_extra_for_import_retry(extra_name: str, runtime_paths: RuntimePaths) -> bool:
@@ -291,7 +299,9 @@ def ensure_optional_deps(
     missing_message: str | None = None,
 ) -> bool:
     """Ensure dependencies are installed, auto-installing via optional extra if needed."""
-    if check_deps_installed(dependencies):
+    with optional_dependency_environment():
+        installed = check_deps_installed(dependencies)
+    if installed:
         return False
     if not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
         missing = ", ".join(dependencies)

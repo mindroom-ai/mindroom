@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
 import sys
 import textwrap
+import threading
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -619,6 +622,12 @@ def install(extras, *, quiet):
 
 
 dependencies._install_via_uv_tool = install
+if mode == 'holder':
+    with dependencies.optional_dependency_environment():
+        print('reading', flush=True)
+        assert sys.stdin.readline().strip() == 'publish'
+    print('finished', flush=True)
+    sys.exit(0)
 if mode == 'reader':
     from mindroom.embeddings import signatures
     from mindroom.constants import resolve_primary_runtime_paths
@@ -643,14 +652,26 @@ else:
 """
 
 
+def _dependency_process_line(process: subprocess.Popen[str]) -> str:
+    assert process.stdout is not None
+    lines: queue.Queue[str] = queue.Queue()
+    threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
+    return lines.get(timeout=20).strip()
+
+
 @pytest.mark.parametrize("contender", ["reader", "installer"])
 def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
     """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
-    (tmp_path / "uv-receipt.toml").write_text(
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (environment / "uv-receipt.toml").write_text(
         '[tool]\nrequirements = [{ name = "mindroom", extras = ["website"] }]\n',
     )
     writer = subprocess.Popen(
-        [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(tmp_path), "writer"],
+        [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(environment), "writer"],
+        env={**os.environ, "HOME": str(tmp_path), "TMPDIR": str(scratch)},
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -660,15 +681,16 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
     try:
         assert writer.stdout is not None
         assert writer.stdin is not None
-        assert writer.stdout.readline().strip() == "installing"
+        assert _dependency_process_line(writer) == "installing"
         reader = subprocess.Popen(
-            [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(tmp_path), contender],
+            [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(environment), contender],
+            env={**os.environ, "HOME": str(tmp_path), "TMPDIR": str(scratch)},
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
         assert reader.stdout is not None
-        assert reader.stdout.readline().strip() == "ready"
+        assert _dependency_process_line(reader) == "ready"
         # A contender has reached its dependency operation while the writer's
         # dist-info directory deliberately has no METADATA yet.
         with pytest.raises(subprocess.TimeoutExpired):
@@ -682,7 +704,7 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
         assert reader.returncode == 0, reader_error
         expected = "imported complete metadata" if contender == "reader" else "installed"
         assert expected in reader_output
-        extras = tomllib.loads((tmp_path / "uv-receipt.toml").read_text())["tool"]["requirements"][0]["extras"]
+        extras = tomllib.loads((environment / "uv-receipt.toml").read_text())["tool"]["requirements"][0]["extras"]
         assert set(extras) == (
             {"duckduckgo", "website"} if contender == "reader" else {"browser", "duckduckgo", "website"}
         )
@@ -692,3 +714,70 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
                 if process.poll() is None:
                     process.kill()
                 process.communicate(timeout=20)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows advisory locks do not have a shared mode")
+def test_optional_dependency_imports_run_in_parallel(tmp_path: Path) -> None:
+    """Two processes can build optional runtimes concurrently while installations remain excluded."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        for _ in range(2):
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(tmp_path), "holder"],
+                env={**os.environ, "HOME": str(tmp_path), "TMPDIR": str(scratch)},
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            processes.append(process)
+            assert _dependency_process_line(process) == "reading"
+        for process in processes:
+            assert process.stdin is not None
+            process.stdin.write("publish\n")
+            process.stdin.flush()
+        for process in processes:
+            output, error = process.communicate(timeout=20)
+            assert process.returncode == 0, error
+            assert "finished" in output
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=20)
+
+
+def test_unrelated_tool_constructors_run_in_parallel() -> None:
+    """Deferred tool builds remain concurrent while sharing the dependency read lock."""
+    tool_name = "test_parallel_optional_tool"
+    rendezvous = threading.Barrier(2)
+
+    class DummyToolkit:
+        name = tool_name
+
+        def __init__(self) -> None:
+            rendezvous.wait(timeout=10)
+
+    TOOL_REGISTRY[tool_name] = lambda: DummyToolkit
+    TOOL_METADATA[tool_name] = ToolMetadata(
+        name=tool_name,
+        file_access=ToolFileAccess.NONE,
+        display_name="Parallel Test Tool",
+        description="Temporary constructor concurrency test",
+        category=ToolCategory.DEVELOPMENT,
+        status=ToolStatus.AVAILABLE,
+        setup_type=SetupType.NONE,
+        config_fields=[],
+        dependencies=[],
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tools = list(
+                pool.map(lambda _: get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None), range(2)),
+            )
+        assert all(isinstance(tool, DummyToolkit) for tool in tools)
+    finally:
+        TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
