@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import sys
 import threading
 import time
@@ -381,6 +382,7 @@ def _manager(
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]] | None = None,
+    bridge_factory: Callable[[str, bool], FakeBridge] | None = None,
 ) -> CallManager:
     admission_gate = response_admission_gate or ResponseAdmissionGate()
 
@@ -394,7 +396,7 @@ def _manager(
         client=client,
         runtime_paths=test_runtime_paths(tmp_path),
         ssl_verify=True,
-        bridge_factory=lambda _identity, _e2ee: bridge,
+        bridge_factory=bridge_factory or (lambda _identity, _e2ee: bridge),
         tool_support=tool_support,  # type: ignore[arg-type]
         get_invited_rooms_by_agent=lambda: invited_rooms_by_agent or {},
         clock_ms=clock_ms,
@@ -5582,25 +5584,24 @@ async def test_manager_ownership_warning_requires_live_call_signal(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_join_closes_bridge_when_service_discovery_fails(
+async def test_join_closes_bridge_when_the_session_cannot_be_built(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A bridge created at the start of a join is closed when focus discovery fails."""
+    """A bridge is closed when the call fails before a session owns it, so no audio process is left behind."""
 
-    async def fail_discovery(*_args: object, **_kwargs: object) -> None:
-        message = "offline"
-        raise httpx.ConnectError(message)
+    def fail_session(**_kwargs: object) -> None:
+        msg = "session rejected"
+        raise RuntimeError(msg)
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", fail_discovery)
-    config = _config()
-    config.calls.livekit_service_url = None
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.CallSession", fail_session)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, config)
+    manager = _manager(client, bridge, tmp_path)
 
-    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    with contextlib.suppress(RuntimeError):
+        await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.closed
     await manager.shutdown()
@@ -5611,68 +5612,14 @@ async def test_join_retries_when_the_audio_process_cannot_start(tmp_path: Path) 
     """A bridge that cannot start its audio process makes the join retry instead of failing silently."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    manager = _manager(client, FakeBridge(), tmp_path)
 
     def fail_spawn(_identity: str, _e2ee: bool) -> FakeBridge:
         msg = "fork failed"
         raise BlockingIOError(msg)
 
-    manager._bridge_factory = fail_spawn
+    manager = _manager(client, FakeBridge(), tmp_path, bridge_factory=fail_spawn)
 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert ROOM_ID in manager._retry_tasks
     await manager.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_join_closes_bridge_when_tooling_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A bridge created at the start of a join is closed when the agent tooling cannot be built."""
-
-    async def fail_tools(**_kwargs: object) -> CallAgentTooling:
-        msg = "prompt failed"
-        raise ValueError(msg)
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fail_tools)
-    client = _client()
-    client.room_get_state.return_value = _state_response(_remote_member_event())
-    bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path)
-
-    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
-
-    assert bridge.closed
-    assert bridge.connected_grant is None
-
-
-@pytest.mark.asyncio
-async def test_join_creates_bridge_before_tooling(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The bridge, and with it the call audio process, starts before the slow tooling and origin work."""
-    order: list[str] = []
-
-    async def record_tools(**_kwargs: object) -> CallAgentTooling:
-        order.append("tooling")
-        msg = "stop after recording"
-        raise ValueError(msg)
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", record_tools)
-    client = _client()
-    client.room_get_state.return_value = _state_response(_remote_member_event())
-    bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path)
-
-    def factory(_identity: str, _e2ee: bool) -> FakeBridge:
-        order.append("bridge")
-        return bridge
-
-    manager._bridge_factory = factory
-
-    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
-
-    assert order == ["bridge", "tooling"]

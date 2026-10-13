@@ -308,10 +308,8 @@ class ProcessLiveVoiceBridge:
     async def _respond(self, request: int, prompt: str) -> None:
         """Run one delegation in the main process and answer the child."""
         options = self._options
-        if options is None:
-            self._responds.pop(request, None)
-            self._send({"type": "RespondError", "req": request, "message": "delegation before the agent started"})
-            return
+        # The child delegates only after StartAgent, which is sent after the options are set.
+        assert options is not None
         try:
             response = await options.respond(prompt, options.on_tools_executed)
         except asyncio.CancelledError:
@@ -319,7 +317,7 @@ class ProcessLiveVoiceBridge:
         except Exception as error:
             # The child sees only the type; the main process logs where it failed, without the message.
             logger.warning(
-                "call_live_delegation_failed",
+                "call_audio_delegation_failed",
                 error_type=type(error).__name__,
                 traceback_frames=exception_frames(error),
             )

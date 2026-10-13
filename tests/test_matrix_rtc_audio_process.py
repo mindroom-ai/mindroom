@@ -714,7 +714,7 @@ async def test_failed_delegation_logs_its_real_error_type_in_main() -> None:
             assert child_options is not None
             with pytest.raises(RuntimeError, match="PermissionError"):
                 await child_options.respond("denied", None)
-    failures = [call for call in warning.call_args_list if call.args == ("call_live_delegation_failed",)]
+    failures = [call for call in warning.call_args_list if call.args == ("call_audio_delegation_failed",)]
     assert len(failures) == 1
     assert failures[0].kwargs["error_type"] == "PermissionError"
     assert "caller lost access" not in str(failures[0].kwargs)
@@ -888,12 +888,11 @@ def test_warm_audio_process_replaces_an_idle_child_that_died() -> None:
 def test_warm_audio_process_hands_over_the_idle_child_when_its_replacement_fails() -> None:
     """A call keeps the idle process even when starting the next one fails."""
     spawned, spawn = _idle_spawner()
-    attempts: list[int] = []
+    failed_sockets: list[socket.socket] = []
 
     def flaky_spawn(child_socket: socket.socket) -> IdleProcess:
-        attempts.append(1)
-        if len(attempts) > 1:
-            child_socket.close()
+        if spawned:
+            failed_sockets.append(child_socket)
             msg = "fork failed"
             raise BlockingIOError(msg)
         return spawn(child_socket)
@@ -903,4 +902,5 @@ def test_warm_audio_process_hands_over_the_idle_child_when_its_replacement_fails
     main_socket, child = warm.take()
     main_socket.close()
     assert child is spawned[0]
-    assert len(attempts) == 2
+    # The failed spawn's socketpair is closed, not leaked.
+    assert [sock.fileno() for sock in failed_sockets] == [-1]
