@@ -57,7 +57,8 @@ def confirm(message: str, *, default: bool) -> bool:
     if _arrow_keys_work():
         import questionary  # noqa: PLC0415  # lazy: prompt_toolkit loads only for prompts
 
-        return _ask(questionary.confirm(message, default=default)) is True
+        # Like a line prompt, an answer waits for Enter; otherwise the Enter typed after `y` answers the next question.
+        return _ask(questionary.confirm(message, default=default, auto_enter=False)) is True
     return typer.confirm(message, default=default)
 
 

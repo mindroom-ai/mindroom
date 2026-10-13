@@ -60,12 +60,20 @@ def test_secret_returns_empty_text_on_enter(keys: Callable[[str], None]) -> None
     assert interactive.secret("API key") == ""
 
 
-@pytest.mark.parametrize(("typed", "expected"), [("n", False), ("y", True), (_ENTER, True)])
+@pytest.mark.parametrize(("typed", "expected"), [("n" + _ENTER, False), ("y" + _ENTER, True), (_ENTER, True)])
 def test_confirm_reads_yes_no_and_the_default(keys: Callable[[str], None], typed: str, expected: bool) -> None:
-    """A key answers the question directly, and Enter takes the default."""
+    """An answer is confirmed with Enter, as in a line prompt, and Enter alone takes the default."""
     keys(typed)
 
     assert interactive.confirm("Continue?", default=True) is expected
+
+
+def test_confirm_keeps_the_enter_after_its_answer(keys: Callable[[str], None]) -> None:
+    """The Enter typed after `y` must not answer the next question, such as whether to install a login service."""
+    keys("y" + _ENTER + "n" + _ENTER)
+
+    assert interactive.confirm("Is this your account?", default=True) is True
+    assert interactive.confirm("Run MindRoom in the background?", default=True) is False
 
 
 @pytest.mark.parametrize(

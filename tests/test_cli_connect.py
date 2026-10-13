@@ -879,8 +879,9 @@ def test_pair_local_install_in_a_terminal_shows_each_renewed_code(
     assert output.count("Or enter the code in MindRoom Chat") == 2
 
 
-def test_terminal_qr_code_has_fixed_colors_without_a_strip_below() -> None:
+def test_terminal_qr_code_has_fixed_colors_without_a_strip_below(monkeypatch: pytest.MonkeyPatch) -> None:
     """White-on-black modules scan in light themes too, and the last half-block row keeps the terminal background."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
     console = Console(file=io.StringIO(), color_system="truecolor", width=120)
     session = cli_connect.DevicePairSession(
         pair_code="ABCD-EFGH",
@@ -898,6 +899,20 @@ def test_terminal_qr_code_has_fixed_colors_without_a_strip_below() -> None:
     assert all(black_background in line for line in qr_lines[:-1])
     assert black_background not in qr_lines[-1]
     assert "\x1b[38;2;255;255;255m▀" in qr_lines[-1]
+
+
+def test_pair_local_install_in_a_dumb_terminal_prints_plain_lines_with_qr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dumb terminal, such as an Emacs shell buffer, cannot draw the spinner but still shows the QR code."""
+    monkeypatch.setenv("TERM", "dumb")
+    output = _pairing_output(tmp_path, Console(file=_TerminalBuffer()))
+
+    assert "  https://chat.example/connect?code=ABCD-EFGH\n" in output
+    assert "Waiting for approval (Ctrl+C to cancel)…" in output
+    assert "▀" in output
+    assert "Connect to MindRoom Chat" not in output
 
 
 @pytest.mark.parametrize("force_terminal", [False, True])

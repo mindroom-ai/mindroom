@@ -544,9 +544,11 @@ def _pairing_display(console: Console) -> Iterator[Callable[[DevicePairSession],
 
     Anywhere else it prints plain lines, which logs keep and the macOS app reads the link from.
     `FORCE_COLOR` makes Rich treat pipes as terminals, so the output must also be a TTY, and not a dumb one.
+    A dumb TTY, such as an Emacs shell buffer, cannot draw the spinner but still gets the QR code.
     """
-    if not (console.is_interactive and console.file.isatty()):
-        yield partial(_print_plain_pairing_request, console)
+    tty = console.is_terminal and console.file.isatty()
+    if not (tty and console.is_interactive):
+        yield partial(_print_plain_pairing_request, console, with_qr=tty)
         return
     console.print(section("Connect to MindRoom Chat"))
     with console.status("Requesting a pair code…") as waiting:
@@ -560,12 +562,14 @@ def _pairing_display(console: Console) -> Iterator[Callable[[DevicePairSession],
         yield show_pair_code
 
 
-def _print_plain_pairing_request(console: Console, session: DevicePairSession) -> None:
+def _print_plain_pairing_request(console: Console, session: DevicePairSession, *, with_qr: bool) -> None:
     """Print the approval link on its own line with the pair code, for logs and the macOS app."""
     console.print("\nConnect this machine to MindRoom:")
     console.print(f"  {session.approve_url}", markup=False, soft_wrap=True)
     console.print(f"  or enter code {session.pair_code} in {_LOCAL_MINDROOM_SETTINGS}", markup=False)
     console.print(f"  Approve only if the page shows code {session.pair_code}", markup=False)
+    if with_qr:
+        console.print(render_qr(session.approve_url), markup=False, highlight=False)
     console.print("Waiting for approval (Ctrl+C to cancel)…")
 
 
