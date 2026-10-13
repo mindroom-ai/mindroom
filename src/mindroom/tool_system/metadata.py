@@ -27,7 +27,11 @@ from mindroom.tool_system.declarations import (
     ToolMetadata,
     ToolValidationInfo,
 )
-from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
+from mindroom.tool_system.dependencies import (
+    auto_install_optional_extra_for_import_retry,
+    ensure_tool_deps,
+    optional_dependency_environment,
+)
 from mindroom.tool_system.legacy_tool_overrides import retired_tool_override
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
@@ -861,39 +865,40 @@ def get_tool_by_name(
         worker_target=worker_target,
     )
 
-    # Pre-check dependencies using find_spec (no side effects) before importing
-    metadata = TOOL_METADATA.get(tool_name)
-    deps = metadata.dependencies if metadata and metadata.dependencies else []
-    if deps:
-        missing = ", ".join(deps)
-        try:
-            installed = ensure_tool_deps(
-                deps,
-                tool_name,
-                runtime_paths,
-                missing_message=f"Missing dependencies for tool '{tool_name}': {missing}",
-            )
-        except ImportError:
-            logger.warning("tool_dependencies_missing", tool_name=tool_name, missing_dependencies=missing)
-            logger.warning("tool_dependency_install_required", tool_name=tool_name)
-            raise
-        if installed:
-            logger.info("tool_optional_dependencies_auto_installed", tool_name=tool_name)
+    with optional_dependency_environment():
+        # Pre-check dependencies using find_spec (no side effects) before importing
+        metadata = TOOL_METADATA.get(tool_name)
+        deps = metadata.dependencies if metadata and metadata.dependencies else []
+        if deps:
+            missing = ", ".join(deps)
+            try:
+                installed = ensure_tool_deps(
+                    deps,
+                    tool_name,
+                    runtime_paths,
+                    missing_message=f"Missing dependencies for tool '{tool_name}': {missing}",
+                )
+            except ImportError:
+                logger.warning("tool_dependencies_missing", tool_name=tool_name, missing_dependencies=missing)
+                logger.warning("tool_dependency_install_required", tool_name=tool_name)
+                raise
+            if installed:
+                logger.info("tool_optional_dependencies_auto_installed", tool_name=tool_name)
 
-    try:
-        return build()
-    except ImportError as first_error:
-        if not auto_install_optional_extra_for_import_retry(tool_name, runtime_paths):
-            logger.warning("tool_import_failed", tool_name=tool_name, error=str(first_error))
-            logger.warning("tool_dependency_install_required", tool_name=tool_name)
-            raise
-
-        logger.info("auto_installing_tool_optional_dependencies", tool_name=tool_name)
         try:
             return build()
-        except ImportError as second_error:
-            logger.warning("tool_auto_install_failed", tool_name=tool_name, error=str(second_error))
-            raise second_error from first_error
+        except ImportError as first_error:
+            if not auto_install_optional_extra_for_import_retry(tool_name, runtime_paths):
+                logger.warning("tool_import_failed", tool_name=tool_name, error=str(first_error))
+                logger.warning("tool_dependency_install_required", tool_name=tool_name)
+                raise
+
+            logger.info("auto_installing_tool_optional_dependencies", tool_name=tool_name)
+            try:
+                return build()
+            except ImportError as second_error:
+                logger.warning("tool_auto_install_failed", tool_name=tool_name, error=str(second_error))
+                raise second_error from first_error
 
 
 @dataclass(frozen=True)

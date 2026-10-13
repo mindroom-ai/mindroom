@@ -588,3 +588,107 @@ def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: p
     assert _install_optional_extras(["wikipedia"], quiet=True)
     assert calls["sync"] == 0
     assert calls["env"] == 1
+
+
+_DEPENDENCY_PROCESS_SCRIPT = """
+import importlib.metadata
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+from mindroom.tool_system import dependencies
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+sys.prefix = str(root)
+sys.path.insert(0, str(root))
+receipt = root / 'uv-receipt.toml'
+info = root / 'transient_embedding-1.dist-info'
+
+
+def install(extras, *, quiet):
+    if mode == 'writer':
+        info.mkdir()
+        (info / 'top_level.txt').write_text('transient_embedding\\n')
+        print('installing', flush=True)
+        assert sys.stdin.readline().strip() == 'publish'
+        (info / 'METADATA').write_text('Metadata-Version: 2.1\\nName: transient-embedding\\nVersion: 1\\n')
+    receipt.write_text('[tool]\\nrequirements = [{ name = "mindroom", extras = ' + json.dumps(extras) + ' }]\\n')
+    return True
+
+
+dependencies._install_via_uv_tool = install
+if mode == 'reader':
+    from mindroom.embeddings import signatures
+    from mindroom.constants import resolve_primary_runtime_paths
+
+    class Embedder:
+        def __init__(self, **kwargs):
+            for name in importlib.metadata.packages_distributions()['transient_embedding']:
+                assert importlib.metadata.version(name) == '1'
+            self.sentence_transformer_client = object()
+
+    signatures.ensure_sentence_transformers_dependencies = lambda paths: None
+    signatures._serialized_sentence_transformers_class = lambda: Embedder
+    paths = resolve_primary_runtime_paths(config_path=root / 'other-runtime' / 'config.yaml', process_env={})
+    print('ready', flush=True)
+    signatures.create_sentence_transformers_embedder(paths)
+    print('imported complete metadata', flush=True)
+else:
+    if mode != 'writer':
+        print('ready', flush=True)
+    assert dependencies._install_optional_extras(['duckduckgo' if mode == 'writer' else 'browser'], quiet=True)
+    print('installed', flush=True)
+"""
+
+
+@pytest.mark.parametrize("contender", ["reader", "installer"])
+def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
+    """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
+    (tmp_path / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "mindroom", extras = ["website"] }]\n',
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(tmp_path), "writer"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    reader: subprocess.Popen[str] | None = None
+    try:
+        assert writer.stdout is not None
+        assert writer.stdin is not None
+        assert writer.stdout.readline().strip() == "installing"
+        reader = subprocess.Popen(
+            [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(tmp_path), contender],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert reader.stdout is not None
+        assert reader.stdout.readline().strip() == "ready"
+        # A contender has reached its dependency operation while the writer's
+        # dist-info directory deliberately has no METADATA yet.
+        with pytest.raises(subprocess.TimeoutExpired):
+            reader.wait(timeout=0.3)
+        writer.stdin.write("publish\n")
+        writer.stdin.flush()
+        writer_output, writer_error = writer.communicate(timeout=20)
+        assert writer.returncode == 0, writer_error
+        assert "installed" in writer_output
+        reader_output, reader_error = reader.communicate(timeout=20)
+        assert reader.returncode == 0, reader_error
+        expected = "imported complete metadata" if contender == "reader" else "installed"
+        assert expected in reader_output
+        extras = tomllib.loads((tmp_path / "uv-receipt.toml").read_text())["tool"]["requirements"][0]["extras"]
+        assert set(extras) == (
+            {"duckduckgo", "website"} if contender == "reader" else {"browser", "duckduckgo", "website"}
+        )
+    finally:
+        for process in (writer, reader):
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=20)

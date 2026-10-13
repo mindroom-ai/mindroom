@@ -4827,7 +4827,7 @@ visibility = ["mindroom.cli.plugins"]
 
 [[modules]]
 path = "mindroom.tool_system.dependencies"
-depends_on = []
+depends_on = ["mindroom.file_locks"]
 
 [[modules]]
 path = "mindroom.tool_system.output_files"
@@ -6268,6 +6268,7 @@ expose = [
     "ensure_optional_deps",
     "ensure_tool_deps",
     "install_command_for_current_python",
+    "optional_dependency_environment",
 ]
 from = ["mindroom.tool_system.dependencies"]
 

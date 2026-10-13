@@ -7,7 +7,7 @@ import threading
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS, SENTENCE_TRANSFORMERS_DEFAULT
-from mindroom.tool_system.dependencies import ensure_optional_deps
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -111,7 +111,7 @@ def create_sentence_transformers_embedder(
     dimensions: int | None = None,
 ) -> Embedder:
     """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
-    with _LOCAL_EMBEDDING_LOCK:
+    with optional_dependency_environment(), _LOCAL_EMBEDDING_LOCK:
         ensure_sentence_transformers_dependencies(runtime_paths)
         embedder_class = _serialized_sentence_transformers_class()
         kwargs: dict[str, Any] = {"id": model}

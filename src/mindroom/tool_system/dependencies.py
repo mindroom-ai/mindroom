@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.metadata as importlib_metadata
 import importlib.util
@@ -9,19 +10,55 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import tomllib
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.constants import RuntimePaths
 
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_ENVIRONMENT_THREAD_LOCK = threading.RLock()
+
+
+class _EnvironmentLockState(threading.local):
+    lock_path: Path | None = None
+
+
+_ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
+
+
+@contextmanager
+def optional_dependency_environment() -> Iterator[None]:
+    """Keep optional installs and imports from observing a partially updated environment.
+
+    All runtimes sharing one interpreter use the same cross-process lock.
+    Nested dependency checks reuse the current thread's lock.
+    """
+    environment = str(Path(sys.prefix).resolve()).encode()
+    key = hashlib.sha256(environment).hexdigest()
+    lock_path = Path.home() / ".cache" / "mindroom" / "optional-dependencies" / f"{key}.lock"
+    with _ENVIRONMENT_THREAD_LOCK:
+        if _ENVIRONMENT_LOCK_STATE.lock_path == lock_path:
+            yield
+            return
+        with advisory_file_lock(lock_path):
+            _ENVIRONMENT_LOCK_STATE.lock_path = lock_path
+            try:
+                yield
+            finally:
+                _ENVIRONMENT_LOCK_STATE.lock_path = None
+
 
 # Packages where the pip install name differs from the Python import name.
 # Only includes cases where replacing dashes with underscores is insufficient.
@@ -213,27 +250,29 @@ def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
     Prefers ``uv sync --locked`` when uv.lock is available (exact pinned versions).
     Falls back to ``uv pip install`` or ``pip install`` otherwise.
     """
-    if not extras:
-        return False
-    if _is_uv_tool_install():
-        current_extras = _get_current_uv_tool_extras()
-        merged_by_name = {_normalize_extra_name(extra): extra for extra in current_extras}
-        merged_by_name.update({_normalize_extra_name(extra): extra for extra in extras})
-        merged = sorted(merged_by_name.values())
-        return _install_via_uv_tool(merged, quiet=quiet)
-    if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
-        return _install_via_uv_sync(extras, quiet=quiet)
-    return _install_in_environment(extras, quiet=quiet)
+    with optional_dependency_environment():
+        if not extras:
+            return False
+        if _is_uv_tool_install():
+            current_extras = _get_current_uv_tool_extras()
+            merged_by_name = {_normalize_extra_name(extra): extra for extra in current_extras}
+            merged_by_name.update({_normalize_extra_name(extra): extra for extra in extras})
+            merged = sorted(merged_by_name.values())
+            return _install_via_uv_tool(merged, quiet=quiet)
+        if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
+            return _install_via_uv_sync(extras, quiet=quiet)
+        return _install_in_environment(extras, quiet=quiet)
 
 
 def _auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -> bool:
     """Auto-install an optional extra when supported and enabled."""
-    if not auto_install_enabled(runtime_paths):
-        return False
-    resolved_extra_name = _resolve_optional_extra_name(extra_name)
-    if resolved_extra_name is None:
-        return False
-    return _install_optional_extras([resolved_extra_name], quiet=True)
+    with optional_dependency_environment():
+        if not auto_install_enabled(runtime_paths):
+            return False
+        resolved_extra_name = _resolve_optional_extra_name(extra_name)
+        if resolved_extra_name is None:
+            return False
+        return _install_optional_extras([resolved_extra_name], quiet=True)
 
 
 def auto_install_optional_extra_for_import_retry(extra_name: str, runtime_paths: RuntimePaths) -> bool:
