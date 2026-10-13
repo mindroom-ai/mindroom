@@ -45,7 +45,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
-from mindroom.config.calls import RealtimeCallProfile
+from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.matrix import EventJournalConfig
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -2750,18 +2750,26 @@ class TestMultiAgentOrchestrator:
     ) -> None:
         """Load the owned config, prepare optional call SDKs, and freeze the startup heap before creating bots."""
         config_path = tmp_path / "custom-config.yaml"
-        mock_config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-        mock_config.calls.enabled = calls_enabled
         # A realtime call agent runs LiveKit in this process, so startup loads its plugins.
-        mock_config.calls.profiles = {
-            "realtime": RealtimeCallProfile(
-                backend="realtime",
-                model="gpt-realtime-2.1",
-                credentials_service="openai",
-                voice="marin",
+        mock_config = _runtime_bound_config(
+            Config(
+                agents={"caller": AgentConfig(display_name="Caller", role="Voice agent")},
+                router=RouterConfig(model="default"),
+                calls=CallsConfig(
+                    enabled=calls_enabled,
+                    profiles={
+                        "realtime": RealtimeCallProfile(
+                            backend="realtime",
+                            model="gpt-realtime-2.1",
+                            credentials_service="openai",
+                            voice="marin",
+                        ),
+                    },
+                    agents={"caller": "realtime"},
+                ),
             ),
-        }
-        mock_config.calls.agents = {ROUTER_AGENT_NAME: "realtime"}
+            tmp_path,
+        )
         call_import_threads: list[threading.Thread] = []
         original_import = builtins.__import__
 
@@ -2796,6 +2804,12 @@ class TestMultiAgentOrchestrator:
                             display_name="Router",
                             password=TEST_PASSWORD,
                         ),
+                        "caller": AgentMatrixUser(
+                            agent_name="caller",
+                            user_id="@mindroom_caller:localhost",
+                            display_name="Caller",
+                            password=TEST_PASSWORD,
+                        ),
                     },
                 ),
             ),
@@ -2818,7 +2832,7 @@ class TestMultiAgentOrchestrator:
             await orchestrator.initialize()
 
         mock_load_config.assert_called_once()
-        create_managed_bot.assert_called_once()
+        assert create_managed_bot.call_count == 2
         assert any(log["event"] == "calls_dependency_preload_failed" for log in logs) is (import_error is not None)
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
