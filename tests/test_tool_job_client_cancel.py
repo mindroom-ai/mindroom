@@ -172,8 +172,9 @@ async def _command(
     *,
     thread: str | None = "$thread",
     agent: AgentConfig | None = None,
+    sender: str = "@alice:test",
 ) -> str:
-    """Run one chat command as alice in the conversation, and return the reply it sent."""
+    """Run one chat command in the conversation, as alice unless another sender is named, and return its reply."""
     config = Config(
         agents={"agent_a": agent or AgentConfig(display_name="Agent A")},
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
@@ -192,13 +193,13 @@ async def _command(
     )
     command = command_parser.parse(text)
     assert command is not None
-    event = SimpleNamespace(sender="@alice:test", event_id="$command", body=text, source={"content": {"body": text}})
+    event = SimpleNamespace(sender=sender, event_id="$command", body=text, source={"content": {"body": text}})
     await handle_command(
         context=context,
         room=nio.MatrixRoom(room_id="!room:test", own_user_id="@mindroom_router:test"),
         event=event,
         command=command,
-        requester_user_id="@alice:test",
+        requester_user_id=sender,
     )
     return send_response.await_args.args[0]
 
@@ -319,6 +320,20 @@ def test_another_agent_never_may_cancel(tmp_path: Path) -> None:
     assert person_may_cancel("@alice:test", config=config, runtime_paths=paths, **allowed)
     assert not person_may_cancel(agent_id, config=config, runtime_paths=paths, **allowed)
     assert not person_may_cancel("@alice:test", config=config, runtime_paths=paths, may_talk=lambda _sender: False)
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_command_refuses_an_agents_account(tmp_path: Path) -> None:
+    """An agent that posts `!cancel_job` itself stops no job, as with the jobs bar's cancel events."""
+    runtime = await _command_runtime(tmp_path)
+    paths = _runtime_paths(tmp_path)
+    agent_id = MatrixID.from_username(agent_username_localpart("agent_a", paths), runtime_matrix_domain(paths)).full_id
+    try:
+        await _start(runtime, "job_a")
+        await _command(tmp_path, "!cancel_job all", sender=agent_id)
+        assert _status(runtime, "job_a") == "running"
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

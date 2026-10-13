@@ -399,8 +399,9 @@ class ToolJobRuntimeCoordinator:
             key = (entity, source)
             if key not in finished:
                 record = await journal.turn_records(entity).load(source)
-                if record is not None:
-                    finished[key] = record.completed
+                if record is not None and record.completed:
+                    finished[key] = True
+                # A turn that ended unanswered, as when its request was deleted, finished once its source settled.
                 elif (bot := self.bot_provider(entity)) is not None:
                     principal = bot.journal_principal()
                     admitted = await principal.load_event(source)

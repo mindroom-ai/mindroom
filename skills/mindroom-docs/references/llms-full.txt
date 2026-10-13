@@ -12612,7 +12612,7 @@ A job with no useful output still needs acknowledging; a cancelled job needs non
 A reply that starts after jobs ended is told the same way when it begins.
 Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
-Cancelled jobs and a silent schedule's jobs get no follow-up; the next reply hears of them, and a silent schedule's next run reports its own work.
+Cancelled jobs and a silent schedule's jobs get no follow-up; the next reply hears of cancelled jobs, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
 Another requester's reply in a shared room never hears of these results.
 A job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own.

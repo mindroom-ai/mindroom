@@ -21,7 +21,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 ## Invariant purposes
 
 - Execution lifetime is independent of any caller's wait, so a released wait never stops work.
-- Each outcome has one active result claim, and only the parent run's saved tool call acknowledges it, so a result is read once and a reply that fails before saving leaves it to be reported again.
+- Each outcome has one active result claim, and only the parent run's saved tool call acknowledges it, so a result is read once and a reply that fails before saving leaves it to be reported again; a cancellation, which has no result to read, is acknowledged when a notice names it.
 - Cancellation is saved before cleanup and stays pending until owned work settles, so a crash during cleanup still reports the job cancelled.
   Only work that a shutdown, restart, or event-loop teardown cut short is interrupted, and a child settlement saved before a crash stands.
 - Cancelling or restarting a job that waits for approval denies its open cards, so no card outlives the call it would approve.
@@ -30,6 +30,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Revocation stops execution through internal ownership although discovery and control are no longer authorized, so losing access never leaves work running unseen.
   A config reload keeps active jobs, and controls and result reads check current authorization.
 - A follow-up is named by its conversation and the set of jobs it reports, so admitting it again changes nothing.
+- An ended job is deleted only once the turn that started it has finished, answered or not, and no approval in its session is pending, so a deleted job's call can never run again.
 - A starting process takes the saved jobs over before dispatch starts, and the journal refuses every later write of the runtime it replaced, so two processes never write one job.
 - A reply that a process stop cuts short continues in place by journal replay, below what the stopped attempt showed, with an account that names the finished calls it must not repeat (see [Bot Runtime](bot-runtime.md)).
   A detached job start is such a finished call, and its result names the job ID.
@@ -50,6 +51,7 @@ Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
 A notice reaches only a model step after a tool batch; a reply that ends without another tool call leaves the job to its follow-up.
 A follow-up in a session switched to minimal mode runs and reports results it cannot acknowledge, so a later standard reply may report them again.
+A follow-up whose turn ends without collecting its jobs is not admitted again in the same process; they wait for the next reply's note.
 A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.

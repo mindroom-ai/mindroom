@@ -50,6 +50,7 @@ from mindroom.tool_jobs.client_cancel import (
     cancel_jobs_command,
     conversation_jobs,
     jobs_listing,
+    person_may_cancel,
 )
 from mindroom.tool_jobs.runtime import get_background_runtime
 
@@ -117,14 +118,18 @@ async def _background_jobs_command(
         return jobs_listing(conversation_jobs(runtime, room_id=room.room_id, thread_id=thread_id))
 
     def may_cancel(job: BackgroundJob) -> bool:
-        # Whoever may talk to the job's entity here may stop its work, as with 🛑.
-        return is_sender_allowed_for_entity_replies_in_room(
+        return person_may_cancel(
             requester_user_id,
-            [job.owner.recipient],
-            context.config,
-            room.room_id,
-            context.runtime_paths,
-            context.agent_reply_memberships,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            may_talk=lambda sender: is_sender_allowed_for_entity_replies_in_room(
+                sender,
+                [job.owner.recipient],
+                context.config,
+                room.room_id,
+                context.runtime_paths,
+                context.agent_reply_memberships,
+            ),
         )
 
     return await cancel_jobs_command(

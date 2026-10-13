@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 
@@ -40,15 +40,21 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("source_completed", "approval"), [(False, False), (True, True), (True, False)])
+@pytest.mark.parametrize(
+    ("source", "approval"),
+    [("pending", False), ("answered", True), ("answered", False), ("ended unanswered", False)],
+)
 @pytest.mark.parametrize("source_pruned", [False, True])
 async def test_retention_preserves_pending_turns_and_conversation_approvals(
     tmp_path: Path,
-    source_completed: bool,
+    source: Literal["pending", "answered", "ended unanswered"],
     approval: bool,
     source_pruned: bool,
 ) -> None:
-    """An old consumed job is deleted only once the turn that started it finished and no approval is pending."""
+    """An old consumed job is deleted only once the turn that started it finished and no approval is pending.
+
+    A turn that ended without an answer, as when its request is deleted, has finished too.
+    """
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     paths = bot.runtime_paths
@@ -81,7 +87,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     await runtime.acknowledge_wait("old", waited.claim)
     entry = runtime._entries["old"]
     entry.job = replace(entry.job, updated_at=(datetime.now(UTC) - timedelta(days=31)).isoformat())
-    record = TurnRecord.create(("$original",), anchor_event_id="$original", completed=source_completed)
+    record = TurnRecord.create(("$original",), anchor_event_id="$original", completed=source == "answered")
     principal = bot.journal_principal()
     await principal.admit(
         InboundEvent(
@@ -96,7 +102,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         ),
         None,
     )
-    if source_completed:
+    if source != "pending":
         await principal.settle("$original")
     await bot._journal_store.turn_records("general").upsert(
         index_event_ids=record.indexed_event_ids,
@@ -138,7 +144,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         assert await paused_for_approval(principal, continuation) is not None
     try:
         await coordinator._expire_ended_jobs()
-        expired = source_completed and not approval
+        expired = source != "pending" and not approval
         assert ("old" in runtime._entries) is not expired
         assert ("old" in await saved_jobs(bot.storage_path)) is not expired
         assert await saved_payload(bot.storage_path, "old") == (None if expired else {"value": "saved result"})
