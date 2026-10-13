@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -40,6 +43,7 @@ from mindroom.model_defaults import (
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
+from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
 
 
@@ -758,6 +762,51 @@ class TestMemoryConfig:
         assert result is expected_memory
         mock_ensure_sentence_transformers_dependencies.assert_called_once_with(_runtime_paths(tmp_path))
         mock_from_config.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.memory.config.ensure_sentence_transformers_dependencies")
+    @patch.object(AsyncMemory, "from_config")
+    async def test_create_memory_instance_waits_for_installs_off_event_loop(
+        self,
+        mock_from_config: MagicMock,
+        mock_ensure_sentence_transformers_dependencies: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A local-embedder Mem0 instance waits for a running install without stalling the event loop."""
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="sentence_transformers",
+                config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
+            ),
+            llm=None,
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        mock_from_config.return_value = SimpleNamespace(vector_store=object())
+        install_running = threading.Event()
+        finish_install = threading.Event()
+
+        def run_install() -> None:
+            with optional_dependency_environment(exclusive=True):
+                install_running.set()
+                finish_install.wait(5)
+
+        installer = threading.Thread(target=run_install)
+        installer.start()
+        try:
+            assert install_running.wait(5)
+            creation = asyncio.create_task(
+                create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path)),
+            )
+            # A blocked event loop would only get past this sleep after the install finished.
+            await asyncio.sleep(0.2)
+            assert not creation.done()
+        finally:
+            finish_install.set()
+            installer.join(5)
+        assert await creation is mock_from_config.return_value
+        mock_ensure_sentence_transformers_dependencies.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_memory_instance_replaces_mem0_openai_embedder_with_strict_adapter(

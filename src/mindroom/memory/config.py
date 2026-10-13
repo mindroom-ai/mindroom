@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -268,8 +269,12 @@ async def create_memory_instance(
         ensure_sentence_transformers_dependencies(runtime_paths)
     if config_dict["embedder"]["provider"] == "huggingface":
         # Mem0's huggingface embedder builds its own SentenceTransformer, which imports optional local packages.
-        with optional_dependency_environment():
-            memory = AsyncMemory.from_config(config_dict)
+        # Wait for a running install in a worker thread so the event loop keeps serving other tasks.
+        def from_config_in_import_scope() -> AsyncMemory:
+            with optional_dependency_environment():
+                return AsyncMemory.from_config(config_dict)
+
+        memory = await asyncio.to_thread(from_config_in_import_scope)
     else:
         memory = AsyncMemory.from_config(config_dict)
     memory_llm = config.memory.llm
