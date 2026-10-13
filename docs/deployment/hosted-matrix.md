@@ -84,7 +84,7 @@ Add `--force` to pair again without asking.
 ### Self-hosted homeservers
 
 Pairing is only for hosted `mindroom.chat` or your own provisioning service.
-When neither `MINDROOM_PROVISIONING_URL` nor `--provisioning-url` is set and `MATRIX_HOMESERVER` is not `https://mindroom.chat`, `connect` refuses without contacting anything or writing files.
+When neither `MINDROOM_PROVISIONING_URL` nor `--provisioning-url` is set and `MATRIX_HOMESERVER` explicitly selects a non-hosted homeserver, `connect` refuses without contacting anything or writing files.
 With no homeserver configured, `connect` pairs with MindRoom Chat.
 Self-hosted servers without a provisioning service register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead (see [Configuration](../configuration/index.md)).
 
