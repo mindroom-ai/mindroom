@@ -59,6 +59,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `teams` | Multi-agent collaboration | [Teams](teams.md) |
 | `router` | Message routing | [Router](router.md) |
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](agents.md#defaults) |
+| `agent_repositories` | GitHub organization and prefix for agent-owned repositories | [`agent_repository`](../tools/execution-and-coding.md#agent_repository) |
 | `memory` | Memory backends and embedder | [Memory](../memory.md) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](../knowledge.md) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](../mcp.md) |

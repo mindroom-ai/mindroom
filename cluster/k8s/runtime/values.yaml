@@ -291,6 +291,18 @@ providerCredentials: []
 #     existingSecret: my-llm-secret
 #     key: anthropic-api-key
 
+# Trusted control-plane broker for one immutable private repository per enabled
+# agent worker. The organization and prefix must match the agent_repositories
+# policy in the runtime config when config.source=file or config.data is set.
+agentRepositories:
+  enabled: false
+  organization: ""
+  prefix: MindRoom
+  brokerUrl: http://agent-vault:14321
+  brokerTokenSecret:
+    name: ""
+    key: token
+
 # The env lists, Agent Vault server env lists, extraVolumes, and extraVolumeMounts accept
 # either a list or a map keyed by entry; see "Layering Values Files" in the README.
 # They default to null so Helm accepts either form without table/non-table warnings.

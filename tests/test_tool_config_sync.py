@@ -31,6 +31,8 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # host runs this suite without it.
 OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
 IGNORED_AGNO_PARAMS = {
+    # AgentRepositoryTools accepts typed broker/preparer seams for trusted control-plane fakes, never authored config.
+    "agent_repository": {"broker", "worker_preparer"},
     # Mapping-only inputs have no safe authored ConfigField representation.
     "firecrawl": {"search_params"},
     "spider": {"optional_params"},

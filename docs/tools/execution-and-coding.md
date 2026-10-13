@@ -23,15 +23,16 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`file_generation`] - JSON, CSV, PDF, DOCX, HTML, text, and source-code file exports.
 - [`visualization`] - Matplotlib charts.
 - [`sleep`] - Intentional pauses.
+- [`agent_repository`] - Provisioning of one private GitHub repository bound to the current agent worker.
 
 ## Common Setup Notes
 
-None of these tools needs credentials or dashboard setup; `docker` needs Docker daemon access in the runtime that runs it.
+None of these tools needs credentials or dashboard setup; `docker` needs Docker daemon access in the runtime that runs it, and `agent_repository` needs an operator-configured repository broker.
 `docker`, `file_generation`, and `visualization` depend on the `docker`, `reportlab` and `python-docx`, and `matplotlib` packages, which install on first use unless [automatic dependency installation](index.md#automatic-dependency-installation) is disabled.
 
 ### Where these tools run
 
-`file`, `shell`, `python`, `coding`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` always runs in the primary process.
+`file`, `shell`, `python`, `coding`, and `docker` run in a worker by default when a worker backend or sandbox proxy is configured, and `reasoning` and `agent_repository` always run in the primary process.
 Whether the other tools here also run in a worker depends on the [execution mode](../deployment/sandbox-proxy.md#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](../deployment/sandbox-proxy.md#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](../deployment/sandbox-proxy.md#worker-scopes).
@@ -397,6 +398,36 @@ The response stays open until the delay ends or the response is stopped.
 | --- | --- | --- | --- | --- |
 | `enable_sleep` | `boolean` | `no` | `true` | Enable `sleep()`. |
 | `all` | `boolean` | `no` | `false` | Enable all sleep functions. |
+
+## [`agent_repository`]
+
+`agent_repository` exposes only `ensure_my_repository()` and accepts no model-supplied arguments.
+The trusted global `agent_repositories` policy supplies the organization and fixed `MindRoom` prefix, while the current worker identity determines the repository name.
+Shared agents use `MindRoom-<agent-slug>` and private `per: user_agent` agents use `MindRoom-<agent-slug>-<matrix-localpart>`.
+
+```yaml
+agent_repositories:
+  organization: example-org
+  prefix: MindRoom
+
+agents:
+  builder:
+    display_name: Builder
+    worker_scope: shared
+    tools: [agent_repository]
+
+  mind:
+    display_name: Mind
+    private:
+      per: user_agent
+    tools: [agent_repository]
+```
+
+The tool asks the configured trusted broker to create or recover exactly one private repository, persists an immutable worker-to-repository-ID binding under the configured MindRoom storage root, and initializes the agent workspace with a credential-free HTTPS `origin`.
+An existing normalized HTTPS origin for the bound repository is accepted unchanged.
+Any SSH origin, different fetch or push URL, URL rewrite, transport override, included Git config, or indirect worktree/common config returns `origin_conflict` without rewriting Git configuration.
+The broker token remains in the control plane, and worker Git authentication uses the separately configured Agent Vault HTTPS proxy with repository-scoped Contents-write access.
+The capability does not expose repository deletion, rename, transfer, visibility changes, invitations, or arbitrary repository management.
 
 ## Related Docs
 

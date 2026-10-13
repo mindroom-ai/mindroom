@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.atomic_file import atomic_write_file_at
+from mindroom.config.agent_repository import AGENT_REPOSITORY_TOOL_NAME
 from mindroom.constants import RuntimePaths, config_relative_path
 from mindroom.path_confinement import (
     open_directory_within_root,
@@ -429,7 +430,8 @@ def _resolve_workspace(
         return None
 
     if agent_config.private is None:
-        if config.resolve_entity(agent_name).memory_backend != "file":
+        uses_file_memory = config.resolve_entity(agent_name).memory_backend == "file"
+        if not uses_file_memory and AGENT_REPOSITORY_TOOL_NAME not in agent_config.tool_names:
             return None
         lexical_root = state_storage_path.expanduser() / "workspace"
         root = resolve_workspace_relative_path(
@@ -443,7 +445,7 @@ def _resolve_workspace(
             root=root,
             lexical_root=lexical_root,
             context_files=(),
-            file_memory_path=root,
+            file_memory_path=root if uses_file_memory else None,
         )
 
     workspace = _effective_workspace(agent_name, config, runtime_paths=runtime_paths)

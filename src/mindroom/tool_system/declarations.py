@@ -171,6 +171,7 @@ class ToolMetadata:
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     requires_primary_runtime: bool = False
     consumes_workspace_paths: bool = False
+    supports_output_redirection: bool = True
     # Runs arbitrary programs (shell, interpreters, containers); independent of the file_access class.
     executes_code: bool = False
     requires_room_context: bool = False

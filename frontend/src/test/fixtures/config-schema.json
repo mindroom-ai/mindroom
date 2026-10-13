@@ -697,6 +697,29 @@
       "title": "AgentPrivateKnowledgeConfig",
       "type": "object"
     },
+    "AgentRepositoriesConfig": {
+      "additionalProperties": false,
+      "description": "Trusted global policy for agent repository provisioning.",
+      "properties": {
+        "organization": {
+          "description": "GitHub organization that owns every agent repository",
+          "title": "Organization",
+          "type": "string"
+        },
+        "prefix": {
+          "const": "MindRoom",
+          "description": "Fixed repository-name prefix",
+          "title": "Prefix",
+          "type": "string"
+        }
+      },
+      "required": [
+        "organization",
+        "prefix"
+      ],
+      "title": "AgentRepositoriesConfig",
+      "type": "object"
+    },
     "AgentThreadExportConfig": {
       "additionalProperties": false,
       "description": "Continuous YAML thread exports into this agent's workspace.",
@@ -4569,6 +4592,18 @@
       "description": "Agent configurations",
       "title": "Agents",
       "type": "object"
+    },
+    "agent_repositories": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentRepositoriesConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Trusted global policy for constrained agent-owned GitHub repositories"
     },
     "teams": {
       "additionalProperties": {

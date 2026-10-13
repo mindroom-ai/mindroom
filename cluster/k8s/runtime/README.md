@@ -682,7 +682,7 @@ workers:
 ### Agent Vault Server NetworkPolicy
 
 The chart-managed Agent Vault server gets its own NetworkPolicy by default, because the API port can create vaults and agent tokens and the proxy port injects stored credentials.
-Ingress to the API port (`server.apiPort`) is limited to the in-chart clients that are enabled: dedicated workers when `agentVault.enabled` is true, the control plane when `accessTool.enabled` is true, the bootstrap Job, and the access-grants Job.
+Ingress to the API port (`server.apiPort`) is limited to the in-chart clients that are enabled: dedicated workers when `agentVault.enabled` is true, the control plane when `accessTool.enabled` or `agentRepositories.enabled` is true, the bootstrap Job, and the access-grants Job.
 Workers are matched like the worker NetworkPolicy and the runtime's own worker listing: the worker namespace, the generic worker labels, and `workers.kubernetes.extraLabels`.
 The selector matches any worker pod that carries all of those labels, so releases that share a worker namespace must each set a different value for the same `workers.kubernetes.extraLabels` key, for example `mindroom.ai/instance`.
 If one release's `extraLabels` are empty or a subset of another release's, its vault also admits the other release's workers.
@@ -711,6 +711,61 @@ workers:
                 - protocol: TCP
                   port: 14321
 ```
+
+### Agent Repositories
+
+Agent repositories let an explicitly enabled agent call the argument-free `ensure_my_repository()` tool for one private GitHub repository bound to its worker identity.
+The feature requires Kubernetes workers with Agent Vault enabled because later Git HTTP(S) traffic uses the existing per-worker Agent Vault proxy capability.
+Repository provisioning requires a compatible Agent Vault service that implements the trusted repository endpoint and holds its GitHub App and broker-token settings.
+That may be an external service or the chart-managed Agent Vault server with those settings injected by a trusted deployment-layer patch.
+The runtime chart does not own those seven server-side settings or their Secrets.
+Configure the normal worker Agent Vault integration with an immutable compatible custom Agent Vault CLI image and owner identity before enabling repositories.
+Configure the trusted broker only on the MindRoom control plane:
+
+```yaml
+agentRepositories:
+  enabled: true
+  organization: example-org
+  prefix: MindRoom
+  brokerUrl: http://agent-vault:14321
+  brokerTokenSecret:
+    name: agent-vault-mindroom-repository-broker
+    key: token
+
+workers:
+  backend: kubernetes
+  kubernetes:
+    agentVault:
+      enabled: true
+```
+
+The broker token Secret is mounted only in the control-plane container, and its value is never copied into worker environment or model-visible state.
+When the chart supplies the default runtime config, it emits the matching global policy automatically.
+When `config.data`, `config.existingConfigMap`, or `config.source=file` owns the runtime config, add the policy and explicit per-agent assignments there:
+
+```yaml
+agent_repositories:
+  organization: example-org
+  prefix: MindRoom
+
+agents:
+  shared_agent:
+    worker_scope: shared
+    tools: [agent_repository]
+  private_agent:
+    private:
+      per: user_agent
+    tools: [agent_repository]
+```
+
+A shared agent receives `MindRoom-<agent-slug>`, while a `private.per=user_agent` agent receives `MindRoom-<agent-slug>-<Matrix-localpart>`.
+MindRoom persists the immutable worker-to-repository-ID binding under `repository_bindings` inside `MINDROOM_STORAGE_PATH`, so that directory must use retained storage and normal backups.
+The tool initializes a missing local Git repository and adds the broker's canonical credential-free GitHub HTTPS URL as `origin`.
+An existing harmlessly normalized HTTPS fetch URL, with no push override or a matching HTTPS push URL for the exact bound repository, succeeds without mutation.
+Any SSH origin, different fetch or push URL, URL rewrite, transport override, included Git config, or indirect worktree/common config returns `origin_conflict` and leaves Git config unchanged.
+The ensure call performs no clone, fetch, commit, or push, and it exposes no repository management operations such as delete, rename, transfer, visibility changes, or collaborator invites.
+MindRoom allows the bounded broker request to run for slightly longer than Agent Vault's five-minute ensure lifecycle, avoiding a client disconnect while provisioning continues server-side.
+Subsequent Git pushes use Agent Vault's repository-scoped Contents-write capability through the existing HTTPS proxy path.
 
 ### Agent Vault Access Grants
 

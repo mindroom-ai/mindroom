@@ -59,6 +59,7 @@ That check covers only the workspace's final path component, so a replaced paren
 With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
 Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment, so programs named in workspace Git config never run.
+`agent_repository` creates a missing workspace `.git` skeleton or edits only `.git/config` of an existing one, through no-follow descriptors and atomic publication, parses that config with the hardened Git command without following includes, and keeps its lock and repository bindings outside the workspace.
 
 ### Read limits on workspace files
 

@@ -22,7 +22,7 @@ import httpx
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
@@ -46,6 +46,7 @@ from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     resolve_unscoped_worker_key,
 )
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
@@ -489,6 +490,36 @@ def _get_worker_manager(
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     )
+
+
+def ensure_worker_target_ready(runtime_paths: RuntimePaths, worker_target: ResolvedWorkerTarget) -> None:
+    """Ensure the exact trusted worker target is ready without dispatching a tool into it."""
+    if primary_worker_backend_name(runtime_paths) != "kubernetes" or not runtime_paths.env_flag(
+        KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"],
+    ):
+        msg = "Agent repository requires Kubernetes workers with Agent Vault enabled"
+        raise WorkerBackendError(msg)
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    manager_context = _primary_worker_manager_context(runtime_paths)
+    with lease_primary_worker_manager(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=manager_context.storage_root,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
+        kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
+        worker_grantable_credentials=manager_context.worker_grantable_credentials,
+    ) as worker_manager:
+        _payload, worker_handle = _build_worker_routing_payload(
+            runtime_paths=runtime_paths,
+            tool_name="agent_repository",
+            function_name="ensure_my_repository",
+            worker_target=worker_target,
+            worker_manager=worker_manager,
+        )
+    if worker_handle is None:
+        msg = "Agent repository requires a dedicated worker runtime"
+        raise WorkerBackendError(msg)
 
 
 def _execution_env_payload(
