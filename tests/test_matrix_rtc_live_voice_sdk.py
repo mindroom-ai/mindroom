@@ -15,9 +15,13 @@ from livekit import rtc
 from livekit.plugins.openai.realtime import GPTLiveSession
 from structlog.testing import capture_logs
 
-from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
-from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions, LiveVoiceUsage, RealtimeVoiceBridge
+from mindroom.matrix_rtc.voice_agent import (
+    CallAgentResponse,
+    LiveVoiceAgentOptions,
+    LiveVoiceUsage,
+    RealtimeVoiceBridge,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable

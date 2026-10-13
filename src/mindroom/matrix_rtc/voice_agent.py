@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from livekit.agents.voice.io import AudioInput, AudioOutput
     from livekit.agents.voice.speech_handle import SpeechHandle
 
-    from mindroom.matrix_rtc.call_tools import CallAgentResponse
     from mindroom.matrix_rtc.focus import SfuGrant
 
 logger = get_logger(__name__)
@@ -320,6 +319,15 @@ def matrix_calls_dependencies_available() -> bool:
         )
     except ModuleNotFoundError:
         return False
+
+
+@dataclass(frozen=True)
+class CallAgentResponse:
+    """One normal MindRoom agent turn returned to the cascaded voice pipe."""
+
+    text: str
+    tool_names: tuple[str, ...] = ()
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)

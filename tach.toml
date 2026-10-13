@@ -4087,7 +4087,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix_rtc"
-depends_on = ["mindroom.matrix_rtc.call_manager"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix_rtc.call_manager"
@@ -4138,6 +4138,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
+    "mindroom.matrix_rtc.voice_agent",
 ]
 
 [[modules]]
@@ -4164,7 +4165,7 @@ path = "mindroom.matrix_rtc.live_voice_agent"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.logging_config",
-    "mindroom.matrix_rtc.transcript",
+    "mindroom.matrix_rtc.spoken_turns",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.timing",
 ]
@@ -4173,6 +4174,7 @@ depends_on = [
 path = "mindroom.matrix_rtc.transcript"
 depends_on = [
     "mindroom.logging_config",
+    "mindroom.matrix_rtc.spoken_turns",
     "mindroom.memory",
     "mindroom.path_confinement",
     "mindroom.runtime_resolution",
@@ -4212,6 +4214,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.voice_agent"
 depends_on = ["mindroom.logging_config"]
+
+[[modules]]
+path = "mindroom.matrix_rtc.spoken_turns"
+depends_on = []
 
 [[modules]]
 path = "mindroom.conversation_resolver"

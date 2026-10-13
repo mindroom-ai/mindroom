@@ -49,7 +49,7 @@ from mindroom.matrix_rtc.call_origin import (
     _CallBriefMessage,
 )
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
-from mindroom.matrix_rtc.call_tools import CallAgentResponse, CallAgentTooling
+from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -66,6 +66,7 @@ from mindroom.matrix_rtc.frame_keys import _SharedWith
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
+    CallAgentResponse,
     CallVoiceAgentOptions,
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,

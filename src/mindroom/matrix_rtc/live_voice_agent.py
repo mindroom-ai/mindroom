@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
-from mindroom.matrix_rtc.transcript import merge_spoken_turns
+from mindroom.matrix_rtc.spoken_turns import merge_spoken_turns
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     LiveVoiceAgentOptions,

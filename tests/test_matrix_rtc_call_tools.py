@@ -36,7 +36,6 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
-    CallAgentResponse,
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
@@ -46,6 +45,7 @@ from mindroom.matrix_rtc.call_tools import (
     build_call_tools,
     matrix_message_available_during_call,
 )
+from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
 from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
 from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
