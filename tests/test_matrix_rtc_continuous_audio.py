@@ -1,4 +1,4 @@
-"""GPT-Live input stays paced across microphone arrival and stream gaps."""
+"""GPT-Live input stays paced across microphone gaps, and late output yields to the caller."""
 
 from __future__ import annotations
 
@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from livekit import rtc
 from livekit.agents import room_io
+from livekit.agents.voice import io as agents_io
+from livekit.agents.voice.events import UserState, UserStateChangedEvent
 from livekit.rtc._utils import RingQueue
+from structlog.testing import capture_logs
 
 import mindroom.matrix_rtc.voice_agent as voice_agent_module
 from mindroom.matrix_rtc.voice_agent import (
@@ -19,6 +22,7 @@ from mindroom.matrix_rtc.voice_agent import (
     RealtimeVoiceBridge,
     VoiceAgentOptions,
     _AuthorizedParticipantAudioInput,
+    _drop_live_backlog_on_caller_speech,
 )
 
 if TYPE_CHECKING:
@@ -52,6 +56,7 @@ async def start_audio(
     *,
     live: bool = True,
     stream_factory: Callable[..., object] | None = None,
+    session: MagicMock | None = None,
 ) -> tuple[_AuthorizedParticipantAudioInput, MagicMock]:
     """Exercise session input wiring with the real RTC mixer and no network."""
     room = MagicMock()
@@ -60,7 +65,8 @@ async def start_audio(
     bridge = RealtimeVoiceBridge(local_identity="bot", e2ee_enabled=False)
     bridge._room = room
     bridge._participant_identities = frozenset({"alice"})
-    session = MagicMock()
+    if session is None:
+        session = MagicMock()
     session.start = AsyncMock()
     options = (
         LiveVoiceAgentOptions(
@@ -416,3 +422,248 @@ async def test_only_live_audio_bounds_upstream_backlog_to_recent_frames(live: bo
         assert received == [frame(value).data.tobytes() for value in expected_values]
     finally:
         await audio.aclose()
+
+
+class OutputClock:
+    """Stand in for the monotonic clock the output paces against."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        """Return the simulated time."""
+        return self.now
+
+
+@pytest.fixture
+def output_clock(monkeypatch: pytest.MonkeyPatch) -> OutputClock:
+    """Drive output arrival times without sleeping."""
+    clock = OutputClock()
+    monkeypatch.setattr(voice_agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    return clock
+
+
+class PlayoutSink(agents_io.AudioOutput):
+    """Stand in for RoomIO: record deliveries and report each flushed segment as played."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="RoomIO",
+            capabilities=agents_io.AudioOutputCapabilities(pause=True),
+            sample_rate=24000,
+        )
+        self.values: list[int] = []
+        self.calls: list[str] = []
+        self.segment_open = False
+
+    async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+        """Record one delivered delta by its sample value."""
+        await super().capture_frame(frame)
+        if not self.segment_open:
+            self.segment_open = True
+            self.on_playback_started(created_at=1.0)
+        self.values.append(frame.data[0])
+
+    def flush(self) -> None:
+        """Finish the open segment as fully played."""
+        super().flush()
+        self.calls.append("flush")
+        if self.segment_open:
+            self.segment_open = False
+            self.on_playback_finished(playback_position=0.1, interrupted=False)
+
+    def clear_buffer(self) -> None:
+        """Record that queued audio was discarded."""
+        self.calls.append("clear")
+
+    def pause(self) -> None:
+        """Record a pause request."""
+        self.calls.append("pause")
+
+    def resume(self) -> None:
+        """Record a resume request."""
+        self.calls.append("resume")
+
+
+class CallSession:
+    """An agent session stub whose RoomIO output is a recording sink and whose events are real."""
+
+    def __init__(self) -> None:
+        self.sink = PlayoutSink()
+        self.session = MagicMock()
+        self.session.output.audio = self.sink
+        self.events: rtc.EventEmitter[str] = rtc.EventEmitter()
+        self.session.on = self.events.on
+
+    @property
+    def output(self) -> agents_io.AudioOutput:
+        """Return the audio output the session speaks through."""
+        return self.session.output.audio
+
+    def caller(self, state: UserState) -> None:
+        """Emit the caller state change LiveKit reports when GPT-Live hears or stops hearing them."""
+        old_state: UserState = "listening" if state == "speaking" else "speaking"
+        self.events.emit("user_state_changed", UserStateChangedEvent(old_state=old_state, new_state=state))
+
+
+@pytest.fixture
+def call() -> CallSession:
+    """Attach the GPT-Live backlog drop to a stub session."""
+    call = CallSession()
+    _drop_live_backlog_on_caller_speech(call.session)
+    return call
+
+
+def delta(value: int) -> rtc.AudioFrame:
+    """Build one 100 ms GPT-Live output delta identified by its sample value."""
+    return rtc.AudioFrame(value.to_bytes(2, "little", signed=True) * 2400, 24000, 1, 2400)
+
+
+async def deliver(output: agents_io.AudioOutput, clock: OutputClock, value: int, *, at: float) -> None:
+    """Hand one delta to the session output at a given time."""
+    clock.now = at
+    await output.capture_frame(delta(value))
+
+
+def drop_logs(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return the backlog drop warnings among captured logs."""
+    return [log for log in logs if log["event"] == "call_output_backlog_dropped"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live", [True, False], ids=["live", "other-model"])
+async def test_only_live_calls_drop_backlog_when_the_caller_speaks(output_clock: OutputClock, live: bool) -> None:
+    """GPT-Live speaks through the backlog drop; other models keep RoomIO's output unchanged."""
+    call = CallSession()
+    audio, _room = await start_audio(live=live, session=call.session)
+    await audio.aclose()
+    assert (call.output is call.sink) is not live
+    for value in range(10):
+        await deliver(call.output, output_clock, value, at=0.0)
+    call.caller("speaking")
+    assert ("clear" in call.sink.calls) is live
+
+
+@pytest.mark.asyncio
+async def test_live_output_plays_late_audio_until_the_caller_speaks(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """Audio held back by a stall still plays late when the caller stays quiet."""
+    with capture_logs() as logs:
+        for value in range(10):
+            await deliver(call.output, output_clock, value, at=value * 0.1)
+        # The loop stalls from 1.0 s to 2.5 s; the provider kept streaming in real time.
+        for value in range(10, 25):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.caller("listening")
+        call.caller("away")
+        for value in range(25, 45):
+            await deliver(call.output, output_clock, value, at=value * 0.1 + 0.04)
+        call.output.flush()
+    assert call.sink.values == list(range(45))
+    assert call.sink.calls == ["flush"]
+    assert drop_logs(logs) == []
+
+
+@pytest.mark.asyncio
+async def test_caller_speech_over_late_audio_clears_it_once(output_clock: OutputClock, call: CallSession) -> None:
+    """The caller talking over stall-delayed speech discards it, and the drop is logged once."""
+    with capture_logs() as logs:
+        for value in range(10):
+            await deliver(call.output, output_clock, value, at=value * 0.1)
+        for value in range(10, 25):
+            await deliver(call.output, output_clock, value, at=2.5)
+        # 1.5 s arrived at 2.5 s behind audio that finished at 1.0 s, so 1.3 s is still queued.
+        output_clock.now = 2.7
+        call.caller("speaking")
+        call.caller("listening")
+        call.caller("speaking")
+        # The wrapper keeps forwarding; RoomIO decides what of the interrupted segment plays.
+        await deliver(call.output, output_clock, 25, at=2.8)
+    assert call.sink.values == list(range(26))
+    assert call.sink.calls == ["clear"]
+    assert drop_logs(logs) == [
+        {"event": "call_output_backlog_dropped", "log_level": "warning", "dropped_ms": 1300},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_audio_discarded_after_a_clear_does_not_count_as_queued(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """Frames RoomIO drops from a cleared segment cannot make a later short burst look late."""
+    with capture_logs() as logs:
+        for value in range(10):
+            await deliver(call.output, output_clock, value, at=value * 0.1)
+        for value in range(10, 16):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.caller("speaking")
+        # The rest of the stalled burst still arrives, and RoomIO discards it.
+        for value in range(16, 35):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.output.flush()
+        call.caller("listening")
+        await deliver(call.output, output_clock, 35, at=3.4)
+        call.caller("speaking")
+    assert call.sink.calls == ["clear", "flush"]
+    assert len(drop_logs(logs)) == 1
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_flushed_segment_keeps_counting_the_next_one(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """A caller talking over the queued tail of a finished utterance must not blind the next one."""
+    with capture_logs() as logs:
+        for value in range(15):
+            await deliver(call.output, output_clock, value, at=0.0)
+        call.output.flush()
+        call.caller("speaking")
+        call.caller("listening")
+        for value in range(15, 30):
+            await deliver(call.output, output_clock, value, at=3.0)
+        call.caller("speaking")
+    assert call.sink.calls == ["flush", "clear", "clear"]
+    assert len(drop_logs(logs)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("queued_deltas", "cleared"), [(1, False), (5, False), (6, True)])
+async def test_caller_speech_leaves_up_to_half_a_second_queued(
+    output_clock: OutputClock,
+    call: CallSession,
+    queued_deltas: int,
+    cleared: bool,
+) -> None:
+    """The normal lead and short backlogs stay for GPT-Live to yield on its own."""
+    with capture_logs() as logs:
+        for value in range(queued_deltas):
+            await deliver(call.output, output_clock, value, at=0.0)
+        call.caller("speaking")
+    assert (call.sink.calls == ["clear"]) is cleared
+    assert len(drop_logs(logs)) == cleared
+
+
+@pytest.mark.asyncio
+async def test_live_output_passes_playout_and_controls_through(output_clock: OutputClock, call: CallSession) -> None:
+    """Segments still report playout, and flush, clear, pause, and resume reach RoomIO."""
+    output = call.output
+    started: list[float] = []
+    output.on("playback_started", lambda event: started.append(event.created_at))
+    assert output.sample_rate == 24000
+    assert output.can_pause
+    for segment in range(2):
+        await deliver(output, output_clock, segment, at=0.0)
+        output.flush()
+        playout = await asyncio.wait_for(output.wait_for_playout(), timeout=1)
+        assert playout.interrupted is False
+    output.clear_buffer()
+    output.pause()
+    output.resume()
+    assert call.sink.values == [0, 1]
+    assert call.sink.calls == ["flush", "flush", "clear", "pause", "resume"]
+    assert started == [1.0, 1.0]
+    assert output.captured_playout_segments == 2
