@@ -47,6 +47,7 @@ from mindroom.tool_system.worker_routing import (
     normalize_worker_key_part,
     resolved_worker_key_scope,
     worker_key_agent_name,
+    worker_log_id,
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -657,7 +658,7 @@ def _plan_knowledge_storage_mounts(
         mount_path = mounted_storage_root / relative_path
         if collision := _first_overlapping_path(mount_path, other_mount_paths):
             msg = (
-                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                f"Kubernetes knowledge mount overlaps existing mountPath for worker {worker_log_id(worker_key)}: "
                 f"{mount_path} and {collision}"
             )
             raise WorkerBackendError(msg)
@@ -667,13 +668,13 @@ def _plan_knowledge_storage_mounts(
             # kubelet follows links inside the volume when it mounts, so another worker could redirect it.
             logger.error(
                 "Refusing to mount knowledge inside a directory other sandbox workers write",
-                worker_key=worker_key,
+                worker=worker_log_id(worker_key),
                 path=str(relative_path),
             )
             continue
         if collision := _first_overlapping_path(mount_path, storage_mount_paths):
             msg = (
-                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                f"Kubernetes knowledge mount overlaps existing mountPath for worker {worker_log_id(worker_key)}: "
                 f"{mount_path} and {collision}"
             )
             raise WorkerBackendError(msg)
@@ -681,7 +682,7 @@ def _plan_knowledge_storage_mounts(
             mount_path,
             tuple(plan.mount_path for plan in plans),
         ):
-            msg = f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: {mount_path} and {collision}"
+            msg = f"Kubernetes knowledge mount paths overlap for worker {worker_log_id(worker_key)}: {mount_path} and {collision}"
             raise WorkerBackendError(msg)
         plans.append(_KnowledgeStorageMountPlan(relative_path=relative_path, mount_path=mount_path))
     return tuple(plans)
@@ -717,7 +718,7 @@ def _agent_names_addressed_by_worker_key(
             and normalize_worker_key_part(agent_name) == encoded_agent_name
         )
     if len(matches) > 1:
-        msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
+        msg = f"Worker '{worker_log_id(worker_key)}' has an ambiguous normalized agent name."
         raise WorkerBackendError(msg)
     return matches
 
@@ -1059,7 +1060,9 @@ class KubernetesResourceManager:
             return []
         vault = self._agent_vault_vault_name(worker_key)
         if vault is None:
-            msg = f"Agent Vault main env requested without a worker vault name for worker_key={worker_key!r}."
+            msg = (
+                f"Agent Vault main env requested without a worker vault name for worker={worker_log_id(worker_key)!r}."
+            )
             raise WorkerBackendError(msg)
         env: list[dict[str, object]] = [
             {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},

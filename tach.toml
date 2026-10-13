@@ -6360,6 +6360,7 @@ expose = [
     "visible_workspace_roots",
     "written_by_other_workers",
     "worker_dir_name",
+    "worker_log_id",
     "worker_root_path",
     "worker_scope_allows_shared_only_integrations",
 ]

@@ -90,6 +90,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
     visible_workspace_roots,
     worker_dir_name,
+    worker_log_id,
     worker_root_path,
 )
 from mindroom.workers.backends import local as local_workers_module
@@ -6100,7 +6101,8 @@ def test_sandbox_runner_records_worker_initialization_failures(
     payload = execute_response.json()
     assert payload["ok"] is False
     assert payload["failure_kind"] == "worker"
-    assert "Failed to initialize worker 'worker-fail'" in payload["error"]
+    assert f"Failed to initialize worker '{worker_log_id('worker-fail')}'" in payload["error"]
+    assert "worker-fail" not in payload["error"]
     assert "boom" in payload["error"]
 
     workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)

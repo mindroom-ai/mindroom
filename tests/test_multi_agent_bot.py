@@ -269,7 +269,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_callback = MagicMock()
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
         ingestion_session = AsyncMock()
         mock_login.return_value = _owned_login(mock_client, ingestion_session)
 
@@ -339,7 +338,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_callback = MagicMock()
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
         mock_ensure_user.return_value = None
 
         async def _login_with_actual_identity(
@@ -451,10 +449,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
-        mock_client.has_uncommitted_classic_sync_state = False
         mock_client.next_batch = ""
         mock_client.user_id = mock_agent_user.user_id
         mock_client.device_id = "DEVICEID"

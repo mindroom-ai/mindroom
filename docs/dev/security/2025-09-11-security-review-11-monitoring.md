@@ -9,7 +9,7 @@ It keeps the gaps still open when re-checked against the code and cluster config
 - The authentication audit trail cannot reconstruct every authentication, because cache-hit, admin, and SSO verifications are not fully audited.
 - Data access patterns are not monitored: bulk exports, cross-tenant access attempts, and admin access to customer data go undetected.
 - Configuration changes are not alerted on, whether to Kubernetes resources, database schema and policies, or application secrets and settings.
-- Attack detection stops at authentication brute force: injection, XSS, and path-traversal probes are not detected, and there is no WAF.
+- Attack detection stops at malformed-header lockouts and the admin token-rejection alert: injection, XSS, and path-traversal probes are not detected, and there is no WAF.
 - The platform database has only a manual backup (`just cluster-db-backup`) and no documented or tested restore procedure, so recovery from data loss is unproven.
 - There is no owned, tested incident-response playbook, no monitored security contact, and no `security.txt`, so breach detection and notification depend on manual review.
 

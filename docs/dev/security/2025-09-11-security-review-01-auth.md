@@ -10,7 +10,8 @@ Findings that the current code fixes are omitted; what remains are the assumptio
 
 ## Decisions
 
-- Brute-force protection is the per-IP lockout after repeated authentication failures, not timing hardening.
+- Token guessing needs no lockout, because Supabase signs its tokens; the per-IP lockout counts only malformed authorization headers.
+  Supabase token rejections do not count, because Supabase also rejects authentic tokens whose session ended or that just expired, so counting them would lock out legitimate clients.
   Padding every auth check to a fixed minimum duration was rejected as overengineered for a theoretical attack.
 - The remaining timing differences, such as a cached versus an uncached token check, could hint whether a token is valid; this is accepted as low risk with little practical exploitation.
 
