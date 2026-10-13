@@ -148,7 +148,7 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
 
 Prerequisites:
 
-- Python 3.12 or higher.
+- Python 3.12–3.14.
 - A Matrix homeserver where MindRoom can create agent accounts (see [Matrix account provisioning](#matrix-account-provisioning)).
 - Credentials for at least one AI provider.
 

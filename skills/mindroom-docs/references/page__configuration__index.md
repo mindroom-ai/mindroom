@@ -204,7 +204,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
+| `MATRIX_HOMESERVER` | Matrix homeserver URL; use the default URL for hosted pairing or your own URL for self-hosting | `https://mindroom.chat` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
 | `MATRIX_SSL_VERIFY` | Set to `false` for a dev or self-signed homeserver; it covers `MATRIX_HOMESERVER` and its MatrixRTC voice-call requests, never the provisioning service or other homeservers (see [TLS Trust](https://docs.mindroom.chat/matrix/#tls-trust)) | `true` |
 | `MATRIX_REGISTRATION_TOKEN` | Registration token for creating managed agent accounts on a self-hosted homeserver | _(unset)_ |

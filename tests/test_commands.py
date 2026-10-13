@@ -48,6 +48,7 @@ def _test_runtime_paths(tmp_path: Path) -> RuntimePaths:
         config_dir=tmp_path,
         env_path=tmp_path / ".env",
         storage_root=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
     )
 
 

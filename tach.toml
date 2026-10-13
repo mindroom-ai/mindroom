@@ -2681,6 +2681,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.matrix.provisioning_env"
 depends_on = [
+    # Shared hosted-service URL recognition and runtime selection for startup and CLI pairing.
     "mindroom.constants",
     "mindroom.matrix.client_session",
 ]

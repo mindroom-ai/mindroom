@@ -86,7 +86,7 @@ def test_client(temp_config_file: Path) -> TestClient:
 
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=temp_config_file,
-        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", "MATRIX_HOMESERVER": "http://localhost:8008"},
     )
     main.initialize_api_app(main.app, runtime_paths)
 

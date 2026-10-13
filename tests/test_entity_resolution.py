@@ -285,7 +285,7 @@ def test_persisted_bot_user_ids_keep_removed_entities_and_skip_internal_user(tmp
     state.save(runtime_paths=runtime_paths)
 
     assert persisted_bot_user_ids(runtime_paths) == frozenset(
-        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:localhost"},
+        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:mindroom.chat"},
     )
 
 

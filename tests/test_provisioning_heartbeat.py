@@ -65,9 +65,21 @@ def _sleep_until(stop_after: int) -> tuple[list[float], Callable[[float], object
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env", "heartbeat_url"),
+    [
+        (_PAIRED_ENV, "https://provisioning.example/v1/local-mindroom/heartbeat"),
+        (
+            {"MINDROOM_LOCAL_CLIENT_ID": "local-client", "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret"},
+            "https://mindroom.chat/v1/local-mindroom/heartbeat",
+        ),
+    ],
+)
 async def test_heartbeat_reports_at_startup_and_then_every_interval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    heartbeat_url: str,
 ) -> None:
     """A paired install reports immediately and after each interval, sending only its client credentials."""
     requests, client_kwargs = _install_transport(
@@ -77,13 +89,13 @@ async def test_heartbeat_reports_at_startup_and_then_every_interval(
     sleeps, sleep = _sleep_until(stop_after=3)
 
     with pytest.raises(_StopLoopError):
-        await run_provisioning_heartbeat(_runtime_paths(tmp_path, _PAIRED_ENV), sleep=sleep)
+        await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), sleep=sleep)
 
     assert len(requests) == 3
     assert sleeps == [6 * 60 * 60] * 3
     for request in requests:
         assert request.method == "POST"
-        assert request.url == "https://provisioning.example/v1/local-mindroom/heartbeat"
+        assert request.url == heartbeat_url
         assert request.headers["X-Local-MindRoom-Client-Id"] == "local-client"
         assert request.headers["X-Local-MindRoom-Client-Secret"] == "local-secret"
         assert request.content == b""
@@ -205,7 +217,11 @@ async def test_invalid_provisioning_url_is_debug_only_and_keeps_running(
     [
         {},
         {"MINDROOM_PROVISIONING_URL": "https://provisioning.example"},
-        {"MINDROOM_LOCAL_CLIENT_ID": "local-client", "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret"},
+        {
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_LOCAL_CLIENT_ID": "local-client",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
+        },
         {"MINDROOM_PROVISIONING_URL": "https://provisioning.example", "MINDROOM_LOCAL_CLIENT_ID": "local-client"},
     ],
 )
@@ -214,7 +230,7 @@ async def test_unpaired_install_sends_nothing(
     monkeypatch: pytest.MonkeyPatch,
     env: dict[str, str],
 ) -> None:
-    """Without a provisioning URL and complete client credentials there is nothing to report."""
+    """Self-hosted installs without provisioning and hosted installs without complete credentials report nothing."""
     requests, _ = _install_transport(monkeypatch, lambda _request: httpx.Response(200))
     sleeps, sleep = _sleep_until(stop_after=1)
 

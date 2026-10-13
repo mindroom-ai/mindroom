@@ -52,6 +52,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
+        "MATRIX_HOMESERVER": "http://localhost:8008",
         "TEST_OAUTH_CLIENT_ID": "test-client",
         "TEST_OAUTH_CLIENT_SECRET": "test-secret",
     }
