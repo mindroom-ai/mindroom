@@ -37,6 +37,7 @@ from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.room_membership import cached_joined_member_ids
+from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
     CALL_BRIEF_TOKEN_BUDGET,
@@ -72,7 +73,6 @@ from mindroom.matrix_rtc.events import (
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url, request_sfu_grant
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
-from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceAgentOptions,
@@ -119,8 +119,9 @@ def _default_cascaded_bridge_factory(local_identity: str, e2ee_enabled: bool) ->
     return CascadedVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
 
 
-def _default_live_bridge_factory(local_identity: str, e2ee_enabled: bool) -> LiveVoiceBridge:
-    return LiveVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
+def _default_live_bridge_factory(local_identity: str, e2ee_enabled: bool) -> ProcessLiveVoiceBridge:
+    # GPT-Live media runs in its own process, so stalls on this event loop cannot interrupt call audio.
+    return ProcessLiveVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
 
 
 _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
@@ -906,7 +907,7 @@ class CallManager:
         )
         return _RoomCallState(members=members, agent_call_events=agent_call_events)
 
-    async def _join(  # noqa: C901, PLR0911
+    async def _join(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         members: list[CallMember],
@@ -920,53 +921,6 @@ class CallManager:
         if backend is None:
             return "skip"
         try:
-            service = await self._resolve_service(members)
-        except _CALL_NETWORK_ERRORS as error:
-            logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
-            return "retry"
-        except ValueError as error:
-            logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
-            return "skip"
-        if service is None:
-            logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
-            return "skip"
-        # The origin only enriches the call; a slow or broken one must never block it.
-        origin_context = None
-        try:
-            async with asyncio.timeout(_ORIGIN_RESOLUTION_TIMEOUT_S):
-                origin_context = await self._resolve_origin_context(room_id, requester_id, agent_call_events)
-        except TimeoutError:
-            logger.warning(
-                "call_origin_resolution_timed_out",
-                room_id=room_id,
-                agent=self._agent_name,
-                timeout_s=_ORIGIN_RESOLUTION_TIMEOUT_S,
-            )
-        except Exception:
-            logger.warning("call_origin_resolution_failed", room_id=room_id, agent=self._agent_name, exc_info=True)
-        try:
-            tooling = await self._build_tooling(
-                room_id,
-                requester_id=requester_id,
-                origin_context=origin_context,
-            )
-            transcript = CallTranscript.start(
-                agent_name=self._agent_name,
-                config=self._config,
-                runtime_paths=self._runtime_paths,
-                execution_identity=tooling.execution_identity,
-                room_id=room_id,
-                room_display_name=room.display_name or room_id,
-            )
-        except Exception as error:
-            logger.warning(
-                "call_join_skipped_agent_materialization_failed",
-                room_id=room_id,
-                agent=self._agent_name,
-                error=str(error),
-            )
-            return "skip"
-        try:
             device_id = required_device_id(self._client)
         except CallJoinError as error:
             logger.warning(
@@ -976,68 +930,133 @@ class CallManager:
                 error=str(error),
             )
             return "skip"
+        # Created first, so the live backend's audio process starts while the slow steps below run.
         bridge = self._bridge_factory(
             f"{self._client.user_id}:{device_id}",
             room.encrypted,
         )
-        options = self._build_voice_agent_options(
-            tooling=tooling,
-            transcript=transcript,
-            room=room,
-            bridge=bridge,
-            backend=backend,
-            logical_call=logical_call,
-            origin_context=origin_context,
-        )
+        session_owns_bridge = False
         try:
-            session = CallSession(
-                room_id=room_id,
-                requester_id=requester_id,
-                e2ee_enabled=room.encrypted,
-                deps=CallSessionDeps(
-                    client=self._client,
-                    bridge=bridge,
-                    key_transport=self._key_transport,
-                    fetch_grant=lambda: self._fetch_grant(room_id, service),
-                    agent_options=options,
-                    livekit_service_url=service,
-                    start_is_allowed=lambda: self._call_start_is_allowed(
-                        room_id,
-                        requester_id,
-                        logical_call,
-                    ),
-                    on_stopped=lambda: self._finish_call(
-                        transcript,
-                        room_id=room_id,
-                        requester_id=requester_id,
-                        origin_context=origin_context,
-                    ),
-                    on_failure=lambda message: self._send_call_failure_notice(
-                        room_id,
-                        logical_call,
-                        message,
-                    ),
-                ),
-            )
-            if not await self._start_call_session(session, members, logical_call):
+            try:
+                service = await self._resolve_service(members)
+            except _CALL_NETWORK_ERRORS as error:
+                logger.warning(
+                    "call_service_discovery_failed",
+                    room_id=room_id,
+                    agent=self._agent_name,
+                    error=str(error),
+                )
+                return "retry"
+            except ValueError as error:
+                logger.warning(
+                    "call_service_discovery_failed",
+                    room_id=room_id,
+                    agent=self._agent_name,
+                    error=str(error),
+                )
                 return "skip"
-        except ValueError as error:
-            logger.warning("call_join_rejected", room_id=room_id, agent=self._agent_name, error=str(error))
-            return "skip"
-        except (CallJoinError, *_CALL_NETWORK_ERRORS) as error:
-            logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))
-            return "retry"
-        if self._shutting_down:
-            # shutdown() ran while the join was in flight and cannot see this
-            # session yet; stop it instead of leaking a live SFU connection.
-            self._pending_keys.pop(room_id, None)
-            await self._stop_session(session)
-            return "skip"
-        self._sessions[room_id] = session
-        logical_call.session_started_ms = self._clock_ms()
-        self._replay_pending_keys(room_id, session)
-        logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
-        return "joined"
+            if service is None:
+                logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
+                return "skip"
+            # The origin only enriches the call; a slow or broken one must never block it.
+            origin_context = None
+            try:
+                async with asyncio.timeout(_ORIGIN_RESOLUTION_TIMEOUT_S):
+                    origin_context = await self._resolve_origin_context(room_id, requester_id, agent_call_events)
+            except TimeoutError:
+                logger.warning(
+                    "call_origin_resolution_timed_out",
+                    room_id=room_id,
+                    agent=self._agent_name,
+                    timeout_s=_ORIGIN_RESOLUTION_TIMEOUT_S,
+                )
+            except Exception:
+                logger.warning("call_origin_resolution_failed", room_id=room_id, agent=self._agent_name, exc_info=True)
+            try:
+                tooling = await self._build_tooling(
+                    room_id,
+                    requester_id=requester_id,
+                    origin_context=origin_context,
+                )
+                transcript = CallTranscript.start(
+                    agent_name=self._agent_name,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                    room_id=room_id,
+                    room_display_name=room.display_name or room_id,
+                )
+            except Exception as error:
+                logger.warning(
+                    "call_join_skipped_agent_materialization_failed",
+                    room_id=room_id,
+                    agent=self._agent_name,
+                    error=str(error),
+                )
+                return "skip"
+            options = self._build_voice_agent_options(
+                tooling=tooling,
+                transcript=transcript,
+                room=room,
+                bridge=bridge,
+                backend=backend,
+                logical_call=logical_call,
+                origin_context=origin_context,
+            )
+            try:
+                session = CallSession(
+                    room_id=room_id,
+                    requester_id=requester_id,
+                    e2ee_enabled=room.encrypted,
+                    deps=CallSessionDeps(
+                        client=self._client,
+                        bridge=bridge,
+                        key_transport=self._key_transport,
+                        fetch_grant=lambda: self._fetch_grant(room_id, service),
+                        agent_options=options,
+                        livekit_service_url=service,
+                        start_is_allowed=lambda: self._call_start_is_allowed(
+                            room_id,
+                            requester_id,
+                            logical_call,
+                        ),
+                        on_stopped=lambda: self._finish_call(
+                            transcript,
+                            room_id=room_id,
+                            requester_id=requester_id,
+                            origin_context=origin_context,
+                        ),
+                        on_failure=lambda message: self._send_call_failure_notice(
+                            room_id,
+                            logical_call,
+                            message,
+                        ),
+                    ),
+                )
+                # From here the session closes the bridge on every failure.
+                session_owns_bridge = True
+                if not await self._start_call_session(session, members, logical_call):
+                    return "skip"
+            except ValueError as error:
+                logger.warning("call_join_rejected", room_id=room_id, agent=self._agent_name, error=str(error))
+                return "skip"
+            except (CallJoinError, *_CALL_NETWORK_ERRORS) as error:
+                logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))
+                return "retry"
+            if self._shutting_down:
+                # shutdown() ran while the join was in flight and cannot see this
+                # session yet; stop it instead of leaking a live SFU connection.
+                self._pending_keys.pop(room_id, None)
+                await self._stop_session(session)
+                return "skip"
+            self._sessions[room_id] = session
+            logical_call.session_started_ms = self._clock_ms()
+            self._replay_pending_keys(room_id, session)
+            logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
+            return "joined"
+        finally:
+            if not session_owns_bridge:
+                await bridge.aclose()
 
     async def _start_call_session(
         self,

@@ -24,8 +24,10 @@ from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.logging_config import (
     bound_log_context,
     configure_default_logging,
+    current_log_file,
     get_logger,
     setup_logging,
+    setup_subprocess_logging,
     subprocess_logging_env,
 )
 from mindroom.message_target import MessageTarget
@@ -743,3 +745,24 @@ def test_knowledge_read_worker_logs_like_its_parent(
     assert [(record["event"], record["level"], record["logger"]) for record in records] == expected
     assert "$invalid" in str(records[-1]["exception"])
     assert "synthetic-secret" not in stderr
+
+
+def test_subprocess_logging_appends_to_the_parent_log_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child given the parent's log file appends its records there, next to the parent's."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    assert log_file.parent.name == "logs"
+    get_logger("tests.parent").info("parent_event")
+
+    setup_subprocess_logging(log_file=log_file)
+    get_logger("tests.child").info("child_event")
+    logging.shutdown()
+
+    events = [json.loads(line)["event"] for line in log_file.read_text().splitlines()]
+    assert "parent_event" in events
+    assert events[-1] == "child_event"

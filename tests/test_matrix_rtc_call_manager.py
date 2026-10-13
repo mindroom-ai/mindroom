@@ -7,6 +7,7 @@ import base64
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
@@ -63,7 +64,6 @@ from mindroom.matrix_rtc.events import (
 )
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.frame_keys import _SharedWith
-from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
     CallAgentResponse,
@@ -1119,8 +1119,15 @@ def test_call_manager_uses_assigned_realtime_profile(
     key_lookup.assert_called_once_with("voice-default", manager._runtime_paths)
 
 
-def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) -> None:
-    """Each assigned profile selects its matching media bridge."""
+def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each assigned profile selects its matching media bridge; live media runs in its own process."""
+
+    @dataclass
+    class RecordingProcessBridge:
+        local_identity: str
+        e2ee_enabled: bool
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ProcessLiveVoiceBridge", RecordingProcessBridge)
     stt = SpeechServiceConfig(
         provider="openai_compatible",
         model="stt",
@@ -1205,7 +1212,7 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
 
     assert isinstance(realtime_bridge, RealtimeVoiceBridge)
     assert isinstance(cascaded_bridge, CascadedVoiceBridge)
-    assert isinstance(live_bridge, LiveVoiceBridge)
+    assert live_bridge == RecordingProcessBridge(local_identity="@speaker:example.org:BOTDEV", e2ee_enabled=False)
     assert realtime_manager._call_config.backend == "realtime"
     assert realtime_manager._call_config.model == "gpt-realtime-custom"
     assert realtime_manager._call_config.voice == "marin"
@@ -5546,3 +5553,81 @@ async def test_manager_ownership_warning_requires_live_call_signal(tmp_path: Pat
     assert bridge.connected_grant is None
     client.room_get_state.assert_not_awaited()
     client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_join_closes_bridge_when_service_discovery_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bridge created at the start of a join is closed when focus discovery fails."""
+
+    async def fail_discovery(*_args: object, **_kwargs: object) -> None:
+        message = "offline"
+        raise httpx.ConnectError(message)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.discover_livekit_service_url", fail_discovery)
+    config = _config()
+    config.calls.livekit_service_url = None
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config)
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.closed
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_join_closes_bridge_when_tooling_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bridge created at the start of a join is closed when the agent tooling cannot be built."""
+
+    async def fail_tools(**_kwargs: object) -> CallAgentTooling:
+        msg = "prompt failed"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fail_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.closed
+    assert bridge.connected_grant is None
+
+
+@pytest.mark.asyncio
+async def test_join_creates_bridge_before_tooling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The bridge, and with it the call audio process, starts before the slow tooling and origin work."""
+    order: list[str] = []
+
+    async def record_tools(**_kwargs: object) -> CallAgentTooling:
+        order.append("tooling")
+        msg = "stop after recording"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", record_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    def factory(_identity: str, _e2ee: bool) -> FakeBridge:
+        order.append("bridge")
+        return bridge
+
+    manager._bridge_factory = factory
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert order == ["bridge", "tooling"]
