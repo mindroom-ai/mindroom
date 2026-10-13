@@ -537,9 +537,25 @@ def _schedule_semantic_refresh_at(
     )
 
 
-def refresh_agent_memory_search(agent_name: str, root: Path, config: Config, runtime_paths: RuntimePaths) -> None:
-    """Re-index a shared agent's file memory at ``root`` after its files changed outside the memory tool."""
-    _schedule_semantic_refresh_at(agent_name, agent_scope_user_id(agent_name), root, config, runtime_paths, None)
+def refresh_agent_memory_search(
+    agent_name: str,
+    root: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    """Re-index an agent's file memory at ``root`` after its files changed outside the memory tool.
+
+    A private agent's memory is one requester's, so ``execution_identity`` names that requester.
+    """
+    _schedule_semantic_refresh_at(
+        agent_name,
+        agent_scope_user_id(agent_name),
+        root,
+        config,
+        runtime_paths,
+        execution_identity,
+    )
 
 
 def _schedule_scope_semantic_refresh(

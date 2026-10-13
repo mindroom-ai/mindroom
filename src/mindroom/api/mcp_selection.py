@@ -86,7 +86,7 @@ def _available_choices(
         available = {
             tool
             for tool in context.config.resolve_entity(name).available_tools
-            if tool in metadata and not metadata[tool].requires_room_context
+            if tool in metadata and metadata[tool].mcp_available
         }
         previous_tools = previous.get(name, ()) if previous is not None else None
         if previous_tools is not None and set(tools) - available - set(previous_tools):

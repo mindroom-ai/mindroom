@@ -77,7 +77,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 - One saved selection applies to all of a user's MCP clients and changes no other user's selection or connections.
 - Removing an agent or tool still works when stored data exceeds a lowered storage quota.
 
-Tools that share a service connection share its OAuth controls, and room-dependent tools are labeled **MindRoom only** and are not exposed.
+Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 
