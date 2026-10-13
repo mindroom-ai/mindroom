@@ -161,8 +161,14 @@ def test_every_prompt_discards_typeahead_before_asking(monkeypatch: pytest.Monke
     assert discarded == ["discard", "discard", "discard"]
 
 
-def test_piped_answers_survive_the_typeahead_discard() -> None:
-    """Only terminal input is discarded; answers piped in ahead of time are still read."""
-    with CliRunner().isolation(input="n\n"):
+def test_piped_answers_survive_the_typeahead_discard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only terminal input is discarded; answers piped in ahead of time, as in `mindroom config init < answers`, stay."""
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"n\n")
+    os.close(write_end)
+    with os.fdopen(read_end, "r") as piped_input:
+        monkeypatch.setattr(sys, "stdin", piped_input)
+
         interactive._discard_typeahead()
-        assert interactive.confirm("Continue?", default=True) is False
+
+        assert piped_input.readline() == "n\n"
