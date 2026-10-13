@@ -156,7 +156,8 @@ def _convert_archive(connection: Connection, session_table: str, runs: Table) ->
             if run_data is not None:
                 insert_run_entry(connection, runs, json.loads(run_data), session_id=session_id)
                 restored.append(run_id)
-        live = [run_id for run_id in ordered_run_ids(connection, runs, session_id) if run_id not in restored]
+        restored_ids = set(restored)
+        live = [run_id for run_id in ordered_run_ids(connection, runs, session_id) if run_id not in restored_ids]
         renumber_runs(connection, runs, session_id, [*restored, *live])
     _insert_generation_rows(connection, session_table, runs)
     connection.exec_driver_sql(f"DROP TABLE {compacted_runs}")

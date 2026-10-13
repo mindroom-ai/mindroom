@@ -218,6 +218,9 @@ Matrix sync callback
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `session_storage/agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks, the event ids each row folds, and edit and redaction cuts |
+| `history/summary_rows_schema.py` | Summary-row table layout and the shared SQL for which runs a session load returns |
+| `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |
@@ -373,3 +376,4 @@ Matrix sync callback
 
 [Data Persistence](../deployment/storage.md#data-persistence) lists the main directories under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
 An agent's Agno session database, including its traces, is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.
+Its `<agent>_sessions_summaries` table holds compaction summary rows, and `<agent>_sessions_removed_runs` records runs that edits and redactions removed.

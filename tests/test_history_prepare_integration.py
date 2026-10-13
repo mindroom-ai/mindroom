@@ -750,7 +750,7 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
 
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_path: Path) -> None:
-    """Seen ids include an archive query, so both unseen-context passes read them in a worker thread."""
+    """Seen ids include a summary-row query, so both unseen-context passes read them in a worker thread."""
     config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
