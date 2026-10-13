@@ -8,6 +8,7 @@ import importlib.metadata as importlib_metadata
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,17 +40,34 @@ class _EnvironmentLockState(threading.local):
 _ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
 
 
+def _environment_lock_path() -> Path:
+    """Return the current user's lock for this Python environment.
+
+    The OS temporary directory also works when HOME or the environment is read-only.
+    A private per-user directory keeps other local users from creating or holding the lock.
+    """
+    key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()
+    if sys.platform == "win32":
+        # Windows temporary directories are already per user.
+        return Path(tempfile.gettempdir()) / "mindroom-optional-dependencies" / f"{key}.lock"
+    uid = os.getuid()
+    lock_dir = Path(tempfile.gettempdir()) / f"mindroom-optional-dependencies-{uid}"
+    lock_dir.mkdir(mode=0o700, exist_ok=True)
+    status = lock_dir.lstat()
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != uid or status.st_mode & 0o077:
+        msg = f"{lock_dir} must be a directory that only the current user can access."
+        raise PermissionError(msg)
+    return lock_dir / f"{key}.lock"
+
+
 @contextmanager
 def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None]:
     """Coordinate same-user optional imports and installs for one Python environment.
 
     Imports share the lock; installers own it exclusively. Install before entering
     an import scope, so no reader attempts a non-atomic upgrade to a write lock.
-    The OS temporary directory also works when HOME or the environment is read-only.
     """
-    environment = str(Path(sys.prefix).resolve()).encode()
-    key = hashlib.sha256(environment).hexdigest()
-    lock_path = Path(tempfile.gettempdir()) / "mindroom-optional-dependencies" / f"{key}.lock"
+    lock_path = _environment_lock_path()
     if _ENVIRONMENT_LOCK_STATE.lock_path == lock_path:
         if exclusive and not _ENVIRONMENT_LOCK_STATE.exclusive:
             msg = "Release the optional dependency import scope before installing dependencies."

@@ -3704,7 +3704,6 @@ depends_on = []
 path = "mindroom.desktop.provider"
 depends_on = [
     "mindroom.desktop.accessibility",
-    "mindroom.tool_system.dependencies",
     "mindroom.desktop.protocol",
  "mindroom.desktop.displays", "mindroom.desktop.input", "mindroom.desktop.macos_input", "mindroom.desktop.macos_capture"]
 

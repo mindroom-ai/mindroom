@@ -279,8 +279,7 @@ def _init_supabase_auth(
         with optional_dependency_environment():
             create_client = importlib.import_module("supabase").create_client
 
-    with optional_dependency_environment():
-        return cast("_SupabaseClientProtocol", create_client(*credentials))
+    return cast("_SupabaseClientProtocol", create_client(*credentials))
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

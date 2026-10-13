@@ -77,8 +77,7 @@ def _ensure_spotify_packages(
 
     def spotify_oauth(**kwargs: str) -> _SpotifyOAuthClientProtocol:
         # MindRoom stores the tokens itself; spotipy's default file cache would return its first token for every code.
-        with optional_dependency_environment():
-            return spotipy_module.SpotifyOAuth(cache_handler=spotipy_module.MemoryCacheHandler(), **kwargs)
+        return spotipy_module.SpotifyOAuth(cache_handler=spotipy_module.MemoryCacheHandler(), **kwargs)
 
     return (
         cast("_SpotifyClientFactoryProtocol", spotipy_module.Spotify),

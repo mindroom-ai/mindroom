@@ -6,6 +6,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import tomllib
@@ -28,6 +29,7 @@ from mindroom.tool_system.dependencies import (
     auto_install_optional_extra_for_import_retry,
     check_deps_installed,
     install_command_for_current_python,
+    optional_dependency_environment,
 )
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -809,3 +811,17 @@ def test_unrelated_tool_constructors_run_in_parallel() -> None:
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows temporary directories are per user")
+def test_optional_dependency_lock_directory_must_be_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Other local users cannot share or plant this user's lock directory."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    lock_dir = tmp_path / f"mindroom-optional-dependencies-{os.getuid()}"
+    lock_dir.mkdir()
+    lock_dir.chmod(0o755)
+    with pytest.raises(PermissionError, match="only the current user"), optional_dependency_environment():
+        pass
+    lock_dir.chmod(0o700)
+    with optional_dependency_environment():
+        assert len(list(lock_dir.glob("*.lock"))) == 1

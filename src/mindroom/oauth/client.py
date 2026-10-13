@@ -336,8 +336,7 @@ class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
 
     def _copy_supplied_google_credentials(self, credentials: Any) -> GoogleOAuthCredentials:  # noqa: ANN401
         """Copy supported caller credentials into private blocking credentials."""
-        with optional_dependency_environment():
-            from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
+        from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
 
         if type(credentials) is not GoogleOAuthCredentials:
             msg = "Google creds must be an exact google.oauth2.credentials.Credentials instance"
