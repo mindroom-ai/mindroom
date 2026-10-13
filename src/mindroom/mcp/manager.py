@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -36,6 +38,7 @@ from mindroom.mcp.errors import (
 from mindroom.mcp.oauth import mcp_oauth_provider, mcp_oauth_provider_id
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.session import MCP_APP_CLIENT_EXTENSIONS, MCP_APP_HTML_MIME_TYPE
 from mindroom.mcp.surface_projection import (
     MCPFunctionSurfaceContext,
     MCPScopedFunctionState,
@@ -46,6 +49,7 @@ from mindroom.mcp.surface_projection import (
 )
 from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import (
+    MCPAppResource,
     MCPDiscoveredTool,
     MCPOAuthCredentialScope,
     MCPOAuthLeaseVersion,
@@ -80,6 +84,65 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+
+def _mcp_tool_ui_resource_uri(tool: mcp_types.Tool) -> str | None:
+    meta = tool.meta
+    if not isinstance(meta, dict):
+        return None
+    ui_meta = meta.get("ui")
+    resource_uri = (
+        ui_meta.get("resourceUri")
+        if isinstance(ui_meta, dict) and "resourceUri" in ui_meta
+        else meta.get("ui/resourceUri")
+    )
+    if not isinstance(resource_uri, str):
+        return None
+    resource_uri = resource_uri.strip()
+    return resource_uri if resource_uri.startswith("ui://") else None
+
+
+def _mcp_tool_visible_to_model(tool: mcp_types.Tool) -> bool:
+    meta = tool.meta
+    if not isinstance(meta, dict):
+        return True
+    ui_meta = meta.get("ui")
+    if not isinstance(ui_meta, dict):
+        return True
+    visibility = ui_meta.get("visibility")
+    if visibility is None:
+        return True
+    return isinstance(visibility, list) and "model" in visibility
+
+
+def _mcp_app_resource_from_content(
+    content: object,
+    *,
+    expected_uri: str,
+) -> MCPAppResource | None:
+    if not isinstance(content, mcp_types.TextResourceContents | mcp_types.BlobResourceContents):
+        return None
+
+    mime_type = content.mime_type or ""
+    if mime_type.lower() != MCP_APP_HTML_MIME_TYPE:
+        return None
+
+    uri = content.uri
+    if uri != expected_uri:
+        return None
+
+    if isinstance(content, mcp_types.TextResourceContents):
+        html = content.text
+    else:
+        try:
+            html = base64.b64decode(content.blob, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return None
+
+    if not html.strip():
+        return None
+    return MCPAppResource(uri=uri, mime_type=mime_type, html=html, meta=content.meta)
+
 
 logger = get_logger(__name__)
 
@@ -1189,7 +1252,48 @@ class MCPServerManager:
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
-        return tool_result_from_call_result(state.server_id, result)
+        app_resources = await self._read_mcp_app_resources_for_tool(state, remote_tool_name)
+        return tool_result_from_call_result(state.server_id, result, app_resources=app_resources)
+
+    async def _read_mcp_app_resources_for_tool(
+        self,
+        state: MCPServerState,
+        remote_tool_name: str,
+    ) -> list[MCPAppResource] | None:
+        session = state.session
+        catalog = state.catalog
+        if session is None or catalog is None:
+            return None
+
+        tool = next((candidate for candidate in catalog.tools if candidate.remote_name == remote_tool_name), None)
+        if tool is None or tool.ui_resource_uri is None:
+            return None
+
+        try:
+            result = await session.read_resource(tool.ui_resource_uri)
+        except Exception as exc:
+            logger.warning(
+                "MCP app resource read failed; falling back to text result",
+                server_id=state.server_id,
+                tool_name=tool.function_name,
+                remote_tool_name=tool.remote_name,
+                resource_uri=tool.ui_resource_uri,
+                error=str(exc),
+            )
+            return None
+
+        resources = [
+            app_resource
+            for content in result.contents
+            if (
+                app_resource := _mcp_app_resource_from_content(
+                    content,
+                    expected_uri=tool.ui_resource_uri,
+                )
+            )
+            is not None
+        ]
+        return resources or None
 
     async def _record_catalog_refresh_error(
         self,
@@ -1432,6 +1536,7 @@ class MCPServerManager:
                         write_stream,
                         read_timeout_seconds=state.config.call_timeout_seconds,
                         message_handler=self._build_message_handler(state),
+                        extensions=MCP_APP_CLIENT_EXTENSIONS,
                     ),
                 )
                 initialize_result = await session.initialize()
@@ -1510,6 +1615,8 @@ class MCPServerManager:
         filtered_tools: list[MCPDiscoveredTool] = []
         function_names: set[str] = set()
         for tool in discovered_tools:
+            if not _mcp_tool_visible_to_model(tool):
+                continue
             if exclude_tools and tool.name in exclude_tools:
                 continue
             if include_tools and tool.name not in include_tools:
@@ -1533,6 +1640,7 @@ class MCPServerManager:
                     input_schema=tool.input_schema,
                     output_schema=tool.output_schema,
                     title=(tool.annotations.title if tool.annotations is not None else tool.title),
+                    ui_resource_uri=_mcp_tool_ui_resource_uri(tool),
                 ),
             )
 
@@ -1543,6 +1651,7 @@ class MCPServerManager:
                 "description": tool.description,
                 "input_schema": tool.input_schema,
                 "output_schema": tool.output_schema,
+                "ui_resource_uri": tool.ui_resource_uri,
             }
             for tool in filtered_tools
         ]

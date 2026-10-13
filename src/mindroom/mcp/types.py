@@ -72,6 +72,7 @@ class MCPDiscoveredTool:
     input_schema: dict[str, Any]
     output_schema: dict[str, Any] | None
     title: str | None = None
+    ui_resource_uri: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,16 @@ class MCPServerCatalog:
     tools: tuple[MCPDiscoveredTool, ...]
     instructions: str | None
     catalog_hash: str
+
+
+@dataclass(frozen=True)
+class MCPAppResource:
+    """One fetched MCP Apps HTML resource ready for Matrix clients to render."""
+
+    uri: str
+    mime_type: str
+    html: str
+    meta: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

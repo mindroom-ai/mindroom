@@ -5,7 +5,7 @@ icon: simple/modelcontextprotocol
 # MCP
 
 MindRoom is a Model Context Protocol (MCP) client: it connects to the MCP servers you configure, discovers their tools, and lets agents call them.
-MindRoom uses MCP tools only; it does not use MCP resources or prompts.
+MindRoom uses MCP tools and the UI resources of [MCP Apps](#mcp-apps) tools; it does not expose other MCP resources or prompts to agents.
 To go the other way and expose your agents' tools to external MCP clients, use the [MCP Gateway](deployment/mcp-gateway.md).
 
 ## Add an MCP Server
@@ -136,6 +136,17 @@ Without a usable icon, Connections picks one matching the server's name, or a pl
 | `call_timeout_seconds` | float | `120.0` | Default timeout per tool call; must be greater than 0 |
 | `max_concurrent_calls` | int | `1` | Maximum concurrent tool calls to the server; at least 1 |
 | `auto_reconnect` | bool | `true` | Reconnect for later calls after a dropped connection or timeout; the failed call is never replayed |
+
+## MCP Apps
+
+MindRoom negotiates the [`io.modelcontextprotocol/ui` MCP Apps extension](https://modelcontextprotocol.io/extensions/apps/overview) when it initializes each MCP session.
+It recognizes the current nested `_meta.ui.resourceUri` declaration and the deprecated flat `_meta["ui/resourceUri"]` declaration.
+Tools whose `_meta.ui.visibility` excludes `model` remain available to their app but are not exposed in the model-callable catalog.
+
+After a successful call to a UI-backed tool, MindRoom reads the declared `ui://` resource.
+It accepts a non-empty UTF-8 text resource or base64 blob only when the response URI matches the requested URI and its MIME type is `text/html;profile=mcp-app`.
+The accepted HTML, resource metadata, redacted tool input, and original MCP tool result are attached to the Matrix tool trace for clients that render MCP Apps.
+If the optional UI resource is missing, malformed, or unavailable, the successful tool call still returns its normal text result.
 
 ## OAuth-Backed Remote MCP
 
