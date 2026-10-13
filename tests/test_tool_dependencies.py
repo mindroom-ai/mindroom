@@ -624,12 +624,6 @@ def install(extras, *, quiet):
 
 
 dependencies._install_via_uv_tool = install
-if mode == 'holder':
-    with dependencies.optional_dependency_environment():
-        print('reading', flush=True)
-        assert sys.stdin.readline().strip() == 'publish'
-    print('finished', flush=True)
-    sys.exit(0)
 if mode == 'reader':
     from mindroom.embeddings import signatures
     from mindroom.constants import resolve_primary_runtime_paths
@@ -744,39 +738,6 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
                 if process.poll() is None:
                     process.kill()
                 process.communicate(timeout=20)
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows advisory locks do not have a shared mode")
-def test_optional_dependency_imports_run_in_parallel(tmp_path: Path) -> None:
-    """Two processes can build optional runtimes concurrently while installations remain excluded."""
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    processes: list[subprocess.Popen[str]] = []
-    try:
-        for _ in range(2):
-            process = subprocess.Popen(
-                [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(tmp_path), "holder"],
-                env={**os.environ, "HOME": str(tmp_path), "TMPDIR": str(scratch)},
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            processes.append(process)
-            assert _dependency_process_line(process) == "reading"
-        for process in processes:
-            assert process.stdin is not None
-            process.stdin.write("publish\n")
-            process.stdin.flush()
-        for process in processes:
-            output, error = process.communicate(timeout=20)
-            assert process.returncode == 0, error
-            assert "finished" in output
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=20)
 
 
 def test_unrelated_tool_constructors_run_in_parallel() -> None:

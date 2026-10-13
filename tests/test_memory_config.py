@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -764,16 +765,16 @@ class TestMemoryConfig:
         mock_from_config.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.memory.config.ensure_sentence_transformers_dependencies")
+    @patch("mindroom.tool_system.dependencies.check_deps_installed", return_value=True)
     @patch.object(AsyncMemory, "from_config")
     async def test_create_memory_instance_waits_for_installs_off_event_loop(
         self,
         mock_from_config: MagicMock,
-        mock_ensure_sentence_transformers_dependencies: MagicMock,
+        mock_check_deps_installed: MagicMock,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A local-embedder Mem0 instance waits for a running install without stalling the event loop."""
+        """Local-embedder Mem0 checks dependencies and waits for a running install without stalling the event loop."""
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
@@ -799,14 +800,16 @@ class TestMemoryConfig:
             creation = asyncio.create_task(
                 create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path)),
             )
-            # A blocked event loop would only get past this sleep after the install finished.
+            started = time.monotonic()
             await asyncio.sleep(0.2)
+            # A blocked event loop would only finish this sleep after the install's 5 s timeout.
+            assert time.monotonic() - started < 2
             assert not creation.done()
         finally:
             finish_install.set()
             installer.join(5)
         assert await creation is mock_from_config.return_value
-        mock_ensure_sentence_transformers_dependencies.assert_called_once()
+        mock_check_deps_installed.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_memory_instance_replaces_mem0_openai_embedder_with_strict_adapter(

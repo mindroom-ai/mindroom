@@ -33,7 +33,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class _EnvironmentLockState(threading.local):
-    lock_path: Path | None = None
+    held: bool = False
     exclusive: bool = False
 
 
@@ -50,7 +50,7 @@ def _environment_lock_path() -> Path:
     if sys.platform == "win32":
         # Windows temporary directories are already per user.
         return Path(tempfile.gettempdir()) / "mindroom-optional-dependencies" / f"{key}.lock"
-    uid = os.getuid()
+    uid = os.geteuid()
     lock_dir = Path(tempfile.gettempdir()) / f"mindroom-optional-dependencies-{uid}"
     lock_dir.mkdir(mode=0o700, exist_ok=True)
     status = lock_dir.lstat()
@@ -67,23 +67,21 @@ def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None
     Imports share the lock; installers own it exclusively. Install before entering
     an import scope, so no reader attempts a non-atomic upgrade to a write lock.
     """
-    lock_path = _environment_lock_path()
-    if _ENVIRONMENT_LOCK_STATE.lock_path == lock_path:
-        if exclusive and not _ENVIRONMENT_LOCK_STATE.exclusive:
+    state = _ENVIRONMENT_LOCK_STATE
+    if state.held:
+        if exclusive and not state.exclusive:
             msg = "Release the optional dependency import scope before installing dependencies."
             raise RuntimeError(msg)
         yield
         return
-    with advisory_file_lock(lock_path, exclusive=exclusive):
-        previous_path = _ENVIRONMENT_LOCK_STATE.lock_path
-        previous_exclusive = _ENVIRONMENT_LOCK_STATE.exclusive
-        _ENVIRONMENT_LOCK_STATE.lock_path = lock_path
-        _ENVIRONMENT_LOCK_STATE.exclusive = exclusive
+    with advisory_file_lock(_environment_lock_path(), exclusive=exclusive):
+        state.held = True
+        state.exclusive = exclusive
         try:
             yield
         finally:
-            _ENVIRONMENT_LOCK_STATE.lock_path = previous_path
-            _ENVIRONMENT_LOCK_STATE.exclusive = previous_exclusive
+            state.held = False
+            state.exclusive = False
 
 
 # Packages where the pip install name differs from the Python import name.
