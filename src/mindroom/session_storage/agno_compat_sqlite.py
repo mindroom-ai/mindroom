@@ -28,7 +28,7 @@ from mindroom.history.summary_rows_schema import (
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
 
     from agno.db.sqlite import SqliteDb
     from agno.run.agent import RunOutput
@@ -249,6 +249,46 @@ def run_deletion_transaction(db: SqliteDb) -> Iterator[tuple[Session, Table | No
     runs_table = _existing_table(db, "runs")
     with db.Session() as session, session.begin():
         yield session, runs_table
+
+
+_ID_CHUNK_SIZE = 500
+
+
+def delete_run_subtrees(
+    connection: Connection,
+    runs: str,
+    run_ids: Collection[str],
+    *,
+    session_id: str | None,
+) -> set[str]:
+    """Delete ``run_ids`` with every member run below them, within one session when given; return the deleted ids.
+
+    ``runs`` is the quoted runs table; the caller owns the transaction. Team member runs are rows
+    whose ``parent_run_id`` is the team run, so a deleted run takes its whole subtree along.
+    """
+    scope, scope_parameters = ("session_id = ? AND ", (session_id,)) if session_id is not None else ("", ())
+    found = {run_id for run_id in run_ids if run_id}
+    frontier = sorted(found)
+    while frontier:
+        chunk, frontier = frontier[:_ID_CHUNK_SIZE], frontier[_ID_CHUNK_SIZE:]
+        children = [
+            run_id
+            for (run_id,) in connection.exec_driver_sql(
+                f"SELECT run_id FROM {runs} WHERE {scope}parent_run_id IN ({', '.join('?' for _ in chunk)})",  # noqa: S608
+                (*scope_parameters, *chunk),
+            )
+            if run_id not in found
+        ]
+        found.update(children)
+        frontier.extend(children)
+    ordered = sorted(found)
+    for start in range(0, len(ordered), _ID_CHUNK_SIZE):
+        chunk = ordered[start : start + _ID_CHUNK_SIZE]
+        connection.exec_driver_sql(
+            f"DELETE FROM {runs} WHERE {scope}run_id IN ({', '.join('?' for _ in chunk)})",  # noqa: S608
+            (*scope_parameters, *chunk),
+        )
+    return found
 
 
 # AGNO_COMPAT: Session reads load every stored run, without one snapshot.

@@ -19,7 +19,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from sqlalchemy import Engine, create_engine, event, select
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.dialects.sqlite import insert
 
 from mindroom.constants import prompt_roles_for_history_storage
@@ -35,17 +35,15 @@ from mindroom.session_storage import (
 from mindroom.session_storage.legacy_session_storage import drop_run_tool_schemas
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
-from mindroom.usage.storage import project_usage, usage_table_sql, usage_upsert_sql
+from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
     from agno.agent import Agent
     from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
-    from sqlalchemy import Table
-    from sqlalchemy.orm import Session as OrmSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -437,29 +435,13 @@ class _ConversationSqliteDb(SqliteDb):
         if not run_ids:
             return
         with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table):
-            _delete_run_subtrees(sess, runs_table, run_ids)
-
-
-def _delete_run_subtrees(
-    transaction: OrmSession,
-    runs_table: Table | None,
-    run_ids: Collection[str],
-) -> None:
-    """Delete runs and their member-run descendants in the caller's transaction."""
-    wanted = {run_id for run_id in run_ids if run_id}
-    if not wanted or runs_table is None:
-        return
-    # Team member runs are rows whose parent_run_id is the team run; a
-    # deleted run takes its whole subtree along, as agno's own
-    # session-level delete cascades do.
-    frontier = list(wanted)
-    while frontier:
-        children = transaction.execute(
-            select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
-        ).scalars()
-        frontier = [child for child in children if child not in wanted]
-        wanted.update(frontier)
-    transaction.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
+            if runs_table is not None:
+                agno_compat_sqlite.delete_run_subtrees(
+                    sess.connection(),
+                    quote_identifier(runs_table.name),
+                    run_ids,
+                    session_id=None,
+                )
 
 
 def runs_without(

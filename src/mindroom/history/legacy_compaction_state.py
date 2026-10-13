@@ -7,7 +7,6 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history.summary_rows import delete_session_run_subtrees
 from mindroom.history.summary_rows_schema import owner_scope_key, summary_rows_schema_sql, summary_rows_table_names
 from mindroom.session_storage import agno_compat_sqlite
 from mindroom.session_storage.legacy_session_storage import (
@@ -103,7 +102,12 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
             )
             scopes.setdefault(summary_scope, ())
         tombstoned = {run_id for ids in scopes.values() for run_id in ids}
-        delete_session_run_subtrees(connection, quote_identifier(runs_table), session_id, tombstoned)
+        agno_compat_sqlite.delete_run_subtrees(
+            connection,
+            quote_identifier(runs_table),
+            tombstoned,
+            session_id=session_id,
+        )
         adopted_metadata = _without_adopted_state(metadata, scopes, summary_scope)
         if adopted_metadata != metadata:
             connection.exec_driver_sql(
@@ -141,11 +145,11 @@ def _convert_archive(connection: Connection, session_table: str, runs: Table) ->
         archived.setdefault(session_id, []).append((run_id, run_data))
     for session_id, entries in archived.items():
         # A stale save or blob residue can hold a copy that reconcile had not pruned yet.
-        delete_session_run_subtrees(
+        agno_compat_sqlite.delete_run_subtrees(
             connection,
             quote_identifier(runs.name),
-            session_id,
             {run_id for run_id, _ in entries},
+            session_id=session_id,
         )
         restored: list[str] = []
         for run_id, run_data in entries:

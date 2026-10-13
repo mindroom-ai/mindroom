@@ -347,7 +347,7 @@ def _cut(
     """Delete every top-level run and non-barrier row at or after ``cut``, with descendants, and record the removed runs."""
     top_level = set(_top_level_from(connection, tables, session_id, scope_key, cut))
     deleted_rows = [row for row in rows if row.summary is not None and (row.after_run_index, row.id) >= cut]
-    removed = sorted(delete_session_run_subtrees(connection, tables.runs, session_id, top_level))
+    removed = sorted(agno_compat_sqlite.delete_run_subtrees(connection, tables.runs, top_level, session_id=session_id))
     for start in range(0, len(removed), _ID_CHUNK_SIZE):
         chunk = removed[start : start + _ID_CHUNK_SIZE]
         connection.exec_driver_sql(
@@ -374,36 +374,6 @@ def _top_level_from(connection: Connection, tables: _Tables, session_id: str, sc
             (session_id, scope_key, first_index),
         )
     ]
-
-
-def delete_session_run_subtrees(connection: Connection, runs: str, session_id: str, run_ids: set[str]) -> set[str]:
-    """Delete one session's ``run_ids`` with every member run below them; return the deleted ids.
-
-    ``runs`` is the quoted runs table; the caller owns the transaction.
-    """
-    found = {run_id for run_id in run_ids if run_id}
-    frontier = sorted(found)
-    while frontier:
-        chunk, frontier = frontier[:_ID_CHUNK_SIZE], frontier[_ID_CHUNK_SIZE:]
-        children = [
-            run_id
-            for (run_id,) in connection.exec_driver_sql(
-                f"SELECT run_id FROM {runs} WHERE session_id = ? "  # noqa: S608
-                f"AND parent_run_id IN ({', '.join('?' for _ in chunk)})",
-                (session_id, *chunk),
-            )
-            if run_id not in found
-        ]
-        found.update(children)
-        frontier.extend(children)
-    ordered = sorted(found)
-    for start in range(0, len(ordered), _ID_CHUNK_SIZE):
-        chunk = ordered[start : start + _ID_CHUNK_SIZE]
-        connection.exec_driver_sql(
-            f"DELETE FROM {runs} WHERE session_id = ? AND run_id IN ({', '.join('?' for _ in chunk)})",  # noqa: S608
-            (session_id, *chunk),
-        )
-    return found
 
 
 def _folded_holder(

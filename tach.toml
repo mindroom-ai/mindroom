@@ -2607,7 +2607,7 @@ depends_on = [
     "mindroom.session_storage.agno_compat_sqlite",
     "mindroom.usage.storage",
 ]
-visibility = ["mindroom.history.legacy_compaction_state", "mindroom.history.storage"]
+visibility = ["mindroom.history.storage"]
 
 [[modules]]
 path = "mindroom.history.summary_rows_schema"
@@ -2634,7 +2634,6 @@ depends_on = [
 path = "mindroom.history.legacy_compaction_state"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.summary_rows",
     "mindroom.history.summary_rows_schema",
     "mindroom.session_storage.agno_compat_sqlite",
     "mindroom.session_storage.legacy_session_storage",
