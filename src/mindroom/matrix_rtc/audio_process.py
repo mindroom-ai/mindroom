@@ -97,7 +97,8 @@ def _spawn_audio_child(child_socket: socket.socket) -> _ChildProcess:
     env = {key: value for key in _CHILD_ENV_KEYS if (value := os.environ.get(key)) is not None}
     env.update({key: value for key, value in os.environ.items() if key.startswith("LIVEKIT_")})
     env.update(subprocess_logging_env())
-    process = subprocess.Popen(
+    # argv is this interpreter, a fixed module, the fd and MindRoom's own log path, run without a shell.
+    process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
         args,
         pass_fds=(fd,),
         start_new_session=True,
