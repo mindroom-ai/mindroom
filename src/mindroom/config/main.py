@@ -1863,12 +1863,16 @@ class Config(BaseModel):
     def _automation_block_reason(self, agent_name: str, automation: Automation) -> str | None:
         """Return why an agent cannot run ``automation``, or None when it can.
 
-        Automations run unattended, so requester-private agents have no identity to run them as, and the
-        built-ins maintain file memory, which needs the file backend.
+        A private agent runs each automation for each requester in that requester's personal room, so it must own
+        personal rooms and cannot post in a configured room, which would show one requester's files to everyone in it.
+        The built-ins maintain file memory, which needs the file backend.
         A plugin automation's own needs are checked when it fires, once its plugin is loaded.
         """
         if self.get_agent(agent_name).private is not None:
-            return "is private; automations run unattended and need a shared agent"
+            if self.personal_rooms is None or self.personal_rooms.agent != agent_name:
+                return "is private; its automations post in personal rooms, so personal_rooms.agent must name it"
+            if automation.room is not None:
+                return f"is private; {automation.name} posts in each requester's personal room and cannot set room"
         if automation.requires_file_memory and self._agent_memory_backend(agent_name) != "file":
             return f"needs memory_backend: file for {automation.name}"
         return None

@@ -473,6 +473,7 @@ def test_per_user_scoped_shared_agent_needs_no_gateway_opt_in(
         {"agents": "personal"},
         {"agents": {"personal": ["unknown"]}},
         {"agents": {"personal": ["matrix_message"]}},
+        {"agents": {"personal": ["claude_agent"]}},
         {"agents": {"personal": "calculator"}},
         {"agents": {"personal": [False]}},
         {"agents": {1: None}},
@@ -486,6 +487,8 @@ def test_selection_rejects_invalid_or_unauthorized_names(
     body: object,
 ) -> None:
     """Browser input can narrow current authority but cannot invent agent access or owner IDs."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.agents["personal"].tools = ["calculator", "matrix_message", "claude_agent"]
     assert (
         gateway_client.post(
             SELECTION,

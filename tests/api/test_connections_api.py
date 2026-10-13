@@ -119,16 +119,17 @@ def test_catalog_includes_deferred_oauth_tools_without_status_calls(
 
 def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, Any]) -> None:
     """Tool visibility does not depend on having an OAuth provider."""
-    portal["payload"]["agents"]["personal"]["tools"].append("matrix_message")
+    portal["payload"]["agents"]["personal"]["tools"].extend(["matrix_message", "claude_agent"])
     _publish_config(main.app, portal["paths"], portal["payload"])
     _use_runtime_auth_settings(main.app)
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     tools = {tool["name"]: tool for tool in response.json()["agents"][0]["tools"]}
     assert tools["calculator"]["provider"] is None
-    assert tools["calculator"]["requires_room_context"] is False
+    assert tools["calculator"]["mcp_available"] is True
     assert tools["google_drive"]["provider"] == "google_drive"
-    assert tools["matrix_message"]["requires_room_context"] is True
+    assert tools["matrix_message"]["mcp_available"] is False
+    assert tools["claude_agent"]["mcp_available"] is False
 
 
 @pytest.mark.parametrize(

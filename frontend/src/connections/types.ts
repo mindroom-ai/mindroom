@@ -24,7 +24,7 @@ export interface ConnectionTool {
   description: string;
   icon: string | null;
   provider: string | null;
-  requires_room_context: boolean;
+  mcp_available: boolean;
 }
 
 export interface ConnectionList {

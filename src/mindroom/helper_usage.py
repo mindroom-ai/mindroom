@@ -72,6 +72,13 @@ def helper_usage_context(scope_context: ScopeSessionContext | None) -> Iterator[
                 else None
             ),
         )
+    with helper_usage_owner_context(owner):
+        yield
+
+
+@contextmanager
+def helper_usage_owner_context(owner: HelperUsageOwner | None) -> Iterator[None]:
+    """Bind one explicit usage owner for an async call, stream pull, or close."""
     token = _HELPER_USAGE_OWNER.set(owner)
     try:
         yield

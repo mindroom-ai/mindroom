@@ -137,6 +137,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("approved_egress", "request_network_access"),
         ("attachments", "list_attachments"),
         ("callback_manager", "mint_callback"),
+        ("claude_agent", "claude_send"),
         ("dynamic_workflow", "list_workflows"),
         ("external_trigger_manager", "list_triggers"),
         ("matrix_api", "matrix_api"),
@@ -150,20 +151,20 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("usage_stats", "get_my_private_usage"),
     ],
 )
-async def test_room_runtime_tools_are_hidden_and_cannot_be_selected(
+async def test_room_and_conversation_tools_are_hidden_and_cannot_be_selected(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
     toolkit: str,
     function: str,
     deferred: bool,
 ) -> None:
-    """Room-dependent tools cannot be discovered or reached through direct gateway calls."""
+    """Tools that need a Matrix room or an agent conversation cannot be discovered or reached through the gateway."""
     config = context.config.model_copy(deep=True)
     config.agents["personal"].tools = ["calculator", ToolConfigEntry(name=toolkit, defer=deferred)]
     context = replace(context, config=config)
 
     def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Gateway constructed a room-dependent toolkit")
+        pytest.fail("Gateway constructed a toolkit that MCP calls cannot use")
 
     monkeypatch.setattr(agents, "build_agent_toolkit", forbidden)
     result = await gateway.search_tools(context)

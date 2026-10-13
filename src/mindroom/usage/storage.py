@@ -84,6 +84,7 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
             "model_provider",
             "model",
             "created_at",
+            "updated_at",
             "voice_seconds",
             "voice_finalized",
         )
