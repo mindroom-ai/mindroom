@@ -142,19 +142,9 @@ def covered_runs(storage: BaseDb, *, session_id: str, run_ids: Sequence[str]) ->
     """Return how the given runs are stored now, in log order, for a later append to check."""
     db = _sqlite(storage)
     tables = _tables(db)
-    wanted = sorted({run_id for run_id in run_ids if run_id})
-    found: list[CoveredRun] = []
     with db.db_engine.connect() as connection:
-        for start in range(0, len(wanted), _ID_CHUNK_SIZE):
-            chunk = wanted[start : start + _ID_CHUNK_SIZE]
-            found.extend(
-                CoveredRun(run_id=run_id, run_index=run_index, status=status)
-                for run_id, run_index, status in connection.exec_driver_sql(
-                    f"SELECT run_id, run_index, status FROM {tables.runs} "  # noqa: S608
-                    f"WHERE session_id = ? AND run_id IN ({', '.join('?' for _ in chunk)})",
-                    (session_id, *chunk),
-                )
-            )
+        stored = _run_metadata(connection, tables, session_id=session_id, run_ids=run_ids)
+    found = [CoveredRun(run_id=run_id, run_index=run_index, status=status) for run_id, run_index, status, _ in stored]
     return sorted(found, key=lambda run: run.run_index)
 
 

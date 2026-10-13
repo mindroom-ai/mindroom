@@ -1,7 +1,9 @@
-"""Single owner of durable compaction state.
+"""Runtime owner of durable compaction state.
 
-This module is the only code allowed to read or write the durable
-compaction-state locations of a stored Agno session:
+This module owns the durable compaction-state locations of a stored Agno session;
+outside it, only the session loader and run-insertion rules in
+``session_storage/agno_compat_sqlite.py`` and the open-time migration in
+``history/legacy_compaction_state.py`` read or write summary rows directly:
 
 - the summary rows of the conversation log (``history/summary_rows.py``), positioned
   between the runs of Agno's runs table; replay is the scope's latest summary row
