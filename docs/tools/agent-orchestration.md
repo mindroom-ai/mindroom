@@ -231,6 +231,7 @@ Shell handles do not appear in `job(action="list")` or the jobs bar, and cannot 
 
 Negative, nonnumeric, boolean, and nonfinite values are rejected before execution.
 A newer human message in the conversation releases the wait without pausing or cancelling the work, so the agent answers the new message while the job runs on.
+For an agent with [`mid_turn`](../configuration/threads.md#mid-turn-coalescing), only a message its judge says cannot wait releases the wait; one that can wait gets the `defer_reaction` and the call keeps waiting.
 Scheduled turns and other agents' messages queued behind the reply wait for it instead.
 
 ### Seeing and cancelling jobs

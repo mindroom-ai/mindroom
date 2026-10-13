@@ -12,15 +12,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-class PendingHumanMessages(Protocol):
-    """Newer human messages waiting for the running reply of their conversation; set while any waits."""
-
-    def is_set(self) -> bool:
-        """Return whether a human message waits now."""
-        ...
+class _PendingHumanMessages(Protocol):
+    """Newer human messages waiting for the running reply of their conversation."""
 
     async def wait(self) -> None:
-        """Return once a human message waits."""
+        """Return once a waiting human message needs the reply's attention, at once if one already does."""
         ...
 
 
@@ -42,17 +38,17 @@ class JobControl:
             raise asyncio.CancelledError
 
 
-_pending_human: ContextVar[PendingHumanMessages | None] = ContextVar("job_pending_human_messages", default=None)
+_pending_human: ContextVar[_PendingHumanMessages | None] = ContextVar("job_pending_human_messages", default=None)
 _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
 
 
-def current_pending_human_messages() -> PendingHumanMessages | None:
+def current_pending_human_messages() -> _PendingHumanMessages | None:
     """Return the human messages waiting for the reply this task belongs to; background work has none."""
     return _pending_human.get()
 
 
 @contextmanager
-def pending_human_messages_context(messages: PendingHumanMessages | None) -> Iterator[None]:
+def pending_human_messages_context(messages: _PendingHumanMessages | None) -> Iterator[None]:
     """Bind the waiting human messages of one response lifecycle, or clear them for background work."""
     token = _pending_human.set(messages)
     try:

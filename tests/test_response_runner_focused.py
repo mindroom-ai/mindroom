@@ -8714,7 +8714,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate)
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
-        finish = await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),))
+        finish = await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
     if failure not in {None, "oversized", "media"}:
         assert not finish
         assert payloads == []
@@ -8773,7 +8773,7 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     ):
         with pytest.raises(RuntimeError, match="stop before generation"):
             await runner._run_claimed_approval_lifecycle(continuation, target=target)
-        assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+        assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert build_lifecycle.call_args.kwargs["request"].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
 
@@ -8806,7 +8806,9 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
         ),
     ):
         await runner._prepare_request_after_lock(request)
-        assert await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),)) is finish
+        assert (
+            await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True) is finish
+        )
     assert len(evaluated) == int(finish)
 
 

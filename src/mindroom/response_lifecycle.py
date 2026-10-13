@@ -145,7 +145,8 @@ class _QueuedMessageState:
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
     mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
-    _event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Replaced on every admission, so each waiter wakes once per newly queued message.
+    _added: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
@@ -178,15 +179,14 @@ class _QueuedMessageState:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
         self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
-        self._event.set()
+        self._added.set()
+        self._added = asyncio.Event()
         return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
             return
         del self._pending_messages[source_event_id]
-        if self.pending_human_messages == 0:
-            self._event.clear()
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -195,13 +195,25 @@ class _QueuedMessageState:
         return self._active_response_turns > 0
 
     async def wait(self) -> None:
-        await self._event.wait()
+        """Return once a queued message needs the reply's attention; the mid-turn judge can let messages wait."""
+        while True:
+            added = self._added
+            if await self._interrupts():
+                return
+            await added.wait()
+
+    async def _interrupts(self) -> bool:
+        pending = self.pending_message_snapshot()
+        if not pending:
+            return False
+        gate = self.mid_turn_gate
+        return gate is None or not await gate.defers(
+            pending,
+            current=lambda: pending == self.pending_message_snapshot(),
+        )
 
     async def wait_until_idle(self) -> None:
         await self._idle_event.wait()
-
-    def is_set(self) -> bool:
-        return self._event.is_set()
 
 
 @dataclass(slots=True)

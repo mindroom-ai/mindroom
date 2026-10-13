@@ -38,7 +38,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import SavedToolJob, ToolJobStore
-    from mindroom.tool_jobs.control import PendingHumanMessages
     from mindroom.tool_jobs.conversation import ConversationKey
 
 type _OutcomeStatus = Literal["completed", "failed", "cancelled", "denied", "interrupted"]
@@ -257,21 +256,22 @@ def _approval_deadline(
 
 async def _changed_or_released(
     changed: asyncio.Event,
-    human: PendingHumanMessages | None,
+    message: asyncio.Future[None] | None,
     *,
     timeout: float | None,  # noqa: ASYNC109
 ) -> bool:
-    """Wait until the job changes, a human message arrives, or ``timeout`` passes; return whether the message came."""
+    """Wait until the job changes, ``message`` returns, or ``timeout`` passes; return whether the message came."""
     change = asyncio.ensure_future(changed.wait())
-    message = None if human is None else asyncio.ensure_future(human.wait())
-    tasks = [change] if message is None else [change, message]
     try:
-        await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
-        return message is not None and message.done() and not message.cancelled()
+        await asyncio.wait(
+            [change] if message is None else [change, message],
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        return message is not None and message.done()
     finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        change.cancel()
+        await asyncio.gather(change, return_exceptions=True)
 
 
 class ToolJobRuntime:
@@ -624,8 +624,11 @@ class ToolJobRuntime:
             claim = entry.claim_for(claim) if readable else None
             if claim is None:
                 return _JobWait(await self._snapshot(entry))
-        # A newer human message in the waiting reply's own conversation releases the wait; the job runs on.
+        # A newer human message in the waiting reply's own conversation releases the wait unless the mid-turn judge
+        # lets it wait; the job runs on.
         human = current_pending_human_messages()
+        # One message waiter spans the loop, so a job change never cancels the judgment it may be awaiting.
+        message: asyncio.Future[None] | None = None
         released = False
         try:
             while True:
@@ -643,12 +646,15 @@ class ToolJobRuntime:
                     approval_deadline = _approval_deadline(entry.job, approval_timeout, approval_deadline, now)
                     ends = [end for end in (deadline, approval_deadline) if end is not None]
                     remaining = min(ends) - now if ends else None
-                    released = released or (human is not None and human.is_set())
                     if released or (remaining is not None and remaining <= 0):
                         return _JobWait(await self._snapshot(entry))
                     changed = entry.changed
-                released = await _changed_or_released(changed, human, timeout=remaining)
+                if message is None and human is not None:
+                    message = asyncio.ensure_future(human.wait())
+                released = await _changed_or_released(changed, message, timeout=remaining)
         finally:
+            if message is not None:
+                message.cancel()
             if not retained:
                 await self.release_wait(job_id, claim)
 

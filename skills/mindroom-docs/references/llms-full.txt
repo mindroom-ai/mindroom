@@ -2856,6 +2856,7 @@ The agent gets the wrap-up notice without a judgment when:
 Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
+With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](https://docs.mindroom.chat/tools/agent-orchestration/#when-a-call-becomes-a-job).
 Queued messages are handled after the active response finishes either way.
 A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
@@ -12587,6 +12588,7 @@ Shell handles do not appear in `job(action="list")` or the jobs bar, and cannot 
 
 Negative, nonnumeric, boolean, and nonfinite values are rejected before execution.
 A newer human message in the conversation releases the wait without pausing or cancelling the work, so the agent answers the new message while the job runs on.
+For an agent with [`mid_turn`](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing), only a message its judge says cannot wait releases the wait; one that can wait gets the `defer_reaction` and the call keeps waiting.
 Scheduled turns and other agents' messages queued behind the reply wait for it instead.
 
 ### Seeing and cancelling jobs

@@ -612,7 +612,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
             queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.parametrize(
@@ -692,7 +692,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -834,8 +834,8 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
     assert dispatch_count == 1
     assert pre_stt_signal.pending_human_messages == 0
     assert alternate_signal.pending_human_messages == 0
-    assert not pre_stt_signal.is_set()
-    assert not alternate_signal.is_set()
+    assert not pre_stt_signal.has_pending_human_messages()
+    assert not alternate_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -931,7 +931,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
 
     assert dispatch_count == 1
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio

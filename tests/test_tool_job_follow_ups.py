@@ -582,7 +582,7 @@ async def test_only_a_human_message_releases_a_running_wait(turn: str) -> None:
         signal_queued_message=turn == "follow_up",
     )
     assert notice is None
-    assert not queued.is_set()
+    assert not queued.has_pending_human_messages()
 
 
 async def test_a_reply_never_waits(tmp_path: Path) -> None:

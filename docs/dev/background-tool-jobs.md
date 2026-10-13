@@ -11,6 +11,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 - Tools block by default.
   `background_after: 0` detaches immediately; a positive value limits foreground waiting.
   Only a newer human message in the conversation releases that wait while accepted work continues; scheduled turns, other agents' messages, and follow-ups queued behind the reply wait for it.
+  With `mid_turn` configured, the wait asks the same judge as the post-batch check, whose decision per queued snapshot both reuse, so a message it defers keeps the wait.
   Releasing a wait neither pauses a job nor authorizes a protected tool.
 - One `job` tool provides scoped `list`, `wait`, `cancel`, and `collect`; `cancel` asks a job to stop and returns at once.
   Complete registered toolkits can be excluded, including plugins.

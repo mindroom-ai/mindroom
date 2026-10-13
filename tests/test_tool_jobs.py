@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.mid_turn import MidTurnGate
+from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import job_checkpoint, pending_human_messages_context
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -36,6 +38,8 @@ from tests.tool_job_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.judgment.state import JudgmentRequest
 
 
 @pytest.mark.asyncio
@@ -814,6 +818,124 @@ async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: 
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "done"
         assert calls == 1
     finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("then", ["correction", "completion"])
+async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
+    tmp_path: Path,
+    then: Literal["correction", "completion"],
+) -> None:
+    """A message the judge lets wait is acknowledged and keeps the reply waiting; one it must answer releases it."""
+    runtime = await tool_job_runtime(tmp_path)
+    state = _QueuedMessageState()
+    proceed, acknowledged = asyncio.Event(), asyncio.Event()
+    judged: list[tuple[str | None, ...]] = []
+
+    async def evaluate(_request: JudgmentRequest) -> bool:
+        texts = tuple(message.text for message in state.pending_message_snapshot())
+        judged.append(texts)
+        return "Stop" not in texts
+
+    async def acknowledge(_event_id: str) -> None:
+        acknowledged.set()
+
+    async def operation() -> BackgroundOutcome:
+        await proceed.wait()
+        return BackgroundOutcome("completed", "done")
+
+    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
+    try:
+        job = await start_job(
+            runtime,
+            "work",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        with pending_human_messages_context(state):
+            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
+        state.add_waiting_human_message("$thanks", text="Thanks")
+        acknowledging = asyncio.create_task(acknowledged.wait())
+        await asyncio.wait({waiter, acknowledging}, timeout=JOB_TEST_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        acknowledging.cancel()
+        assert acknowledged.is_set()
+        assert not waiter.done()
+        if then == "correction":
+            state.add_waiting_human_message("$stop", text="Stop")
+            result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+            assert (result.job.status, result.claim) == ("running", None)
+            # A later wait of the same reply detaches at once on the decision already made.
+            with pending_human_messages_context(state):
+                later = await asyncio.wait_for(
+                    runtime.wait(job.job_id, owner=job_owner(), depth=0),
+                    JOB_TEST_TIMEOUT,
+                )
+            assert later.job.status == "running"
+            assert judged == [("Thanks",), ("Thanks", "Stop")]
+        else:
+            proceed.set()
+            result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+            assert result.job.result == "done"
+            assert result.claim is not None
+            # A finished wait judges no later message.
+            state.add_waiting_human_message("$later", text="Later")
+            for _ in range(100):
+                await asyncio.sleep(0)
+            assert judged == [("Thanks",)]
+    finally:
+        proceed.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_job_change_keeps_the_mid_turn_judgment_its_wait_awaits(tmp_path: Path) -> None:
+    """A job that changes while the judge decides keeps that one judgment, whose answer still releases the wait."""
+    runtime = await tool_job_runtime(tmp_path)
+    state = _QueuedMessageState()
+    proceed, judging, answer = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    judgments = 0
+
+    async def evaluate(_request: JudgmentRequest) -> bool:
+        nonlocal judgments
+        judgments += 1
+        judging.set()
+        await answer.wait()
+        return False
+
+    async def operation() -> BackgroundOutcome:
+        await proceed.wait()
+        return BackgroundOutcome("completed", "done")
+
+    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
+    try:
+        job = await start_job(
+            runtime,
+            "work",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        with pending_human_messages_context(state):
+            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
+        state.add_waiting_human_message("$stop", text="Stop")
+        await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
+        await runtime.set_awaiting_approval(job.job_id, awaiting=True)
+        # Give a restarted judgment every chance to start before the first one answers.
+        for _ in range(100):
+            await asyncio.sleep(0)
+        answer.set()
+        result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
+        assert result.job.status == "awaiting_approval"
+        assert judgments == 1
+    finally:
+        proceed.set()
+        answer.set()
         await runtime.shutdown()
 
 
