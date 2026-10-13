@@ -1,8 +1,8 @@
 """Child process that runs one GPT-Live call's media, away from the MindRoom event loop.
 
 The main process (``audio_process.ProcessLiveVoiceBridge``) drives this
-process over an inherited socket. Here the unchanged ``LiveVoiceBridge`` owns
-the LiveKit room, frame encryption, the agent session and GPT-Live, so
+process over an inherited socket. Here ``LiveVoiceBridge`` owns the LiveKit
+room, frame encryption, the agent session and GPT-Live, so
 garbage collection, SQLite commits and other work on the main loop cannot
 interrupt call audio. Bridge callbacks become messages back to the main
 process; delegations are a request the main process answers.
