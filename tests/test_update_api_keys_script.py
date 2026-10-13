@@ -35,7 +35,8 @@ def test_update_warns_that_a_chart_managed_secret_needs_the_helm_values(tmp_path
 
     result = subprocess.run(
         [bash, str(script)],
-        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        # Keys exported in the developer's shell must not reach the recorded kubectl calls.
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
         capture_output=True,
         text=True,
         check=True,
