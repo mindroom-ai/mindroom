@@ -21,6 +21,7 @@ from mindroom.tool_system.worker_routing import (
     shared_storage_root,
     visible_workspace_roots,
     worker_key_agent_name,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
 
@@ -83,7 +84,7 @@ def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str 
         and worker_parts[-1] == state_scope_parts[-1]
     ):
         return state_scope_worker_key
-    msg = f"Worker state scope does not own the requested worker key: {worker_key}"
+    msg = f"Worker state scope does not own the requested worker key: {worker_log_id(worker_key)}"
     raise WorkerBackendError(msg)
 
 
@@ -104,7 +105,7 @@ def validate_private_user_agent_visibility(
         return
     if private_agent_names is not None and agent_name in private_agent_names:
         return
-    msg = f"user_agent worker key targets a private agent missing from explicit private-agent visibility: {worker_key}"
+    msg = f"user_agent worker key targets a private agent missing from explicit private-agent visibility: {worker_log_id(worker_key)}"
     raise WorkerBackendError(msg)
 
 
@@ -249,11 +250,11 @@ def _scoped_workspaces(
 ) -> tuple[Path, ...]:
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
-        msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
+        msg = f"Unsupported worker key for scoped storage mounts: {worker_log_id(worker_key)}"
         raise WorkerBackendError(msg)
 
     if scope == "user_agent" and private_agent_names is None:
-        msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
+        msg = f"user_agent workers require explicit private-agent visibility: {worker_log_id(worker_key)}"
         raise WorkerBackendError(msg)
     if resolved_agent_policies is not None:
         validate_private_user_agent_visibility(
@@ -268,7 +269,7 @@ def _scoped_workspaces(
         private_agent_names=private_agent_names or frozenset(),
     )
     if not workspaces and scope != "user":
-        msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
+        msg = f"Unsupported worker key for scoped storage mounts: {worker_log_id(worker_key)}"
         raise WorkerBackendError(msg)
     return workspaces
 
@@ -292,6 +293,7 @@ def plan_scoped_workspace_mounts(
     """
     storage_root = shared_storage_root(local_shared_storage_root)
     private_root = private_instances_root_path(storage_root)
+    canonical_scope = private_instance_scope_root_path(storage_root, worker_key)
     mounts: list[ScopedWorkspaceMount] = []
     for workspace in _scoped_workspaces(
         worker_key=worker_key,
@@ -300,6 +302,10 @@ def plan_scoped_workspace_mounts(
         resolved_agent_policies=resolved_agent_policies,
     ):
         relative_path = workspace.relative_to(storage_root)
+        # A private scope's directory is named after its requester, so logs show the path below it.
+        logged_workspace = str(
+            workspace.relative_to(canonical_scope) if workspace.is_relative_to(canonical_scope) else relative_path,
+        )
         create = create_shared and not workspace.is_relative_to(private_root)
         try:
             with open_directory_within_root(storage_root, relative_path, create=create):
@@ -307,8 +313,8 @@ def plan_scoped_workspace_mounts(
         except FileNotFoundError:
             logger.info(
                 "Not mounting a workspace that does not exist yet",
-                worker_key=worker_key,
-                workspace=str(relative_path),
+                worker=worker_log_id(worker_key),
+                workspace=logged_workspace,
             )
         except OSError as exc:
             if create:
@@ -316,10 +322,9 @@ def plan_scoped_workspace_mounts(
                 raise WorkerBackendError(msg) from exc
             logger.warning(
                 "Not mounting a workspace reached through a link",
-                worker_key=worker_key,
-                workspace=str(relative_path),
+                worker=worker_log_id(worker_key),
+                workspace=logged_workspace,
             )
-    canonical_scope = private_instance_scope_root_path(storage_root, worker_key)
     private_mounts = [mount for mount in mounts if mount.local_path.is_relative_to(canonical_scope)]
     if private_mounts:
         try:
@@ -349,5 +354,5 @@ def validate_unique_worker_visible_paths(
     normalized_paths = [str(path) for path in paths]
     if len(normalized_paths) == len(set(normalized_paths)):
         return
-    msg = f"Duplicate {duplicate_label} generated for worker key: {worker_key}"
+    msg = f"Duplicate {duplicate_label} generated for worker key: {worker_log_id(worker_key)}"
     raise WorkerBackendError(msg)

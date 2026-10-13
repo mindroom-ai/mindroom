@@ -803,6 +803,41 @@ async def test_requester_mcp_session_opened_during_a_turn_does_not_inherit_the_t
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_call_during_a_turn_does_not_hand_the_turn_context_to_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The SDK keeps each sent call's context until the session's next message, and a turn's contextvars hold its Agent."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
+    ]
+    call_contexts: list[contextvars.Context] = []
+    original_call_tool = _FakeClientSession.call_tool
+
+    async def recording_call_tool(self: _FakeClientSession, *args: object, **kwargs: object) -> CallToolResult:
+        # The SDK's context stream snapshots exactly this context when the call is sent.
+        call_contexts.append(contextvars.copy_context())
+        return await original_call_tool(self, *args, **kwargs)
+
+    monkeypatch.setattr(_FakeClientSession, "call_tool", recording_call_tool)
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+
+    token = _TURN_OWNER.set(object())
+    try:
+        result = await manager.call_tool("demo", "echo", {"value": "ping"})
+    finally:
+        _TURN_OWNER.reset(token)
+
+    assert result.content == "pong"
+    [call_context] = call_contexts
+    assert _TURN_OWNER not in call_context
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_unscoped_mcp_oauth_uses_installation_credential_and_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

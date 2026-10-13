@@ -2279,7 +2279,8 @@ def create_agent(  # noqa: PLR0915
         cli_shell=cli_shell,
         name=agent_config.display_name,
         id=agent_name,
-        # An authored prompt leads the system message in place of the agent's identity, never substituted.
+        # An authored prompt leads the system message in place of the agent's identity, never substituted:
+        # its braces stay literal rather than resolving as session-state variables.
         description=persona_prompt,
         resolve_in_context=persona is None,
         role=role_context.role,

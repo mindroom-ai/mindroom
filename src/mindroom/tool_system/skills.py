@@ -634,6 +634,8 @@ def _load_root_skills(root: Path) -> list[Skill]:
     if cached and cached[0] == snapshot:
         return cached[1]
 
+    # Agno's validator rejects skills MindRoom supports, such as OpenClaw's JSON5 `metadata`
+    # string and a SKILL.md without frontmatter, and one invalid skill would fail the whole root.
     loader = LocalSkills(str(resolved_root), validate=False)
     try:
         skills = loader.load()

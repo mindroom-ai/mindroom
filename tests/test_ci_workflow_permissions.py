@@ -107,7 +107,7 @@ def test_security_scan_pins_the_tools_it_installs() -> None:
 
 
 def test_security_scan_audits_the_locked_dependencies(tmp_path: Path) -> None:
-    """A bare pip-audit checks only its own environment, so the audit reads the requirements exported from uv.lock."""
+    """A bare pip-audit checks only its own environment, so the audit reads the requirements exported from each uv.lock."""
     steps = _load_workflow("security-scan.yml")["jobs"]["scan"]["steps"]
     audit = next(step["run"] for step in steps if step.get("name") == "Python dependency audit")
     bash = shutil.which("bash")
@@ -116,20 +116,26 @@ def test_security_scan_audits_the_locked_dependencies(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     # Exit like pip-audit does on findings, which must stay advisory.
-    (bin_dir / "pip-audit").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/pip-audit-args"\nexit 1\n')
+    (bin_dir / "pip-audit").write_text('#!/bin/sh\nprintf "%s\\n" "$@" -- >> "$RUNNER_TEMP/pip-audit-args"\nexit 1\n')
     (bin_dir / "pip-audit").chmod(0o755)
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path)}
 
     subprocess.run([bash, "-e", "-c", audit], cwd=ROOT, env=env, check=True)
 
     requirements = tmp_path / "requirements.txt"
+    platform_backend_requirements = tmp_path / "platform-backend-requirements.txt"
+    audit_flags = ["--disable-pip", "--no-deps", "-r"]
     assert (tmp_path / "pip-audit-args").read_text().splitlines() == [
-        "--disable-pip",
-        "--no-deps",
-        "-r",
+        *audit_flags,
         str(requirements),
+        "--",
+        *audit_flags,
+        str(platform_backend_requirements),
+        "--",
     ]
     assert re.search(r"^agno==", requirements.read_text(encoding="utf-8"), re.MULTILINE)
+    # The platform backend locks its own dependencies, which the root lock file does not contain.
+    assert re.search(r"^stripe==", platform_backend_requirements.read_text(encoding="utf-8"), re.MULTILINE)
 
 
 def test_pypi_publish_job_only_downloads_and_publishes_the_built_wheel() -> None:

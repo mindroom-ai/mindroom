@@ -4,8 +4,7 @@ These tests construct ``TurnController`` directly from ``TurnControllerDeps`` â€
 no ``AgentBot``/orchestrator boot â€” with real ``TurnPolicy``, ``ConversationResolver``,
 ``TurnStore`` (disk-backed ledger), and ``CoalescingGate`` collaborators, and typed
 recording fakes only at the execution and delivery seams (``ResponseRunner``,
-``DeliveryGateway``). They pin the turn contract from
-``docs/architecture/bot-runtime.md``: precheck filtering (via ``IngressValidator``),
+``DeliveryGateway``). They pin the turn contract: precheck filtering (via ``IngressValidator``),
 replay-guard rejection, policy decision routing, ingress-level command dispatch
 with terminal TurnStore outcomes (commands are control inputs that never enter
 the coalescing gate), durable dedup across restarts, and the controller-owned

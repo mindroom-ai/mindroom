@@ -6,8 +6,7 @@ serializations across three phases:
 
 - ``agent_build``: repeated warm ``create_agent`` calls for one config.
 - ``tool_surface``: one turn's static token budgeting (execution preparation
-  plus the history-runtime re-estimate) and run-metadata payload assembly on
-  one fresh agent instance.
+  plus the history-runtime re-estimate) on one fresh agent instance.
 - ``prompt_branches``: controlled file-memory and agent-build delays executed
   sequentially (before) and concurrently (after).
 """
@@ -35,7 +34,6 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.history import prompt_tokens as prompt_tokens_module
 from mindroom.history.prompt_tokens import (
     agent_static_token_estimator,
-    agent_tool_definition_payloads_for_logging,
     estimate_agent_static_tokens,
 )
 from mindroom.memory import MemoryPromptParts
@@ -330,11 +328,9 @@ def main() -> None:
             agent_static_token_estimator(agent).estimate(prompt)
             # History runtime: an independent re-estimate for replay planning.
             estimate_agent_static_tokens(agent, prompt)
-            # Run metadata: model-visible tool schema payloads.
-            agent_tool_definition_payloads_for_logging(agent)
 
         # A fresh agent per iteration mirrors production, where every turn
-        # rebuilds the agent instance before budgeting and metadata assembly.
+        # rebuilds the agent instance before budgeting.
         results.append(
             _phase(
                 "tool_surface_per_turn",

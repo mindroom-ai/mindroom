@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -21,7 +21,6 @@ from mindroom.matrix.client_delivery import (
     edit_message_result,
     send_message_outcome,
     send_message_result,
-    send_room_event_result,
 )
 from mindroom.matrix.large_messages import _MATRIX_EVENT_HARD_LIMIT, _calculate_delivery_event_size
 
@@ -77,37 +76,8 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
 
 
-@pytest.mark.asyncio
-async def test_room_event_waits_for_classic_room_cache_rebuild() -> None:
-    """Non-message events use the same bounded recovery seam as visible messages."""
-    client = _mock_client(encrypted=True)
-    room = client.rooms.pop("!room:localhost")
-    client.room_send.side_effect = [
-        nio.SendRetryError("Classic Sync room state is being rebuilt."),
-        nio.RoomSendResponse(event_id="$reaction:localhost", room_id="!room:localhost"),
-    ]
-
-    async def restore_room_cache(_delay: float) -> None:
-        client.rooms["!room:localhost"] = room
-
-    with patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_room_cache):
-        response = await send_room_event_result(
-            client,
-            "!room:localhost",
-            "m.reaction",
-            {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$event", "key": "👍"}},
-            transaction_id="reaction-1",
-            operation="test_reaction",
-        )
-
-    assert isinstance(response, nio.RoomSendResponse)
-    assert response.event_id == "$reaction:localhost"
-    assert client.room_send.await_count == 2
-    assert all(call.kwargs["tx_id"] == "reaction-1" for call in client.room_send.await_args_list)
-
-
 def test_outbound_matrix_events_use_delivery_boundary() -> None:
-    """Production code must not bypass bounded recovery with direct room_send calls."""
+    """Production code must not bypass the encryption guard and failure handling with direct room_send calls."""
     source_root = Path(__file__).parents[1] / "src" / "mindroom"
     violations: list[str] = []
     for source_path in source_root.rglob("*.py"):
@@ -491,31 +461,23 @@ async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() 
         (nio.UploadResponse("mxc://server/uncached-sidecar-2"), None),
     ]
     client._send.return_value = nio.RoomSendResponse("$raw", "!room:localhost")
-    client.room_send.side_effect = [
-        nio.SendRetryError("Classic Sync room state is being rebuilt."),
-        nio.RoomSendResponse("$encrypted", "!room:localhost"),
-    ]
+    # nio refuses an encrypted send to a room missing from its cache, so only the attempted payload is checked.
+    client.room_send.side_effect = nio.LocalProtocolError("No such room with id !room:localhost found.")
 
-    async def restore_encrypted_room(_delay: float) -> None:
-        room = MagicMock()
-        room.encrypted = True
-        client.rooms["!room:localhost"] = room
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "x" * 100_000, "msgtype": "m.text"},
+    )
 
-    with patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_encrypted_room):
-        outcome = await send_message_outcome(
-            client,
-            "!room:localhost",
-            {"body": "x" * 100_000, "msgtype": "m.text"},
-        )
-
-    assert isinstance(outcome, DeliveredMatrixEvent)
-    assert outcome.event_id == "$encrypted"
-    encrypted_file = cast("dict[str, object]", outcome.content_sent["file"])
+    assert outcome == MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "local delivery exception")
+    content_sent = client.room_send.await_args.kwargs["content"]
+    encrypted_file = cast("dict[str, object]", content_sent["file"])
     assert encrypted_file["url"] == "mxc://server/uncached-sidecar-2"
     assert encrypted_file["key"]
     assert encrypted_file["iv"]
     assert encrypted_file["hashes"]
-    assert "url" not in outcome.content_sent
+    assert "url" not in content_sent
     assert [call.kwargs["content_type"] for call in client.upload.await_args_list] == [
         "application/json",
         "application/octet-stream",
@@ -525,7 +487,7 @@ async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() 
         "message-content.json.enc",
     ]
     assert client.room_get_state_event.await_count == 2
-    assert client.room_send.await_count == 2
+    client.room_send.assert_awaited_once()
     client._send.assert_not_awaited()
 
 

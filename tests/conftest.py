@@ -1838,7 +1838,7 @@ class DiesAfterAcknowledgement:
         )
 
 
-# Drops contract 2's journal handoff, for tests that are not about it. Named
+# Drops the outbox-enqueue journal handoff, for tests that are not about it. Named
 # rather than a bare lambda so a reader can see that the handoff was
 # deliberately stubbed here, not forgotten. Tests that care what the handoff
 # settles use a real journal store instead.

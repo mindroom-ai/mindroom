@@ -4033,8 +4033,25 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
     assert captured["json"]["private_agent_names"] == []
 
 
-def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dedicated worker routing should always reconcile through ensure_worker before use."""
+@pytest.mark.parametrize(
+    ("env", "identity_tenant_id", "identity_account_id", "expected_worker_key"),
+    [
+        ({}, None, None, "v1:default:unscoped:code"),
+        ({"CUSTOMER_ID": "tenant-a", "ACCOUNT_ID": "account-a"}, None, None, "v1:tenant-a:unscoped:code"),
+        ({"ACCOUNT_ID": "account-b"}, None, None, "v1:account-b:unscoped:code"),
+        ({}, "tenant-c", None, "v1:tenant-c:unscoped:code"),
+        ({}, None, "account-d", "v1:account-d:unscoped:code"),
+    ],
+    ids=["default", "runtime-tenant", "runtime-account", "identity-tenant", "identity-account"],
+)
+def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    identity_tenant_id: str | None,
+    identity_account_id: str | None,
+    expected_worker_key: str,
+) -> None:
+    """Dedicated unscoped routing reconciles through ensure_worker under a key that keeps the runtime or identity tenant."""
 
     class _FakeWorkerManager:
         def __init__(self, ensured_handle: WorkerHandle) -> None:
@@ -4062,6 +4079,10 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypa
         last_used_at=20.0,
         created_at=10.0,
     )
+    for name in ("CUSTOMER_ID", "ACCOUNT_ID"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
         proxy_url="http://sandbox-runner:8765",
@@ -4076,17 +4097,28 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypa
         lambda _runtime_paths_arg, _proxy_config_arg: fake_manager,
     )
     monkeypatch.setattr(sandbox_proxy_module, "primary_worker_backend_is_dedicated", lambda _runtime_paths_arg: True)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id=identity_tenant_id,
+        account_id=identity_account_id,
+    )
 
     payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
         runtime_paths=runtime_paths,
         tool_name="shell",
         function_name="run_shell_command",
-        worker_target=_worker_target(runtime_paths, None, "code", None),
+        worker_target=_worker_target(runtime_paths, None, "code", identity),
     )
 
-    assert payload["worker_key"] == "v1:default:unscoped:code"
+    assert payload == {"routing_agent_name": "code", "worker_key": expected_worker_key}
     assert worker_handle is refreshed_handle
-    assert fake_manager.ensure_calls == ["v1:default:unscoped:code"]
+    assert fake_manager.ensure_calls == [expected_worker_key]
 
 
 def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypatch: pytest.MonkeyPatch) -> None:

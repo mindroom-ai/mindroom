@@ -174,7 +174,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                         "room_id": "!legacy:example.org",
                         "thread_id": "$legacy-thread",
                         "dirty": True,
-                        "in_flight": False,
                         "first_dirty_at": 100,
                         "last_seen_at": 200,
                         "last_session_updated_at": 190,
@@ -191,7 +190,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                         "worker_key": None,
                         "execution_identity": None,
                         "dirty": False,
-                        "in_flight": False,
                         "first_dirty_at": 110,
                         "last_seen_at": 210,
                         "consecutive_failures": 0,
@@ -216,7 +214,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                 "worker_key": None,
                 "execution_identity": None,
                 "dirty": True,
-                "in_flight": False,
                 "first_dirty_at": 100,
                 "last_seen_at": 200,
                 "last_session_updated_at": 190,
@@ -233,7 +230,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                 "worker_key": None,
                 "execution_identity": None,
                 "dirty": False,
-                "in_flight": False,
                 "first_dirty_at": 110,
                 "last_seen_at": 210,
                 "consecutive_failures": 0,
@@ -317,6 +313,51 @@ async def test_worker_respects_batch_limits(
         agent_name: str,
         **_: object,
     ) -> dict[str, str]:
+        writes.append(f"{agent_name}:{content}")
+        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
+
+    worker = MemoryAutoFlushWorker(
+        storage_path=storage_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    await worker._run_cycle(config)
+
+    assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_flush_mark_left_by_an_older_release_does_not_block_flushing(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session an older release left marked in flight after a crash is flushed after restart."""
+    storage_path = tmp_path
+    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
+    state_file = storage_path / "memory_flush_state.json"
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    payload["sessions"]["general:s1"]["in_flight"] = True
+    state_file.write_text(json.dumps(payload), encoding="utf-8")
+    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
+
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this important decision")],
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+    writes: list[str] = []
+
+    def _fake_append_daily_memory(content: str, agent_name: str, **_: object) -> dict[str, str]:
         writes.append(f"{agent_name}:{content}")
         return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
 
@@ -644,7 +685,6 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
     session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is True
-    assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
 
 
@@ -703,7 +743,6 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
     session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is False
-    assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
     assert session_state["last_session_updated_at"] == 200
     assert append_calls == []

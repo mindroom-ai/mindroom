@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - "saas-platform/**"
+      - "cluster/**"
       - ".github/workflows/platform-backend-tests.yml"
   pull_request:
     branches: [main]
     paths:
       - "saas-platform/**"
+      - "cluster/**"
       - ".github/workflows/platform-backend-tests.yml"
 
 permissions:

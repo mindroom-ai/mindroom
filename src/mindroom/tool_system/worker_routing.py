@@ -543,20 +543,15 @@ def resolve_worker_key(
 
 def resolve_unscoped_worker_key(
     agent_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
     *,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Derive a stable backend worker key for unscoped sandbox execution."""
-    identity = execution_identity
-    tenant_key = normalize_worker_key_part(
-        tenant_id
-        or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
-        or account_id
-        or (identity.account_id if identity is not None and identity.account_id is not None else None)
-        or "default",
-    )
+    """Derive a stable backend worker key for unscoped sandbox execution.
+
+    Pass the tenant and account of the resolved worker target, which already fall back to its execution identity's.
+    """
+    tenant_key = normalize_worker_key_part(tenant_id or account_id or "default")
     effective_agent_name = normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
@@ -653,14 +648,21 @@ def _resolve_execution_identity_for_worker_scope(
     )
 
 
+def worker_log_id(worker_key: str) -> str:
+    """Return the digest that names a worker in logs, because worker keys embed requester identifiers.
+
+    `worker_dir_name` ends with it, so a logged worker can be found on disk.
+    """
+    return hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
+
+
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
     prefix = _normalize_worker_dir_part(worker_key)
     prefix = prefix[:_WORKER_DIRNAME_MAX_PREFIX_LENGTH].rstrip("._-")
     if not prefix:
         prefix = "worker"
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}-{digest}"
+    return f"{prefix}-{worker_log_id(worker_key)}"
 
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:

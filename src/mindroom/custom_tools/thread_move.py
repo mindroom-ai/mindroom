@@ -101,7 +101,8 @@ def _plan_thread_copy(
         if entity is not None and isinstance(speaks_for, str) and speaks_for:
             # MindRoom's own posts on someone's behalf (voice transcripts,
             # handoffs, earlier move copies) keep who they speak for, because
-            # prompts label them with that person.
+            # prompts label them with that person. A human's own field is never copied,
+            # so a person cannot make a copy claim another author.
             content[ORIGINAL_SENDER_KEY] = speaks_for
         poster = entity if entity is not None and entity in target_posters else ROUTER_AGENT_NAME
         if poster != entity:
