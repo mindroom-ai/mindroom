@@ -1176,11 +1176,16 @@ class MCPServerManager:
             msg = f"MCP server '{state.server_id}' is not connected"
             raise MCPConnectionError(state.server_id, msg)
         try:
-            result = await session.call_tool(
-                remote_tool_name,
-                arguments=arguments,
-                read_timeout_seconds=timeout_seconds,
-                progress_callback=progress_callback,
+            # The SDK keeps the context each request is sent from until the session's next message, and a
+            # turn's contextvars hold its Agent and tools; awaiting the task still forwards cancellation.
+            result = await asyncio.create_task(
+                session.call_tool(
+                    remote_tool_name,
+                    arguments=arguments,
+                    read_timeout_seconds=timeout_seconds,
+                    progress_callback=progress_callback,
+                ),
+                context=Context(),
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc

@@ -65,7 +65,10 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class SummaryModel:
-    """One serving model and its matching identity and serialized-input budget."""
+    """One serving model and its matching identity and serialized-input budget.
+
+    A fallback switch replaces the whole value, so later chunks cannot use the previous model's budget or identity.
+    """
 
     model: Model
     name: str
