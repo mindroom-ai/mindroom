@@ -153,6 +153,8 @@ class ToolMetadata:
 
     ``requires_room_context`` marks toolkits that need the live Matrix room
     runtime, including its client, requester, and conversation context.
+    ``requires_conversation`` marks toolkits that need the calling agent's
+    conversation, such as its session, model, and usage accounting, but no room.
     ``requires_primary_runtime`` prevents worker routing even when an authored
     ``worker_tools`` override selects the tool. It is independent from the
     overridable ``default_execution_target``.
@@ -172,6 +174,7 @@ class ToolMetadata:
     # Runs arbitrary programs (shell, interpreters, containers); independent of the file_access class.
     executes_code: bool = False
     requires_room_context: bool = False
+    requires_conversation: bool = False
     icon: str | None = None
     icon_color: str | None = None
     config_fields: list[ConfigField] | None = None
@@ -188,3 +191,8 @@ class ToolMetadata:
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
     supports_toolkit_filters: bool = False
     factory: Callable[[], type] | None = None
+
+    @property
+    def mcp_available(self) -> bool:
+        """Whether MCP gateway calls, which run without a Matrix room or an agent conversation, can use the tool."""
+        return not (self.requires_room_context or self.requires_conversation)

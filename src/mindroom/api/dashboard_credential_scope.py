@@ -16,7 +16,7 @@ from mindroom.authorization import (
 )
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, build_requester_execution_identity
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -96,21 +96,13 @@ def build_dashboard_execution_identity(
     and it exists solely so dashboard previews hit the same scoped-runtime seams as
     live requests once an execution scope is chosen.
     """
-    tenant_id = runtime_paths.env_value("CUSTOMER_ID")
-    account_id = runtime_paths.env_value("ACCOUNT_ID")
     requester_id = _dashboard_requester_id_for_request(request, runtime_paths)
     if requester_id is not None and config is not None:
         requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    return ToolExecutionIdentity(
-        channel="matrix",
+    return build_requester_execution_identity(
         agent_name=agent_name,
+        runtime_paths=runtime_paths,
         requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-        tenant_id=tenant_id,
-        account_id=account_id,
     )
 
 

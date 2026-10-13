@@ -96,7 +96,7 @@ def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Tool
 
     # Plugin metadata can change after selection while this build is scheduled.
     metadata = TOOL_METADATA.get(entry.name)
-    if metadata is not None and metadata.requires_room_context:
+    if metadata is not None and not metadata.mcp_available:
         raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     runtime = resolve_agent_runtime(
         context.agent_name,

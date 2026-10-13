@@ -335,6 +335,7 @@ See [Security Posture](architecture/security-posture.md#file-access) for how eac
 | `requires_primary_runtime` | bool | `False` | Never route the tool to a worker, even when `worker_tools` lists it |
 | `consumes_workspace_paths` | bool | `False` | The tool opens workspace files by path; when it runs in a worker, attachments are saved to the worker workspace so the tool can open them |
 | `requires_room_context` | bool | `False` | The tool needs a live Matrix room, so it is hidden where none exists, such as the MCP gateway, the OpenAI-compatible API, and room-less runs, and it always runs in the primary runtime |
+| `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](tools/index.md#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose injected `agent` parameter is unused and can receive `None` in a worker |
@@ -787,7 +788,7 @@ from mindroom.automations import Ask, AutomationContext, Done, automation
 from mindroom.path_confinement import read_regular_file_within_root
 
 
-# Only agents with file memory have a workspace for the digest.
+# The digest lives in the agent's file memory, so skip agents without it.
 @automation("weekly_digest", requires_file_memory=True)
 def check(ctx: AutomationContext) -> Ask | None:
     if ctx.workspace is None or not ctx.workspace.is_dir():
@@ -844,8 +845,10 @@ agents:
 | `entry` | The agent's entry for this automation |
 | `options` | The entry's `options`, set per agent, read-only |
 | `settings` | The plugin's `settings`, set once per plugin, read-only |
-| `workspace` | The agent's workspace root, which may not exist yet; `None` for an agent without `memory_backend: file`, which has no workspace |
-| `state_dir` | The agent's automation state directory in MindRoom storage, outside the workspace; name your files after your automation and create the directory when you first write |
+| `requester_id` | For a [private agent](scheduling.md#automations), the requester whose instance this run maintains; `None` for a shared agent |
+| `execution_identity` | The identity that resolves that requester's instance, for helpers that take one; `None` for a shared agent |
+| `workspace` | The workspace root, which may not exist yet: a private agent's is the requester's private root; `None` for a shared agent without `memory_backend: file`, which has no workspace |
+| `state_dir` | The automation state directory of the agent, or of the requester's instance, in MindRoom storage outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees
 
@@ -861,5 +864,5 @@ For plugin code, MindRoom also guarantees:
 ### Helpers the built-ins use
 
 Agent workspaces can contain files worker code wrote, so read and write them without following links: `read_regular_file_within_root`, `write_file_within_root`, and `open_directory_within_root` from `mindroom.path_confinement` do that.
-To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths))` with `refresh_agent_memory_search` from `mindroom.memory`.
+To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths, ctx.execution_identity))` with `refresh_agent_memory_search` from `mindroom.memory`.
 [`prompt_curation.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/prompt_curation.py) and [`dreaming.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/dreaming.py) are complete examples: a single prompt with a re-check, and a proposal reviewed in a second thread before code applies it.
