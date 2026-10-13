@@ -12,6 +12,7 @@ from mindroom.embeddings.signatures import effective_mem0_embedder_signature, en
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.timing import timed
+from mindroom.tool_system.dependencies import optional_dependency_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -258,28 +259,29 @@ async def create_memory_instance(
         Configured AsyncMemory instance
 
     """
-    from mem0 import AsyncMemory  # noqa: PLC0415
-
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
     if config.memory.embedder.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)
 
-    # Create AsyncMemory instance with dictionary config directly
-    # Mem0 expects a dict for configuration, not config objects
-    memory = AsyncMemory.from_config(config_dict)
-    memory_llm = config.memory.llm
-    if memory_llm is not None and memory_llm.provider == "openai":
-        from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
+    with optional_dependency_environment():
+        from mem0 import AsyncMemory  # noqa: PLC0415
 
-        install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
-    if config.memory.embedder.provider == "openai":
-        # Mem0's own OpenAI embedder indexes response.data[0] without validation
-        # and can expose raw provider errors. Reuse MindRoom's strict boundary.
-        from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
+        # Create AsyncMemory instance with dictionary config directly
+        # Mem0 expects a dict for configuration, not config objects
+        memory = AsyncMemory.from_config(config_dict)
+        memory_llm = config.memory.llm
+        if memory_llm is not None and memory_llm.provider == "openai":
+            from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
 
-        strict_embedder = cast("_StrictOpenAIEmbedder", create_configured_embedder(config, runtime_paths))
-        cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
-    _install_chroma_similarity_scores(memory.vector_store)
+            install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
+        if config.memory.embedder.provider == "openai":
+            # Mem0's own OpenAI embedder indexes response.data[0] without validation
+            # and can expose raw provider errors. Reuse MindRoom's strict boundary.
+            from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
+
+            strict_embedder = cast("_StrictOpenAIEmbedder", create_configured_embedder(config, runtime_paths))
+            cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
+        _install_chroma_similarity_scores(memory.vector_store)
 
     logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
     return memory

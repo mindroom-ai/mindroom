@@ -644,6 +644,34 @@ if mode == 'reader':
     print('ready', flush=True)
     signatures.create_sentence_transformers_embedder(paths)
     print('imported complete metadata', flush=True)
+elif mode == 'mem0_reader':
+    import asyncio
+    from types import ModuleType
+    from mindroom.config.main import Config
+    from mindroom.constants import resolve_primary_runtime_paths
+    from mindroom.memory import config as memory_config
+
+    class Memory:
+        vector_store = object()
+
+        @classmethod
+        def from_config(cls, config):
+            for name in importlib.metadata.packages_distributions()['transient_embedding']:
+                assert importlib.metadata.version(name) == '1'
+            return cls()
+
+    mem0 = ModuleType('mem0')
+    mem0.AsyncMemory = Memory
+    sys.modules['mem0'] = mem0
+    memory_config.ensure_sentence_transformers_dependencies = lambda paths: None
+    memory_config._install_chroma_similarity_scores = lambda store: None
+    config = Config()
+    config.memory.embedder.provider = 'sentence_transformers'
+    config.memory.llm = None
+    paths = resolve_primary_runtime_paths(config_path=root / 'mem0-runtime' / 'config.yaml', process_env={})
+    print('ready', flush=True)
+    asyncio.run(memory_config.create_memory_instance(root / 'memory', config, paths))
+    print('imported complete metadata', flush=True)
 else:
     if mode != 'writer':
         print('ready', flush=True)
@@ -659,7 +687,7 @@ def _dependency_process_line(process: subprocess.Popen[str]) -> str:
     return lines.get(timeout=20).strip()
 
 
-@pytest.mark.parametrize("contender", ["reader", "installer"])
+@pytest.mark.parametrize("contender", ["reader", "mem0_reader", "installer"])
 def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
     """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
     environment = tmp_path / "environment"
@@ -702,11 +730,11 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
         assert "installed" in writer_output
         reader_output, reader_error = reader.communicate(timeout=20)
         assert reader.returncode == 0, reader_error
-        expected = "imported complete metadata" if contender == "reader" else "installed"
+        expected = "installed" if contender == "installer" else "imported complete metadata"
         assert expected in reader_output
         extras = tomllib.loads((environment / "uv-receipt.toml").read_text())["tool"]["requirements"][0]["extras"]
         assert set(extras) == (
-            {"duckduckgo", "website"} if contender == "reader" else {"browser", "duckduckgo", "website"}
+            {"duckduckgo", "website"} if contender != "installer" else {"browser", "duckduckgo", "website"}
         )
     finally:
         for process in (writer, reader):

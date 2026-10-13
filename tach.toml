@@ -3210,6 +3210,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.memory._mem0_openai",
     "mindroom.timing",
+    "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.memory._backend"]
 
