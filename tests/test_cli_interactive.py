@@ -32,18 +32,18 @@ def keys(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
         yield pipe.send_text
 
 
-def test_select_moves_from_the_default_with_arrow_keys(keys: Callable[[str], None]) -> None:
-    """The pointer starts on the default, so one step down picks the next choice."""
-    keys(_DOWN + _ENTER)
+def test_select_moves_from_the_first_choice_with_arrow_keys(keys: Callable[[str], None]) -> None:
+    """The pointer starts on the first choice, so two steps down pick the third."""
+    keys(_DOWN + _DOWN + _ENTER)
 
-    assert interactive.select("Provider?", _CHOICES, default="anthropic") == "ollama"
+    assert interactive.select("Provider?", _CHOICES) == "ollama"
 
 
-def test_select_returns_the_default_on_enter(keys: Callable[[str], None]) -> None:
-    """Enter alone accepts the default choice."""
+def test_select_returns_the_first_choice_on_enter(keys: Callable[[str], None]) -> None:
+    """Enter alone accepts the first choice, which is the default."""
     keys(_ENTER)
 
-    assert interactive.select("Provider?", _CHOICES, default="anthropic") == "anthropic"
+    assert interactive.select("Provider?", _CHOICES) == "openai"
 
 
 def test_secret_returns_the_typed_text(keys: Callable[[str], None]) -> None:
@@ -71,7 +71,7 @@ def test_confirm_reads_yes_no_and_the_default(keys: Callable[[str], None], typed
 @pytest.mark.parametrize(
     "ask",
     [
-        lambda: interactive.select("Provider?", _CHOICES, default="openai"),
+        lambda: interactive.select("Provider?", _CHOICES),
         lambda: interactive.secret("API key"),
         lambda: interactive.confirm("Continue?", default=True),
     ],
@@ -87,7 +87,7 @@ def test_ctrl_c_aborts_like_a_line_prompt(keys: Callable[[str], None], ask: Call
 def test_piped_input_answers_line_prompts() -> None:
     """Arrow-key prompts would silently take the default from a pipe, so piped answers get line prompts."""
     with CliRunner().isolation(input="ollama\nsk-test\nn\n"):
-        assert interactive.select("Provider?", _CHOICES, default="openai") == "ollama"
+        assert interactive.select("Provider?", _CHOICES) == "ollama"
         assert interactive.secret("API key") == "sk-test"
         assert interactive.confirm("Continue?", default=True) is False
 
@@ -95,7 +95,7 @@ def test_piped_input_answers_line_prompts() -> None:
 def test_piped_select_asks_again_after_an_unknown_choice() -> None:
     """A line answer must name one of the choices."""
     with CliRunner().isolation(input="gemini\nanthropic\n") as (_, _, output):
-        assert interactive.select("Provider?", _CHOICES, default="openai") == "anthropic"
+        assert interactive.select("Provider?", _CHOICES) == "anthropic"
         assert b"is not one of" in output.getvalue()
 
 

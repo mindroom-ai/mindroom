@@ -126,7 +126,7 @@ _PROVIDER_HELP = "Default model provider for the generated config."
 _PROVIDER_CHOICES_TEXT = (
     "anthropic, azure, bedrock_claude, codex, kimi, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
 )
-# The provider menu in its display order: each preset's name and what it needs.
+# The provider menu in its display order, default first: each preset's name and what it needs.
 _PROVIDER_PRESET_MENU: dict[_ProviderPreset, tuple[str, str]] = {
     "openai": ("OpenAI", "API key"),
     "anthropic": ("Anthropic", "API key"),
@@ -1079,7 +1079,6 @@ def _prompt_provider_preset() -> _ProviderPreset:
     return select(
         "Which model provider should your agents use?",
         [(preset, f"{label:<{width}}{needs}") for preset, (label, needs) in _PROVIDER_PRESET_MENU.items()],
-        default="openai",
     )
 
 

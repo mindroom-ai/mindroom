@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import yaml
 from rich.console import Group
 from rich.markup import escape
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -571,8 +572,11 @@ def _print_plain_pairing_request(console: Console, session: DevicePairSession) -
 
 def _terminal_pairing_request(session: DevicePairSession, *, width: int) -> Group:
     """Return the approval link on its own unwrapped line, then the QR code beside the pair code to check."""
-    qr_code = render_qr(session.approve_url).rstrip("\n")
-    qr_width = max(len(line) for line in qr_code.splitlines())
+    # The QR code's full blocks are its light modules, so fixed colors keep it scannable in light themes too.
+    # Its odd module count leaves a last line of upper half blocks, whose lower half lies outside the code.
+    *qr_rows, qr_last_row = render_qr(session.approve_url).rstrip("\n").splitlines()
+    qr_code = Text.assemble(("\n".join(qr_rows), "#ffffff on #000000"), "\n", (qr_last_row, "#ffffff"), no_wrap=True)
+    qr_width = len(qr_last_row)
     details = Text.assemble(
         ("Pair code  ", "dim"),
         (session.pair_code, "bold cyan"),
@@ -581,17 +585,19 @@ def _terminal_pairing_request(session: DevicePairSession, *, width: int) -> Grou
         ("Or enter the code in MindRoom Chat\n→ Settings → Local MindRoom.", "dim"),
     )
     if width < qr_width + _PAIRING_DETAILS_GAP + _PAIRING_DETAILS_MIN_WIDTH:
-        codes: RenderableType = Group(Text(qr_code, no_wrap=True), details)
+        codes: RenderableType = Group(qr_code, details)
     else:
         codes = Table.grid(padding=(0, _PAIRING_DETAILS_GAP))
         codes.add_column(no_wrap=True, vertical="middle")
         codes.add_column(vertical="middle")
-        codes.add_row(Text(qr_code), details)
-    return Group(
-        "Open this link or scan the QR code, then approve this machine in MindRoom Chat:",
-        Text(f"  {session.approve_url}", no_wrap=True, overflow="ignore"),
-        codes,
+        codes.add_row(qr_code, details)
+    link = Text.assemble(
+        "  ",
+        (session.approve_url, Style(color="bright_blue", underline=True, link=session.approve_url)),
+        no_wrap=True,
+        overflow="ignore",
     )
+    return Group("Open this link or scan the QR code, then approve this machine in MindRoom Chat:", link, codes)
 
 
 def _confirm_approver_or_raise(

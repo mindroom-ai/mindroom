@@ -22,8 +22,11 @@ def section(title: str) -> Group:
     return Group(NewLine(), Rule(f"[bold]{title}[/bold]", align="left", style="green"))
 
 
-def select[Value: str](message: str, choices: Sequence[tuple[Value, str]], *, default: Value) -> Value:
-    """Return the value of the `(value, title)` choice picked with the arrow keys, or typed by value when piped."""
+def select[Value: str](message: str, choices: Sequence[tuple[Value, str]]) -> Value:
+    """Return the value of the `(value, title)` choice picked with the arrow keys, or typed by value when piped.
+
+    The first choice is the default; questionary would mark any other default as picked next to the pointer.
+    """
     if _arrow_keys_work():
         import questionary  # noqa: PLC0415  # lazy: prompt_toolkit loads only for prompts
 
@@ -31,11 +34,12 @@ def select[Value: str](message: str, choices: Sequence[tuple[Value, str]], *, de
             questionary.select(
                 message,
                 choices=[questionary.Choice(title, value=value) for value, title in choices],
-                default=default,
+                # The pointed choice gets the green of the setup headers; questionary leaves it unstyled.
+                style=questionary.Style([("pointer", "fg:ansigreen bold"), ("highlighted", "fg:ansigreen bold")]),
             ),
         )
     else:
-        picked = typer.prompt(message, default=default, type=click.Choice([value for value, _ in choices]))
+        picked = typer.prompt(message, default=choices[0][0], type=click.Choice([value for value, _ in choices]))
     return next(value for value, _ in choices if value == picked)
 
 

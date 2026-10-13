@@ -879,6 +879,27 @@ def test_pair_local_install_in_a_terminal_shows_each_renewed_code(
     assert output.count("Or enter the code in MindRoom Chat") == 2
 
 
+def test_terminal_qr_code_has_fixed_colors_without_a_strip_below() -> None:
+    """White-on-black modules scan in light themes too, and the last half-block row keeps the terminal background."""
+    console = Console(file=io.StringIO(), color_system="truecolor", width=120)
+    session = cli_connect.DevicePairSession(
+        pair_code="ABCD-EFGH",
+        device_secret="device-secret",  # noqa: S106
+        approve_url="https://chat.example/connect?code=ABCD-EFGH",
+        poll_interval_seconds=3,
+        expires_at=datetime(2099, 9, 26, 12, 10, tzinfo=UTC),
+    )
+
+    console.print(cli_connect._terminal_pairing_request(session, width=120))
+
+    assert isinstance(console.file, io.StringIO)
+    qr_lines = [line for line in console.file.getvalue().splitlines() if "█" in line or "▀" in line]
+    black_background = "\x1b[38;2;255;255;255;48;2;0;0;0m"
+    assert all(black_background in line for line in qr_lines[:-1])
+    assert black_background not in qr_lines[-1]
+    assert "\x1b[38;2;255;255;255m▀" in qr_lines[-1]
+
+
 @pytest.mark.parametrize("force_terminal", [False, True])
 def test_pair_local_install_without_a_terminal_prints_plain_lines_without_qr(
     tmp_path: Path,
