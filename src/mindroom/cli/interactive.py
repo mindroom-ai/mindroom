@@ -96,6 +96,10 @@ def _discard_typeahead() -> None:
 
 def _ask(question: Question) -> object:
     """Ask `question`, raising `typer.Abort` on Ctrl+C or end of input the way typer's prompts do."""
+    from prompt_toolkit.input.typeahead import clear_typeahead  # noqa: PLC0415  # lazy: loaded with questionary
+
+    # prompt_toolkit replays keys an earlier prompt read but did not use, such as a second Enter; they are not answers.
+    clear_typeahead(question.application.input)
     try:
         return question.unsafe_ask()
     except (KeyboardInterrupt, EOFError):

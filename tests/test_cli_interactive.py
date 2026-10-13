@@ -71,11 +71,19 @@ def test_confirm_reads_yes_no_and_the_default(keys: Callable[[str], None], typed
     assert interactive.confirm("Continue?", default=True) is expected
 
 
-def test_confirm_keeps_the_enter_after_its_answer(keys: Callable[[str], None]) -> None:
-    """The Enter typed after `y` must not answer the next question, such as whether to install a login service."""
-    keys("y" + _ENTER + "n" + _ENTER)
+def test_confirm_answer_waits_for_enter(keys: Callable[[str], None]) -> None:
+    """A yes/no answer counts only on Enter, so a corrected key wins and nothing is left for the next question."""
+    keys("y" + "n" + _ENTER)
 
+    assert interactive.confirm("Is this your account?", default=True) is False
+
+
+def test_confirm_answers_only_its_own_question(keys: Callable[[str], None]) -> None:
+    """Keys left after an answer, such as a second Enter, must not answer the next question, such as a login service."""
+    keys("y" + _ENTER + _ENTER)
     assert interactive.confirm("Is this your account?", default=True) is True
+
+    keys("n" + _ENTER)
     assert interactive.confirm("Run MindRoom in the background?", default=True) is False
 
 
