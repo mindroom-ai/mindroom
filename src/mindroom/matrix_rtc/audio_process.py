@@ -7,6 +7,9 @@ inherited socket. The main process keeps everything that needs MindRoom state:
 resolving instructions, running delegations, storing transcripts and usage,
 and closing the delegate. Stalls on the main event loop then delay only those
 steps, never the call audio.
+
+A new audio process spends about 1.5 s importing the agent stack, so one idle
+process is kept started ahead of the next call.
 """
 
 from __future__ import annotations
@@ -58,6 +61,10 @@ class _ChildProcess(Protocol):
         """Return the exit code once the process has exited."""
         ...
 
+    def running(self) -> bool:
+        """Return whether the process has not exited yet."""
+        ...
+
     def kill(self) -> None:
         """Kill the process and its group."""
         ...
@@ -69,6 +76,9 @@ class _PopenChild:
 
     async def wait(self) -> int:
         return await asyncio.to_thread(self._process.wait)
+
+    def running(self) -> bool:
+        return self._process.poll() is None
 
     def kill(self) -> None:
         with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -96,6 +106,35 @@ def _spawn_audio_child(child_socket: socket.socket) -> _ChildProcess:
     return _PopenChild(process)
 
 
+class _WarmAudioProcess:
+    """One idle call audio process, started before it is needed."""
+
+    def __init__(self, spawn: Callable[[socket.socket], _ChildProcess] = _spawn_audio_child) -> None:
+        self._spawn = spawn
+        self._idle: tuple[socket.socket, _ChildProcess] | None = None
+
+    def prewarm(self) -> None:
+        """Start the idle process unless a live one is already waiting."""
+        if self._idle is not None:
+            if self._idle[1].running():
+                return
+            self._idle[0].close()
+        main_socket, child_socket = socket.socketpair()
+        self._idle = (main_socket, self._spawn(child_socket))
+
+    def take(self) -> tuple[socket.socket, _ChildProcess]:
+        """Hand the idle process to a call and start the next call's process."""
+        self.prewarm()
+        assert self._idle is not None
+        taken, self._idle = self._idle, None
+        self.prewarm()
+        return taken
+
+
+_warm_audio_process = _WarmAudioProcess()
+prewarm_call_audio_process = _warm_audio_process.prewarm
+
+
 class ProcessLiveVoiceBridge:
     """One GPT-Live call whose media runs in a child process."""
 
@@ -104,10 +143,9 @@ class ProcessLiveVoiceBridge:
         *,
         local_identity: str,
         e2ee_enabled: bool,
-        spawn: Callable[[socket.socket], _ChildProcess] = _spawn_audio_child,
+        start_child: Callable[[], tuple[socket.socket, _ChildProcess]] = _warm_audio_process.take,
     ) -> None:
-        main_socket, child_socket = socket.socketpair()
-        self._child = spawn(child_socket)
+        main_socket, self._child = start_child()
         self._queued: list[dict[str, Any]] = [{"type": "Start", "local_identity": local_identity, "e2ee": e2ee_enabled}]
         self._writer: asyncio.StreamWriter | None = None
         self._replies: dict[int, asyncio.Future[None]] = {}

@@ -2403,6 +2403,32 @@ async def test_preload_builds_the_token_encoder_off_the_event_loop(monkeypatch: 
     assert encoder_threads[0] != threading.get_ident()
 
 
+@pytest.mark.asyncio
+async def test_preload_prewarms_the_call_audio_process_only_for_live_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup starts an idle call audio process only when some agent answers calls with GPT-Live."""
+    livekit_plugins = ModuleType("livekit.plugins")
+    livekit_plugins.openai = ModuleType("livekit.plugins.openai")
+    monkeypatch.setitem(sys.modules, "livekit.plugins", livekit_plugins)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: True)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.o200k_encoding", lambda: None)
+    prewarms: list[None] = []
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.prewarm_call_audio_process", lambda: prewarms.append(None))
+
+    await preload_matrix_call_dependencies(_config())
+    assert prewarms == []
+
+    config = _config()
+    config.calls.profiles["live"] = LiveCallProfile(
+        backend="live",
+        model="gpt-live-1",
+        credentials_service="openai_live",
+        voice="marin",
+    )
+    config.calls.agents["helper"] = "live"
+    await preload_matrix_call_dependencies(config)
+    assert prewarms == [None]
+
+
 def test_voice_backend_availability_requires_runtime_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -37,7 +37,7 @@ from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.room_membership import cached_joined_member_ids
-from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge
+from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
     CALL_BRIEF_TOKEN_BUDGET,
@@ -257,6 +257,9 @@ async def preload_matrix_call_dependencies(config: Config) -> None:
 
         # Call setup counts tokens; building the encoder on the loop would stall call audio.
         await asyncio.to_thread(o200k_encoding)
+        if any(config.calls.resolve_agent_config(agent).backend == "live" for agent in config.calls.agents):
+            # The first GPT-Live call would otherwise wait for its audio process to import the agent stack.
+            prewarm_call_audio_process()
     except Exception:
         logger.warning("calls_dependency_preload_failed", exc_info=True)
 

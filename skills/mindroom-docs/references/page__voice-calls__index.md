@@ -111,6 +111,7 @@ See the example in [Setup](#setup).
 Live answers from the agent's full rendered system prompt, including its context files and caller-specific workspace, and delegates requests that need tools, research, more memory, or actions to the normal MindRoom agent, then relays the result conversationally.
 If the agent's prompt plus voice guidance exceeds about 16,000 tokens (a local estimate, not a provider limit), Live instead delegates every substantive request, including questions about identity and preferences, to the normal agent.
 Delegated turns keep their history while the call lasts, and each new call starts a fresh delegate session.
+Each Live call runs its audio in a separate Python process, so a busy MindRoom process does not interrupt the call's audio; expect one extra process per active call, plus one idle process (about 130 MB) that MindRoom starts ahead of the next call so pickup stays fast.
 
 This example uses GPT-Live for speech and the `chat` model for delegated turns, with a voice credential independent of the agent's model provider:
 

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.matrix_rtc.audio_child import _AudioChild
-from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, _spawn_audio_child
+from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, _spawn_audio_child, _WarmAudioProcess
 from mindroom.matrix_rtc.audio_protocol import (
     _MAX_FRAME_BYTES,
     AudioProtocolError,
@@ -200,7 +200,9 @@ async def child_channel() -> AsyncIterator[ChildChannel]:
         bridges.append(FakeLiveBridge(local_identity, e2ee_enabled))
         return bridges[-1]
 
-    task = asyncio.create_task(_AudioChild(child_reader, child_writer, bridge_factory=factory).serve())
+    task = asyncio.create_task(
+        _AudioChild(child_reader, child_writer, bridge_factory=factory).serve(),
+    )
     channel = ChildChannel(main_reader, main_writer, bridges, task)
     try:
         yield channel
@@ -389,6 +391,10 @@ class InProcessChild:
             await self.task
         return 0
 
+    def running(self) -> bool:
+        """Return whether the child task is still serving."""
+        return not self.task.done()
+
     def kill(self) -> None:
         """Stop the child task, closing its end of the socket."""
         self.killed = True
@@ -472,11 +478,12 @@ async def proxy_bridge(
     bridges: list[FakeLiveBridge] = []
     children: list[InProcessChild] = []
 
-    def spawn(child_socket: socket.socket) -> InProcessChild:
+    def start_child() -> tuple[socket.socket, InProcessChild]:
+        main_socket, child_socket = socket.socketpair()
         children.append(InProcessChild(child_socket, bridges, hang_on_close=hang_on_close))
-        return children[-1]
+        return main_socket, children[-1]
 
-    bridge = ProcessLiveVoiceBridge(local_identity="@bot:x:DEV", e2ee_enabled=True, spawn=spawn)
+    bridge = ProcessLiveVoiceBridge(local_identity="@bot:x:DEV", e2ee_enabled=True, start_child=start_child)
     try:
         yield bridge, bridges, children
     finally:
@@ -664,3 +671,58 @@ async def test_real_child_starts_and_closes() -> None:
     finally:
         child.kill()
         writer.close()
+
+
+class IdleProcess:
+    """A started call audio process that only reports whether it is alive."""
+
+    def __init__(self) -> None:
+        self.alive = True
+
+    async def wait(self) -> int:
+        """Return at once; the fake process never runs."""
+        return 0
+
+    def running(self) -> bool:
+        """Return whether the fake process is alive."""
+        return self.alive
+
+    def kill(self) -> None:
+        """Mark the fake process dead."""
+        self.alive = False
+
+
+def _idle_spawner() -> tuple[list[IdleProcess], Callable[[socket.socket], IdleProcess]]:
+    spawned: list[IdleProcess] = []
+
+    def spawn(child_socket: socket.socket) -> IdleProcess:
+        child_socket.close()
+        spawned.append(IdleProcess())
+        return spawned[-1]
+
+    return spawned, spawn
+
+
+def test_warm_audio_process_hands_over_the_idle_child_and_starts_its_replacement() -> None:
+    """A call takes the prewarmed process, and the next call's process starts right away."""
+    spawned, spawn = _idle_spawner()
+    warm = _WarmAudioProcess(spawn)
+    warm.prewarm()
+    warm.prewarm()
+    assert len(spawned) == 1
+    main_socket, child = warm.take()
+    main_socket.close()
+    assert child is spawned[0]
+    assert len(spawned) == 2
+
+
+def test_warm_audio_process_replaces_an_idle_child_that_died() -> None:
+    """A prewarmed process that exited while idle is never handed to a call."""
+    spawned, spawn = _idle_spawner()
+    warm = _WarmAudioProcess(spawn)
+    warm.prewarm()
+    spawned[0].alive = False
+    main_socket, child = warm.take()
+    main_socket.close()
+    assert child is spawned[1]
+    assert len(spawned) == 3

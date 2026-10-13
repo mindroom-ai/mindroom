@@ -186,7 +186,11 @@ class _AudioChild:
 
 
 def _die_with_parent() -> None:
-    """Ask Linux to kill this process when the MindRoom process that started it exits."""
+    """Ask Linux to kill this process when the MindRoom process that started it exits.
+
+    Linux sends the signal when the spawning thread exits, so MindRoom spawns
+    this process from its event loop thread, never from a worker thread.
+    """
     if sys.platform != "linux":
         return
     with contextlib.suppress(OSError, AttributeError):
@@ -214,7 +218,8 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _die_with_parent()
     setup_subprocess_logging(log_file=Path(args.log_file) if args.log_file else None)
-    # LiveKit registers its plugins on the main thread.
+    # Importing the agent stack takes about 1.5 s; MindRoom starts this process before a call needs it.
+    # LiveKit registers its plugins only on the main thread.
     from livekit.plugins import openai  # noqa: F401, PLC0415
 
     # The child's import-time heap never needs collecting again.
