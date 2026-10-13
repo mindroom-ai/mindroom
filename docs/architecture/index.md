@@ -14,7 +14,7 @@ icon: lucide/layout
 - [Code Map](code-map.md) - The inbound turn pipeline at module level, key modules and their purpose, and where persistent state lives
 - [Migration and Compatibility Boundaries](migrations.md) - Why historical formats are handled as they are, and which migrations dependencies own
 - [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it
-- [Background Tool Jobs](../dev/background-tool-jobs.md) - Execution ownership, waiting, Stop, and recovery
+- [Background Tool Jobs](background-tool-jobs.md) - The decisions, invariant purposes, and limits behind background tool jobs
 - [Matrix Event-Journal Contracts](matrix-event-journal-contracts.md) - Event-journal decisions the code does not explain, and the homeserver behaviour you would otherwise rediscover by debugging
 
 ## Storage upgrade boundaries

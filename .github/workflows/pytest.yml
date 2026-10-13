@@ -63,7 +63,7 @@ jobs:
       - name: Check tool execution on Python 3.14
         if: matrix.python-version == '3.14'
         run: |
-          uv run pytest tests/test_tool_job_execution.py tests/test_tool_job_wait_timeout.py tests/test_tool_hooks.py -m "not requires_matrix"
+          uv run pytest tests/test_tool_job_execution.py tests/test_tool_job_background_after.py tests/test_tool_hooks.py -m "not requires_matrix"
 
       - name: Check for uncommitted changes
         run: |

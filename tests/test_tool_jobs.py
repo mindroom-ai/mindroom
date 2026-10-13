@@ -830,16 +830,26 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
     """A message the judge lets wait is acknowledged and keeps the reply waiting; one it must answer releases it."""
     runtime = await tool_job_runtime(tmp_path)
     state = _QueuedMessageState()
-    proceed, acknowledged = asyncio.Event(), asyncio.Event()
+    proceed, acknowledgement = asyncio.Event(), asyncio.Event()
     judged: list[tuple[str | None, ...]] = []
+    acknowledged: list[str] = []
 
     async def evaluate(_request: JudgmentRequest) -> bool:
         texts = tuple(message.text for message in state.pending_message_snapshot())
         judged.append(texts)
         return "Stop" not in texts
 
-    async def acknowledge(_event_id: str) -> None:
-        acknowledged.set()
+    async def acknowledge(event_id: str) -> None:
+        acknowledged.append(event_id)
+        acknowledgement.set()
+
+    async def queue_deferred(event_id: str, text: str) -> None:
+        """Queue a message the judge lets wait, and return once it is acknowledged or the wait ends."""
+        acknowledgement.clear()
+        state.add_waiting_human_message(event_id, text=text)
+        acknowledging = asyncio.create_task(acknowledgement.wait())
+        await asyncio.wait({waiter, acknowledging}, timeout=JOB_TEST_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        acknowledging.cancel()
 
     async def operation() -> BackgroundOutcome:
         await proceed.wait()
@@ -858,11 +868,10 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
         )
         with pending_human_messages_context(state):
             waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
-        state.add_waiting_human_message("$thanks", text="Thanks")
-        acknowledging = asyncio.create_task(acknowledged.wait())
-        await asyncio.wait({waiter, acknowledging}, timeout=JOB_TEST_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
-        acknowledging.cancel()
-        assert acknowledged.is_set()
+        # Each newly queued message is judged with those before it, and a queue the judge defers keeps the wait.
+        await queue_deferred("$thanks", "Thanks")
+        await queue_deferred("$norush", "No rush")
+        assert acknowledged == ["$thanks", "$norush"]
         assert not waiter.done()
         if then == "correction":
             state.add_waiting_human_message("$stop", text="Stop")
@@ -875,7 +884,7 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
                     JOB_TEST_TIMEOUT,
                 )
             assert later.job.status == "running"
-            assert judged == [("Thanks",), ("Thanks", "Stop")]
+            assert judged == [("Thanks",), ("Thanks", "No rush"), ("Thanks", "No rush", "Stop")]
         else:
             proceed.set()
             result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
@@ -885,7 +894,7 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
             state.add_waiting_human_message("$later", text="Later")
             for _ in range(100):
                 await asyncio.sleep(0)
-            assert judged == [("Thanks",)]
+            assert judged == [("Thanks",), ("Thanks", "No rush")]
     finally:
         proceed.set()
         await runtime.shutdown()

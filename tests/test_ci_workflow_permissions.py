@@ -1,4 +1,4 @@
-"""Check CI workflow policies: least-privilege tokens, pinned actions, and cancelling superseded pull request runs."""
+"""Check CI workflow policies: least-privilege tokens, pinned actions, cancelling superseded pull request runs, and named tests."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
+# A test file a step names relative to its working directory.
+_TEST_PATH = re.compile(r"(?<![\w./-])tests/[\w./-]+\.py\b")
 # Jobs that install or run repository or dependency code chosen by the pushed commit.
 _CODE_RUNNING_JOBS = (
     ("docs.yml", "build"),
@@ -198,3 +200,16 @@ def test_pull_request_workflows_cancel_only_superseded_pull_request_runs(name: s
 def test_serialized_workflows_cancel_only_superseded_pull_request_runs(name: str) -> None:
     """A cancelled in-progress run marks its main commit failed, so only pull request runs may be cancelled."""
     assert _load_workflow(name)["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_workflow_steps_name_only_test_files_that_exist() -> None:
+    """A step that names a missing test file fails collection instead of running the checks it was added for."""
+    named = []
+    for path in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for job in _load_workflow(path.name).get("jobs", {}).values():
+            default = job.get("defaults", {}).get("run", {}).get("working-directory", ".")
+            for step in job.get("steps", []):
+                base = ROOT / step.get("working-directory", default)
+                named += [(path.name, base / test) for test in _TEST_PATH.findall(step.get("run", ""))]
+    assert named
+    assert [(name, str(test.relative_to(ROOT))) for name, test in named if not test.is_file()] == []

@@ -655,7 +655,7 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
 
 
 @pytest.mark.parametrize("follow_up", [False, True])
-def test_a_follow_ups_resumed_approval_replies_to_no_event(*, follow_up: bool) -> None:
+async def test_a_follow_ups_resumed_approval_replies_to_no_event(*, follow_up: bool) -> None:
     """A follow-up is a runtime source, not a Matrix event, so its reply after an approval replies to nothing."""
     source = "job-follow-up:!room:localhost:abc:0" if follow_up else "$source"
     key = ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False)
