@@ -407,32 +407,18 @@ class _ProviderControlledFailureGithub:
         self.closed = True
 
 
-class _DuplicatePullRequestGithub:
-    """Reject pull request creation the way GitHub reports an existing pull request."""
+class _RejectedPullRequestGithub:
+    """Reject pull request creation with a GitHub validation error response."""
 
-    def __init__(self, header_sentinel: str) -> None:
-        self.header_sentinel = header_sentinel
+    def __init__(self, data: dict[str, object], headers: dict[str, str] | None = None) -> None:
+        self.data = data
+        self.headers = headers
 
-    def get_repo(self, _repo_name: str) -> _DuplicatePullRequestGithub:
+    def get_repo(self, _repo_name: str) -> _RejectedPullRequestGithub:
         return self
 
     def create_pull(self, **_kwargs: object) -> Never:
-        raise GithubException(
-            422,
-            {
-                "message": "Validation Failed",
-                "errors": [
-                    {
-                        "resource": "PullRequest",
-                        "code": "custom",
-                        "message": "A pull request already exists for example:feature.",
-                    },
-                    {"resource": "PullRequest", "field": "base", "code": "invalid"},
-                ],
-                "documentation_url": "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
-            },
-            {"x-github-request-id": self.header_sentinel},
-        )
+        raise GithubException(422, self.data, self.headers)
 
     def close(self) -> None:
         pass
@@ -1438,8 +1424,11 @@ def test_github_provider_failures_relay_only_github_message_to_agent(
     )
 
 
-def test_github_validation_failure_tells_agent_why_github_rejected_the_request(tmp_path: Path) -> None:
-    """A bare 422 cannot tell an existing pull request from a bad branch, so GitHub's reason must reach the agent."""
+def _create_rejected_pull_request(
+    tmp_path: Path,
+    github: _RejectedPullRequestGithub,
+) -> tuple[str, _CapturingLogger, str]:
+    """Run create_pull_request through the wrapped tool and return its result and both log streams."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     tool = _build_tool(
@@ -1448,8 +1437,7 @@ def test_github_validation_failure_tells_agent_why_github_rejected_the_request(t
         _worker_target("@alice:example.test"),
         access_token=MANUAL_ACCESS_TOKEN,
     )
-    header_sentinel = "response-header-must-not-reach-agent"
-    tool.g = _DuplicatePullRequestGithub(header_sentinel)
+    tool.g = github
     mindroom_logger = _CapturingLogger()
     agno_log_output = io.StringIO()
     agno_handler = logging.StreamHandler(agno_log_output)
@@ -1462,6 +1450,29 @@ def test_github_validation_failure_tells_agent_why_github_rejected_the_request(t
     finally:
         agno_github_module.logger.removeHandler(agno_handler)
         agno_handler.close()
+    return result, mindroom_logger, agno_log_output.getvalue()
+
+
+def test_github_validation_failure_tells_agent_why_github_rejected_the_request(tmp_path: Path) -> None:
+    """A bare 422 cannot tell an existing pull request from a bad branch, so GitHub's reason must reach the agent."""
+    header_sentinel = "response-header-must-not-reach-agent"
+    github = _RejectedPullRequestGithub(
+        {
+            "message": "Validation Failed",
+            "errors": [
+                {
+                    "resource": "PullRequest",
+                    "code": "custom",
+                    "message": "A pull request already exists for example:feature.",
+                },
+                {"resource": "PullRequest", "field": "base", "code": "invalid"},
+            ],
+            "documentation_url": "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+        },
+        {"x-github-request-id": header_sentinel},
+    )
+
+    result, mindroom_logger, agno_log_text = _create_rejected_pull_request(tmp_path, github)
 
     assert json.loads(result) == {
         "error": "GitHub request failed with HTTP 422. GitHub said: Validation Failed; "
@@ -1480,9 +1491,67 @@ def test_github_validation_failure_tells_agent_why_github_rejected_the_request(t
             },
         ),
     ]
-    agno_log_text = agno_log_output.getvalue()
     assert "operation=create_pull_request" in agno_log_text
     assert "already exists" not in agno_log_text
+
+
+_FAKE_GITHUB_TOKEN = "ghp_" + "a1B2c3D4" * 5
+_FAKE_URL_PASSWORD = "hunter2-" + "Zq9" * 6
+
+
+@pytest.mark.parametrize(
+    ("data", "truncated"),
+    [
+        pytest.param(
+            {
+                "message": f"GitHub explanation: token {_FAKE_GITHUB_TOKEN} was rejected",
+                "errors": [
+                    {
+                        "code": "custom",
+                        "message": f"Push to https://alice:{_FAKE_URL_PASSWORD}@git.example.org/example/project.git failed",
+                    },
+                ],
+            },
+            False,
+            id="credentials",
+        ),
+        pytest.param(
+            {
+                "message": "GitHub explanation\nsecond line\r\n\tthird line",
+                "errors": [{"code": "custom", "message": "first entry line\n\nsecond entry line"}],
+            },
+            False,
+            id="multiline",
+        ),
+        pytest.param(
+            # The token starts before the 500-character cap and ends after it.
+            {"message": "GitHub explanation " + "word " * 92 + _FAKE_GITHUB_TOKEN + " " + "tail " * 60},
+            True,
+            id="credential-straddling-cap",
+        ),
+    ],
+)
+def test_github_provider_detail_is_redacted_single_line_and_bounded(
+    tmp_path: Path,
+    data: dict[str, object],
+    truncated: bool,
+) -> None:
+    """GitHub's text reaches the agent only redacted, on one line, within 500 characters, and never in logs."""
+    result, mindroom_logger, agno_log_text = _create_rejected_pull_request(tmp_path, _RejectedPullRequestGithub(data))
+
+    status_text, detail = json.loads(result)["error"].split(". GitHub said: ", 1)
+    assert status_text == "GitHub request failed with HTTP 422"
+    assert detail.startswith("GitHub explanation")
+    assert len(detail) <= 500
+    assert not any(character in detail for character in "\r\n\t")
+    assert detail.endswith("... [truncated]") is truncated
+    for secret in (_FAKE_GITHUB_TOKEN, _FAKE_URL_PASSWORD):
+        assert secret[:12] not in result
+    process_logs = (agno_log_text, repr(mindroom_logger.warning_calls), repr(mindroom_logger.exception_calls))
+    assert all("GitHub explanation" not in output for output in process_logs)
+    assert all(
+        secret[:12] not in output for output in process_logs for secret in (_FAKE_GITHUB_TOKEN, _FAKE_URL_PASSWORD)
+    )
 
 
 def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> None:
