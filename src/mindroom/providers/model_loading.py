@@ -35,6 +35,7 @@ logger = get_logger(__name__)
 __all__ = [
     "CLAUDE_CACHE_PROVIDERS",
     "canonical_provider",
+    "effective_model_id",
     "get_model_instance",
     "missing_model_api_key_provider",
     "model_uses_own_credential",
@@ -57,6 +58,20 @@ _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 def canonical_provider(provider: str) -> str:
     """Return the normalized provider key used for model dispatch and identity checks."""
     return provider.strip().lower().replace("-", "_")
+
+
+def effective_model_id(model_config: ModelConfig) -> str:
+    """Return the id a loaded model reports, since Codex and Kimi rewrite configured ids."""
+    provider = canonical_provider(model_config.provider)
+    if provider in {"codex", "openai_codex"}:
+        from mindroom.providers.codex_model import normalize_codex_model_id  # noqa: PLC0415
+
+        return normalize_codex_model_id(model_config.id)
+    if provider in {"kimi", "kimi_code"}:
+        from mindroom.providers.kimi_model import normalize_kimi_model_id  # noqa: PLC0415
+
+        return normalize_kimi_model_id(model_config.id)
+    return model_config.id
 
 
 def _populate_azure_openai_runtime_kwargs(

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, fit_judgment_request
 from mindroom.logging_config import get_logger
-from mindroom.providers.model_loading import CLAUDE_CACHE_PROVIDERS, canonical_provider
+from mindroom.providers.model_loading import CLAUDE_CACHE_PROVIDERS, canonical_provider, effective_model_id
 
 if TYPE_CHECKING:
     from agno.session.agent import AgentSession
@@ -56,7 +56,8 @@ def _is_thread_cache_warm(session: AgentSession | None, model_config: ModelConfi
     if session is None or not session.runs:
         return False
     newest = max(session.runs, key=lambda run: run.created_at)
-    if newest.model != model_config.id:
+    # Interrupted-turn replays carry no model, so only the TTL decides after them.
+    if newest.model and newest.model != effective_model_id(model_config):
         return False
     # The session is written at or after the last provider request, so this errs toward warm.
     return session.updated_at is None or now - session.updated_at < _prompt_cache_ttl_seconds(model_config)
@@ -75,9 +76,48 @@ async def select_cold_cache_model(
     now: float,
 ) -> str:
     """Return the smaller model only when the agent model's cache is cold and the judge accepts."""
+    decision, reason = await _judge(
+        settings,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+        agent_model=agent_model,
+        session=session,
+        context=context,
+        prompt=prompt,
+        now=now,
+    )
+    chosen = settings.model if decision is True else agent_model
+    logger.info(
+        "Cold cache model selected",
+        agent=agent_name,
+        agent_model=agent_model,
+        chosen_model=chosen,
+        cache_age_seconds=None if session is None or session.updated_at is None else now - session.updated_at,
+        decision=decision,
+        reason=reason,
+    )
+    return chosen
+
+
+async def _judge(
+    settings: ColdCacheConfig,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    agent_model: str,
+    session: AgentSession | None,
+    context: tuple[JudgmentMessage, ...] | None,
+    prompt: str,
+    now: float,
+) -> tuple[bool | None, str]:
+    """Return the judgment decision, or None, with why it was or was not made."""
     model_config = config.models.get(agent_model)
-    if model_config is None or context is None or _is_thread_cache_warm(session, model_config, now=now):
-        return agent_model
+    if model_config is None or _is_thread_cache_warm(session, model_config, now=now):
+        return None, "warm"
+    if context is None:
+        return None, "history_unavailable"
     request = fit_judgment_request(
         _COLD_CACHE_QUESTION,
         context,
@@ -86,7 +126,7 @@ async def select_cold_cache_model(
         max_context_messages=_MAX_CONTEXT_MESSAGES,
     )
     if request is None or not request.complete:
-        return agent_model
+        return None, "request_incomplete"
     evaluate = create_judgment_evaluator(
         settings.effective_judgment(),
         config,
@@ -95,15 +135,6 @@ async def select_cold_cache_model(
         question_id=_COLD_CACHE_QUESTION.id,
     )
     if evaluate is None:
-        return agent_model
+        return None, "judgment_unavailable"
     result = await evaluate(request)
-    chosen = settings.model if result.failure is None and result.decision is True else agent_model
-    logger.info(
-        "Cold cache model selected",
-        agent=agent_name,
-        agent_model=agent_model,
-        chosen_model=chosen,
-        cache_age_seconds=None if session is None or session.updated_at is None else now - session.updated_at,
-        decision=result.decision,
-    )
-    return chosen
+    return (result.decision if result.failure is None else None), "judged"

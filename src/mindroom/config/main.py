@@ -2016,10 +2016,13 @@ class Config(BaseModel):
             raise ValueError(msg)
         cold_window = self.get_model_context_window(cold_model)
         agent_window = self.get_model_context_window(agent_model)
-        if cold_window is not None and (agent_window is None or cold_window < agent_window):
+        # Without a window on both sides, compaction cannot keep the smaller model's turns in bounds.
+        if (cold_window is None) != (agent_window is None) or (
+            cold_window is not None and agent_window is not None and cold_window < agent_window
+        ):
             msg = (
                 f"cold_cache model {cold_model!r} for agent {agent_name!r} needs a context window "
-                f"at least as large as {agent_model!r}"
+                f"at least as large as {agent_model!r}, and both or neither must set one"
             )
             raise ValueError(msg)
 

@@ -29,6 +29,7 @@ _MODELS: dict[str, dict[str, Any]] = {
     "haiku": {"provider": "anthropic", "id": "claude-haiku-5-5", "context_window": 200_000},
     "tiny": {"provider": "anthropic", "id": "claude-tiny", "context_window": 32_000},
     "unsized": {"provider": "anthropic", "id": "claude-unsized"},
+    "unsized2": {"provider": "anthropic", "id": "claude-unsized-2"},
 }
 
 
@@ -70,7 +71,8 @@ def test_cold_cache_rejects_same_model() -> None:
     ("agent_model", "cold_model", "accepted"),
     [
         ("opus", "tiny", False),
-        ("opus", "unsized", True),
+        ("opus", "unsized", False),
+        ("unsized", "unsized2", True),
         ("unsized", "haiku", False),
         ("unsized", "opus", False),
     ],
@@ -91,7 +93,7 @@ def _model(**overrides: object) -> ModelConfig:
     return ModelConfig.model_validate({**_MODELS["opus"], **overrides})
 
 
-def _session(*runs: tuple[str, float], updated_at: float | None) -> AgentSession:
+def _session(*runs: tuple[str | None, float], updated_at: float | None) -> AgentSession:
     return AgentSession(
         session_id="session",
         runs=[RunOutput(model=model, created_at=int(created_at)) for model, created_at in runs],
@@ -124,11 +126,23 @@ def test_ttl_other_providers_is_one_hour() -> None:
         (_session(("claude-opus-5-5", _NOW - 3700), updated_at=_NOW - 3601), False),
         (_session(("claude-opus-5-5", _NOW - 3700), updated_at=None), True),
         (_session(("claude-opus-5-5", _NOW - 20), ("claude-haiku-5-5", _NOW - 30), updated_at=_NOW - 10), True),
+        (_session(("claude-opus-5-5", _NOW - 40), (None, _NOW - 10), updated_at=_NOW - 5), True),
+        (_session(("claude-opus-5-5", _NOW - 7300), (None, _NOW - 7250), updated_at=_NOW - 7200), False),
     ],
 )
 def test_warmth(session: AgentSession | None, warm: bool) -> None:
     """Only the agent model serving the newest run within the TTL keeps the cache warm."""
     assert _is_thread_cache_warm(session, _model(), now=_NOW) is warm
+
+
+@pytest.mark.parametrize(
+    ("provider", "configured_id", "stored_id"),
+    [("codex", "openai-codex/gpt-5.6", "gpt-5.6-sol"), ("kimi", "kimi-code/kimi-k3", "kimi-k3")],
+)
+def test_warmth_matches_rewritten_model_ids(provider: str, configured_id: str, stored_id: str) -> None:
+    """Codex and Kimi store the endpoint id they rewrite, which must still count as the agent model."""
+    session = _session((stored_id, _NOW - 20), updated_at=_NOW - 10)
+    assert _is_thread_cache_warm(session, _model(provider=provider, id=configured_id), now=_NOW)
 
 
 class _FakeJudge:
@@ -212,7 +226,19 @@ async def test_select_cold_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             "chosen_model": "haiku",
             "cache_age_seconds": None,
             "decision": True,
+            "reason": "judged",
         },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_select_logs_why_it_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can see why a cold-cache agent kept its model, for example in room mode."""
+    with capture_logs() as logs:
+        await _select(tmp_path, monkeypatch, _FakeJudge(), context=None)
+    selected = [log for log in logs if log["event"] == "Cold cache model selected"]
+    assert [(log["chosen_model"], log["decision"], log["reason"]) for log in selected] == [
+        ("opus", None, "history_unavailable"),
     ]
 
 

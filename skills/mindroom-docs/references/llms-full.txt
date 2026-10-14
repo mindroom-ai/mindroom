@@ -2366,7 +2366,7 @@ agents:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | string | Required | Smaller model alias for accepted cold-cache turns; its `context_window` must be at least the agent model's |
+| `model` | string | Required | Smaller model alias for accepted cold-cache turns; set `context_window` on both models or neither, and when set it must be at least the agent model's |
 | `judgment` | object or null | `null` | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends). Unset asks `model` itself |
 
 A thread's cache counts as cold when its newest run used a different model, or when its session was last written longer ago than the cache lifetime:
@@ -2379,9 +2379,11 @@ Only an accepting decision switches; a decline, abstention, timeout, or missing 
 Warm turns make no judgment call.
 After a switch the agent model's cache stays cold, so each later turn is judged again, and a harder request returns to the agent model.
 
-The switch never happens when a `!model` thread override, a `!room_model` or `room_models` room override, or a scheduled model applies, or when the request carries images, audio, video, or files.
+The switch never happens when a scheduled model, or a `!model`, `!room_model`, or `room_models` override that selects a different model, applies, or when the request carries images, audio, video, or files.
 Earlier attachments reach the judge only as placeholders, so pick a smaller model that supports the same media as the agent model.
+Agents in `thread_mode: room` keep their model, because room mode has no thread history for the judge to read.
 Teams and the router keep their models.
+Each decision logs `Cold cache model selected` with a `reason`: `warm`, `history_unavailable`, `request_incomplete`, `judgment_unavailable`, or `judged`.
 
 ## Stalled Streams
 
