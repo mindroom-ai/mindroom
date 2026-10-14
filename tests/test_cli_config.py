@@ -2970,7 +2970,7 @@ class TestVersionAndHelp:
         """Version command prints the version string."""
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
-        assert "Mindroom version" in result.output
+        assert "MindRoom version" in result.output
 
     def test_help_mentions_config(self) -> None:
         """Top-level help includes key subcommands."""

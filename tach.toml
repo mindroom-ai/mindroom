@@ -4397,6 +4397,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
+    "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.owner",
     "mindroom.config.main",
@@ -4429,6 +4430,16 @@ visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
     "mindroom.cli.local_stack",
+    "mindroom.cli.service",
+]
+
+[[modules]]
+path = "mindroom.cli.help_format"
+depends_on = []
+visibility = [
+    "mindroom.cli.config",
+    "mindroom.cli.desktop",
+    "mindroom.cli.main",
     "mindroom.cli.service",
 ]
 
@@ -4482,6 +4493,7 @@ path = "mindroom.cli.desktop"
 depends_on = [
     "mindroom.desktop.transport",
     "mindroom.cli.config",
+    "mindroom.cli.help_format",
     "mindroom.constants",
     "mindroom.desktop.bridge_components",
     "mindroom.desktop.cloudflare_access",
@@ -4531,6 +4543,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.cli.config",
     "mindroom.cli.env_file",
+    "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.constants",
     "mindroom.matrix.provisioning_env",
@@ -4565,6 +4578,7 @@ depends_on = [
     "mindroom.cli.connect",
     "mindroom.cli.desktop",
     "mindroom.cli.doctor",
+    "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",

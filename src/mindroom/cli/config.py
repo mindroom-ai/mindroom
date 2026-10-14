@@ -23,6 +23,7 @@ from mindroom import constants
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import upsert_env_values, write_private_env_text
+from mindroom.cli.help_format import PanelOrderedGroup, examples
 from mindroom.cli.interactive import secret, section, select
 from mindroom.model_defaults import (
     CONFIG_INIT_ADDITIONAL_MODELS,
@@ -59,8 +60,9 @@ console = Console()
 _err_console = Console(stderr=True)
 
 config_app = typer.Typer(
+    cls=PanelOrderedGroup,
     name="config",
-    help="Manage MindRoom configuration files.",
+    help="Create, edit, and validate config.yaml.",
     rich_markup_mode="rich",
     no_args_is_help=True,
 )
@@ -469,7 +471,16 @@ def format_validation_errors(
     console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")
 
 
-@config_app.command("init")
+@config_app.command(
+    "init",
+    rich_help_panel="Create and edit",
+    epilog=examples(
+        ("mindroom config init", "Starter config for MindRoom Chat"),
+        ("mindroom config init --provider anthropic", "Use Anthropic models"),
+        ("mindroom config init --matrix-server self-hosted", "Use your own Matrix homeserver"),
+        ("mindroom config init --print", "Show the config without writing files"),
+    ),
+)
 def config_init(
     path: Path | None = typer.Option(  # noqa: B008
         None,
@@ -690,7 +701,7 @@ def _write_starter_setup(
     return env_changed
 
 
-@config_app.command("show")
+@config_app.command("show", rich_help_panel="Inspect")
 def config_show(
     path: Path | None = CONFIG_PATH_OPTION,
     raw: bool = typer.Option(
@@ -724,7 +735,7 @@ def config_show(
     console.print(_yaml_syntax(content, line_numbers=True, word_wrap=True))
 
 
-@config_app.command("edit")
+@config_app.command("edit", rich_help_panel="Create and edit")
 def config_edit(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
@@ -763,7 +774,7 @@ def config_edit(
         raise typer.Exit(e.returncode) from None
 
 
-@config_app.command("validate")
+@config_app.command("validate", rich_help_panel="Inspect")
 def config_validate(
     path: Path | None = typer.Option(  # noqa: B008
         None,
@@ -816,7 +827,7 @@ def config_validate(
     check_env_keys(config, runtime_paths=runtime_paths)
 
 
-@config_app.command("resolve")
+@config_app.command("resolve", rich_help_panel="Inspect")
 def config_resolve(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
@@ -849,7 +860,7 @@ def config_resolve(
     )
 
 
-@config_app.command("path")
+@config_app.command("path", rich_help_panel="Inspect")
 def config_path_cmd(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
@@ -939,14 +950,14 @@ def validate_config_source_quiet(
     return _call_config_loader_quietly(validate)
 
 
-@config_app.command("use-local-model")
+@config_app.command("use-local-model", rich_help_panel="Create and edit")
 def config_use_local_model(
     model: str = typer.Option(..., help="Model ID served by the local inference engine."),
     base_url: str = typer.Option(..., help="OpenAI-compatible local server URL."),
     api_key: str = typer.Option(LOCAL_OPENAI_API_KEY_DEFAULT, help="Local server authentication key."),
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
-    """Use a local model as the default, keeping explicitly selected agent models.
+    """Make a local model the default, keeping agents' explicit model choices.
 
     A backup is saved before replacing YAML. Configurations composed with
     !include must be edited in their authored source files instead.

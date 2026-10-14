@@ -18,6 +18,7 @@ from mindroom.runtime_env_policy import is_unset_env_value
 
 from .config import DEFAULT_API_HOST, DEFAULT_API_PORT, warn_dashboard_without_key, worker_dashboard_api_key_needed
 from .env_file import upsert_env_values
+from .help_format import examples
 from .interactive import confirm, section
 
 if TYPE_CHECKING:
@@ -31,7 +32,7 @@ _err_console = Console(stderr=True)
 
 service_app = typer.Typer(
     name="service",
-    help="""Install and manage MindRoom as a background user service.
+    help="""Run MindRoom in the background, starting at login.
 
 MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
 That version is also installed as a uv tool, so the service runs from a persistent environment instead of uv's cache.
@@ -41,7 +42,7 @@ Supported platforms:
 - macOS: launchd (`~/Library/LaunchAgents/`)
 - Linux: systemd user services (`~/.config/systemd/user/`)
 """,
-    rich_markup_mode="markdown",
+    rich_markup_mode="rich",
     no_args_is_help=True,
 )
 
@@ -101,7 +102,14 @@ def _print_service_action_result(result: ServiceActionResult) -> None:
     _console.print(f"[green]{result.message}[/green]")
 
 
-@service_app.command("install")
+@service_app.command(
+    "install",
+    epilog=examples(
+        ("mindroom service install", "Install and start the service"),
+        ("mindroom service status", "Check that it runs and show recent logs"),
+        ("mindroom service restart", "Pick up changes to .env"),
+    ),
+)
 def install_service(
     skip_deps: bool = typer.Option(False, "--skip-deps", help="Skip uv dependency check."),
     no_confirm: bool = typer.Option(False, "--no-confirm", "-y", help="Skip confirmation prompts."),
