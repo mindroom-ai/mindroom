@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 # A summary longer than this wraps in the commands panel of a 100-column terminal.
-_SUMMARY_MAX_LENGTH = 72
+_SUMMARY_MAX_LENGTH = 71
 # Typer pads the epilog by one column on each side.
 _EXAMPLE_MAX_LENGTH = 78
 
