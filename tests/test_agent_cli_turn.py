@@ -43,6 +43,7 @@ from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
@@ -580,6 +581,113 @@ async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end(
         assert events == ["retire"]
     assert current_cli_lifetime() is None
     assert events == ["retire", "close"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("job_running", [False, True], ids=["no-job", "job-running"])
+async def test_response_lifetime_keeps_its_owner_until_its_background_jobs_settle(*, job_running: bool) -> None:
+    """A shell job that outlives its reply keeps the reply's CLI; the owner closes once the last job settles."""
+    events = []
+
+    class Owner:
+        def bind_response_task(self, task):
+            pass
+
+        async def close(self) -> None:
+            events.append("close")
+
+    registry = TurnToolRegistry()
+    owner = Owner()
+    async with execution_resources() as resources:
+        job = resources.acquire() if job_running else None
+        async with response_cli_lifetime() as lifetime:
+            lifetime.register(owner, registry)
+        assert events == ([] if job_running else ["close"])
+    assert events == ([] if job_running else ["close"])
+    if job is not None:
+        await job.release()
+    assert events == ["close"]
+
+
+@pytest.mark.asyncio
+async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Path) -> None:
+    """A shell job released from its reply keeps calling tools through the CLI until the job settles."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    reply_finished = asyncio.Event()
+    statuses = []
+
+    async def command() -> str:
+        await reply_finished.wait()
+        statuses.append((await _settled_receipt(owner, "ping"))["status"])
+        return "job done"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            job = resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                shell_job = asyncio.create_task(owner.run_native_shell(command))
+        reply_finished.set()
+        assert await shell_job == "job done"
+        assert statuses == ["completed"]
+        await job.release()
+
+    with pytest.raises(CliAuthenticationError):
+        await owner.operation(
+            window=None,
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="ping"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_native_shell_leaves_the_others_their_cli(tmp_path: Path) -> None:
+    """Cancelling one shell job stops its CLI calls only; a command still running keeps calling tools."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def hang() -> str:
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping, hang], authorize)
+    hanging = asyncio.Event()
+    first_cancelled = asyncio.Event()
+
+    async def first() -> str:
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="hang"),
+        )
+        hanging.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def second() -> str:
+        await first_cancelled.wait()
+        receipt = await _settled_receipt(owner, "ping")
+        return str(receipt["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        first_task = asyncio.create_task(owner.run_native_shell(first))
+        second_task = asyncio.create_task(owner.run_native_shell(second))
+        await hanging.wait()
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+        first_cancelled.set()
+        assert await second_task == "completed"
+    await owner.close()
 
 
 @pytest.mark.asyncio

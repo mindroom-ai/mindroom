@@ -338,19 +338,21 @@ class LiveTurnTools(TurnToolBridge):
         try:
             yield
         except asyncio.CancelledError:
-            self._cancel_active()
+            self._cancel_window(window)
             raise
         finally:
             await wait_for_future_until_complete(
                 asyncio.create_task(self._drain_window(window), name="agent-cli-window-drain"),
-                on_cancel=self._cancel_active,
+                on_cancel=partial(self._cancel_window, window),
             )
 
-    def _cancel_active(self) -> None:
-        self.revoke()
-        self.close_for_shutdown = self._is_shutdown()
-        for task in self._active:
-            request_task_cancel(task, process_shutdown=self.close_for_shutdown)
+    def _cancel_window(self, window: str) -> None:
+        """Stop one command's admitted CLI work and refuse its later calls; other running commands keep their CLI."""
+        self._windows.pop(window, None)
+        shutdown = self._is_shutdown()
+        for task, owner in self._active.items():
+            if owner == window:
+                request_task_cancel(task, process_shutdown=shutdown)
 
     async def _drain_window(self, window: str) -> None:
         failures: list[Exception] = []

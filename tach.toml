@@ -276,6 +276,7 @@ expose = [
 path = "mindroom.agent_cli.lifetime"
 depends_on = [
     "mindroom.agent_cli.agno_compat_cli_checkpoint",
+    "mindroom.tool_jobs.resources",
 ]
 visibility = [
     "mindroom.ai",
@@ -8128,6 +8129,7 @@ visibility = [
 path = "mindroom.tool_jobs.resources"
 depends_on = []
 visibility = [
+    "mindroom.agent_cli.lifetime",
     "mindroom.ai",
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.history.session_context",
