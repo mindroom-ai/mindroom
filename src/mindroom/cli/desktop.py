@@ -840,13 +840,13 @@ def desktop_run(
         None,
         "--browser-executable",
         help="Chrome-family executable to open the Playwright extension connection page, including Brave.",
-        rich_help_panel="Browser",
+        rich_help_panel="Browser profile",
     ),
     browser_user_data_dir: Path | None = typer.Option(  # noqa: B008
         None,
         "--browser-user-data-dir",
         help="Existing browser user-data root containing the profile where the extension is installed.",
-        rich_help_panel="Browser",
+        rich_help_panel="Browser profile",
     ),
     browser_timeout_seconds: int | None = typer.Option(
         None,
@@ -854,7 +854,7 @@ def desktop_run(
         min=1,
         max=120,
         help="Local Playwright MCP call timeout.",
-        rich_help_panel="Browser",
+        rich_help_panel="Browser profile",
     ),
     controller_user_id: str | None = typer.Option(
         None,

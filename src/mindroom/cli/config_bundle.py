@@ -80,9 +80,9 @@ def config_install_bundle(
 ) -> None:
     """Validate and install a complete config tree.
 
-    To confirm the running MindRoom reloaded it, pass the installed config file to check-applied:
+    To confirm the running MindRoom reloaded it, pass the installed config file and the receipt fingerprint:
 
-    `mindroom config check-applied --path TARGET/config.yaml`
+    `mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300`
     """
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.

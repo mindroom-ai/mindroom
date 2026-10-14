@@ -58,7 +58,7 @@ Every command also prints its options with `--help`.
 │ journal                  Inspect and rebind the durable event journal.                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Automation ───────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live work; exit 0 idle, 1 busy, or 2 unavailable.       │
+│ check-active-responses   Check whether MindRoom has live work.                         │
 │ trigger                  Send signed external triggers.                                │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Development ──────────────────────────────────────────────────────────────────────────╮
@@ -970,26 +970,20 @@ Applications stay observe-only unless `--allow-control` grants a short lease, an
 │                                                             setup (80 unless changed).       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Browser ────────────────────────────────────────────────────────────────────────────────────╮
-│ --browser-extension      --no-browser-extens…                          Expose Playwright MCP │
-│                                                                        control of an         │
-│                                                                        existing browser      │
-│                                                                        profile when its      │
-│                                                                        extension is          │
-│                                                                        installed.            │
-│ --browser-executable                             PATH                  Chrome-family         │
-│                                                                        executable to open    │
-│                                                                        the Playwright        │
-│                                                                        extension connection  │
-│                                                                        page, including       │
-│                                                                        Brave.                │
-│ --browser-user-data-…                            PATH                  Existing browser      │
-│                                                                        user-data root        │
-│                                                                        containing the        │
-│                                                                        profile where the     │
-│                                                                        extension is          │
-│                                                                        installed.            │
-│ --browser-timeout-se…                            INTEGER RANGE         Local Playwright MCP  │
-│                                                  [1<=x<=120]           call timeout.         │
+│ --browser-extension    --no-browser-extension      Expose Playwright MCP control of an       │
+│                                                    existing browser profile when its         │
+│                                                    extension is installed.                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Browser profile ────────────────────────────────────────────────────────────────────────────╮
+│ --browser-executable             PATH                       Chrome-family executable to open │
+│                                                             the Playwright extension         │
+│                                                             connection page, including       │
+│                                                             Brave.                           │
+│ --browser-user-data-dir          PATH                       Existing browser user-data root  │
+│                                                             containing the profile where the │
+│                                                             extension is installed.          │
+│ --browser-timeout-seconds        INTEGER RANGE [1<=x<=120]  Local Playwright MCP call        │
+│                                                             timeout.                         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Controller ─────────────────────────────────────────────────────────────────────────────────╮
 │ --controller-user-id          TEXT  Pinned cloud controller Matrix user.                     │
