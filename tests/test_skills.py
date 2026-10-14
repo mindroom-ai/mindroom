@@ -120,18 +120,19 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
     assert (listing.path.parent / "references" / "reference-index.md").exists()
 
 
-def test_bundled_open_knowledge_format_skill_loads_for_allowlisted_agent(tmp_path: Path) -> None:
-    """Ensure an agent that allowlists the bundled open-knowledge-format skill can load it."""
+@pytest.mark.parametrize("skill_name", ["open-knowledge-format", "agent-conversations"])
+def test_bundled_skill_loads_for_allowlisted_agent(tmp_path: Path, skill_name: str) -> None:
+    """Ensure an agent that allowlists a bundled skill can load it."""
     skills = build_agent_skills(
         "code",
-        _base_config(["open-knowledge-format"]),
+        _base_config([skill_name]),
         _runtime_paths(tmp_path),
         skill_roots=[skills_module._get_bundled_skills_dir()],
         env_vars={},
         credential_keys=set(),
     )
 
-    assert _skill_names(skills) == ["open-knowledge-format"]
+    assert _skill_names(skills) == [skill_name]
 
 
 def test_get_bundled_skills_dir_uses_package_fallback(
