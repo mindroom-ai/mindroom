@@ -365,15 +365,19 @@ class _RevokedTokenGithub:
 
 
 class _ProviderControlledFailureGithub:
-    def __init__(self, status_code: int, sentinel: str) -> None:
+    """Fail with GitHub's message plus a sentinel in fields that must never reach the agent."""
+
+    def __init__(self, status_code: int, sentinel: str, github_message: str = "Server Error") -> None:
         self.status_code = status_code
         self.sentinel = sentinel
+        self.github_message = github_message
         self.closed = False
 
     def _raise_provider_error(self) -> Never:
         raise GithubException(
             self.status_code,
-            {"message": self.sentinel},
+            {"message": self.github_message, "documentation_url": f"https://docs.example.org/{self.sentinel}"},
+            {"x-github-request-id": self.sentinel},
             message=self.sentinel,
         )
 
@@ -401,6 +405,37 @@ class _ProviderControlledFailureGithub:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _DuplicatePullRequestGithub:
+    """Reject pull request creation the way GitHub reports an existing pull request."""
+
+    def __init__(self, header_sentinel: str) -> None:
+        self.header_sentinel = header_sentinel
+
+    def get_repo(self, _repo_name: str) -> _DuplicatePullRequestGithub:
+        return self
+
+    def create_pull(self, **_kwargs: object) -> Never:
+        raise GithubException(
+            422,
+            {
+                "message": "Validation Failed",
+                "errors": [
+                    {
+                        "resource": "PullRequest",
+                        "code": "custom",
+                        "message": "A pull request already exists for example:feature.",
+                    },
+                    {"resource": "PullRequest", "field": "base", "code": "invalid"},
+                ],
+                "documentation_url": "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+            },
+            {"x-github-request-id": self.header_sentinel},
+        )
+
+    def close(self) -> None:
+        pass
 
 
 class _RetryProviderFailureGithub:
@@ -1338,11 +1373,12 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
         "get_file_content",
     ],
 )
-def test_github_provider_failures_do_not_expose_provider_controlled_text(
+def test_github_provider_failures_relay_only_github_message_to_agent(
     tmp_path: Path,
     status_code: int,
     operation: str,
 ) -> None:
+    """GitHub's message reaches the agent, but never the logs, and headers or links reach neither."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     target = _worker_target("@alice:example.test")
@@ -1354,7 +1390,8 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = f"provider-controlled-secret-{operation}-{status_code}"
-    tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
+    github_message = f"GitHub explanation for {operation}"
+    tool.g = _ProviderControlledFailureGithub(status_code, sentinel, github_message)
     mindroom_logger = _CapturingLogger()
     agno_log_output = io.StringIO()
     agno_handler = logging.StreamHandler(agno_log_output)
@@ -1383,20 +1420,73 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
     if status_code == 401:
         assert payload["oauth_connection_required"] is True
         assert payload["reason"] == "access_rejected"
+        assert github_message not in result
     else:
         assert set(payload) == {"error"}
         assert payload["error"].startswith(f"GitHub request failed with HTTP {status_code}")
+        assert payload["error"].endswith(f". GitHub said: {github_message}")
     captured_logs = (
         agno_log_output.getvalue(),
         repr(mindroom_logger.warning_calls),
         repr(mindroom_logger.exception_calls),
     )
-    assert all(sentinel not in output for output in captured_logs)
+    assert all(sentinel not in output and github_message not in output for output in captured_logs)
     assert sentinel not in result
-    assert any(kwargs.get("status_code") == status_code for _event, kwargs in mindroom_logger.warning_calls)
+    assert any(
+        kwargs.get("status_code") == status_code and kwargs.get("tool_name") == operation
+        for _event, kwargs in mindroom_logger.warning_calls
+    )
+
+
+def test_github_validation_failure_tells_agent_why_github_rejected_the_request(tmp_path: Path) -> None:
+    """A bare 422 cannot tell an existing pull request from a bad branch, so GitHub's reason must reach the agent."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    header_sentinel = "response-header-must-not-reach-agent"
+    tool.g = _DuplicatePullRequestGithub(header_sentinel)
+    mindroom_logger = _CapturingLogger()
+    agno_log_output = io.StringIO()
+    agno_handler = logging.StreamHandler(agno_log_output)
+    agno_handler.setFormatter(logging.Formatter("%(message)s"))
+    agno_github_module.logger.addHandler(agno_handler)
+
+    try:
+        with patch("mindroom.custom_tools.github.logger", mindroom_logger):
+            result = tool.create_pull_request("example/project", "Add notes", "Body", "feature", "main")
+    finally:
+        agno_github_module.logger.removeHandler(agno_handler)
+        agno_handler.close()
+
+    assert json.loads(result) == {
+        "error": "GitHub request failed with HTTP 422. GitHub said: Validation Failed; "
+        "A pull request already exists for example:feature. (code: custom); field: base, code: invalid",
+    }
+    assert header_sentinel not in result
+    assert "docs.github.com" not in result
+    assert mindroom_logger.warning_calls == [
+        (
+            "github_tool_call_failed",
+            {
+                "provider_id": "github",
+                "tool_name": "create_pull_request",
+                "error_type": "GithubException",
+                "status_code": 422,
+            },
+        ),
+    ]
+    agno_log_text = agno_log_output.getvalue()
+    assert "operation=create_pull_request" in agno_log_text
+    assert "already exists" not in agno_log_text
 
 
 def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> None:
+    """GitHub's text follows MindRoom's own status and never triggers OAuth recovery."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     target = _worker_target("@alice:example.test")
@@ -1407,13 +1497,16 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    sentinel = "provider-controlled-secret: 401 null"
-    tool.g = _ProviderControlledFailureGithub(500, sentinel)
+    sentinel = "provider-controlled-secret-for-spoofing"
+    tool.g = _ProviderControlledFailureGithub(500, sentinel, "Bad credentials: 401 null")
 
     result = tool.list_repositories()
 
-    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
+    assert json.loads(result) == {
+        "error": "GitHub request failed with HTTP 500. GitHub said: Bad credentials: 401 null",
+    }
     assert sentinel not in result
+    assert tool.access_token == "managed-access"  # noqa: S105
 
 
 @pytest.mark.parametrize(
@@ -1422,13 +1515,13 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
         (
             404,
             "GitHub request failed with HTTP 404: the requested repository, ref, path, issue, or other resource "
-            "does not exist, or this GitHub connection cannot access it",
+            "does not exist, or this GitHub connection cannot access it. GitHub said: Not Found",
         ),
-        (418, "GitHub request failed with HTTP 418"),
-        (600, "GitHub request failed"),
+        (418, "GitHub request failed with HTTP 418. GitHub said: Not Found"),
+        (600, "GitHub request failed. GitHub said: Not Found"),
     ],
 )
-def test_github_provider_failure_reports_status_without_provider_text(
+def test_github_provider_failure_reports_status_and_github_message(
     tmp_path: Path,
     status_code: int,
     expected_error: str,
@@ -1445,7 +1538,7 @@ def test_github_provider_failure_reports_status_without_provider_text(
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = "provider-controlled-secret-for-status"
-    tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
+    tool.g = _ProviderControlledFailureGithub(status_code, sentinel, "Not Found")
 
     wrapped_result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
     owned_result = tool.edit_issue("example/project", 7, title="Updated")
@@ -1476,14 +1569,18 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
         with patch.object(
             Requester,
             "requestJson",
-            return_value=(500, {}, json.dumps({"message": sentinel})),
+            return_value=(
+                500,
+                {"x-github-request-id": sentinel},
+                json.dumps({"message": "Server Error", "documentation_url": f"https://docs.example.org/{sentinel}"}),
+            ),
         ):
             tool.g = tool.authenticate()
             result = tool.list_repositories()
     finally:
         agno_github_module.logger.disabled = previous_disabled
 
-    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
+    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500. GitHub said: Server Error"}
     assert sentinel not in result
 
 
