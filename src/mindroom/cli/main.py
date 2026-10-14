@@ -195,8 +195,8 @@ def run(
     """Set up on first run, pair, and start MindRoom.
 
     When no config exists, MindRoom creates a starter config for MindRoom Chat, asking for the model provider in a terminal or taking it from --provider.
-    It pairs this machine with your MindRoom Chat account when it is not paired yet, and a first run in a terminal offers to keep running in the background at login (see --service).
-    It then creates the agent accounts and rooms from config.yaml, keeps room memberships in sync, and starts the dashboard and API (disable with --no-api).
+    An install on MindRoom Chat that is not paired yet pairs this machine with your account, and a first run in a terminal offers to keep running in the background at login (see --service).
+    MindRoom then creates the agent accounts and rooms from config.yaml, keeps room memberships in sync, and starts the dashboard and API (disable with --no-api).
     """
     if bootstrap_config_bundle_revision is not None and bootstrap_config_bundle is None:
         typer.echo("--bootstrap-config-bundle-revision requires --bootstrap-config-bundle.", err=True)

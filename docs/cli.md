@@ -103,11 +103,11 @@ On a hosted install, the dashboard becomes available after pairing is approved.
 
  When no config exists, MindRoom creates a starter config for MindRoom Chat, asking for
  the model provider in a terminal or taking it from --provider.
- It pairs this machine with your MindRoom Chat account when it is not paired yet, and a
- first run in a terminal offers to keep running in the background at login (see
+ An install on MindRoom Chat that is not paired yet pairs this machine with your account,
+ and a first run in a terminal offers to keep running in the background at login (see
  --service).
- It then creates the agent accounts and rooms from config.yaml, keeps room memberships in
- sync, and starts the dashboard and API (disable with --no-api).
+ MindRoom then creates the agent accounts and rooms from config.yaml, keeps room
+ memberships in sync, and starts the dashboard and API (disable with --no-api).
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --provider                       TEXT  Model provider preset for the starter config    │
@@ -865,14 +865,6 @@ Create and privately save the dedicated local desktop Matrix device.
  Log in once, create an Olm device, and save its access token privately.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --user-id                                TEXT                 Expected Matrix user ID; │
-│                                                               required for password    │
-│                                                               login and optional for   │
-│                                                               SSO.                     │
-│ --homeserver                             TEXT                 Matrix homeserver URL;   │
-│                                                               defaults to the          │
-│                                                               configured MindRoom      │
-│                                                               homeserver.              │
 │ --login-method                           [auto|password|sso]  Matrix login method.     │
 │                                                               Auto uses browser SSO    │
 │                                                               when advertised,         │
@@ -897,6 +889,10 @@ Create and privately save the dedicated local desktop Matrix device.
 │                                                               exit.                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Matrix connection ────────────────────────────────────────────────────────────────────╮
+│ --user-id                         TEXT  Expected Matrix user ID; required for password │
+│                                         login and optional for SSO.                    │
+│ --homeserver                      TEXT  Matrix homeserver URL; defaults to the         │
+│                                         configured MindRoom homeserver.                │
 │ --cloudflare-access                     Authenticate Matrix requests interactively     │
 │                                         with the local cloudflared CLI.                │
 │                                         [env var: MINDROOM_DESKTOP_CLOUDFLARE_ACCESS]  │

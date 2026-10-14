@@ -146,11 +146,13 @@ def desktop_login(
         None,
         "--user-id",
         help="Expected Matrix user ID; required for password login and optional for SSO.",
+        rich_help_panel="Matrix connection",
     ),
     homeserver: str | None = typer.Option(
         None,
         "--homeserver",
         help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+        rich_help_panel="Matrix connection",
     ),
     login_method: DesktopLoginMethod = typer.Option(  # noqa: B008
         DesktopLoginMethod.AUTO,
