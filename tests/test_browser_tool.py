@@ -36,6 +36,7 @@ from mindroom.custom_tools.browser import (
     _BrowserProfileState,
     _BrowserTabState,
     _clean_str,
+    _goto,
     _persistent_launch_kwargs,
     _profile_dir,
 )
@@ -47,7 +48,7 @@ from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.worker_computer import browser_proxy
-from mindroom.worker_computer.browser_proxy import BrowserEgress, _UpstreamProxy
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from tests.authorization_helpers import (
@@ -59,7 +60,7 @@ from tests.browser_egress_helpers import (
     SquidLikeUpstream,
     socks5_connect,
 )
-from tests.browser_lifecycle_helpers import LifecycleBrowser
+from tests.browser_lifecycle_helpers import LifecycleBrowser, LifecyclePage
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.test_worker_computer_runtime import FakeDisplay
 
@@ -67,8 +68,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from playwright.async_api import Download as PlaywrightDownload
-
-    from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
+    from playwright.async_api import Page
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 DESKTOP_MEDIA = EncryptedDesktopMedia(
@@ -1424,6 +1424,35 @@ async def test_egress_denial_names_the_destination_as_chromium_dialed_it(
     finally:
         await tool.aclose()
         await squid.close()
+
+
+class _FailingDocumentPage(LifecyclePage):
+    """A page whose main-document request for the URL fails with one Playwright error."""
+
+    def __init__(self, error: PlaywrightError) -> None:
+        super().__init__()
+        self.main_frame = object()
+        self._error = error
+
+    async def goto(self, url: str, **_kwargs: object) -> None:
+        document = SimpleNamespace(url=url, frame=self.main_frame, is_navigation_request=lambda: True)
+        await self.emit("request", document)
+        raise self._error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chromium_error", "named"),
+    [("net::ERR_SOCKS_CONNECTION_FAILED at https://public.example/", True), ("Timeout 30000ms exceeded.", False)],
+)
+async def test_only_a_socks_failure_names_the_recorded_egress_denial(chromium_error: str, named: bool) -> None:
+    """A load that fails another way keeps its own error even when the relay recorded a 403 for that destination."""
+    relay = MagicMock(spec=BrowserDestinationProxy)
+    relay.egress_refused.side_effect = lambda host, port: (host, port) == ("public.example", 443)
+    page = cast("Page", _FailingDocumentPage(PlaywrightError(chromium_error)))
+    expected = _egress_refusal("public.example:443") if named else re.escape(chromium_error)
+    with pytest.raises(RuntimeError if named else PlaywrightError, match=f"^{expected}$"):
+        await _goto(page, "https://public.example/", relay)
 
 
 def _install_fake_persistent_playwright(

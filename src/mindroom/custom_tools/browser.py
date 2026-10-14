@@ -568,7 +568,8 @@ async def _goto(page: Page, target_url: str, relay: BrowserDestinationProxy | No
     try:
         await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
     except PlaywrightError as exc:
-        if relay is None or not documents:
+        # Only Chromium's failure to connect through the relay can be the recorded denial; a timeout stays a timeout.
+        if relay is None or not documents or "ERR_SOCKS_CONNECTION_FAILED" not in exc.message:
             raise
         url = urlsplit(documents[-1])
         host = url.hostname or ""
