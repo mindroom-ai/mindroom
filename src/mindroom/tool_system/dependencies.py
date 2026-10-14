@@ -314,7 +314,11 @@ def ensure_optional_deps(
     *,
     missing_message: str | None = None,
 ) -> bool:
-    """Ensure dependencies are installed, auto-installing via optional extra if needed."""
+    """Ensure dependencies are installed, auto-installing via optional extra if needed.
+
+    Import the package inside ``optional_dependency_environment()`` afterwards,
+    so the import cannot overlap another thread's install.
+    """
     with optional_dependency_environment():
         installed = check_deps_installed(dependencies)
     if installed:
