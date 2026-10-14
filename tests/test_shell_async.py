@@ -598,6 +598,25 @@ async def test_check_shell_command_finished(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_finished_command_reports_its_whole_run_time(tmp_path: Path) -> None:
+    """The status counts from the command's start, not its backgrounding, and stops when it finishes."""
+    tool = _get_toolkit(tmp_path)
+    run_fn = tool.async_functions["run_shell_command"].entrypoint
+    check_fn = tool.functions["check_shell_command"].entrypoint
+    assert run_fn is not None
+    assert check_fn is not None
+
+    result = await run_fn("sleep 1.2", timeout=1)
+    handle = result.split("Handle: ")[1].split("\n")[0]
+    await asyncio.sleep(1.5)
+    status = check_fn(handle)
+
+    assert "FINISHED" in status
+    ran = float(status.split("ran for ")[1].split("s)")[0])
+    assert 1.1 <= ran < 1.5
+
+
+@pytest.mark.asyncio
 async def test_check_shell_command_unknown_handle(tmp_path: Path) -> None:
     """Checking an unknown handle should return an error."""
     tool = _get_toolkit(tmp_path)

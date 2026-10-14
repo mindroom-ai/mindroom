@@ -247,6 +247,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
     try:
         if capture is None and output_destination is not None:
             capture = ShellOutputCapture(output_destination, cwd)
+        started_at = time.monotonic()
         process = await asyncio.create_subprocess_exec(
             *argv,
             stdin=stdin,
@@ -287,6 +288,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
                 stdout_reader=stdout_reader,
                 stderr_reader=stderr_reader,
                 output_capture=capture,
+                started_at=started_at,
             )
 
         if kill_group_after_exit:
@@ -367,6 +369,7 @@ async def _background_process(
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
     output_capture: ShellOutputCapture | None,
+    started_at: float,
 ) -> ShellRunResult:
     active = sum(1 for record in registry.values() if not record.finished)
     if active >= MAX_BACKGROUNDED:
@@ -395,6 +398,7 @@ async def _background_process(
         stderr_buf=stderr_buf,
         tail=tail,
         output_capture=output_capture,
+        started_at=started_at,
     )
     monitor_task = asyncio.create_task(
         _monitor_process(registry, handle, process, stdout_reader, stderr_reader),
@@ -440,7 +444,8 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     if record is None or record.namespace != namespace:
         return f"Error: Unknown handle '{handle}'"
 
-    elapsed = time.monotonic() - record.started_at
+    ended_at = record.finished_at if record.finished and record.finished_at is not None else time.monotonic()
+    elapsed = ended_at - record.started_at
 
     if record.finished:
         if record.output_receipt is not None:
