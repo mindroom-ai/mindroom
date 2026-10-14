@@ -621,9 +621,11 @@ async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Pa
 
     owner = await _native_owner(tmp_path, [ping], authorize)
     reply_finished = asyncio.Event()
+    running = asyncio.Event()
     statuses = []
 
     async def command() -> str:
+        running.set()
         await reply_finished.wait()
         statuses.append((await _settled_receipt(owner, "ping"))["status"])
         return "job done"
@@ -634,6 +636,9 @@ async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Pa
             async with response_cli_lifetime() as lifetime:
                 lifetime.register(owner, TurnToolRegistry())
                 shell_job = asyncio.create_task(owner.run_native_shell(command))
+                await running.wait()
+                # Every reply attempt ends by retiring its catalog, as the response driver does.
+                await lifetime.retire_attempt()
         reply_finished.set()
         assert await shell_job == "job done"
         assert statuses == ["completed"]
@@ -644,6 +649,43 @@ async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Pa
             window=None,
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="ping"),
         )
+
+
+@pytest.mark.asyncio
+async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog(tmp_path: Path) -> None:
+    """A retired attempt's catalog stays open for a running shell command and closes once the command ends."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    old = owner.catalog
+    running = asyncio.Event()
+    rebuilt = asyncio.Event()
+
+    async def command() -> str:
+        running.set()
+        await rebuilt.wait()
+        return str((await _settled_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        window = asyncio.create_task(owner.run_native_shell(command))
+        await running.wait()
+        await owner.retire_binding()
+        assert (await owner.operation(window=None, operation=ToolListOperation(operation="tools.list")))["items"]
+        new = await _catalog(tmp_path, [Toolkit(name="calls", tools=[ping])])
+        new.run_response.agent_id = "helper"
+        new.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+        owner.bind_catalog(new)
+        rebuilt.set()
+        assert await window == "completed"
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await old.bind(ToolKey("calls", "ping"))
+    await owner.close()
 
 
 @pytest.mark.asyncio

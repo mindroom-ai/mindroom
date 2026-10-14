@@ -176,6 +176,8 @@ class LiveTurnTools(TurnToolBridge):
         self._windows: dict[str, Context] = {}
         self._closed = False
         self._binding_retired = False
+        # Retired attempt catalogs that open shell windows still call through, closed once the last window drains.
+        self._retired_catalogs: list[PreparedAgentToolCatalog] = []
         self.control_executions: list[ToolExecution] = []
         self._close_task: asyncio.Task[None] | None = None
         self.close_for_shutdown = False
@@ -200,7 +202,11 @@ class LiveTurnTools(TurnToolBridge):
     async def operation(self, operation: AgentCliOperation, *, window: str | None) -> dict[str, object]:
         """Metadata reads are pure; describes and calls run only inside the caller's open Bash window."""
         self._check_live()
-        if self._binding_retired and isinstance(operation, ToolListOperation | ToolSearchOperation):
+        if (
+            self._binding_retired
+            and not self._windows
+            and isinstance(operation, ToolListOperation | ToolSearchOperation)
+        ):
             msg = "Agent tool catalog is being rebuilt; retry shortly"
             raise CliOperationError(msg)
         if isinstance(operation, ToolListOperation):
@@ -368,6 +374,10 @@ class LiveTurnTools(TurnToolBridge):
             for task in tasks:
                 self._active.pop(task, None)
             failures.extend(result for result in results if isinstance(result, Exception))
+        if not self._windows and self._retired_catalogs:
+            retired, self._retired_catalogs = self._retired_catalogs, []
+            for catalog in retired:
+                await catalog.close()
         if failures:
             msg = "Agent CLI admitted operation failed"
             raise ExceptionGroup(msg, failures)
@@ -793,10 +803,13 @@ class LiveTurnTools(TurnToolBridge):
                 )
 
     async def retire_binding(self) -> None:
-        """Retire this attempt while retaining receipts and the response grant."""
+        """Retire this attempt while retaining receipts and the response grant; open shell windows keep its catalog."""
         async with self._outer:
             self._binding_retired = True
-            await self.catalog.close()
+            if self._windows:
+                self._retired_catalogs.append(self.catalog)
+            else:
+                await self.catalog.close()
 
     def bind_catalog(self, catalog: PreparedAgentToolCatalog, *, context: Mapping[str, str] | None = None) -> None:
         """Install the next attempt only after retiring the previous catalog."""
