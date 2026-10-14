@@ -79,7 +79,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
+from mindroom.mid_turn_judgment import conversation_context_before_sources, create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -3816,7 +3816,7 @@ class ResponseRunner:
             lambda: (
                 None
                 if request.requires_model_history_refresh
-                else conversation_context_for_mid_turn(
+                else conversation_context_before_sources(
                     request.thread_history,
                     source_event_ids=request.sources.logical_source_event_ids,
                     thread_id=request.thread_id,

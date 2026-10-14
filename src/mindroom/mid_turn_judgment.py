@@ -104,7 +104,7 @@ def _judgment_text(message: ResolvedVisibleMessage) -> str | None:
     return f"{label}\n{message.body}" if name != message.body and message.body.strip() else label
 
 
-def conversation_context_for_mid_turn(
+def conversation_context_before_sources(
     history: Sequence[ResolvedVisibleMessage],
     *,
     source_event_ids: tuple[str, ...],

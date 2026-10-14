@@ -25,7 +25,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
-from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
+from mindroom.mid_turn_judgment import conversation_context_before_sources, create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.providers import model_loading
 from mindroom.response_lifecycle import _QueuedMessageState
@@ -869,7 +869,7 @@ def test_earlier_media_reaches_the_judge_as_a_placeholder(tmp_path: Path, monkey
     )
 
     def context() -> tuple[JudgmentMessage, ...] | None:
-        return conversation_context_for_mid_turn(
+        return conversation_context_before_sources(
             history,
             source_event_ids=("$source",),
             thread_id="$root",

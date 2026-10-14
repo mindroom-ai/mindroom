@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeGuard
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, JudgmentQuestion, build_judgment_request
+from mindroom.judgment.state import (
+    MAX_REQUEST_BYTES,
+    JudgmentMessage,
+    JudgmentQuestion,
+    clip_is_unredacted,
+    clip_judgment_text,
+    fit_judgment_request,
+)
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
@@ -20,10 +27,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# A long earlier message or reply snapshot reaches the judge as its start and end, so one big reply cannot disable judgment.
-_CLIPPED_TEXT_CHARS = 2_000
-# Credentials are shorter than this, so scanning this far past each cut finds one that clipping splits.
-_CLIP_SCAN_MARGIN_CHARS = 4_000
 _MAX_CONTEXT_MESSAGES = 63
 
 MID_TURN_QUESTION = JudgmentQuestion(
@@ -43,23 +46,8 @@ MID_TURN_QUESTION = JudgmentQuestion(
 )
 
 
-def _clip(text: str) -> str:
-    if len(text) <= _CLIPPED_TEXT_CHARS:
-        return text
-    half = _CLIPPED_TEXT_CHARS // 2
-    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
-
-
 def _is_unredacted(text: str) -> bool:
     return redact_sensitive_text(text) == text
-
-
-def _clip_is_unredacted(text: str) -> bool:
-    """Scan what the clip keeps and the margin past each cut, never the omitted middle of a long text."""
-    reach = _CLIPPED_TEXT_CHARS // 2 + _CLIP_SCAN_MARGIN_CHARS
-    if len(text) <= 2 * reach:
-        return _is_unredacted(text)
-    return _is_unredacted(text[:reach]) and _is_unredacted(text[-reach:])
 
 
 def _is_plain_text(text: str | None) -> TypeGuard[str]:
@@ -164,7 +152,7 @@ class MidTurnGate:
             self._checked, self._finish = pending, finish
             return finish
 
-    def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest | str:  # noqa: PLR0911
+    def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest | str:
         """Build the judge's request, or name why the queue cannot be judged."""
         if self.conversation_context is None:
             return "history_unavailable"
@@ -177,26 +165,15 @@ class MidTurnGate:
         for message in pending:
             if not _is_whole_text(message.text):
                 return "queued_message_unjudgeable"
-            if message.visible_response is None or not _clip_is_unredacted(message.visible_response):
+            if message.visible_response is None or not clip_is_unredacted(message.visible_response):
                 return "visible_response_unavailable"
-            queued.append({"text": message.text, "visible_response": _clip(message.visible_response)})
-        history = self.conversation_context[-_MAX_CONTEXT_MESSAGES:]
+            queued.append({"text": message.text, "visible_response": clip_judgment_text(message.visible_response)})
         evidence = json.dumps({"active_request": self.active_text, "queued_messages": queued}, ensure_ascii=False)
-        context = [JudgmentMessage(message.sender, _clip(message.text)) for message in history]
-        while True:
-            request = build_judgment_request(
-                MID_TURN_QUESTION,
-                (*context, JudgmentMessage("user", evidence)),
-                max_context_messages=_MAX_CONTEXT_MESSAGES + 1,
-                instructions=self.instructions,
-            )
-            if request.incomplete_reason != "essential_input_too_large" or not context:
-                break
-            # The oldest conversation gives way first.
-            del context[0]
-        # Only the newest messages that fit reach the judge, so older ones are never scanned.
-        kept = history[len(history) - len(context) :]
-        # Earlier messages may name attachments the judge cannot open, as agents echo their attachment annotations.
-        if not all(_clip_is_unredacted(message.text) for message in kept):
-            return "history_unjudgeable"
-        return request
+        request = fit_judgment_request(
+            MID_TURN_QUESTION,
+            self.conversation_context,
+            JudgmentMessage("user", evidence),
+            instructions=self.instructions,
+            max_context_messages=_MAX_CONTEXT_MESSAGES,
+        )
+        return "history_unjudgeable" if request is None else request

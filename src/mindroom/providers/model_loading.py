@@ -32,9 +32,17 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
+__all__ = [
+    "CLAUDE_CACHE_PROVIDERS",
+    "canonical_provider",
+    "get_model_instance",
+    "missing_model_api_key_provider",
+    "model_uses_own_credential",
+]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
+# Claude providers default to Anthropic prompt caching with the 1h TTL.
+CLAUDE_CACHE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER})
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past
 # 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
 # ceiling for non-streaming operations.
@@ -225,7 +233,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths, shared_api_key=shared_api_key)
 
-    if canonical_provider_key in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
+    if canonical_provider_key in CLAUDE_CACHE_PROVIDERS:
         extra_kwargs.setdefault("cache_system_prompt", True)
         extra_kwargs.setdefault("extended_cache_time", True)
         extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
