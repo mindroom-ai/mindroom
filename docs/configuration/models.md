@@ -485,6 +485,43 @@ For `codex` and `kimi`, conversations share a `prompt_cache_key` per agent and r
 Set `extra_kwargs.prompt_cache_key` to choose your own cache group, for example to separate deployments that share a storage path and provider account, or set it to `null` to send no key.
 A shared key still needs identical prefixes and tools, and provider routing can produce cache misses.
 
+## Cold-Cache Model
+
+A cached prompt is read at a tenth of the normal input price, while writing a new cache costs more than the normal price.
+Switching models mid-thread therefore usually costs money, because the new model starts without a cache.
+Once the agent model's cache for a thread has expired, the next turn pays for a full write either way, and a cheaper model can answer a simple request for a fraction of the cost.
+Set `agents.<name>.cold_cache` to let a judge make that switch:
+
+```yaml
+agents:
+  assistant:
+    model: opus
+    cold_cache:
+      model: haiku
+      judgment:
+        provider: openai_decisions
+        threshold: 0.8
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | Required | Smaller model alias for accepted cold-cache turns; its `context_window` must be at least the agent model's |
+| `judgment` | object or null | `null` | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](threads.md#judgment-backends). Unset asks `model` itself |
+
+A thread's cache counts as cold when its newest run used a different model, or when its session was last written longer ago than the cache lifetime:
+
+- Claude providers: one hour, or five minutes with `extra_kwargs.extended_cache_time: false`. Anthropic refreshes the lifetime on every cache hit, so the expiry is exact.
+- Other providers: one hour, the upper bound of OpenAI's in-memory retention, so a warm cache is not mistaken for a cold one.
+
+On a cold turn, the judge sees up to seven recent thread messages and the new request, and decides whether the smaller model can answer as well as the agent model.
+Only an accepting decision switches; a decline, abstention, timeout, or missing credential keeps the agent model.
+Warm turns make no judgment call.
+After a switch the agent model's cache stays cold, so each later turn is judged again, and a harder request returns to the agent model.
+
+The switch never happens when a `!model` thread override, a `!room_model` or `room_models` room override, or a scheduled model applies, or when the request carries images, audio, video, or files.
+Earlier attachments reach the judge only as placeholders, so pick a smaller model that supports the same media as the agent model.
+Teams and the router keep their models.
+
 ## Stalled Streams
 
 A provider sometimes accepts a streamed request and then sends nothing more, which would leave the agent busy and queue every follow-up message behind it.

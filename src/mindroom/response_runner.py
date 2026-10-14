@@ -38,6 +38,7 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.cold_cache import select_cold_cache_model
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -700,16 +701,10 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
-def _mid_turn_for_request(
-    request: ResponseRequest,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    on_defer: Callable[[str, str], Awaitable[None]],
-) -> MidTurnGate | None:
-    """Treat deferred attachment registration as incomplete judgment context too."""
+def _request_has_media(request: ResponseRequest) -> bool:
+    """Count deferred attachment registration as media too."""
     preparation = request.payload_preparation
-    has_media = bool(
+    return bool(
         request.attachment_ids
         or (request.media is not None and request.media.has_any())
         or (
@@ -722,6 +717,17 @@ def _mid_turn_for_request(
             )
         ),
     )
+
+
+def _mid_turn_for_request(
+    request: ResponseRequest,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    on_defer: Callable[[str, str], Awaitable[None]],
+) -> MidTurnGate | None:
+    """Treat deferred attachment registration as incomplete judgment context too."""
+    has_media = _request_has_media(request)
     gate = create_mid_turn_gate(
         config,
         runtime_paths,
@@ -5826,6 +5832,72 @@ class ResponseRunner:
                 await request.on_no_response_handled()
             return None
 
+    async def _cold_cache_model(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_model: str,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity,
+    ) -> str:
+        """Let a judge move a turn whose prompt cache expired to the agent's smaller model."""
+        config = self.deps.runtime.config
+        agent = config.agents.get(self.deps.agent_name)
+        if (
+            agent is None
+            or agent.cold_cache is None
+            or request.scheduled_model is not None
+            # Thread and room overrides are explicit choices.
+            or resolved_model != agent.model
+            # The judge cannot see media, and the smaller model may not read it.
+            or _request_has_media(request)
+        ):
+            return resolved_model
+        try:
+            session = await asyncio.to_thread(self._read_agent_session, session_id, execution_identity)
+        except Exception as error:
+            # The switch is an optimization, so an unreadable session must not fail the reply.
+            self.deps.logger.warning(
+                "cold_cache_session_read_failed",
+                session_id=session_id,
+                exception_type=error.__class__.__name__,
+            )
+            return resolved_model
+        context = (
+            None
+            if request.requires_model_history_refresh
+            else conversation_context_before_sources(
+                request.thread_history,
+                source_event_ids=request.sources.logical_source_event_ids,
+                thread_id=request.thread_id,
+                config=config,
+                runtime_paths=self.deps.runtime_paths,
+            )
+        )
+        return await select_cold_cache_model(
+            agent.cold_cache,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            agent_name=self.deps.agent_name,
+            agent_model=resolved_model,
+            session=session,
+            context=context,
+            prompt=request.prompt,
+            now=time.time(),
+        )
+
+    def _read_agent_session(
+        self,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity,
+    ) -> AgentSession | None:
+        storage = self.deps.state_writer.create_storage(execution_identity)
+        try:
+            session = storage.get_session(session_id, SessionType.AGENT)
+        finally:
+            storage.close()
+        return session if isinstance(session, AgentSession) else None
+
     async def _generate_response_with_participation_locked(
         self,
         request: ResponseRequest,
@@ -5906,6 +5978,12 @@ class ResponseRunner:
             execution_identity=execution_identity,
         )
 
+        active_model_name = await self._cold_cache_model(
+            request,
+            resolved_model=active_model_name,
+            session_id=session_id,
+            execution_identity=execution_identity,
+        )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_response_runtime(

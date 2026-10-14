@@ -24,6 +24,7 @@ import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.base import BaseDb, SessionType
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
@@ -52,6 +53,7 @@ from mindroom.cancellation import current_task_is_process_shutdown, request_task
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.cold_cache import ColdCacheConfig
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import (
@@ -104,6 +106,7 @@ from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
@@ -7948,6 +7951,101 @@ async def test_tools_get_the_reply_correlation_when_the_request_names_none(tmp_p
         await coordinator.prepare_response_runtime(_plain_request(_target(reply_to_event_id="$selection")))
 
     assert observed == ["$selection"]
+
+
+async def _cold_cache_reply_model(
+    tmp_path: Path,
+    *,
+    scheduled_model: str | None = None,
+    room_model: str | None = None,
+    media: MediaInputs | None = None,
+) -> tuple[list[str | None], list[dict[str, object]]]:
+    """Run one reply for a cold-cache agent and return the model it used and the selector calls."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    config.models["cheap2"] = ModelConfig(provider="test", id="cheap2-model")
+    config.agents["general"] = config.agents["general"].model_copy(
+        update={"cold_cache": ColdCacheConfig(model="cheap")},
+    )
+    if room_model is not None:
+        set_room_model_override(coordinator.deps.runtime_paths, room_id="!room:localhost", model_name=room_model)
+    selector_calls: list[dict[str, object]] = []
+    active_models: list[str | None] = []
+
+    async def fake_select(settings: ColdCacheConfig, **kwargs: object) -> str:
+        selector_calls.append(kwargs)
+        return settings.model
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        active_models.append(ctx.active_model_name)
+        return "final text"
+
+    request = replace(
+        _plain_request(_target(thread_id="$event")),
+        scheduled_model=scheduled_model,
+        media=media,
+    )
+    with (
+        patch("mindroom.response_runner.select_cold_cache_model", new=fake_select),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator.generate_response(request)
+    return active_models, selector_calls
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_model_used_for_reply(tmp_path: Path) -> None:
+    """An accepted cold-cache judgment replies with the smaller model, judged on this thread and prompt."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path)
+    assert active_models == ["cheap"]
+    assert len(selector_calls) == 1
+    call = selector_calls[0]
+    assert call["agent_name"] == "general"
+    assert call["agent_model"] == "default"
+    assert call["session"] is None
+    assert call["context"] == ()
+    assert call["prompt"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_session_read_failure_keeps_agent_model(tmp_path: Path) -> None:
+    """An unreadable session skips the optional switch instead of failing the reply."""
+    with patch.object(ResponseRunner, "_read_agent_session", side_effect=RuntimeError("storage unavailable")):
+        active_models, selector_calls = await _cold_cache_reply_model(tmp_path)
+    assert selector_calls == []
+    assert active_models == ["default"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "expected_model"),
+    [
+        ({"scheduled_model": "cheap2"}, "cheap2"),
+        ({"room_model": "cheap2"}, "cheap2"),
+        ({"media": MediaInputs(images=[Image(content=b"png")])}, "default"),
+    ],
+)
+async def test_cold_cache_skipped_for_override(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_model: str,
+) -> None:
+    """Explicit model choices and media turns never consult the cold-cache judge."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, **override)
+    assert selector_calls == []
+    assert active_models == [expected_model]
 
 
 @pytest.mark.asyncio
