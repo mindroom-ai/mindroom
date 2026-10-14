@@ -3943,8 +3943,7 @@ agents:
       archive_after_days: 30
 ```
 
-Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
-Self-hosted configurations from `mindroom config init` leave it off.
+`mindroom config init` and newly provisioned hosted instances enable it for the starter Mind agent; set `agents.<name>.skill_learning.enabled: false` to turn it off.
 Reviews incur additional model usage, reported under `kind: skill_learning` in [usage tracking](https://docs.mindroom.chat/usage/#token-usage).
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
 
@@ -10758,7 +10757,8 @@ Writing a tag requires both the agent's Matrix account and the requesting user t
 ## [`thread_resolution`]
 
 `thread_resolution` lets an agent resolve or reopen threads in the current room.
-It is not in starter configs or default tool sets, so agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
+The `mindroom config init` starter gives it to Mind, with a [tool approval](https://docs.mindroom.chat/tool-approval/) rule that makes each `resolve_thread` call wait for the requester's approval.
+It is not in default tool sets, so other agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
 
 `resolve_thread(thread_id=None)` adds the `resolved` state, and `reopen_thread(thread_id=None)` removes it.
 Without `thread_id`, both require an active thread.
@@ -12546,7 +12546,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 ## Background jobs
 
-This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
+This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; configs from `mindroom config init` turn it on.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and shell tools keep their own background commands.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.

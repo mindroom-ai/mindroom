@@ -1190,6 +1190,17 @@ models:
   default:
 {model_block}{additional_models_block}{commented_model_options_block}
 
+mcp_servers:
+  # Reads and sends Matrix messages as the account you log in with.
+  # Log in once with: uvx matrix-mcp auth sso <homeserver URL>
+  # See https://matrix-mcp.mindroom.chat/
+  matrix_mcp:
+    transport: stdio
+    command: uvx
+    args:
+      - matrix-mcp
+      - serve
+
 agents:
   mind:
     display_name: Mind
@@ -1226,10 +1237,26 @@ agents:
       - update_awareness
       - todo
       - matrix_message
+      - name: matrix_room
+        defer: true
       - name: thread_model
         defer: true
       - thread_tags
       - thread_summary
+      - thread_resolution
+      - compact_context
+      - callback_manager
+      - chat_ui
+      - script
+      - name: mcp_matrix_mcp
+        defer: true
+    delegate_to:
+      - mind
+    skill_learning:
+      enabled: true
+    automations:
+      - prompt_curation
+      - dreaming
     skills:
       - mindroom-docs
     instructions:
@@ -1279,6 +1306,14 @@ memory:
 
 authorization:
   config_command_enabled: false
+
+tool_approval:
+  rules:
+    - match: resolve_thread
+      action: require_approval
+
+background_tool_jobs:
+  enabled: true
 
 defaults:
   # Execution tools (shell, file, python, coding, docker) run directly in the

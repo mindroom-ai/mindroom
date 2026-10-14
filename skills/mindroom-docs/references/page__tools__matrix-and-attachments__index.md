@@ -124,7 +124,8 @@ Writing a tag requires both the agent's Matrix account and the requesting user t
 ## [`thread_resolution`]
 
 `thread_resolution` lets an agent resolve or reopen threads in the current room.
-It is not in starter configs or default tool sets, so agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
+The `mindroom config init` starter gives it to Mind, with a [tool approval](https://docs.mindroom.chat/tool-approval/) rule that makes each `resolve_thread` call wait for the requester's approval.
+It is not in default tool sets, so other agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
 
 `resolve_thread(thread_id=None)` adds the `resolved` state, and `reopen_thread(thread_id=None)` removes it.
 Without `thread_id`, both require an active thread.

@@ -308,10 +308,23 @@ class TestConfigInit:
             "update_awareness",
             "todo",
             "matrix_message",
+            {"name": "matrix_room", "defer": True},
             {"name": "thread_model", "defer": True},
             "thread_tags",
             "thread_summary",
+            "thread_resolution",
+            "compact_context",
+            "callback_manager",
+            "chat_ui",
+            "script",
+            {"name": "mcp_matrix_mcp", "defer": True},
         ]
+        assert mind["delegate_to"] == ["mind"]
+        assert mind["skill_learning"] == {"enabled": True}
+        assert mind["automations"] == ["prompt_curation", "dreaming"]
+        assert config["mcp_servers"]["matrix_mcp"]["args"] == ["matrix-mcp", "serve"]
+        assert config["tool_approval"]["rules"] == [{"match": "resolve_thread", "action": "require_approval"}]
+        assert config["background_tool_jobs"] == {"enabled": True}
         config_manager_entry = next(
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
         )
@@ -320,7 +333,6 @@ class TestConfigInit:
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "thread_model"
         )
         assert thread_model_entry.defer is True
-        assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
         assert (
             "When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess."

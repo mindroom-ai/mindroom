@@ -184,7 +184,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 ## Background jobs
 
-This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
+This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; configs from `mindroom config init` turn it on.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and shell tools keep their own background commands.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
