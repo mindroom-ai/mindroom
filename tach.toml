@@ -2747,6 +2747,7 @@ depends_on = [
     "mindroom.config.reload_status",
     "mindroom.event_journal.opening",
     "mindroom.logging_config",
+    "mindroom.matrix_rtc.call_manager",
     "mindroom.orchestration.config_updates",
     "mindroom.orchestration.runtime",
     "mindroom.tool_jobs.settings",
@@ -4173,6 +4174,7 @@ depends_on = [
     "mindroom.model_defaults",
     "mindroom.response_admission",
     "mindroom.session_ids",
+    "mindroom.tool_system.dependencies",
 ]
 
 [[modules]]

@@ -1425,7 +1425,7 @@ class _MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
-        await preload_matrix_call_dependencies(config)
+        await preload_matrix_call_dependencies(config, self.runtime_paths)
         freeze_startup_heap()
         hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
         entity_names = configured_entity_names(config)

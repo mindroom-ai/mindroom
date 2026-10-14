@@ -92,6 +92,7 @@ from mindroom.response_admission import (
 )
 from mindroom.session_ids import create_session_id
 from mindroom.token_budget import approximate_o200k_tokens, o200k_encoding
+from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -109,6 +110,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
 
 logger = get_logger(__name__)
+
+_MATRIX_CALLS_EXTRA = "matrix_calls"
+_MATRIX_CALLS_INSTALL_HINT = "install mindroom with the [matrix_calls] extra"
 
 
 def _default_bridge_factory(local_identity: str, e2ee_enabled: bool) -> RealtimeVoiceBridge:
@@ -247,12 +251,33 @@ def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") ->
     return "\n\n".join(part for part in parts if part)
 
 
-async def preload_matrix_call_dependencies(config: Config) -> None:
-    """Load optional call SDKs and the call token encoder before bots start syncing."""
-    if not config.calls.enabled or not matrix_calls_dependencies_available():
+async def _ensure_matrix_call_dependencies(runtime_paths: RuntimePaths) -> bool:
+    """Return whether the call SDKs are importable, installing the extra first unless auto-install is off."""
+    if matrix_calls_dependencies_available():
+        return True
+    if not auto_install_enabled(runtime_paths):
+        return False
+    logger.info("calls_optional_dependencies_auto_installing", extra=_MATRIX_CALLS_EXTRA)
+    installed = await asyncio.to_thread(
+        auto_install_optional_extra_for_import_retry,
+        _MATRIX_CALLS_EXTRA,
+        runtime_paths,
+    )
+    if installed and matrix_calls_dependencies_available():
+        logger.info("calls_optional_dependencies_auto_installed", extra=_MATRIX_CALLS_EXTRA)
+        return True
+    logger.warning("calls_dependency_auto_install_failed", hint=_MATRIX_CALLS_INSTALL_HINT)
+    return False
+
+
+async def preload_matrix_call_dependencies(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Install missing call SDKs, then load them and the call token encoder before call agents start."""
+    if not config.calls.enabled or not config.calls.agents:
         return
     backends = {config.calls.resolve_agent_config(agent).backend for agent in config.calls.agents}
     try:
+        if not await _ensure_matrix_call_dependencies(runtime_paths):
+            return
         if backends - {"live"}:
             # Realtime and cascaded calls run LiveKit in this process; it registers plugins on the main thread.
             from livekit.plugins import openai  # noqa: F401, PLC0415
@@ -288,7 +313,7 @@ def maybe_build_call_manager(
         logger.warning(
             "calls_enabled_but_dependencies_missing",
             agent=agent_name,
-            hint="install mindroom with the [matrix_calls] extra",
+            hint=_MATRIX_CALLS_INSTALL_HINT,
         )
         return None
     return CallManager(
