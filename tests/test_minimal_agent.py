@@ -31,7 +31,7 @@ from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
 from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, estimate_agent_static_tokens
@@ -82,6 +82,27 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         AgentSession(session_id="budget"),
     )
     assert [name for tool in tools for name in tool.get_async_functions()] == ["bash"]
+
+
+def test_minimal_mode_with_background_jobs_keeps_its_shell_handles(tmp_path: Path) -> None:
+    """Minimal Bash polls and stops its own commands, so jobs leave its shell's run, check, and kill in place."""
+    config = Config(
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+        agents={"helper": AgentConfig(display_name="Helper", tools=["shell"])},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+    )
+    runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    persist_entity_accounts(config, runtime)
+    minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
+
+    functions = {
+        name: function
+        for toolkit in minimal.tools or []
+        if isinstance(toolkit, Toolkit)
+        for name, function in toolkit.get_async_functions().items()
+    }
+    assert {"run_shell_command", "check_shell_command", "kill_shell_command"} <= set(functions)
+    assert "timeout" in functions["run_shell_command"].parameters["properties"]
 
 
 @pytest.mark.parametrize("delegation_depth", [0, 1])

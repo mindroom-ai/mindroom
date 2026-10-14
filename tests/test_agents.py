@@ -4142,7 +4142,7 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
     depth: int,
     asks_as_job: bool,
 ) -> None:
-    """A subagent's calls and excluded toolkits keep pausing their run, as every call does with jobs off."""
+    """A subagent's calls keep pausing their run, as every call does with jobs off."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(
         Config(
@@ -4169,9 +4169,12 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
     }
     expected = JOB_APPROVAL_TYPE if asks_as_job else POLICY_CONFIRMATION_APPROVAL_TYPE
     assert (functions["add"].requires_confirmation, functions["add"].approval_type) == (not asks_as_job, expected)
-    # Shell keeps its own waiting behavior by default, so it keeps pausing for its approval.
     shell = functions["run_shell_command"]
-    assert (shell.requires_confirmation, shell.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
+    assert (shell.requires_confirmation, shell.approval_type) == (not asks_as_job, expected)
+    # With jobs on, a standard agent's command runs to completion as the shell's only function.
+    assert ("check_shell_command" in functions) is not enabled
+    assert ("kill_shell_command" in functions) is not enabled
+    assert ("timeout" in shell.parameters["properties"]) is not enabled
 
 
 def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:

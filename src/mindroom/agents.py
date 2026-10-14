@@ -57,6 +57,7 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
 )
 from mindroom.session_storage import agent_storage
+from mindroom.shell.managed import install_managed_shell
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_call_budget import install_model_call_cap
@@ -2242,6 +2243,14 @@ def create_agent(  # noqa: PLR0915
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
+    # A standard agent's shell command runs to completion as one call, so its background job owns the whole run.
+    if (
+        agent_mode == "standard"
+        and not disable_runtime_capabilities
+        and background_tool_jobs_enabled(config, runtime_paths)
+        and not toolkit_is_background_excluded("shell", config, runtime_paths)
+    ):
+        install_managed_shell(tool_assembly.tools)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     cli_shell = (
         agent_cli_in_shell

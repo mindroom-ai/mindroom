@@ -244,8 +244,8 @@ def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
-def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path, *, jobs: bool) -> None:
-    """An approved command resumes later, or runs in its job after the reply ended, without this response's CLI."""
+def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, *, jobs: bool) -> None:
+    """A paused run resumes later without this response's CLI; a job asks first and then runs with it."""
     runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
     runtime.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
@@ -266,15 +266,15 @@ def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path, *, jobs: bool) ->
         clear_api_server_address()
 
     try:
-        assert not isinstance(agent, CliShellAgent)
-        assert STANDARD_CLI_NOTE not in agent.instructions
+        assert isinstance(agent, CliShellAgent) is jobs
+        assert (STANDARD_CLI_NOTE in agent.instructions) is jobs
     finally:
         close_agent_runtime_state_dbs(agent)
 
 
 @pytest.mark.parametrize("managed", [False, True], ids=["excluded-shell", "managed-shell"])
-def test_a_shell_that_runs_as_a_background_job_gets_no_cli(tmp_path: Path, *, managed: bool) -> None:
-    """A shell command that can outlive its reply cannot use that reply's CLI, which ends with it."""
+def test_a_shell_gets_the_cli_whether_or_not_it_runs_as_a_job(tmp_path: Path, *, managed: bool) -> None:
+    """A shell job keeps its reply's CLI until the job settles, so both kinds of shell get it."""
     runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
     runtime.config.background_tool_jobs = BackgroundToolJobsConfig(
         enabled=True,
@@ -294,7 +294,7 @@ def test_a_shell_that_runs_as_a_background_job_gets_no_cli(tmp_path: Path, *, ma
         clear_api_server_address()
 
     try:
-        assert isinstance(agent, CliShellAgent) is not managed
+        assert isinstance(agent, CliShellAgent)
     finally:
         close_agent_runtime_state_dbs(agent)
 

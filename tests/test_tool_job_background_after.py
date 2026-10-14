@@ -22,6 +22,7 @@ from agno.tools.function import Function, FunctionCall, ToolResult
 from mindroom.agent_cli.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.agno_execution import _drain_result, wait_mode
@@ -497,7 +498,7 @@ class MCPTools(Toolkit):
 
 
 def _excluded_function() -> Function:
-    """A function of a toolkit built as shell, which the default settings exclude."""
+    """A function of a toolkit built as shell, which the test settings exclude."""
     toolkit = Toolkit(name="shell", tools=[_ordinary])
     bind_toolkit_construction(toolkit, ToolConstruction("shell", None))
     bind_toolkit_authority(toolkit, authored_name="shell")
@@ -541,7 +542,11 @@ def test_wait_mode_classifies_every_call_from_current_policy(
 ) -> None:
     """One classifier decides schema projection and execution for each kind of function."""
     paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(exclude_toolkits=["shell"]),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    context = _delegate_runtime_context(config, paths)
     agent = Agent(id="leader")
     stopping = assembled_function(_stopping)
     stopping.stop_after_tool_call = True

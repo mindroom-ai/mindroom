@@ -73,7 +73,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
     paths = _runtime_paths(tmp_path)
     team, authored_name = request.param
     config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True, exclude_toolkits=["shell"]),
         agents={"leader": AgentConfig(display_name="Leader", tools=[authored_name])},
     )
     context = _delegate_runtime_context(config, paths)
@@ -185,7 +185,7 @@ async def test_shell_native_handles_control_the_actual_process(
 
 @pytest.mark.asyncio
 async def test_empty_exclusion_list_includes_shell(shell_runtime: _ShellRuntime) -> None:
-    """An explicit empty list removes the shell default from execution and schemas."""
+    """An empty exclusion list makes shell calls background jobs in execution and schemas."""
     actor, model, runtime, owner, _ = shell_runtime
     context = get_tool_runtime_context()
     assert context is not None
