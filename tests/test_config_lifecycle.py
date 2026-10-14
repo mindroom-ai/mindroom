@@ -11,7 +11,6 @@ import pytest
 
 import mindroom.orchestration.config_lifecycle as lifecycle_module
 from mindroom.config.agent import AgentConfig
-from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config, load_config
 from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, _ReplacementDrainState
@@ -25,7 +24,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.constants import RuntimePaths
 
 
 def _make_lifecycle(
@@ -173,45 +171,6 @@ async def test_reload_drains_active_responses_before_applying(
     await asyncio.wait_for(task, timeout=1)
     lifecycle.apply_update_plan.assert_awaited_once()
     assert gate.closed is False
-
-
-@pytest.mark.asyncio
-async def test_reload_enabling_calls_prepares_call_dependencies_before_closing_admission(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A reload that enables calls installs their SDKs before the agent restarts, while replies still run."""
-    gate = ResponseAdmissionGate()
-    current_config = Config(agents={"helper": AgentConfig(display_name="Helper")})
-    new_config = Config(
-        agents={"helper": AgentConfig(display_name="Helper")},
-        calls=CallsConfig(
-            enabled=True,
-            profiles={
-                "voice": RealtimeCallProfile(
-                    backend="realtime",
-                    model="gpt-realtime-2.1",
-                    credentials_service="openai",
-                    voice="marin",
-                ),
-            },
-            agents={"helper": "voice"},
-        ),
-    )
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", MagicMock(return_value=new_config))
-    lifecycle = _make_lifecycle(tmp_path, current_config=current_config, response_admission_gate=gate)
-    preloads: list[tuple[Config, bool, bool]] = []
-
-    async def preload(config: Config, runtime_paths: RuntimePaths) -> None:
-        assert runtime_paths is lifecycle.runtime_paths
-        preloads.append((config, gate.closed, lifecycle.apply_update_plan.await_count > 0))
-
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.preload_matrix_call_dependencies", preload)
-
-    assert await lifecycle._update_config() is True
-
-    assert preloads == [(new_config, False, False)]
-    lifecycle.apply_update_plan.assert_awaited_once()
 
 
 _AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"

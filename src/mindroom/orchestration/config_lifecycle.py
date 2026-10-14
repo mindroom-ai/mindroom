@@ -12,7 +12,6 @@ from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.config.yaml_includes import partial_source_files
 from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
-from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.orchestration.config_updates import (
     build_config_update_plan,
     configured_entity_names,
@@ -178,8 +177,6 @@ class ConfigReloadLifecycle:
                     self.runtime_paths,
                     tolerate_plugin_load_errors=True,
                 )
-            # Install and load the SDKs that newly enabled call agents need while admission is still open.
-            await preload_matrix_call_dependencies(new_config, self.runtime_paths)
             self.loaded_source_files = new_config.source_files
             self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
             runtime_config = self.current_config()

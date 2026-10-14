@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import sys
 import threading
 import time
@@ -2313,11 +2314,12 @@ async def test_manager_reconcile_contains_session_stop_failure(tmp_path: Path) -
     assert manager._sessions == {}
 
 
-def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
     """Maybe build call manager respects configuration."""
     client = _client()
     runtime_paths = test_runtime_paths(tmp_path)
-    disabled = maybe_build_call_manager(
+    disabled = await maybe_build_call_manager(
         agent_name="helper",
         config=_config(enabled=False),
         client=client,
@@ -2330,7 +2332,7 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         wait_for_admission_or_shutdown=_admission_available,
     )
     assert disabled is None
-    not_listed = maybe_build_call_manager(
+    not_listed = await maybe_build_call_manager(
         agent_name="other",
         config=_config(),
         client=client,
@@ -2343,7 +2345,7 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         wait_for_admission_or_shutdown=_admission_available,
     )
     assert not_listed is None
-    enabled = maybe_build_call_manager(
+    enabled = await maybe_build_call_manager(
         agent_name="helper",
         config=_config(),
         client=client,
@@ -2358,37 +2360,71 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
     assert isinstance(enabled, CallManager)
 
 
-def test_maybe_build_call_manager_survives_missing_livekit_package(
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["installed", "auto_install_disabled", "install_failed"])
+async def test_maybe_build_call_manager_auto_installs_missing_livekit_package(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    outcome: str,
 ) -> None:
-    """A missing livekit package disables calls instead of crashing agent startup."""
+    """A missing matrix_calls extra is installed before building; when it cannot be, calls stay off without crashing."""
+    livekit_installed = False
+    real_find_spec = importlib.util.find_spec
 
-    def raising_find_spec(_name: str) -> None:
-        msg = "No module named 'livekit'"
-        raise ModuleNotFoundError(msg)
+    def find_spec(name: str, *args: object) -> object:
+        if name.startswith("livekit") and not livekit_installed:
+            msg = "No module named 'livekit'"
+            raise ModuleNotFoundError(msg)
+        return real_find_spec(name, *args)
 
-    monkeypatch.setattr("importlib.util.find_spec", raising_find_spec)
-    manager = maybe_build_call_manager(
-        agent_name="helper",
-        config=_config(),
-        client=_client(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        ssl_verify=True,
-        tool_support=object(),
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
-    assert manager is None
+    def install(_extras: list[str], *, quiet: bool) -> bool:
+        nonlocal livekit_installed
+        assert quiet
+        livekit_installed = outcome == "installed"
+        return livekit_installed
+
+    install_extras = MagicMock(side_effect=install)
+    monkeypatch.setattr("importlib.util.find_spec", find_spec)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", install_extras)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    process_env = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"} if outcome == "auto_install_disabled" else {}
+
+    with capture_logs() as logs:
+        manager = await maybe_build_call_manager(
+            agent_name="helper",
+            config=_config(),
+            client=_client(),
+            runtime_paths=resolve_runtime_paths(
+                config_path=config_path,
+                storage_path=tmp_path / "mindroom_data",
+                process_env=process_env,
+            ),
+            ssl_verify=True,
+            tool_support=object(),
+            get_invited_rooms_by_agent=dict,
+            agent_reply_memberships=AgentReplyMembershipIndex(),
+            response_admission_gate=ResponseAdmissionGate(),
+            wait_for_admission_or_shutdown=_admission_available,
+        )
+
+    events = {log["event"]: log for log in logs}
+    if outcome == "auto_install_disabled":
+        install_extras.assert_not_called()
+    else:
+        install_extras.assert_called_once_with(["matrix_calls"], quiet=True)
+    if outcome == "installed":
+        assert isinstance(manager, CallManager)
+        assert "calls_optional_dependencies_auto_installed" in events
+    else:
+        assert manager is None
+        assert events["calls_enabled_but_dependencies_missing"]["hint"] == (
+            "install mindroom with the [matrix_calls] extra"
+        )
 
 
 @pytest.mark.asyncio
-async def test_preload_builds_the_token_encoder_off_the_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+async def test_preload_builds_the_token_encoder_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Startup builds the call token encoder in a worker thread, and only when calls are enabled."""
     livekit_plugins = ModuleType("livekit.plugins")
     livekit_plugins.openai = ModuleType("livekit.plugins.openai")
@@ -2400,20 +2436,16 @@ async def test_preload_builds_the_token_encoder_off_the_event_loop(
         lambda: encoder_threads.append(threading.get_ident()),
     )
 
-    runtime_paths = test_runtime_paths(tmp_path)
-    await preload_matrix_call_dependencies(_config(enabled=False), runtime_paths)
+    await preload_matrix_call_dependencies(_config(enabled=False))
     assert encoder_threads == []
 
-    await preload_matrix_call_dependencies(_config(), runtime_paths)
+    await preload_matrix_call_dependencies(_config())
     assert len(encoder_threads) == 1
     assert encoder_threads[0] != threading.get_ident()
 
 
 @pytest.mark.asyncio
-async def test_preload_matches_the_configured_call_backends(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+async def test_preload_matches_the_configured_call_backends(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process call backends load LiveKit here; GPT-Live calls get an idle audio process instead."""
     imported: list[str] = []
     prewarms: list[None] = []
@@ -2430,8 +2462,7 @@ async def test_preload_matches_the_configured_call_backends(
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.o200k_encoding", lambda: None)
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.prewarm_call_audio_process", lambda: prewarms.append(None))
 
-    runtime_paths = test_runtime_paths(tmp_path)
-    await preload_matrix_call_dependencies(_config(), runtime_paths)
+    await preload_matrix_call_dependencies(_config())
     assert (imported, prewarms) == (["openai"], [])
 
     live_only = _config()
@@ -2440,101 +2471,8 @@ async def test_preload_matches_the_configured_call_backends(
     }
     live_only.calls.agents["helper"] = "live"
     imported.clear()
-    await preload_matrix_call_dependencies(live_only, runtime_paths)
+    await preload_matrix_call_dependencies(live_only)
     assert (imported, prewarms) == ([], [None])
-
-
-def _build_helper_call_manager(config: Config, runtime_paths: RuntimePaths) -> CallManager | None:
-    return maybe_build_call_manager(
-        agent_name="helper",
-        config=config,
-        client=_client(),
-        runtime_paths=runtime_paths,
-        ssl_verify=True,
-        tool_support=object(),
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("install_succeeds", [True, False])
-async def test_preload_auto_installs_missing_call_dependencies(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    install_succeeds: bool,
-) -> None:
-    """Startup installs a missing matrix_calls extra so call agents start, and warns when the install fails."""
-    available = False
-    installed_extras: list[str] = []
-
-    def install(extra_name: str, _runtime_paths: RuntimePaths) -> bool:
-        nonlocal available
-        installed_extras.append(extra_name)
-        available = install_succeeds
-        return install_succeeds
-
-    livekit_plugins = ModuleType("livekit.plugins")
-    livekit_plugins.openai = ModuleType("livekit.plugins.openai")
-    monkeypatch.setitem(sys.modules, "livekit.plugins", livekit_plugins)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: available)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.auto_install_optional_extra_for_import_retry", install)
-    encoder_builds: list[None] = []
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.o200k_encoding", lambda: encoder_builds.append(None))
-    runtime_paths = test_runtime_paths(tmp_path)
-
-    with capture_logs() as logs:
-        await preload_matrix_call_dependencies(_config(), runtime_paths)
-        manager = _build_helper_call_manager(_config(), runtime_paths)
-
-    events = [log["event"] for log in logs]
-    assert installed_extras == ["matrix_calls"]
-    assert len(encoder_builds) == int(install_succeeds)
-    if install_succeeds:
-        assert isinstance(manager, CallManager)
-        assert events == ["calls_optional_dependencies_auto_installing", "calls_optional_dependencies_auto_installed"]
-    else:
-        assert manager is None
-        assert events == [
-            "calls_optional_dependencies_auto_installing",
-            "calls_dependency_auto_install_failed",
-            "calls_enabled_but_dependencies_missing",
-        ]
-
-
-@pytest.mark.asyncio
-async def test_preload_leaves_missing_call_dependencies_when_auto_install_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """MINDROOM_NO_AUTO_INSTALL_TOOLS keeps calls unavailable with the manual install hint instead of installing."""
-    install = MagicMock(return_value=True)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: False)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.auto_install_optional_extra_for_import_retry", install)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "mindroom_data",
-        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
-    )
-
-    with capture_logs() as logs:
-        await preload_matrix_call_dependencies(_config(), runtime_paths)
-        manager = _build_helper_call_manager(_config(), runtime_paths)
-
-    install.assert_not_called()
-    assert manager is None
-    assert logs == [
-        {
-            "event": "calls_enabled_but_dependencies_missing",
-            "agent": "helper",
-            "hint": "install mindroom with the [matrix_calls] extra",
-            "log_level": "warning",
-        },
-    ]
 
 
 def test_voice_backend_availability_requires_runtime_credentials(

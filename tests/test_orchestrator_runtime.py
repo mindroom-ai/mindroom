@@ -2829,8 +2829,7 @@ class TestMultiAgentOrchestrator:
                 runtime_paths=resolve_runtime_paths(
                     config_path=config_path,
                     storage_path=tmp_path,
-                    # Missing call SDKs stay missing instead of being installed into the test environment.
-                    process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
+                    process_env={},
                 ),
             )
             await orchestrator.initialize()

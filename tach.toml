@@ -2747,7 +2747,6 @@ depends_on = [
     "mindroom.config.reload_status",
     "mindroom.event_journal.opening",
     "mindroom.logging_config",
-    "mindroom.matrix_rtc.call_manager",
     "mindroom.orchestration.config_updates",
     "mindroom.orchestration.runtime",
     "mindroom.tool_jobs.settings",
@@ -4274,7 +4273,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix_rtc.voice_agent"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.tool_system.dependencies"]
 
 [[modules]]
 path = "mindroom.matrix_rtc.spoken_turns"

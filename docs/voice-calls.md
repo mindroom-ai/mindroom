@@ -18,7 +18,7 @@ Each calls-enabled agent uses one of three backends:
 
 ## Setup
 
-1. MindRoom installs the `matrix_calls` extra automatically when it starts or reloads a config with calls enabled for at least one agent, unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+1. MindRoom installs the `matrix_calls` extra automatically when a calls-enabled agent starts, including after a config reload, unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
    If auto-install is disabled or fails, install it yourself with `pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`.
 2. Make sure your Matrix deployment has a MatrixRTC backend; see [Server requirements](#server-requirements).
 3. Define call profiles and assign one to each calls-enabled agent:
