@@ -29,6 +29,8 @@ _MAX_CONNECTIONS = 128
 # One page cannot hold more of the shared browser DNS threads than this, even after its lookups time out.
 _MAX_CONCURRENT_LOOKUPS = 4
 _MAX_UPSTREAM_RESPONSE_HEAD = 16 * 1024
+# Refused destinations a page reaches cannot grow the record the browser tool reads past this.
+_MAX_REMEMBERED_REFUSALS = 64
 _REPLY_ADDRESS = b"\x00\x01\x00\x00\x00\x00\x00\x00"
 # The relay carries only TCP, so WebRTC must not send UDP (STUN, TURN, or media) around it.
 # Chromium ignores the --force-webrtc-ip-handling-policy spelling.
@@ -255,6 +257,12 @@ class BrowserDestinationProxy:
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
         self._lookup_slots = asyncio.Semaphore(_MAX_CONCURRENT_LOOKUPS)
         self._lookups: dict[tuple[str, int], asyncio.Future[list[_IPAddress]]] = {}
+        # Insertion-ordered set of destinations whose latest connection the egress proxy refused.
+        self._refused: dict[tuple[str, int], None] = {}
+
+    def egress_refused(self, host: str, port: int) -> bool:
+        """Return whether the egress proxy refused the latest connection to this host and port."""
+        return (host, port) in self._refused
 
     async def start(self) -> None:
         """Listen only on an ephemeral loopback port of the process that owns the browser."""
@@ -386,6 +394,7 @@ class BrowserDestinationProxy:
         )
 
     async def _connect(self, host: str, port: int) -> tuple[StreamReader, StreamWriter]:
+        self._refused.pop((host, port), None)
         addresses = await self._resolve(host, port)
         if port == self._port and any(_is_loopback(address) for address in addresses):
             msg = "Browser proxy cannot connect to itself."
@@ -411,6 +420,9 @@ class BrowserDestinationProxy:
                     assert upstream is not None
                     return await _open_upstream_tunnel(upstream, target, port, self._upstream_tls)
             except _UpstreamTunnelRefusedError as refused:
+                self._refused[host, port] = None
+                if len(self._refused) > _MAX_REMEMBERED_REFUSALS:
+                    del self._refused[next(iter(self._refused))]
                 logger.warning(
                     "browser_egress_proxy_refused_tunnel",
                     destination=f"{target}:{port}",

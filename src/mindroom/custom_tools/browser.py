@@ -18,6 +18,7 @@ from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from agno.tools import Toolkit
@@ -551,6 +552,23 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
     return (
         f"{expected_text}{cache_text}.{installed_text} Run `{_PLAYWRIGHT_INSTALL_COMMAND}` from the MindRoom checkout."
     )
+
+
+async def _goto(page: Page, target_url: str, relay: BrowserDestinationProxy | None) -> None:
+    """Load one URL, naming its destination instead of Chromium's SOCKS error when the egress proxy refused it."""
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        url = urlsplit(target_url)
+        host = url.hostname or ""
+        port = url.port or (443 if url.scheme == "https" else 80)
+        if relay is not None and relay.egress_refused(host, port):
+            msg = (
+                f"The browser could not reach {host}:{port} because outbound access to that host is not allowed "
+                "from this browser."
+            )
+            raise RuntimeError(msg) from exc
+        raise
 
 
 def _copy_within_limit(source: BinaryIO, output: BinaryIO, max_bytes: int) -> int:
@@ -1321,7 +1339,7 @@ class BrowserTools(Toolkit):
             await page.set_content(html, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
         else:
             assert target_url is not None
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+            await _goto(page, target_url, state.destination_proxy)
         if self._worker_display is not None:
             await page.bring_to_front()
         state.active_target_id = target_id
@@ -1367,7 +1385,7 @@ class BrowserTools(Toolkit):
     async def _navigate(self, profile_name: str, target_url: str, target_id: str | None) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        await tab.page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+        await _goto(tab.page, target_url, state.destination_proxy)
         state.active_target_id = resolved_target_id
         return {
             "action": "navigate",

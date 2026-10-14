@@ -7,6 +7,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -1291,8 +1292,10 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
         result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/preview"))
         assert result["title"] == "Forwarded HTTP"
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in requests
-        with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+        with pytest.raises(RuntimeError, match=_egress_refusal("9.9.9.9:443")):
             await tool.browser(action="open", targetUrl="https://9.9.9.9/denied")
+        with pytest.raises(RuntimeError, match=_egress_refusal("9.9.9.9:443")):
+            await tool.browser(action="navigate", targetUrl="https://9.9.9.9/denied")
         assert b"CONNECT 9.9.9.9:443 HTTP/1.1" in requests
         # Redirects the page route never sees are still refused at dial time, before any proxy.
         for redirect in ["metadata-redirect", "alias-redirect", "private-redirect"]:
@@ -1327,7 +1330,7 @@ async def test_worker_browser_plain_http_needs_egress_proxy_connect_to_port_80(
                 result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/plain"))
                 assert result["title"] == "Via egress proxy"
             else:
-                with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                with pytest.raises(RuntimeError, match=_egress_refusal("8.8.8.8:80")):
                     await tool.browser(action="open", targetUrl="http://8.8.8.8/plain")
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in squid.requests
         refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
@@ -1369,7 +1372,7 @@ async def test_hostname_allowlist_proxies_serve_worker_browsers_but_not_the_prim
                 assert result["title"] == "Via egress proxy"
                 assert b"CONNECT allowed.example:80 HTTP/1.1" in squid.requests
             else:
-                with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                with pytest.raises(RuntimeError, match=_egress_refusal("allowed.example:80")):
                     await tool.browser(action="open", targetUrl="http://allowed.example/page")
                 assert b"CONNECT 93.184.216.34:80 HTTP/1.1" in squid.requests
         refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
@@ -1615,6 +1618,14 @@ async def test_headless_host_browser_dials_only_validated_addresses(
         assert hits == []
     finally:
         await tool.aclose()
+
+
+def _egress_refusal(destination: str) -> str:
+    """Match the tool error that names a destination the egress proxy refused instead of Chromium's SOCKS error."""
+    return re.escape(
+        f"The browser could not reach {destination} because outbound access to that host is not allowed from this "
+        "browser.",
+    )
 
 
 def _headless_real_browser(

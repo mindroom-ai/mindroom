@@ -181,7 +181,7 @@ class _RecordingUpstream:
 
     def __init__(self, *, accept: bool = True) -> None:
         self.requests: list[bytes] = []
-        self._accept = accept
+        self.accept = accept
         self._server: asyncio.Server | None = None
 
     async def __aenter__(self) -> _UpstreamProxy:
@@ -196,7 +196,7 @@ class _RecordingUpstream:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             self.requests.append((await reader.readuntil(b"\r\n\r\n")).split(b"\r\n", 1)[0])
-            if not self._accept:
+            if not self.accept:
                 writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
                 return
@@ -577,6 +577,34 @@ async def test_upstream_refusal_fails_the_connection_without_a_direct_fallback(m
             await proxy.close()
     assert recorder.requests == [b"CONNECT 8.8.8.8:443 HTTP/1.1"]
     assert dialed == []
+
+
+@pytest.mark.asyncio
+async def test_relay_remembers_destinations_whose_latest_connection_the_egress_proxy_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser tool can name a refused destination; a later outcome replaces it and a page cannot grow the record."""
+    _resolve_as(monkeypatch, {"public.example": "8.8.8.8", "other.example": "8.8.4.4", "third.example": "1.1.1.1"})
+    monkeypatch.setattr(browser_proxy, "_MAX_REMEMBERED_REFUSALS", 2)
+    recorder = _RecordingUpstream(accept=False)
+    async with recorder as upstream_proxy:
+        proxy = BrowserDestinationProxy(egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy))
+        await proxy.start()
+        try:
+            assert await _relay_reply(proxy, "public.example", 443) != 0
+            assert proxy.egress_refused("public.example", 443)
+            assert not proxy.egress_refused("public.example", 80)
+            recorder.accept = True
+            assert await _relay_reply(proxy, "public.example", 443) == 0
+            assert not proxy.egress_refused("public.example", 443)
+            recorder.accept = False
+            for host in ["public.example", "other.example", "third.example"]:
+                assert await _relay_reply(proxy, host, 443) != 0
+            assert not proxy.egress_refused("public.example", 443)
+            assert proxy.egress_refused("other.example", 443)
+            assert proxy.egress_refused("third.example", 443)
+        finally:
+            await proxy.close()
 
 
 @pytest.mark.asyncio
