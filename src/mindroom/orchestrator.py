@@ -158,6 +158,7 @@ from .orchestration.runtime import (
 )
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
+from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -415,6 +416,7 @@ class _MultiAgentOrchestrator:
     _automations: AutomationRunner = field(init=False, repr=False)
     _budgets: BudgetMonitor = field(init=False, repr=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
+    _tool_job_runtime: ToolJobRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
@@ -486,6 +488,13 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             agent_reply_memberships=self.agent_reply_memberships,
+        )
+        self._tool_job_runtime = ToolJobRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+            agent_reply_memberships=self.agent_reply_memberships,
+            journal_provider=self._shared_journal_store,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
@@ -734,6 +743,12 @@ class _MultiAgentOrchestrator:
             self._bind_response_admission_gate(bot)
         self._configure_approval_store_transport()
         self._thread_export_runner.queue_full_pass()
+
+    async def _start_runtime_support(self, bots: list[AgentBot | TeamBot]) -> None:
+        """Bind live-callback support, then start the job and script runtimes that deliver through those bots."""
+        self._bind_started_runtime_support_services(bots)
+        await self._tool_job_runtime.sync()
+        await self._script_runtime.start()
 
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
@@ -1055,6 +1070,7 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
+        await self._tool_job_runtime.sync()
         self._automations.start()
         self._budgets.sync()
         self._thread_export_runner.start()
@@ -1420,6 +1436,7 @@ class _MultiAgentOrchestrator:
         warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
+        await self._tool_job_runtime.initialize()
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
@@ -1633,8 +1650,7 @@ class _MultiAgentOrchestrator:
         self._log_mcp_degraded_entities(config)
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
-        self._bind_started_runtime_support_services(started_bots)
-        await self._script_runtime.start()
+        await self._start_runtime_support(started_bots)
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
         async with self.config_reload.startup_publication_admission():
@@ -2453,6 +2469,10 @@ class _MultiAgentOrchestrator:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
             logger.exception("Background script runtime shutdown failed")
+        try:
+            await _run_shutdown_step("tool_job_execution", self._tool_job_runtime.quiesce())
+        except Exception:
+            logger.exception("Background tool job runtime shutdown failed")
         await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
         await _run_shutdown_step("config_reload", self.config_reload.cancel())
         owner = self._mcp_catalog_change_task_owner
@@ -2546,6 +2566,11 @@ class _MultiAgentOrchestrator:
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
         journal_failures: list[BaseException] = []
+        if pending_response_owner_count == 0 and not callback_cleanup_pending:
+            try:
+                await _run_shutdown_step("tool_job_runtime", self._tool_job_runtime.stop())
+            except Exception:
+                logger.exception("Background tool job runtime shutdown failed")
         if self._open_journal is not None and pending_response_owner_count == 0 and not callback_cleanup_pending:
             journal, self._open_journal = self._open_journal, None
             self._journal_held = False

@@ -45,6 +45,10 @@ Turn records are scoped to the agent name alone, so a re-login under a new Matri
 - `scheduled_call_approvals.arguments_json` holds each scheduled call's unredacted arguments beside its task, room, thread, requester, and approver, while Matrix task state and the trigger carry only the task ID.
   Grant maintenance deletes the row 30 days after its send time or withdrawal, once its card has retired and any receipt is settled.
 - `background_approval_calls.reason` can hold the text of a human's denial reply to a scheduled-call or script approval card, and it is deleted with its scheduled-call binding or when retention prunes its script run, never before the shared card retires.
+- `tool_jobs.job_json` keeps each background job's snapshot: its owner and conversation, the tool name, the call's unredacted arguments, a result summary of at most 500 characters, and for a background subagent the child's saved state.
+  `tool_jobs.result_payload_json` keeps the job's full result, including returned media bytes, up to 64 MiB of encoded JSON.
+  An ended job is deleted 30 days after its last change, read or not, once its turn has finished and no approval in its session is pending; redacting the message that started it or the bot leaving the room does not delete it sooner.
+  `tool_job_owner` holds only the runtime generation that owns the jobs.
 
 There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
 

@@ -55,6 +55,11 @@ class ToolExecutionIdentity:
     account_id: str | None = None
     transport_agent_name: str | None = None
 
+    @property
+    def recipient(self) -> str:
+        """The entity whose Matrix account answers this caller: its team transport, or the agent itself."""
+        return self.transport_agent_name or self.agent_name
+
 
 type SerializedToolExecutionIdentity = dict[str, object]
 

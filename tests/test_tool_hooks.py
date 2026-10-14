@@ -42,6 +42,10 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
+from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_jobs.execution_authority import authorized_tool_call
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
@@ -70,6 +74,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -1525,6 +1530,58 @@ async def test_sync_tool_aexecute_keeps_original_agno_chain_without_background_t
 
 
 @pytest.mark.asyncio
+async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_enters_the_tool_body(
+    tmp_path: Path,
+) -> None:
+    """A grant revoked during a before hook, as a reload that removes the tool does, keeps the tool body from starting."""
+    revoked: list[bool] = []
+    blocked: list[bool] = []
+    ran: list[str] = []
+
+    def authorize_execution(_owner: object, _function: Function, _arguments: Mapping[str, object]) -> None:
+        if revoked:
+            msg = "No longer authorized"
+            raise JobAccessError(msg)
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(_ctx: ToolBeforeCallContext) -> None:
+        revoked.append(True)
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        blocked.append(ctx.blocked)
+
+    context = _tool_runtime_context(tmp_path)
+    runtime = await tool_job_runtime(tmp_path / "jobs", authorize_execution=authorize_execution)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.from_plugins([_plugin("tool-policy", [before, after])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+    )
+    assert bridge is not None
+
+    def sync_tool() -> str:
+        ran.append("body")
+        return "done"
+
+    call = FunctionCall(function=Function(name="sync_tool", entrypoint=sync_tool), arguments={})
+    try:
+        with (
+            tool_runtime_context(context),
+            tool_execution_identity(_execution_identity()),
+            authorized_tool_call(_execution_identity(), call),
+            pytest.raises(JobAccessError),
+        ):
+            await bridge("sync_tool", sync_tool, {})
+    finally:
+        await runtime.shutdown()
+    assert ran == []
+    assert blocked == [True]
+
+
+@pytest.mark.asyncio
 async def test_sync_tool_aexecute_cancellation_during_before_hook_never_starts_body(tmp_path: Path) -> None:
     """Cancellation before the synchronous leaf remains ordinary task cancellation."""
     before_started = asyncio.Event()
@@ -1756,6 +1813,42 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
         "Adjust your approach — try a different tool or different arguments."
     )
     assert after_seen == [(True, result, None)]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_before_hook_is_reported_as_blocked(tmp_path: Path) -> None:
+    """A cancelled admission pairs its hooks without claiming the tool body failed."""
+    control = JobControl()
+    after_seen: list[tuple[bool, BaseException | None]] = []
+    calls = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(_ctx: ToolBeforeCallContext) -> None:
+        control.cancel()
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        after_seen.append((ctx.blocked, ctx.error))
+
+    async def body() -> str:
+        calls.append("executed")
+        return "result"
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.from_plugins([_plugin("cancel-admission", [before, after])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+    )
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        job_control_context(control),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await bridge("body", body, {})
+    assert calls == []
+    assert len(after_seen) == 1
+    assert after_seen[0][0]
+    assert isinstance(after_seen[0][1], asyncio.CancelledError)
 
 
 @pytest.mark.asyncio

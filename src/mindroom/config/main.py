@@ -59,6 +59,7 @@ from mindroom.config.matrix import (
 )
 from mindroom.config.memory import MemoryBackend, MemoryConfig, MemorySearchConfig
 from mindroom.config.models import (
+    BackgroundToolJobsConfig,
     CompactionConfig,
     CompactionOverrideConfig,
     DebugConfig,
@@ -465,6 +466,10 @@ class Config(BaseModel):
     budgets: BudgetsConfig | None = Field(default=None, description="Optional per-user monthly spending budgets")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
+    background_tool_jobs: BackgroundToolJobsConfig = Field(
+        default_factory=BackgroundToolJobsConfig,
+        description="Opt-in managed background tool execution; turning it on or off and its exclusions need a restart.",
+    )
     event_journal: EventJournalConfig = Field(
         default_factory=EventJournalConfig,
         description="Durable Matrix event-journal store",

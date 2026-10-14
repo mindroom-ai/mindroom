@@ -56,6 +56,7 @@ import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.scheduling.tasks as scheduling_module
+import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ResponseTurnContext
 from mindroom.authorization import _ReplyAuthorizationDecision
@@ -3069,6 +3070,12 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Separate each test's pinned instances; tests still own shutdown of live resources."""
+    monkeypatch.setattr(tool_jobs_instances, "_instances", {})
 
 
 @pytest.fixture(autouse=True)

@@ -103,6 +103,34 @@ Matrix sync callback
 | `oauth/reset.py` | OAuth reset target resolution and requester-bound browser intents |
 | `oauth/reset_execution.py` | MCP retirement and durable reset execution |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
+| `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
+| `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
+| `delegation/background.py` | A background subagent's job: native child admission, outcome, and cleanup inside the generic execution owner |
+| `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
+| `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting and published runtime |
+| `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
+| `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
+| `tool_jobs/agno_compat_functions.py` | Private SDK actor/context access and dispatch classification |
+| `tool_jobs/agno_execution.py` | Job eligibility, approved SDK call execution, and result capture |
+| `tool_jobs/consumption.py` | Exact durable acknowledgement after the SDK saves a consumed result |
+| `tool_jobs/execution_scope.py` | Response execution envelopes |
+| `tool_jobs/resources.py` | Retained resource cleanup ownership |
+| `tool_jobs/authorization.py` | Current local grants using shared construction policy |
+| `tool_jobs/execution_authority.py` | Application-entry authority checks |
+| `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
+| `tool_jobs/control.py` | Newer human messages that release waits, and cancellation checkpoints |
+| `tool_jobs/background_after.py` | The reserved `background_after` argument of managed calls and its validation |
+| `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
+| `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and how long a reply waits for a job's approval |
+| `tool_jobs/notices.py` | The notice on a tool result and the turn-start note about jobs that ended |
+| `tool_jobs/publication.py` | Each agent's live jobs, published per room as state for the client jobs bar |
+| `tool_jobs/client_cancel.py` | Client cancel events, `!jobs` and `!cancel_job`, and a left room's jobs |
+| `tool_jobs/approvals.py` | Approval cards a job posts and owns for its child's or its own gated call, denied when the job ends early |
+| `tool_jobs/follow_ups.py` | A follow-up's journal source, identity, streak, and envelope |
+| `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
+| `tool_system/filters.py` | Shared include/exclude function policy |
+| `custom_tools/job.py` | Reserved job discovery and control tool |
+| `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, card denial, follow-ups, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |
@@ -287,6 +315,7 @@ Matrix sync callback
 | `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
 | `cli/debug_report.py` | `mindroom debug-report` command: bug report parsing, config-only storage location, and JSON output |
 | `cli/doctor.py` | Doctor command implementation |
+| `cli/interactive.py` | Arrow-key prompts and step headers for terminal setup, with line prompts for piped input |
 | `cli/local_stack.py` | Local stack setup command |
 | `credentials/sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |

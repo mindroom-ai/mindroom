@@ -58,6 +58,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 ### Approvals
 
 - An approval pauses and holds its reply and its conversation: later messages to that agent in that conversation wait with a ⏳ reaction, as behind a running reply, until the approval ends; no approval holds the room's event lane.
+- With background jobs on, a top-level agent's gated call that can become a managed job asks for its approval from that job instead of pausing its reply, so the approval holds neither the reply nor its conversation; after `approval_wait_timeout` the reply goes on and the job's outcome reaches the conversation like any other job's, and a restart interrupts the job, so that approval does not survive a restart as a paused reply's does.
 - The hold is not the conversation lock, because the resume, the failure settlement, an edit's regeneration, and approval recovery must still take that lock.
 - The hold is taken before the pause commits, so the approval's end can never come before it, and each bot start takes the holds of its principal's pending approvals before it replays the journal.
 - A message waiting behind a hold rechecks every 30 seconds that its approval still exists, so a hold whose end did not reach this bot still ends.

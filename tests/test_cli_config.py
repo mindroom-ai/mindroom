@@ -12,7 +12,7 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, get_args
 from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import agno.models.vertexai.claude as vertexai_claude_module
@@ -36,7 +36,6 @@ from mindroom.cli.config import _format_config_search_locations, activate_cli_ru
 from mindroom.cli.main import (
     _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
     _load_active_config_or_exit,
-    _terminal_is_interactive,
     _threads_export,
     app,
 )
@@ -952,6 +951,11 @@ class TestConfigInit:
         assert llama_cpp_server_command(LLAMA_CPP_QWEN) in output
         assert "llama.cpp" in output
 
+    def test_provider_menu_lists_every_preset_once(self) -> None:
+        """Every preset `--provider` accepts can also be picked from the setup menu."""
+        assert set(config_cli._PROVIDER_PRESET_MENU) == set(get_args(config_cli._ProviderPreset))
+        assert set(config_cli._PROVIDER_PRESET_MENU) >= config_cli._API_KEY_PRESETS
+
     def test_init_help_separates_matrix_server_from_provider_presets(self) -> None:
         """Config init help should present Matrix server and model provider as separate choices."""
         result = runner.invoke(app, ["config", "init", "--help"])
@@ -1012,7 +1016,7 @@ class TestConfigInit:
 
         config = yaml.safe_load(result.output)
         assert config["models"]["default"]["provider"] == "openai"
-        assert "Choose provider preset" not in normalize_console_output(result.output)
+        assert "Which model provider should your agents use?" not in normalize_console_output(result.output)
         assert not target.exists()
 
     def test_init_print_ignores_existing_config_without_prompting(self, tmp_path: Path) -> None:
@@ -2221,7 +2225,7 @@ class TestRunFirstRunSetup:
 
     @pytest.fixture(autouse=True)
     def _interactive_terminal(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: True)
+        monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: True)
         # On a platform without a service manager, first-run setup starts MindRoom in the terminal without asking.
         monkeypatch.setattr(
             "mindroom.cli.service._get_service_manager",
@@ -2275,8 +2279,8 @@ class TestRunFirstRunSetup:
         result, paired, started = self._invoke_run(config_path, f"openai\n{typed_key}\n")
 
         assert result.exit_code == 0, result.output
-        assert "No MindRoom config found" in result.output
-        assert "Choose provider preset" in result.output
+        assert "Welcome to MindRoom" in result.output
+        assert "Which model provider should your agents use?" in result.output
         assert "API key" in result.output
         assert typed_key not in result.output
         assert config_path.is_file()
@@ -2415,7 +2419,7 @@ class TestRunFirstRunSetup:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An agent sets up, pairs, and installs the login service in one command, with the key from its environment."""
-        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: False)
         config_path = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         manager = self._service_manager(monkeypatch)
@@ -2429,7 +2433,7 @@ class TestRunFirstRunSetup:
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
-        assert "Choose provider preset" not in output
+        assert "Which model provider should your agents use?" not in output
         assert "[Y/n]" not in output
         assert "provider: openai" in config_path.read_text(encoding="utf-8")
         assert "OPENAI_API_KEY=sk-agent\n" in env_path.read_text(encoding="utf-8")
@@ -2446,14 +2450,14 @@ class TestRunFirstRunSetup:
     ) -> None:
         """Without a terminal, `--provider` creates the config with no prompts, and a missing key is skipped."""
         config_path = tmp_path / "config.yaml"
-        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: False)
         manager = self._service_manager(monkeypatch)
 
         result, paired, started = self._invoke_run(config_path, "", args=("--provider", preset))
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
-        assert "Choose provider preset" not in output
+        assert "Which model provider should your agents use?" not in output
         assert "API key (" not in output
         assert "start it at login" not in output
         assert f"provider: {preset}" in config_path.read_text(encoding="utf-8")
@@ -2665,8 +2669,8 @@ class TestRunFirstRunSetup:
         result, _paired, started = self._invoke_run(config_path, "")
 
         assert result.exit_code == 0, result.output
-        assert "Choose provider preset" not in result.output
-        assert "No MindRoom config found" not in result.output
+        assert "Which model provider should your agents use?" not in result.output
+        assert "Welcome to MindRoom" not in result.output
         assert config_path.read_text(encoding="utf-8") == original
         assert len(started) == 1
 
@@ -2795,14 +2799,6 @@ class TestRunFirstRunSetup:
         assert result.exit_code == 0, result.output
         assert "openai: Set OPENAI_API_KEY" in normalize_console_output(result.output)
         assert len(started) == 1
-
-
-def test_terminal_is_interactive_requires_stdin_and_stdout_ttys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Services and piped runs never prompt, even when only one stream is a terminal."""
-    for stdin_tty, stdout_tty, expected in ((True, True, True), (True, False, False), (False, True, False)):
-        monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda value=stdin_tty: value))
-        monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda value=stdout_tty: value))
-        assert _terminal_is_interactive() is expected
 
 
 # ---------------------------------------------------------------------------

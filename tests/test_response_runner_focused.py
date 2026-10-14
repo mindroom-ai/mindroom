@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import inspect
 import json
 from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
@@ -17,7 +18,7 @@ from functools import partial
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
@@ -43,7 +44,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt as approval_receipt
-from mindroom.approval.response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
@@ -156,9 +157,11 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
 )
-from mindroom.teams import _TeamStreamPresentation
+from mindroom.teams import _TeamStreamPresentation, continue_paused_team_run
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
@@ -2981,8 +2984,10 @@ async def test_agent_continuation_runs_only_approved_calls(
         toolkit_owners=toolkit_owners_for_agents([agent]),
     )
     assert captured is not None
-    plan = await runner._approval_responses.plan_pause(
+    plan = await plan_approval_calls(
         identify_approval_tools(captured, default_agent_name="general"),
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
         requester_id="@user:localhost",
         toolkit_owners=captured.toolkit_owners,
     )
@@ -3232,8 +3237,10 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         patch("mindroom.approval.response.resolve_tool_approval_approver", side_effect=resolve_approver),
         patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate_policy),
     ):
-        await runner._approval_responses.plan_pause(
+        await plan_approval_calls(
             ((tool, "call-1", "dangerous", "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
@@ -3294,8 +3301,10 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value=None),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-1", "dangerous", "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
@@ -3322,11 +3331,13 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
             new=AsyncMock(side_effect=[(True, 60.0), (False, 60.0)]),
         ),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (human_tool, "call-human", "publish_report", "general"),
                 (policy_tool, "call-policy", "read_report", "general"),
             ),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "publish_report"): "test_toolkit", ("general", "read_report"): "test_toolkit"},
         )
@@ -3351,11 +3362,13 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         ),
         patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (automatic, "call-auto", "conditional_read", "general"),
                 (gated, "call-gated", "conditional_write", "general"),
             ),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={
                 ("general", "conditional_read"): "test_toolkit",
@@ -3408,11 +3421,13 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
             new=AsyncMock(return_value=(True, 60.0)),
         ),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (first, "call-1", "dangerous_one", "general"),
                 (second, "call-2", "dangerous_two", "general"),
             ),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous_one"): "test_toolkit", ("general", "dangerous_two"): "test_toolkit"},
         )
@@ -4095,7 +4110,9 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     body = "🤝 **Team Response** (General):\n\n**General**: The report is clean."
 
-    async def continue_team(*, progress: ProgressPublisher | None, **_kwargs: object) -> CompletedApprovalRun:
+    async def continue_team(*, progress: ProgressPublisher | None, **kwargs: object) -> CompletedApprovalRun:
+        # The runner's call must fit the real function, not only this fake.
+        inspect.signature(continue_paused_team_run).bind(progress=progress, **kwargs)
         assert progress is not None
         await progress(StructuredStreamChunk(content=body))
         return CompletedApprovalRun(response_text=body, metadata_content={})
@@ -4486,8 +4503,10 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
         "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-native", "native_confirmation", "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "native_confirmation"): "test_toolkit"},
         )
@@ -4525,8 +4544,10 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-exempt", function.name, "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
         )
@@ -4578,8 +4599,10 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-script", function.name, "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
         )
@@ -4994,7 +5017,10 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_mode="coordinate",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
-    continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
+    continued = create_autospec(
+        continue_paused_team_run,
+        return_value=CompletedApprovalRun(response_text="done", metadata_content={}),
+    )
 
     with (
         patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
@@ -8688,7 +8714,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate)
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
-        finish = await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),))
+        finish = await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
     if failure not in {None, "oversized", "media"}:
         assert not finish
         assert payloads == []
@@ -8747,7 +8773,7 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     ):
         with pytest.raises(RuntimeError, match="stop before generation"):
             await runner._run_claimed_approval_lifecycle(continuation, target=target)
-        assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+        assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert build_lifecycle.call_args.kwargs["request"].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
 
@@ -8780,7 +8806,9 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
         ),
     ):
         await runner._prepare_request_after_lock(request)
-        assert await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),)) is finish
+        assert (
+            await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True) is finish
+        )
     assert len(evaluated) == int(finish)
 
 
@@ -8946,12 +8974,27 @@ async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent"])
+@pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent", "a job follow-up"])
 async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
-    """Like cron runs in Hermes, automation and agent requests have no person to learn from."""
+    """Like cron runs in Hermes, automation, agent requests, and job follow-ups have no person to learn from."""
 
     def update(request: ResponseRequest) -> ResponseRequest:
         envelope = request.response_envelope
+        if requested_by == "a job follow-up":
+            key = ConversationKey(
+                "general",
+                envelope.target.room_id,
+                envelope.target.resolved_thread_id,
+                request.user_id or "",
+                silent=False,
+            )
+            follow_up = follow_up_envelope(
+                key,
+                follow_up_id="job-follow-up:1",
+                sender_id="@mindroom_general:localhost",
+                prompt="",
+            )
+            return replace(request, response_envelope=replace(envelope, origin=follow_up.origin))
         if requested_by in {"a schedule", "a hook"}:
             source_kind = SCHEDULED_SOURCE_KIND if requested_by == "a schedule" else HOOK_SOURCE_KIND
             return replace(

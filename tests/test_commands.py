@@ -203,6 +203,21 @@ def test_all_commands_have_documentation() -> None:
         assert len(description) > 0, f"{cmd_type} should have a description"
 
 
+def test_background_job_commands() -> None:
+    """`!jobs` lists the conversation's background jobs; `!cancel_job` cancels one or all of them."""
+    command = command_parser.parse("!jobs")
+    assert command is not None
+    assert command.type == CommandType.JOBS
+    command = command_parser.parse("!cancel_job abc123")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_JOB
+    assert command.args == {"job_id": "abc123"}
+    command = command_parser.parse("!cancel-job all")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_JOB
+    assert command.args == {"job_id": None}
+
+
 def test_cancel_schedule_command() -> None:
     """Test cancel schedule command parsing."""
     # Basic cancel

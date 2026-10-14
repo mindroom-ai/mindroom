@@ -31,6 +31,7 @@ from mindroom.approval.response import (
     ApprovalResponseCoordinator,
     continuation_target,
     identify_approval_tools,
+    plan_approval_calls,
     require_ordered_pause_presentation,
 )
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
@@ -157,6 +158,8 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -169,7 +172,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -220,7 +223,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import JournalEvent, PrincipalStore
     from mindroom.history.types import HistoryScope
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -231,6 +234,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -641,6 +645,8 @@ class ResponseRequest:
     edit_regeneration: bool = False
     # The span an interactive selection's acknowledgement created, which this answer adopts.
     interactive_span_id: str | None = None
+    # Set for a follow-up: the conversation whose ended background jobs it reports in a new reply.
+    follow_up_key: ConversationKey | None = None
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -1065,10 +1071,14 @@ class _InboxResponseOwnership:
 def _requested_by_a_person(origin: TurnOrigin) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs and replies to other agents never count toward a review; they
-    have no human to learn from.
+    Like Hermes skipping cron reviews, automated runs, job follow-ups, and replies to other agents never count toward a
+    review; they have no human to learn from.
     """
-    return origin.requester_kind == SenderKind.USER and not is_automation_source_kind(origin.source_kind)
+    return (
+        origin.requester_kind == SenderKind.USER
+        and origin.intent is not TurnIntent.JOB_FOLLOW_UP
+        and not is_automation_source_kind(origin.source_kind)
+    )
 
 
 @dataclass
@@ -1605,8 +1615,10 @@ class ResponseRunner:
         )
         approval_id = uuid4().hex
         try:
-            plan = await self._approval_responses.plan_pause(
+            plan = await plan_approval_calls(
                 identified_tools,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
                 requester_id=requester_id,
                 toolkit_owners=paused.toolkit_owners,
             )
@@ -3321,6 +3333,8 @@ class ResponseRunner:
         slot = current_slot()
         if slot is None:
             return request
+        if request.follow_up_key is not None and not await self._follow_up_due(request):
+            return None
         handle = await self.deps.replies.claim(
             delivery_id=request.response_envelope.source_event_id,
             sources=request.sources,
@@ -3481,6 +3495,82 @@ class ResponseRunner:
             resume.close()
             raise
         return False
+
+    async def handoff_job_follow_up(self, event: JournalEvent) -> None:
+        """Hand a follow-up to a detached response owner; its reply, or that owner, settles it.
+
+        The dispatcher hands over only a follow-up no live owner holds.
+        """
+        self.track_inbox_response(
+            self._run_job_follow_up(event),
+            name=f"job_follow_up:{event.event_id}",
+            room_id=event.room_id,
+            source_event_ids=(event.event_id,),
+            recovery_proof_ready=lambda: True,
+        )
+
+    async def _run_job_follow_up(self, event: JournalEvent) -> None:
+        """Run the turn a follow-up asks for, then settle a follow-up no reply took."""
+        key = follow_up_key(event, self.deps.agent_name)
+        claimed = asyncio.Event()
+        handoff = asyncio.Event()
+        await self._generate_job_follow_up(
+            self._job_follow_up_request(key, event.event_id, claimed=claimed, handoff=handoff),
+        )
+        if claimed.is_set() or handoff.is_set():
+            # The follow-up's reply settles its source, or keeps it pending for its retry.
+            return
+        await self.deps.approval_store.settle(event.event_id)
+
+    async def _follow_up_due(self, request: ResponseRequest) -> bool:
+        """Decide under the conversation lock whether a follow-up still has jobs to report, which a reply may have collected."""
+        assert request.follow_up_key is not None
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is not None and follow_up_jobs(await runtime.ended_jobs(request.follow_up_key)):
+            return True
+        # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
+        reply = await self.deps.replies.store.replies.for_sources((request.response_envelope.source_event_id,))
+        return reply is not None and not reply.terminal
+
+    def _job_follow_up_request(
+        self,
+        key: ConversationKey,
+        follow_up_id: str,
+        *,
+        claimed: asyncio.Event,
+        handoff: asyncio.Event,
+    ) -> ResponseRequest:
+        """Build the turn that reports a conversation's ended jobs in a new reply; its start note lists the jobs."""
+        prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
+        envelope = follow_up_envelope(key, follow_up_id=follow_up_id, sender_id=self.deps.matrix_full_id, prompt=prompt)
+
+        async def mark_claimed() -> None:
+            claimed.set()
+
+        return ResponseRequest(
+            thread_history=(),
+            prompt=envelope.body,
+            response_envelope=envelope,
+            sources=ResponseSources((follow_up_id,), (follow_up_id,)),
+            follow_up_key=key,
+            user_id=key.requester_id,
+            on_reply_claimed=mark_claimed,
+            source_handoff=handoff,
+        )
+
+    async def _generate_job_follow_up(self, request: ResponseRequest) -> None:
+        """Answer as this agent, or as this team, which owns the jobs its members started."""
+        config = self.deps.runtime.config
+        team = config.teams.get(self.deps.agent_name)
+        if team is None:
+            await self.generate_response(request)
+            return
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
+        await self.generate_team_response_helper(
+            request,
+            team_agents=[registry.current_id(name) for name in team.agents],
+            team_mode=team.mode,
+        )
 
     def wake_cli_approval_sources(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Wake response-local CLI owners and return sources still owned by the journal."""

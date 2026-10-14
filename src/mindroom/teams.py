@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agents import create_agent, enable_all_history_replay
+from mindroom.agents import create_agent, enable_all_history_replay, team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
     accumulate_model_request_metrics,
@@ -128,6 +128,10 @@ from mindroom.team_exact_members import (
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.notices import append_turn_start_job_note
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
@@ -2317,9 +2321,11 @@ def _create_team_instance(
         agent.add_session_summary_to_context = False
 
     install_message_builder_patch()
+    job_controls = team_background_jobs(model, config, runtime_paths, execution_identity)
     team_members: list[Agent | Team] = [*agents]
     team = Team(
         members=team_members,
+        tools=None if job_controls is None else [job_controls],
         id=team_id,
         name=team_display_name,
         model=model,
@@ -2646,7 +2652,10 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-async def continue_paused_team_run(
+@owned_tool_execution(
+    enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
+)
+async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
     *,
     member_names: tuple[str, ...],
     mode: TeamMode,
@@ -2699,6 +2708,7 @@ async def continue_paused_team_run(
         if scope is None:
             msg = "Paused team history is no longer available"
             raise RuntimeError(msg)
+        set_consumption_storage(scope.storage_factory)
         session = scope.session
         persisted = session.get_run(run_id) if isinstance(session, TeamSession) else None
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
@@ -2827,17 +2837,20 @@ async def continue_paused_team_run(
             ),
         )
     finally:
-        with stack:
-            _register_team_notice_storage(
-                scope_context=scope,
-                session_id=session_id,
-                entity_name=configured_team_name,
-            )
-            close_team_runtime_state_dbs(
-                agents=members.agents if members is not None else [],
-                team_db=cast("BaseDb | None", team.db) if team is not None else None,
-                shared_scope_storage=scope.storage if scope is not None else None,
-            )
+        try:
+            await finalize_consumption()
+        finally:
+            with stack:
+                _register_team_notice_storage(
+                    scope_context=scope,
+                    session_id=session_id,
+                    entity_name=configured_team_name,
+                )
+                close_team_runtime_state_dbs(
+                    agents=members.agents if members is not None else [],
+                    team_db=cast("BaseDb | None", team.db) if team is not None else None,
+                    shared_scope_storage=scope.storage if scope is not None else None,
+                )
 
 
 async def prepare_materialized_team_execution(
@@ -2862,6 +2875,10 @@ async def prepare_materialized_team_execution(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
+    ctx = replace(
+        ctx,
+        transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
+    )
     if ctx.system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
         _append_additional_context(team, rendered_system_context)
@@ -3007,6 +3024,7 @@ async def team_response(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_name,
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3479,6 +3497,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_label,
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,

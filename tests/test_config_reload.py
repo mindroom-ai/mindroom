@@ -1935,7 +1935,8 @@ def test_config_update_plan_restarts_a_stopped_bot_for_any_edit(
     assert plan.live_updated_entities == set()
 
 
-def test_config_update_plan_restarts_running_entities_when_construction_prompts_change() -> None:
+@pytest.mark.parametrize("prompt_name", ["HIDDEN_TOOL_CALLS_PROMPT", "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS"])
+def test_config_update_plan_restarts_running_entities_when_construction_prompts_change(prompt_name: str) -> None:
     """Construction-time root prompt overrides should restart running agents, teams, and router."""
     old_config = _runtime_bound_config(
         Config(
@@ -1961,7 +1962,7 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
                 ),
             },
             router=RouterConfig(model="default"),
-            prompts={"HIDDEN_TOOL_CALLS_PROMPT": "Custom hidden tool-call prompt."},
+            prompts={prompt_name: "Custom construction-time prompt."},
         ),
     )
 

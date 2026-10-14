@@ -60,8 +60,10 @@ _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_ev
 
 def _needs_turn_replay(event: JournalEvent) -> bool:
     """Return whether replay needs responders and turn recovery semantics."""
-    return event.kind in TURN_BACKED_KINDS or (
-        event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
+    return (
+        event.kind in TURN_BACKED_KINDS
+        or event.kind is EventKind.JOB_FOLLOW_UP
+        or (event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION)
     )
 
 
@@ -73,6 +75,7 @@ type _RtcCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]
 type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 type _ApprovalContinuationCallback = Callable[[str], Awaitable[bool | None]]
+type _JobCancelCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +93,9 @@ class JournalCallbacks:
     turn_has_live_claim: Callable[[str], bool]
     # Delivers what replies left waiting to replay a settled source owe Matrix.
     replies_ended: Callable[[tuple[str, ...]], None]
+    # Hands a follow-up to its response owner, which settles it.
+    on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
+    on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
 
 
@@ -236,6 +242,14 @@ class JournalDispatcher:
             # routing policy, either duplicating side effects or settling the
             # source before the continuation can resume.
             return approval_settled
+        if event.kind is EventKind.JOB_FOLLOW_UP:
+            # A runtime source, not a Matrix event: nothing for ingress to parse.
+            await self.callbacks.on_job_follow_up(event)
+            return False
+        return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
+
+    async def _parse_and_invoke(self, event: JournalEvent, *, needs_turn_replay: bool) -> bool:
+        """Rebuild the admitted Matrix event and run its callback; an unreplayable one settles."""
         try:
             matrix_event = parse_journal_event(event)
         except JournalCorruptionError:
@@ -511,6 +525,7 @@ _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.SCHEDULE_TRIGGER: _Binding(nio.UnknownEvent, _run_scheduled_trigger),
     EventKind.REACTION: _Binding(nio.ReactionEvent, _turn_backed(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
+    EventKind.JOB_CANCEL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_job_cancel)),
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
     EventKind.RTC: _Binding(nio.UnknownEvent, _run_rtc_event),
     EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),

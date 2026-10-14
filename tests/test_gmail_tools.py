@@ -770,15 +770,16 @@ def test_gmail_attachments_inside_workspace_are_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Workspace paths attach their contents, but upstream only ever opens private snapshots."""
-    temporary_root = tmp_path / "tmp"
-    temporary_root.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(temporary_root))
     workspace = tmp_path / "workspace"
     (workspace / "reports").mkdir(parents=True)
     (workspace / "reports" / "plan.txt").write_text("plan", encoding="utf-8")
     (workspace / "notes.txt").write_text("notes", encoding="utf-8")
     (workspace / "alias.txt").symlink_to(workspace / "notes.txt")
     gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
+    # Building the tool creates the optional dependency lock under the default temporary directory.
+    temporary_root = tmp_path / "tmp"
+    temporary_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temporary_root))
 
     with patch.object(
         GmailTools,

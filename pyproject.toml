@@ -55,6 +55,7 @@ dependencies = [
   "pyjwt>=2.13",
   "python-dotenv>=1",
   "pyyaml>=6",
+  "questionary>=2.1.1",
   "referencing>=0.37",
   "rich",
   "segno>=1.6.6",

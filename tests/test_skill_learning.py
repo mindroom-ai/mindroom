@@ -31,6 +31,7 @@ from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -1429,6 +1430,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
         "no final answer",
         "no skill_manage",
         "skill_manage needs approval",
+        "skill_manage asks as its job",
         "compressed tool results",
         "conversation too long to fork",
         "no capture",
@@ -1446,6 +1448,9 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
     elif reason == "skill_manage needs approval":
         (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
         tool.requires_confirmation = True
+    elif reason == "skill_manage asks as its job":
+        (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
+        tool.approval_type = JOB_APPROVAL_TYPE
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
     capture = SkillReviewCapture()
     compression = _ShortenToolResults() if reason == "compressed tool results" else None
