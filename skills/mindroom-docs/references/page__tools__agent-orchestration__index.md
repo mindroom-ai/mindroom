@@ -203,19 +203,21 @@ Exclude complete toolkits in YAML when they should retain native execution:
 ```yaml
 background_tool_jobs:
   enabled: true
-  exclude_toolkits: [shell, my_plugin_toolkit]
+  exclude_toolkits: [my_plugin_toolkit]
   approval_wait_timeout: 120
 ```
 
-The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
+The default list is `[]`, which excludes nothing.
 Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
 Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
 The generic runtime adds no `background_after`, creates no job, and does not release these calls when a newer message arrives.
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
-Shell handles do not appear in `job(action="list")` or the jobs bar, and cannot be controlled with `job`.
+A standard agent's shell command runs until it finishes, like any other managed call: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command and the processes it started.
+Its shell then has no `timeout`, `check_shell_command`, or `kill_shell_command`, and a shell call that cannot run as a job, such as during a voice call, is stopped after 120 seconds.
+A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
+Listing `shell` in `exclude_toolkits` restores the native `timeout` and `shell:...` handles, which minimal-mode agents always keep.
 
 ### When a call becomes a job
 
@@ -291,7 +293,7 @@ The reply waits for the decision for `background_tool_jobs.approval_wait_timeout
 The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
 A call's own `background_after`, or a newer human message, releases the reply the same way.
 Cancelling the job before the decision denies its card.
-Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
+Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 Cancelling the job denies its open cards.

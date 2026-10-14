@@ -75,7 +75,8 @@ It is available automatically when the agent answers a Matrix conversation itsel
 Team members, call agents, `room_agent` workflow participants, and OpenAI-compatible requests do not get it.
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
-The CLI is not offered when the agent's shell commands themselves require approval, or when [background jobs](agent-orchestration.md#background-jobs) manage the shell because `shell` was removed from `exclude_toolkits`, and after a response pauses for any approval, the rest of that response continues without it.
+The CLI is not offered when the agent's shell commands themselves pause the response for approval, and after a response pauses for any approval, the rest of that response continues without it.
+With [background jobs](agent-orchestration.md#background-jobs) enabled, a shell command that continues in the background keeps the CLI until its job ends, including after the response finished.
 Media returned by CLI calls reaches the model with the shell command's result, and streamed responses show CLI calls as their own tool-trace entries.
 
 ## Discover and call tools

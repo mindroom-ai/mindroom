@@ -242,6 +242,7 @@ Matrix sync callback
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell/execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
+| `shell/managed.py` | Standard-mode shell under background jobs: runs a command to completion by polling its handle internally |
 | `shell/supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
