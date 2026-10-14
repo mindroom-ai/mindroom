@@ -96,6 +96,18 @@
           "default": null,
           "description": "Opt-in judgments for messages queued during this agent's response across all rooms"
         },
+        "cold_cache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColdCacheConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in switch to a smaller model for turns whose prompt cache has expired"
+        },
         "access": {
           "anyOf": [
             {
@@ -1001,6 +1013,38 @@
         }
       },
       "title": "CoalescingConfig",
+      "type": "object"
+    },
+    "ColdCacheConfig": {
+      "additionalProperties": false,
+      "description": "Let a judge move cold-cache turns to a cheaper model.",
+      "properties": {
+        "model": {
+          "description": "Smaller model alias used when the judgment accepts a cold-cache turn",
+          "minLength": 1,
+          "title": "Model",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgmentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "LLM model alias, TypeSafe, or OpenAI Decisions backend; unset asks the smaller model itself"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "title": "ColdCacheConfig",
       "type": "object"
     },
     "CompactionConfig": {

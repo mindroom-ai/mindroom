@@ -1991,18 +1991,37 @@ class Config(BaseModel):
     def validate_agent_helper_models(self) -> Config:
         """Validate dedicated judgment and skill-review model aliases for opted-in agents."""
         for agent_name, agent in self.agents.items():
-            for settings in (agent.participation, agent.mid_turn):
+            for settings in (agent.participation, agent.mid_turn, agent.cold_cache):
                 if settings is None:
                     continue
                 judgment = settings.judgment
                 if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
                     msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
                     raise ValueError(msg)
+            if agent.cold_cache is not None:
+                self._validate_cold_cache_model(agent_name, agent.model, agent.cold_cache.model)
             review_model = agent.skill_learning.model
             if review_model is not None and review_model not in self.models:
                 msg = f"Unknown skill_learning model for agent {agent_name!r}: {review_model!r}"
                 raise ValueError(msg)
         return self
+
+    def _validate_cold_cache_model(self, agent_name: str, agent_model: str, cold_model: str) -> None:
+        """Keep a downshifted turn from compacting history the agent model still needs."""
+        if cold_model not in self.models:
+            msg = f"Unknown cold_cache model for agent {agent_name!r}: {cold_model!r}"
+            raise ValueError(msg)
+        if cold_model == agent_model:
+            msg = f"cold_cache model must differ from the model of agent {agent_name!r}"
+            raise ValueError(msg)
+        cold_window = self.get_model_context_window(cold_model)
+        agent_window = self.get_model_context_window(agent_model)
+        if cold_window is not None and (agent_window is None or cold_window < agent_window):
+            msg = (
+                f"cold_cache model {cold_model!r} for agent {agent_name!r} needs a context window "
+                f"at least as large as {agent_model!r}"
+            )
+            raise ValueError(msg)
 
     def _entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.

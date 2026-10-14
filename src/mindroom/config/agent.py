@@ -23,6 +23,7 @@ from mindroom.config.access import (
     validate_concrete_matrix_user_ids,
 )
 from mindroom.config.automations import AutomationList  # noqa: TC001
+from mindroom.config.cold_cache import ColdCacheConfig  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
@@ -263,6 +264,10 @@ class AgentConfig(BaseModel):
     mid_turn: MidTurnConfig | None = Field(
         default=None,
         description="Opt-in judgments for messages queued during this agent's response across all rooms",
+    )
+    cold_cache: ColdCacheConfig | None = Field(
+        default=None,
+        description="Opt-in switch to a smaller model for turns whose prompt cache has expired",
     )
     access: ResponderAccessConfig | None = Field(
         default=None,
