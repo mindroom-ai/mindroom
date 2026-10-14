@@ -1186,6 +1186,9 @@ async def local_preview_server() -> AsyncIterator[tuple[int, str, list[str]]]:
         if request.path == "/metadata-redirect":
             location = "http://169.254.169.254/blocked"
             raise web.HTTPFound(location)
+        if request.path == "/egress-denied-redirect":
+            location = "https://9.9.9.9/denied"
+            raise web.HTTPFound(location)
         if request.path == "/app.js":
             return web.Response(text="document.title = 'Preview loaded';", content_type="text/javascript")
         return web.Response(text='<script src="/app.js"></script><h1>Local preview</h1>', content_type="text/html")
@@ -1296,6 +1299,9 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
             await tool.browser(action="open", targetUrl="https://9.9.9.9/denied")
         with pytest.raises(RuntimeError, match=_egress_refusal("9.9.9.9:443")):
             await tool.browser(action="navigate", targetUrl="https://9.9.9.9/denied")
+        # The error names the destination the proxy denied, not the allowed page that redirected there.
+        with pytest.raises(RuntimeError, match=_egress_refusal("9.9.9.9:443")):
+            await tool.browser(action="open", targetUrl=f"http://localhost:{port}/egress-denied-redirect")
         assert b"CONNECT 9.9.9.9:443 HTTP/1.1" in requests
         # Redirects the page route never sees are still refused at dial time, before any proxy.
         for redirect in ["metadata-redirect", "alias-redirect", "private-redirect"]:
@@ -1382,6 +1388,39 @@ async def test_hostname_allowlist_proxies_serve_worker_browsers_but_not_the_prim
                 "proxies that allow only hostnames are unsupported for the primary browser"
                 in (refusals[0]["requirement"])
             )
+    finally:
+        await tool.aclose()
+        await squid.close()
+
+
+@pytest.mark.asyncio
+async def test_egress_denial_names_the_destination_as_chromium_dialed_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A denied URL is named by the host Chromium sent the relay, whatever spelling the request used."""
+    squid = SquidLikeUpstream(allowed_hosts=frozenset())
+    tool = _headless_real_browser("headless", monkeypatch, tmp_path, {"HTTP_PROXY": await squid.start()})
+    real_getaddrinfo = socket.getaddrinfo
+
+    def public_getaddrinfo(
+        host: str | bytes | None,
+        service: str | bytes | int | None,
+        *args: int,
+        **kwargs: int,
+    ) -> object:
+        if not isinstance(host, str) or not host.endswith(".example"):
+            return real_getaddrinfo(host, service, *args, **kwargs)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", service))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", public_getaddrinfo)
+    try:
+        # Chromium maps names with UTS 46, so this is not Python's IDNA 2003 "fass.example".
+        with pytest.raises(RuntimeError, match=_egress_refusal("xn--fa-hia.example:80")):
+            await tool.browser(action="open", targetUrl="http://Faß.example/page")
+        with pytest.raises(RuntimeError, match=_egress_refusal("[2606:4700:4700::1111]:443")):
+            await tool.browser(action="navigate", targetUrl="https://[2606:4700:4700:0:0:0:0:1111]/")
+        assert b"CONNECT xn--fa-hia.example:80 HTTP/1.1" in squid.requests
     finally:
         await tool.aclose()
         await squid.close()
@@ -1623,8 +1662,7 @@ async def test_headless_host_browser_dials_only_validated_addresses(
 def _egress_refusal(destination: str) -> str:
     """Match the tool error that names a destination the egress proxy refused instead of Chromium's SOCKS error."""
     return re.escape(
-        f"The browser could not reach {destination} because outbound access to that host is not allowed from this "
-        "browser.",
+        f"The browser could not reach {destination} because the egress proxy does not allow connections to it.",
     )
 
 

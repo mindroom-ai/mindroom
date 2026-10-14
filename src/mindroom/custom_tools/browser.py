@@ -7,7 +7,6 @@ This exposes a single ``browser_control`` function with an ``action`` parameter.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import os
 import re
@@ -66,7 +65,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import BinaryIO
 
-    from playwright.async_api import Download
+    from playwright.async_api import Download, Request
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
@@ -556,24 +555,31 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
 
 
 async def _goto(page: Page, target_url: str, relay: BrowserDestinationProxy | None) -> None:
-    """Load one URL, naming its destination instead of Chromium's SOCKS error when the egress proxy refused it."""
+    """Load one URL, naming the destination the egress proxy denied instead of Chromium's SOCKS error."""
+    # The last main-document request is the redirect hop that failed, and Chromium's URL for it spells the host
+    # exactly as Chromium names it to the relay.
+    documents: list[str] = []
+
+    def record_document(request: Request) -> None:
+        if request.is_navigation_request() and request.frame is page.main_frame:
+            documents.append(request.url)
+
+    page.on("request", record_document)
     try:
         await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
     except PlaywrightError as exc:
-        url = urlsplit(target_url)
+        if relay is None or not documents:
+            raise
+        url = urlsplit(documents[-1])
         host = url.hostname or ""
-        # Chromium names hosts to the relay as IDNA ASCII, and the relay keeps IPv6 literals compressed.
-        with suppress(ValueError):
-            host = ipaddress.IPv6Address(host).compressed if ":" in host else host.encode("idna").decode("ascii")
         port = url.port or (443 if url.scheme == "https" else 80)
-        if relay is not None and relay.egress_refused(host, port):
-            authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-            msg = (
-                f"The browser could not reach {authority} because outbound access to that host is not allowed "
-                "from this browser."
-            )
-            raise RuntimeError(msg) from exc
-        raise
+        if not relay.egress_refused(host, port):
+            raise
+        authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        msg = f"The browser could not reach {authority} because the egress proxy does not allow connections to it."
+        raise RuntimeError(msg) from exc
+    finally:
+        page.remove_listener("request", record_document)
 
 
 def _copy_within_limit(source: BinaryIO, output: BinaryIO, max_bytes: int) -> int:
