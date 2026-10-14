@@ -18,6 +18,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from mindroom.shell.output_capture import (
     CapturedShellStream,
@@ -26,7 +27,12 @@ from mindroom.shell.output_capture import (
     format_shell_completion,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
+# Time a worker shell request needs beyond its command's foreground wait to deliver the answer.
+_SHELL_REQUEST_GRACE_SECONDS = 30.0
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 MAX_BACKGROUNDED = 16
@@ -138,6 +144,18 @@ class ShellRunResult:
     message: str
     handle: str | None = None
     output_file_handled: bool = False
+
+
+def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
+    """Return how long one worker request may take for this shell call, or 0 when it has no foreground wait."""
+    if tool_name != "shell" or function_name != "run_shell_command":
+        return 0.0
+    raw_timeout = kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS)
+    try:
+        timeout = max(0.0, float(raw_timeout))
+    except (TypeError, ValueError):
+        timeout = float(DEFAULT_RUN_TIMEOUT_SECONDS)
+    return timeout + _SHELL_REQUEST_GRACE_SECONDS
 
 
 async def run_command(

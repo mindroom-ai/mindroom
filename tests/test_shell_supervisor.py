@@ -22,7 +22,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.script_runs import shim as script_run_shim
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import run_command
+from mindroom.shell.execution import run_command, shell_request_budget_seconds
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
@@ -1311,21 +1311,13 @@ def test_subprocess_mode_shell_background_handle_across_requests(tmp_path: Path)
 # ---------------------------------------------------------------------------
 
 
-def test_shell_run_timeout_seconds_parses_kwargs() -> None:
-    """The dispatch budget helper should read the requested foreground timeout."""
-
-    def prepared(function_name: str, kwargs: dict[str, object]) -> object:
-        return sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
-            tool_name="shell",
-            function_name=function_name,
-            kwargs=kwargs,
-        )
-
-    helper = sandbox_runner_module._shell_run_timeout_seconds
-    assert helper(prepared("run_shell_command", {"timeout": 300})) == 300.0
-    assert helper(prepared("run_shell_command", {})) == 120.0
-    assert helper(prepared("run_shell_command", {"timeout": "nope"})) == 120.0
-    assert helper(prepared("check_shell_command", {"timeout": 300})) == 0.0
+def test_shell_request_budget_covers_the_requested_foreground_wait() -> None:
+    """A worker shell request may take its command's foreground timeout plus the answer's grace."""
+    assert shell_request_budget_seconds("shell", "run_shell_command", {"timeout": 300}) == 330.0
+    assert shell_request_budget_seconds("shell", "run_shell_command", {}) == 150.0
+    assert shell_request_budget_seconds("shell", "run_shell_command", {"timeout": "nope"}) == 150.0
+    assert shell_request_budget_seconds("shell", "check_shell_command", {"timeout": 300}) == 0.0
+    assert shell_request_budget_seconds("coding", "run_shell_command", {"timeout": 300}) == 0.0
 
 
 def test_shell_subprocess_dispatch_context_injects_socket_and_budget(

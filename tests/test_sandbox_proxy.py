@@ -6022,6 +6022,39 @@ def _proxied_shell(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("function_name", "arguments", "expected_timeout"),
+    [
+        ("run_shell_command", {"args": "make", "timeout": 600}, 630.0),
+        ("run_shell_command", {"args": "make"}, 150.0),
+        ("check_shell_command", {"handle": "shell:abc"}, 120.0),
+    ],
+)
+async def test_a_worker_shell_call_waits_as_long_as_its_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    function_name: str,
+    arguments: dict[str, object],
+    expected_timeout: float,
+) -> None:
+    """The primary waits for a worker shell command as long as the runner lets it run, so the command's answer arrives."""
+    captured: dict[str, Any] = {}
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell"},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
+    entrypoint = get_tool_by_name("shell", runtime_paths, worker_target=None).async_functions[function_name].entrypoint
+    assert entrypoint is not None
+
+    await entrypoint(**arguments)
+
+    assert captured["timeout"] == expected_timeout
+
+
+@pytest.mark.asyncio
 async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancelling a dispatched call returns at once and posts the call's request ID to the runner's cancel route."""
     dispatched = threading.Event()

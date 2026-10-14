@@ -53,7 +53,7 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS
+from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -105,7 +105,6 @@ logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
-_SHELL_DISPATCH_TIMEOUT_GRACE_SECONDS = 30.0
 _STARTUP_RUNTIME_PATHS_JSON_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 
 
@@ -1365,17 +1364,6 @@ def _execute_request_forkserver(
     return _parse_subprocess_response(request, runtime_paths, completed)
 
 
-def _shell_run_timeout_seconds(prepared: PreparedSandboxRunnerExecuteRequest) -> float:
-    """Return the foreground wait requested by one run_shell_command call."""
-    if prepared.function_name != "run_shell_command":
-        return 0.0
-    raw_timeout = prepared.kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS)
-    try:
-        return max(0.0, float(raw_timeout))
-    except (TypeError, ValueError):
-        return float(DEFAULT_RUN_TIMEOUT_SECONDS)
-
-
 def _shell_subprocess_dispatch_context(
     prepared: PreparedSandboxRunnerExecuteRequest,
     subprocess_context: _PreparedSandboxSubprocessContext,
@@ -1393,7 +1381,7 @@ def _shell_subprocess_dispatch_context(
     subprocess_env[shell_supervisor.SHELL_SUPERVISOR_SOCKET_ENV] = socket_path
     timeout_seconds = max(
         timeout_seconds,
-        _shell_run_timeout_seconds(prepared) + _SHELL_DISPATCH_TIMEOUT_GRACE_SECONDS,
+        shell_request_budget_seconds(prepared.tool_name, prepared.function_name, prepared.kwargs),
     )
     return replace(subprocess_context, subprocess_env=subprocess_env), timeout_seconds
 
