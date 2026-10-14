@@ -55,6 +55,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "access",
         "allow_self_config",
         "automations",
+        "cold_cache",
         "compaction",
         "compress_tool_results",
         "context_files",
