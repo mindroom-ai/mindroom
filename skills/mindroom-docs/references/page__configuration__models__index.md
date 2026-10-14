@@ -486,36 +486,38 @@ A shared key still needs identical prefixes and tools, and provider routing can 
 A cached prompt is read at a tenth of the normal input price, while writing a new cache costs more than the normal price.
 Switching models mid-thread therefore usually costs money, because the new model starts without a cache.
 Once the agent model's cache for a thread has expired, the next turn pays for a full write either way, and a cheaper model can answer a simple request for a fraction of the cost.
-Set `agents.<name>.cold_cache` to let a judge make that switch:
+Set `agents.<name>.cheap_model` to the agent's cheaper alternative and `agents.<name>.cold_cache` to let a judge switch to it:
 
 ```yaml
 agents:
   assistant:
     model: opus
+    cheap_model: haiku
     cold_cache:
-      model: haiku
       judgment:
         provider: openai_decisions
         threshold: 0.8
 ```
 
-| Field | Type | Default | Description |
+`cold_cache: {}` enables the switch with the default judge, which asks `cheap_model` itself whether it can answer.
+`cold_cache` requires `cheap_model`, and `cheap_model` needs `context_window` set on both models or neither; when set, it must be at least the agent model's.
+
+| `cold_cache` field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | string | Required | Smaller model alias for accepted cold-cache turns; set `context_window` on both models or neither, and when set it must be at least the agent model's |
-| `judgment` | object or null | `null` | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends). Unset asks `model` itself |
+| `judgment` | object or null | `null` | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends). Unset asks `cheap_model` itself |
 
 A thread's cache counts as cold when its newest run used a different model, or when its session was last written longer ago than the cache lifetime:
 
 - Claude providers: one hour, or five minutes with `extra_kwargs.extended_cache_time: false`. Anthropic refreshes the lifetime on every cache hit, so the expiry is exact.
 - Other providers: one hour, the upper bound of OpenAI's in-memory retention, so a warm cache is not mistaken for a cold one.
 
-On a cold turn, the judge sees up to seven recent thread messages and the new request, and decides whether the smaller model can answer as well as the agent model.
+On a cold turn, the judge sees up to seven recent thread messages and the new request, and decides whether the cheap model can answer as well as the agent model.
 Only an accepting decision switches; a decline, abstention, timeout, or missing credential keeps the agent model.
 Warm turns make no judgment call.
 After a switch the agent model's cache stays cold, so each later turn is judged again, and a harder request returns to the agent model.
 
 The switch never happens when a scheduled model, or a `!model`, `!room_model`, or `room_models` override that selects a different model, applies, or when the request carries images, audio, video, or files.
-Earlier attachments reach the judge only as placeholders, so pick a smaller model that supports the same media as the agent model.
+Earlier attachments reach the judge only as placeholders, so pick a cheap model that supports the same media as the agent model.
 Agents in `thread_mode: room` keep their model, because room mode has no thread history for the judge to read.
 Teams and the router keep their models.
 Each decision logs `Cold cache model selected` with a `reason`: `warm`, `history_unavailable`, `request_incomplete`, `judgment_unavailable`, or `judged`.

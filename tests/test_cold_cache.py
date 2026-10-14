@@ -1,4 +1,4 @@
-"""Cold-cache model downshift: configuration, cache expiry, and the judged switch."""
+"""Cold-cache switch to the cheap model: configuration, cache expiry, and the judged switch."""
 
 from __future__ import annotations
 
@@ -33,42 +33,53 @@ _MODELS: dict[str, dict[str, Any]] = {
 }
 
 
-def _config(cold_cache: dict[str, Any], *, agent_model: str = "opus") -> Config:
-    return Config.model_validate(
-        {
-            "models": _MODELS,
-            "agents": {"assistant": {"display_name": "Assistant", "model": agent_model, "cold_cache": cold_cache}},
-        },
-    )
+def _config(
+    cold_cache: dict[str, Any] | None = None,
+    *,
+    agent_model: str = "opus",
+    cheap_model: str | None = "haiku",
+) -> Config:
+    agent: dict[str, Any] = {"display_name": "Assistant", "model": agent_model}
+    if cheap_model is not None:
+        agent["cheap_model"] = cheap_model
+    if cold_cache is not None:
+        agent["cold_cache"] = cold_cache
+    return Config.model_validate({"models": _MODELS, "agents": {"assistant": agent}})
 
 
-def test_cold_cache_defaults_to_self_judging_llm() -> None:
-    """Without a judgment backend, the smaller model decides whether it can answer."""
-    settings = _config({"model": "haiku"}).agents["assistant"].cold_cache
+def test_cold_cache_defaults_to_self_judging_cheap_model() -> None:
+    """Without a judgment backend, the cheap model decides whether it can answer."""
+    settings = _config({}).agents["assistant"].cold_cache
     assert settings is not None
-    assert settings.effective_judgment() == LLMJudgmentConfig(provider="llm", model="haiku")
+    assert settings.effective_judgment("haiku") == LLMJudgmentConfig(provider="llm", model="haiku")
 
 
-def test_cold_cache_rejects_unknown_model() -> None:
-    """A misspelled smaller model fails configuration instead of silently never switching."""
-    with pytest.raises(ValidationError, match="Unknown cold_cache model for agent 'assistant'"):
-        _config({"model": "nope"})
+def test_cheap_model_rejects_unknown_model() -> None:
+    """A misspelled cheap model fails configuration instead of silently never switching."""
+    with pytest.raises(ValidationError, match="Unknown cheap_model for agent 'assistant'"):
+        _config(cheap_model="nope")
 
 
 def test_cold_cache_rejects_unknown_judgment_model() -> None:
     """The judge's model alias is validated like other judgment settings."""
     with pytest.raises(ValidationError, match="Unknown judgment model"):
-        _config({"model": "haiku", "judgment": {"provider": "llm", "model": "nope"}})
+        _config({"judgment": {"provider": "llm", "model": "nope"}})
 
 
-def test_cold_cache_rejects_same_model() -> None:
+def test_cheap_model_rejects_same_model() -> None:
     """Switching to the agent's own model would be a no-op that still pays for a judgment."""
-    with pytest.raises(ValidationError, match="cold_cache model must differ"):
-        _config({"model": "opus"})
+    with pytest.raises(ValidationError, match="cheap_model must differ"):
+        _config(cheap_model="opus")
+
+
+def test_cold_cache_requires_cheap_model() -> None:
+    """Cold-cache turns switch to the agent's cheap model, so one must be configured."""
+    with pytest.raises(ValidationError, match="cold_cache needs a cheap_model"):
+        _config({}, cheap_model=None)
 
 
 @pytest.mark.parametrize(
-    ("agent_model", "cold_model", "accepted"),
+    ("agent_model", "cheap_model", "accepted"),
     [
         ("opus", "tiny", False),
         ("opus", "unsized", False),
@@ -77,13 +88,13 @@ def test_cold_cache_rejects_same_model() -> None:
         ("unsized", "opus", False),
     ],
 )
-def test_cold_cache_context_window_must_not_shrink(agent_model: str, cold_model: str, accepted: bool) -> None:
+def test_cheap_model_context_window_must_not_shrink(agent_model: str, cheap_model: str, accepted: bool) -> None:
     """A smaller window would compact the thread and shrink the agent model's later context."""
     if accepted:
-        assert _config({"model": cold_model}, agent_model=agent_model).agents["assistant"].cold_cache is not None
+        assert _config(agent_model=agent_model, cheap_model=cheap_model).agents["assistant"].cheap_model == cheap_model
         return
     with pytest.raises(ValidationError, match="context window"):
-        _config({"model": cold_model}, agent_model=agent_model)
+        _config(agent_model=agent_model, cheap_model=cheap_model)
 
 
 _NOW = 1_800_000_000.0
@@ -175,7 +186,7 @@ async def _select(
     prompt: str = "What time is it in Tokyo?",
     cold_cache: dict[str, Any] | None = None,
 ) -> str:
-    config = _config(cold_cache or {"model": "haiku"})
+    config = _config(cold_cache or {})
     monkeypatch.setattr("mindroom.cold_cache.create_judgment_evaluator", lambda *_args, **_kwargs: judge)
     settings = config.agents["assistant"].cold_cache
     assert settings is not None
@@ -185,6 +196,7 @@ async def _select(
         runtime_paths=test_runtime_paths(tmp_path),
         agent_name="assistant",
         agent_model="opus",
+        cheap_model="haiku",
         session=session,
         context=context,
         prompt=prompt,
@@ -264,7 +276,7 @@ async def test_select_without_context_or_backend_keeps_agent_model(
     judge = _FakeJudge()
     assert await _select(tmp_path, monkeypatch, judge, context=None) == "opus"
     assert judge.requests == []
-    typesafe = {"model": "haiku", "judgment": {"provider": "typesafe"}}
+    typesafe = {"judgment": {"provider": "typesafe"}}
     assert await _select(tmp_path, monkeypatch, None, cold_cache=typesafe) == "opus"
     assert await _select(tmp_path, monkeypatch, judge, prompt="x" * MAX_REQUEST_BYTES) == "opus"
     assert judge.requests == []

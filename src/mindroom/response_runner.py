@@ -5840,16 +5840,17 @@ class ResponseRunner:
         session_id: str,
         execution_identity: ToolExecutionIdentity,
     ) -> str:
-        """Let a judge move a turn whose prompt cache expired to the agent's smaller model."""
+        """Let a judge move a turn whose prompt cache expired to the agent's cheap model."""
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
         if (
             agent is None
             or agent.cold_cache is None
+            or agent.cheap_model is None
             or request.scheduled_model is not None
             # Thread and room overrides are explicit choices.
             or resolved_model != agent.model
-            # The judge cannot see media, and the smaller model may not read it.
+            # The judge cannot see media, and the cheap model may not read it.
             or _request_has_media(request)
         ):
             return resolved_model
@@ -5880,6 +5881,7 @@ class ResponseRunner:
             runtime_paths=self.deps.runtime_paths,
             agent_name=self.deps.agent_name,
             agent_model=resolved_model,
+            cheap_model=agent.cheap_model,
             session=session,
             context=context,
             prompt=request.prompt,

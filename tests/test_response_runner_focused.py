@@ -7967,16 +7967,16 @@ async def _cold_cache_reply_model(
     config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
     config.models["cheap2"] = ModelConfig(provider="test", id="cheap2-model")
     config.agents["general"] = config.agents["general"].model_copy(
-        update={"cold_cache": ColdCacheConfig(model="cheap")},
+        update={"cheap_model": "cheap", "cold_cache": ColdCacheConfig()},
     )
     if room_model is not None:
         set_room_model_override(coordinator.deps.runtime_paths, room_id="!room:localhost", model_name=room_model)
     selector_calls: list[dict[str, object]] = []
     active_models: list[str | None] = []
 
-    async def fake_select(settings: ColdCacheConfig, **kwargs: object) -> str:
-        selector_calls.append(kwargs)
-        return settings.model
+    async def fake_select(_settings: ColdCacheConfig, *, cheap_model: str, **kwargs: object) -> str:
+        selector_calls.append({"cheap_model": cheap_model, **kwargs})
+        return cheap_model
 
     async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
         active_models.append(ctx.active_model_name)
@@ -8014,6 +8014,7 @@ async def test_cold_cache_model_used_for_reply(tmp_path: Path) -> None:
     call = selector_calls[0]
     assert call["agent_name"] == "general"
     assert call["agent_model"] == "default"
+    assert call["cheap_model"] == "cheap"
     assert call["session"] is None
     assert call["context"] == ()
     assert call["prompt"] == "hello"

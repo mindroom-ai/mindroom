@@ -106,7 +106,7 @@
             }
           ],
           "default": null,
-          "description": "Opt-in switch to a smaller model for turns whose prompt cache has expired"
+          "description": "Opt-in switch to cheap_model for turns whose prompt cache has expired"
         },
         "access": {
           "anyOf": [
@@ -199,6 +199,22 @@
           "description": "Configured model alias used for this agent's replies",
           "title": "Model",
           "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "cheap_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cheaper model alias this agent may switch to, such as on cold-cache turns",
+          "title": "Cheap Model",
           "x-mindroom": {
             "reference": "model"
           }
@@ -1017,17 +1033,8 @@
     },
     "ColdCacheConfig": {
       "additionalProperties": false,
-      "description": "Let a judge move cold-cache turns to a cheaper model.",
+      "description": "Let a judge move cold-cache turns to the agent's cheap model.",
       "properties": {
-        "model": {
-          "description": "Smaller model alias used when the judgment accepts a cold-cache turn",
-          "minLength": 1,
-          "title": "Model",
-          "type": "string",
-          "x-mindroom": {
-            "reference": "model"
-          }
-        },
         "judgment": {
           "anyOf": [
             {
@@ -1038,12 +1045,9 @@
             }
           ],
           "default": null,
-          "description": "LLM model alias, TypeSafe, or OpenAI Decisions backend; unset asks the smaller model itself"
+          "description": "LLM model alias, TypeSafe, or OpenAI Decisions backend; unset asks the cheap model itself"
         }
       },
-      "required": [
-        "model"
-      ],
       "title": "ColdCacheConfig",
       "type": "object"
     },

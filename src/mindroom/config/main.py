@@ -1998,30 +1998,33 @@ class Config(BaseModel):
                 if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
                     msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
                     raise ValueError(msg)
-            if agent.cold_cache is not None:
-                self._validate_cold_cache_model(agent_name, agent.model, agent.cold_cache.model)
+            if agent.cheap_model is not None:
+                self._validate_cheap_model(agent_name, agent.model, agent.cheap_model)
+            elif agent.cold_cache is not None:
+                msg = f"cold_cache needs a cheap_model for agent {agent_name!r}"
+                raise ValueError(msg)
             review_model = agent.skill_learning.model
             if review_model is not None and review_model not in self.models:
                 msg = f"Unknown skill_learning model for agent {agent_name!r}: {review_model!r}"
                 raise ValueError(msg)
         return self
 
-    def _validate_cold_cache_model(self, agent_name: str, agent_model: str, cold_model: str) -> None:
-        """Keep a downshifted turn from compacting history the agent model still needs."""
-        if cold_model not in self.models:
-            msg = f"Unknown cold_cache model for agent {agent_name!r}: {cold_model!r}"
+    def _validate_cheap_model(self, agent_name: str, agent_model: str, cheap_model: str) -> None:
+        """Keep a cheap-model turn from compacting history the agent model still needs."""
+        if cheap_model not in self.models:
+            msg = f"Unknown cheap_model for agent {agent_name!r}: {cheap_model!r}"
             raise ValueError(msg)
-        if cold_model == agent_model:
-            msg = f"cold_cache model must differ from the model of agent {agent_name!r}"
+        if cheap_model == agent_model:
+            msg = f"cheap_model must differ from the model of agent {agent_name!r}"
             raise ValueError(msg)
-        cold_window = self.get_model_context_window(cold_model)
+        cheap_window = self.get_model_context_window(cheap_model)
         agent_window = self.get_model_context_window(agent_model)
-        # Without a window on both sides, compaction cannot keep the smaller model's turns in bounds.
-        if (cold_window is None) != (agent_window is None) or (
-            cold_window is not None and agent_window is not None and cold_window < agent_window
+        # Without a window on both sides, compaction cannot keep the cheap model's turns in bounds.
+        if (cheap_window is None) != (agent_window is None) or (
+            cheap_window is not None and agent_window is not None and cheap_window < agent_window
         ):
             msg = (
-                f"cold_cache model {cold_model!r} for agent {agent_name!r} needs a context window "
+                f"cheap_model {cheap_model!r} for agent {agent_name!r} needs a context window "
                 f"at least as large as {agent_model!r}, and both or neither must set one"
             )
             raise ValueError(msg)

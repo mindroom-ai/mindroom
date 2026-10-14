@@ -1,4 +1,4 @@
-"""Move cold-cache turns to a smaller model when a judge accepts the request."""
+"""Move cold-cache turns to the agent's cheap model when a judge accepts the request."""
 
 from __future__ import annotations
 
@@ -70,24 +70,26 @@ async def select_cold_cache_model(
     runtime_paths: RuntimePaths,
     agent_name: str,
     agent_model: str,
+    cheap_model: str,
     session: AgentSession | None,
     context: tuple[JudgmentMessage, ...] | None,
     prompt: str,
     now: float,
 ) -> str:
-    """Return the smaller model only when the agent model's cache is cold and the judge accepts."""
+    """Return the cheap model only when the agent model's cache is cold and the judge accepts."""
     decision, reason = await _judge(
         settings,
         config=config,
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         agent_model=agent_model,
+        cheap_model=cheap_model,
         session=session,
         context=context,
         prompt=prompt,
         now=now,
     )
-    chosen = settings.model if decision is True else agent_model
+    chosen = cheap_model if decision is True else agent_model
     logger.info(
         "Cold cache model selected",
         agent=agent_name,
@@ -107,6 +109,7 @@ async def _judge(
     runtime_paths: RuntimePaths,
     agent_name: str,
     agent_model: str,
+    cheap_model: str,
     session: AgentSession | None,
     context: tuple[JudgmentMessage, ...] | None,
     prompt: str,
@@ -128,7 +131,7 @@ async def _judge(
     if request is None or not request.complete:
         return None, "request_incomplete"
     evaluate = create_judgment_evaluator(
-        settings.effective_judgment(),
+        settings.effective_judgment(cheap_model),
         config,
         runtime_paths,
         owner=f"{runtime_paths.storage_root}:{agent_name}",
