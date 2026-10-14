@@ -10,6 +10,9 @@ import ssl
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
 import httpx
@@ -19,10 +22,11 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from playwright.async_api import Error as PlaywrightError
 from structlog.testing import capture_logs
 
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.custom_tools.browser import BrowserTools
+from mindroom.custom_tools.browser import BrowserTools, _goto
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.worker_computer import browser_proxy, mcp_provider
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_MCP_CONFIG
@@ -36,7 +40,11 @@ from mindroom.worker_computer.browser_proxy import (
 from tests.browser_egress_helpers import SQUID_DEFAULT_CONNECT_PORTS, SquidLikeUpstream, socks5_connect
 from tests.browser_lifecycle_helpers import LifecycleBrowser
 
+if TYPE_CHECKING:
+    from playwright.async_api import Page
+
 _WORKER = _UpstreamProxy(host="worker", port=3128, tls=False)
+_DENIED = b"403 Forbidden"
 _OTHER = _UpstreamProxy(host="other", port=3128, tls=False)
 
 
@@ -177,11 +185,11 @@ def test_no_proxy_matches_names_by_suffix_and_addresses_by_range(host: str, addr
 
 
 class _RecordingUpstream:
-    """An HTTP proxy that records CONNECT requests and echoes tunneled bytes when it accepts one."""
+    """An HTTP proxy that records CONNECT requests and echoes tunneled bytes unless it answers with ``refusal``."""
 
-    def __init__(self, *, accept: bool = True) -> None:
+    def __init__(self, *, refusal: bytes | None = None) -> None:
         self.requests: list[bytes] = []
-        self.accept = accept
+        self.refusal = refusal
         self._server: asyncio.Server | None = None
 
     async def __aenter__(self) -> _UpstreamProxy:
@@ -196,8 +204,8 @@ class _RecordingUpstream:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             self.requests.append((await reader.readuntil(b"\r\n\r\n")).split(b"\r\n", 1)[0])
-            if not self.accept:
-                writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            if self.refusal is not None:
+                writer.write(b"HTTP/1.1 " + self.refusal + b"\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
                 return
             writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -567,7 +575,7 @@ async def test_upstream_refusal_fails_the_connection_without_a_direct_fallback(m
         return await original_open(host, port, **kwargs)
 
     monkeypatch.setattr(asyncio, "open_connection", open_connection)
-    recorder = _RecordingUpstream(accept=False)
+    recorder = _RecordingUpstream(refusal=_DENIED)
     async with recorder as upstream_proxy:
         proxy = BrowserDestinationProxy(egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy))
         await proxy.start()
@@ -580,24 +588,26 @@ async def test_upstream_refusal_fails_the_connection_without_a_direct_fallback(m
 
 
 @pytest.mark.asyncio
-async def test_relay_remembers_destinations_whose_latest_connection_the_egress_proxy_refused(
+async def test_relay_remembers_destinations_whose_latest_connection_the_egress_proxy_denied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The browser tool can name a refused destination; a later outcome replaces it and a page cannot grow the record."""
+    """Only a policy denial is remembered, the next connection to a destination replaces it, and pages cannot grow it."""
     _resolve_as(monkeypatch, {"public.example": "8.8.8.8", "other.example": "8.8.4.4", "third.example": "1.1.1.1"})
     monkeypatch.setattr(browser_proxy, "_MAX_REMEMBERED_REFUSALS", 2)
-    recorder = _RecordingUpstream(accept=False)
+    recorder = _RecordingUpstream()
     async with recorder as upstream_proxy:
         proxy = BrowserDestinationProxy(egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy))
         await proxy.start()
         try:
-            assert await _relay_reply(proxy, "public.example", 443) != 0
-            assert proxy.egress_refused("public.example", 443)
+            for refusal, denied in [(_DENIED, True), (b"407 Proxy Authentication Required", False), (_DENIED, True)]:
+                recorder.refusal = refusal
+                assert await _relay_reply(proxy, "public.example", 443) != 0
+                assert proxy.egress_refused("public.example", 443) is denied
             assert not proxy.egress_refused("public.example", 80)
-            recorder.accept = True
+            recorder.refusal = None
             assert await _relay_reply(proxy, "public.example", 443) == 0
             assert not proxy.egress_refused("public.example", 443)
-            recorder.accept = False
+            recorder.refusal = _DENIED
             for host in ["public.example", "other.example", "third.example"]:
                 assert await _relay_reply(proxy, host, 443) != 0
             assert not proxy.egress_refused("public.example", 443)
@@ -605,6 +615,44 @@ async def test_relay_remembers_destinations_whose_latest_connection_the_egress_p
             assert proxy.egress_refused("third.example", 443)
         finally:
             await proxy.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target_url", "relay_host", "port", "destination"),
+    [
+        ("https://Public.Example/page", "public.example", 443, "public.example:443"),
+        ("http://bücher.example/page", "xn--bcher-kva.example", 80, "xn--bcher-kva.example:80"),
+        ("https://[2606:4700:4700:0:0:0:0:1111]:8443/", "2606:4700:4700::1111", 8443, "[2606:4700:4700::1111]:8443"),
+    ],
+)
+async def test_browser_load_names_the_destination_the_egress_proxy_denied(
+    target_url: str,
+    relay_host: str,
+    port: int,
+    destination: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A load fails with the denied destination named, matched as Chromium names it; other failures stay Chromium's."""
+    _resolve_as(monkeypatch, {"public.example": "8.8.8.8", "xn--bcher-kva.example": "8.8.4.4"})
+    chromium_error = PlaywrightError("Page.goto: net::ERR_SOCKS_CONNECTION_FAILED")
+    page = cast("Page", SimpleNamespace(goto=AsyncMock(side_effect=chromium_error)))
+    async with _RecordingUpstream(refusal=_DENIED) as upstream_proxy:
+        relay = BrowserDestinationProxy(egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy))
+        await relay.start()
+        try:
+            with pytest.raises(PlaywrightError):
+                await _goto(page, target_url, relay)
+            assert await _relay_reply(relay, relay_host, port) != 0
+            with pytest.raises(RuntimeError) as denied:
+                await _goto(page, target_url, relay)
+        finally:
+            await relay.close()
+    assert str(denied.value) == (
+        f"The browser could not reach {destination} because outbound access to that host is not allowed from this "
+        "browser."
+    )
+    assert denied.value.__cause__ is chromium_error
 
 
 @pytest.mark.asyncio

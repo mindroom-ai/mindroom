@@ -7,6 +7,7 @@ This exposes a single ``browser_control`` function with an ``action`` parameter.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -561,10 +562,14 @@ async def _goto(page: Page, target_url: str, relay: BrowserDestinationProxy | No
     except PlaywrightError as exc:
         url = urlsplit(target_url)
         host = url.hostname or ""
+        # Chromium names hosts to the relay as IDNA ASCII, and the relay keeps IPv6 literals compressed.
+        with suppress(ValueError):
+            host = ipaddress.IPv6Address(host).compressed if ":" in host else host.encode("idna").decode("ascii")
         port = url.port or (443 if url.scheme == "https" else 80)
         if relay is not None and relay.egress_refused(host, port):
+            authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
             msg = (
-                f"The browser could not reach {host}:{port} because outbound access to that host is not allowed "
+                f"The browser could not reach {authority} because outbound access to that host is not allowed "
                 "from this browser."
             )
             raise RuntimeError(msg) from exc

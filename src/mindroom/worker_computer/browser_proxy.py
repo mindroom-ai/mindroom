@@ -257,11 +257,11 @@ class BrowserDestinationProxy:
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
         self._lookup_slots = asyncio.Semaphore(_MAX_CONCURRENT_LOOKUPS)
         self._lookups: dict[tuple[str, int], asyncio.Future[list[_IPAddress]]] = {}
-        # Insertion-ordered set of destinations whose latest connection the egress proxy refused.
+        # Insertion-ordered set of destinations whose latest connection the egress proxy denied.
         self._refused: dict[tuple[str, int], None] = {}
 
     def egress_refused(self, host: str, port: int) -> bool:
-        """Return whether the egress proxy refused the latest connection to this host and port."""
+        """Return whether the egress proxy denied the latest connection to this host and port by policy."""
         return (host, port) in self._refused
 
     async def start(self) -> None:
@@ -420,9 +420,11 @@ class BrowserDestinationProxy:
                     assert upstream is not None
                     return await _open_upstream_tunnel(upstream, target, port, self._upstream_tls)
             except _UpstreamTunnelRefusedError as refused:
-                self._refused[host, port] = None
-                if len(self._refused) > _MAX_REMEMBERED_REFUSALS:
-                    del self._refused[next(iter(self._refused))]
+                # Egress proxies such as Squid deny a destination by policy with 403; other 4xx mean something else.
+                if refused.status == "403":
+                    self._refused[host, port] = None
+                    if len(self._refused) > _MAX_REMEMBERED_REFUSALS:
+                        del self._refused[next(iter(self._refused))]
                 logger.warning(
                     "browser_egress_proxy_refused_tunnel",
                     destination=f"{target}:{port}",
