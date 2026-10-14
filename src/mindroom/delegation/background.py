@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import DelegationChild
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.records import DelegationTerminalStatus
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -38,7 +39,7 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     return DelegationChild.from_dict(job.adapter["child"])
 
 
-def delegation_outcome(status: Literal["completed", "failed", "cancelled", "denied"], text: str) -> BackgroundOutcome:
+def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:
     """Keep a child's full text in the job payload; job metadata keeps only its summary."""
     return BackgroundOutcome(status, text, result_payload=encode_result_payload(ToolResultPayload(value=text)))
 
@@ -104,9 +105,6 @@ async def start_delegation(
     cancel: Callable[[DelegationChild], Awaitable[None]],
 ) -> tuple[BackgroundJob, JobClaim | None]:
     """Accept native child ownership without exposing its live object in a generic record, claiming its outcome."""
-    if child.caller_agent_name != owner.agent_name:
-        msg = "Child caller does not match its job owner."
-        raise SubagentSessionError(msg)
     context = get_tool_runtime_context()
     adapter = {"child": _child_snapshot(child)}
 

@@ -65,16 +65,13 @@ def follow_up_event(
     )
 
 
-def follow_up_key(event: JournalEvent, recipient: str) -> ConversationKey | None:
-    """Return the conversation a follow-up admitted for ``recipient`` answers in."""
-    requester_id = event.source.get("requester_id")
-    if not isinstance(requester_id, str):
-        return None
+def follow_up_key(event: JournalEvent, recipient: str) -> ConversationKey:
+    """Return the conversation a follow-up admitted for ``recipient`` answers in; only `follow_up_event` writes them."""
     return ConversationKey(
         recipient=recipient,
         room_id=event.room_id,
         thread_id=event.thread_id,
-        requester_id=requester_id,
+        requester_id=str(event.source["requester_id"]),
         silent=False,
     )
 

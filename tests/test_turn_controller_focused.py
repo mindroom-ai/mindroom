@@ -868,6 +868,7 @@ def _obligation_runner(
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,
             replies_ended=lambda _reply_ids: None,
             on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
         schedule_trigger_sender_is_managed=lambda sender: sender == principal_id,

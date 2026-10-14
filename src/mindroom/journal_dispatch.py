@@ -78,10 +78,6 @@ type _ApprovalContinuationCallback = Callable[[str], Awaitable[bool | None]]
 type _JobCancelCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
 
 
-async def _ignore_job_cancel(_room: nio.MatrixRoom, _event: nio.UnknownEvent) -> None:
-    """Leave a job cancel to the bots that run background jobs."""
-
-
 @dataclass(frozen=True, slots=True)
 class JournalCallbacks:
     """The typed Matrix callbacks the journal dispatches to."""
@@ -99,8 +95,8 @@ class JournalCallbacks:
     replies_ended: Callable[[tuple[str, ...]], None]
     # Hands a follow-up to its response owner, which settles it.
     on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
+    on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
-    on_job_cancel: _JobCancelCallback = _ignore_job_cancel
 
 
 @dataclass

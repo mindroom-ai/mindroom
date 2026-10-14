@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal, NamedTuple, NotRequired, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
 from agno.db.base import BaseDb
@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.records import DelegationTerminalStatus
     from mindroom.delegation.state import ChildResponseRunner, DelegationHookState, SubagentPersona
     from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -671,7 +672,7 @@ async def _background_child_outcome(
 ) -> BackgroundOutcome:
     """Keep child execution, approvals, liveness and settlement owned by its background job."""
 
-    def finished(status: Literal["completed", "failed", "cancelled", "denied"], text: str) -> BackgroundOutcome:
+    def finished(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:
         return delegation_outcome(status, _finalize_delegation_output(text, output_request))
 
     run = partial(
@@ -1261,9 +1262,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 # The reply records a background child's call before its job starts, as for any managed call: the
                 # child's own tools run unrecorded in its job, so a restart's account names the delegation.
                 record_return = (
-                    await record_call(tool.tool_name or "run_subagent", application_arguments(tool.tool_args) or {})
-                    if background is not None
-                    else None
+                    await record_call(tool.tool_name or "run_subagent", args) if background is not None else None
                 )
                 if fresh:
                     await start_child_turn(

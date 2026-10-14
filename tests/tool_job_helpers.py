@@ -85,7 +85,8 @@ class ProcessRuntime(ToolJobRuntime):
             authorize=authorize,
             authorize_execution=authorize_execution,
             cancel=cancel,
-            denied=denied,
+            # Without its own denial rule, a test treats every unauthorized job as proven denied.
+            denied=denied or (lambda job: not authorize(job)),
         )
         self._journal = journal
 

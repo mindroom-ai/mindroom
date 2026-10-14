@@ -167,11 +167,17 @@ _CANCELLED_REASON = (
 )
 
 
-def _interrupted_reason(cause: Literal["restart", "shutdown"]) -> str:
-    """Tell the model what an interrupted call may have done, so it repeats only a read-only one."""
-    return (
+def _stopped_outcome(*, cancelled: bool, cause: Literal["restart", "shutdown"]) -> BackgroundOutcome:
+    """Settle a job a restart or shutdown stopped: cancelled if cancelling it already began, otherwise interrupted.
+
+    The interrupted reason tells the model what the call may have done, so it repeats only a read-only one.
+    """
+    if cancelled:
+        return BackgroundOutcome("cancelled", _CANCELLED_REASON)
+    return BackgroundOutcome(
+        "interrupted",
         f"A runtime {cause} interrupted this call before it returned a result. If it has side effects, they may "
-        "already have happened, so do not run it again; a read-only call can run again to get its result."
+        "already have happened, so do not run it again; a read-only call can run again to get its result.",
     )
 
 
@@ -284,13 +290,13 @@ class ToolJobRuntime:
         authorize: Callable[[BackgroundJob], bool],
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: _Cleanup,
-        denied: Callable[[BackgroundJob], bool] | None = None,
+        denied: Callable[[BackgroundJob], bool],
     ) -> None:
         # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
         self._authorize = authorize
         # Access proven gone, as opposed to access merely unresolved, such as while room membership resolves.
-        self._denied = denied or (lambda job: not authorize(job))
+        self._denied = denied
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
         self.authorize_execution = authorize_execution
         self._cancel = cancel
@@ -452,14 +458,9 @@ class ToolJobRuntime:
                 if entry.job.status not in TERMINAL_STATUSES:
                     # Only work the restart cut short is interrupted by it; a cancellation saved before it is not.
                     cancelled = entry.job.status == "cancel_requested"
-                    reason = _interrupted_reason("restart")
-                    default = (
-                        BackgroundOutcome("cancelled", _CANCELLED_REASON)
-                        if cancelled
-                        else BackgroundOutcome("interrupted", reason)
-                    )
                     entry.control.cancel(shutdown=not cancelled)
                     outcome = await self._cleanup(entry)
+                    default = _stopped_outcome(cancelled=cancelled, cause="restart")
                     await self._publish_outcome(entry, self._settled(entry, outcome, default))
                 self._add_entry(entry)
 
@@ -885,17 +886,11 @@ class ToolJobRuntime:
                     entry.task.cancel()
                     tasks.append(entry.task)
         await asyncio.gather(*tasks, return_exceptions=True)
-        reason = _interrupted_reason("shutdown")
         for entry in self._entries.values():
             # A job cancelled before the shutdown ends cancelled, as its cleanup was told.
             stopped = entry.control.cancelled and not entry.control.shutdown
             try:
-                await self._settle(
-                    entry,
-                    BackgroundOutcome("cancelled", _CANCELLED_REASON)
-                    if stopped
-                    else BackgroundOutcome("interrupted", reason),
-                )
+                await self._settle(entry, _stopped_outcome(cancelled=stopped, cause="shutdown"))
             except Exception as error:
                 # A blocked native child stays unsettled for the next recovery; other jobs still settle.
                 failures.append(error)

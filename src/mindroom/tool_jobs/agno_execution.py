@@ -356,7 +356,6 @@ async def _run_operation(
             approved, reason = await approval()
             if not approved:
                 return BackgroundOutcome("denied", reason or "The requester did not approve this call.")
-            job_checkpoint()
         with (
             tool_execution_identity(owner),
             authorized_tool_call(owner, owned_call),
@@ -484,7 +483,7 @@ def _unaskable(call: FunctionCall) -> ToolCallResult:
 
 
 def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
-    """Expose invalid framework arguments through Agno's ordinary tool failure contract."""
+    """Report a call that did not run through Agno's ordinary tool failure contract."""
     with Timer() as timer:
         call.error = str(error)
         return False, timer, call, FunctionExecutionResult(status="failure", error=call.error)

@@ -3164,6 +3164,7 @@ async def test_a_follow_up_whose_turn_is_gone_is_dispatched_again(alice: Princip
             turn_has_live_claim=lambda _event_id: False,
             replies_ended=lambda _reply_ids: None,
             on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room(),
     )
@@ -3203,6 +3204,7 @@ class TestOutOfBandDispatch:
                 turn_has_live_claim=lambda _event_id: False,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3286,6 +3288,7 @@ class TestDeferralOwnership:
                 turn_has_live_claim=lambda _event_id: turn_claimed,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -3916,6 +3919,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
         )
@@ -4153,6 +4157,7 @@ class TestAdmittedWorkReachesItsCallback:
                 turn_has_live_claim=lambda _event_id: False,
                 replies_ended=lambda _reply_ids: None,
                 on_job_follow_up=AsyncMock(),
+                on_job_cancel=AsyncMock(),
             ),
             room_for_id=lambda _room_id: room(),
             schedule_trigger_sender_is_managed=lambda sender: sender == BOT,

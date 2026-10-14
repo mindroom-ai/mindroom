@@ -3497,25 +3497,26 @@ class ResponseRunner:
         return False
 
     async def handoff_job_follow_up(self, event: JournalEvent) -> None:
-        """Hand a follow-up to a detached response owner; its reply, or that owner, settles it."""
-        if not self.has_live_inbox_response(event.event_id):
-            self.track_inbox_response(
-                self._run_job_follow_up(event),
-                name=f"job_follow_up:{event.event_id}",
-                room_id=event.room_id,
-                source_event_ids=(event.event_id,),
-                recovery_proof_ready=lambda: True,
-            )
+        """Hand a follow-up to a detached response owner; its reply, or that owner, settles it.
+
+        The dispatcher hands over only a follow-up no live owner holds.
+        """
+        self.track_inbox_response(
+            self._run_job_follow_up(event),
+            name=f"job_follow_up:{event.event_id}",
+            room_id=event.room_id,
+            source_event_ids=(event.event_id,),
+            recovery_proof_ready=lambda: True,
+        )
 
     async def _run_job_follow_up(self, event: JournalEvent) -> None:
         """Run the turn a follow-up asks for, then settle a follow-up no reply took."""
         key = follow_up_key(event, self.deps.agent_name)
         claimed = asyncio.Event()
         handoff = asyncio.Event()
-        if key is not None:
-            await self._generate_job_follow_up(
-                self._job_follow_up_request(key, event.event_id, claimed=claimed, handoff=handoff),
-            )
+        await self._generate_job_follow_up(
+            self._job_follow_up_request(key, event.event_id, claimed=claimed, handoff=handoff),
+        )
         if claimed.is_set() or handoff.is_set():
             # The follow-up's reply settles its source, or keeps it pending for its retry.
             return

@@ -122,6 +122,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 authorize=lambda job: True,
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
+                denied=lambda job: False,
             )
             await runtime.recover()
 
@@ -159,6 +160,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 authorize=authorized,
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
+                denied=lambda job: not authorized(job),
             )
             await runtime.recover()
             statuses = {

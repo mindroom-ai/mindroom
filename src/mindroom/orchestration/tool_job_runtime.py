@@ -191,8 +191,7 @@ class ToolJobRuntimeCoordinator:
         owner = job.owner
         if config is None or owner.channel != "matrix" or owner.requester_id is None or owner.room_id is None:
             return "denied"
-        caller = config.agents.get(owner.agent_name)
-        if caller is None:
+        if owner.agent_name not in config.agents:
             return "denied"
         entities = _accessed_entities(config, owner.recipient, owner.agent_name)
         if job.kind == "delegation":

@@ -2386,9 +2386,6 @@ class EventJournalStore:
         either. The generation fences writes: whichever runtime last took
         ownership is the only one whose saves land.
         """
-        if not runtime_generation:
-            msg = "Tool jobs require a runtime generation"
-            raise ValueError(msg)
         return ToolJobStore(_backend=self.backend, _runtime_generation=runtime_generation)
 
     async def close(self) -> None:
