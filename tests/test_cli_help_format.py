@@ -87,9 +87,11 @@ def test_desktop_help_lists_setup_before_advanced_commands() -> None:
 def test_every_summary_fits_on_one_line() -> None:
     """Each command's first help paragraph is a short summary; details go in later paragraphs."""
     for path, command in _commands(_root()):
-        summary = " ".join((command.help or "").split("\n\n")[0].split())
-        assert summary, path
-        assert len(summary) <= _SUMMARY_MAX_LENGTH, (path, summary)
+        first_paragraph = (command.help or "").split("\n\n")[0].strip()
+        # Typer keeps single newlines in rich mode, so a summary split across source lines shows on two rows.
+        assert "\n" not in first_paragraph, (path, first_paragraph)
+        assert first_paragraph, path
+        assert len(first_paragraph) <= _SUMMARY_MAX_LENGTH, (path, first_paragraph)
 
 
 def test_run_help_groups_its_options_and_shows_examples() -> None:

@@ -974,7 +974,7 @@ Applications stay observe-only unless `--allow-control` grants a short lease, an
 │                                                    existing browser profile when its         │
 │                                                    extension is installed.                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Browser profile ────────────────────────────────────────────────────────────────────────────╮
+╭─ Browser extension ──────────────────────────────────────────────────────────────────────────╮
 │ --browser-executable             PATH                       Chrome-family executable to open │
 │                                                             the Playwright extension         │
 │                                                             connection page, including       │
