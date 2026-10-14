@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import click
@@ -12,16 +15,20 @@ from typer import rich_utils
 from typer.core import TyperCommand, TyperGroup
 from typer.testing import CliRunner
 
+import mindroom.cli.main as cli_main
 from mindroom.cli import help_format
 from mindroom.cli.main import app
 from tests.conftest import normalize_console_output
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 runner = CliRunner()
 # A summary longer than this wraps in the commands panel of a 100-column terminal.
 _SUMMARY_MAX_LENGTH = 72
+# Typer pads the epilog by one column on each side.
+_EXAMPLE_MAX_LENGTH = 78
 
 
 def _commands(group: click.Group, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], click.Command]]:
@@ -63,7 +70,9 @@ def test_top_level_help_starts_with_getting_started() -> None:
 
     positions = [output.index(f"{panel} ") for panel in ("Get started", "Configure", "Keep running", "Troubleshoot")]
     assert positions == sorted(positions)
-    assert output.index(" run ") < output.index(" config ") < output.index(" service ")
+    # The quick start above the panels also names `run` and `config`, so look only at the panels.
+    panels = output[positions[0] :]
+    assert panels.index(" run ") < panels.index(" config ") < panels.index(" service ")
     assert "Commands" not in output
 
 
@@ -96,6 +105,14 @@ def test_run_help_groups_its_options_and_shows_examples() -> None:
     assert "mindroom run --provider anthropic" in output
 
 
+def test_every_example_fits_an_80_column_terminal() -> None:
+    """An example row longer than this wraps back to the first column, which breaks the alignment."""
+    for path, command in _commands(_root()):
+        for paragraph in (command.epilog or "").split("\n\n"):
+            row = Text.from_markup(paragraph).plain
+            assert len(row) <= _EXAMPLE_MAX_LENGTH, (path, row)
+
+
 def test_examples_align_their_descriptions() -> None:
     """Every example description starts in the same column, one example per line."""
     epilog = help_format.examples(("mindroom run", "Start"), ("mindroom run --no-api", "Start without the dashboard"))
@@ -106,20 +123,60 @@ def test_examples_align_their_descriptions() -> None:
     assert rows == ["mindroom run           Start", "mindroom run --no-api  Start without the dashboard"]
 
 
-@pytest.fixture
-def restored_help_theme(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Undo the help theme after the test, since Typer keeps it in module globals."""
-    for name in help_format._HELP_THEME:
-        monkeypatch.setattr(rich_utils, name, getattr(rich_utils, name))
-
-
-@pytest.mark.usefixtures("restored_help_theme")
-def test_help_theme_sets_styles_typer_still_reads() -> None:
+def test_help_theme_sets_styles_typer_still_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Typer upgrade that renames a style would leave the theme silently unused."""
-    styles_before = {name: getattr(rich_utils, name) for name in help_format._HELP_THEME}
+    for name in help_format._HELP_THEME:
+        assert hasattr(rich_utils, name), name
+        # Typer keeps the styles in module globals, so restore them after the test.
+        monkeypatch.setattr(rich_utils, name, getattr(rich_utils, name))
 
     help_format.apply_help_theme()
 
     for name, style in help_format._HELP_THEME.items():
-        assert name in styles_before
         assert getattr(rich_utils, name) == style
+
+
+@pytest.mark.parametrize(
+    ("args", "themed", "banner"),
+    [
+        ([], True, True),
+        (["--help"], True, True),
+        (["config"], True, False),
+        (["run", "--help"], True, False),
+        (["service", "status"], False, False),
+        (["config", "show", "--path", "config.yaml"], False, False),
+    ],
+)
+def test_help_output_is_prepared_only_where_help_can_appear(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+    themed: bool,
+    banner: bool,
+) -> None:
+    """Commands the macOS app polls, such as `service status`, skip loading Typer's help renderer."""
+    themes: list[None] = []
+    monkeypatch.setattr(cli_main, "apply_help_theme", lambda: themes.append(None))
+
+    cli_main._prepare_help_output(args)
+
+    assert bool(themes) is themed
+    assert ("What if I told you" in capsys.readouterr().out) is banner
+
+
+def test_shell_completion_prints_only_completions(tmp_path: Path) -> None:
+    """Shell completion runs `mindroom` without arguments and evaluates its output, so no banner may precede it."""
+    env = {**os.environ, "_MINDROOM_COMPLETE": "complete_bash", "COMP_WORDS": "mindroom ru", "COMP_CWORD": "1"}
+    script = "import sys; sys.argv[0] = 'mindroom'; from mindroom.cli.main import main; main()"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.stdout.split() == ["run"], result.stdout + result.stderr

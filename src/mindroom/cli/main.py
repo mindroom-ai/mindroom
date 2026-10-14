@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import socket
 import sys
@@ -118,7 +119,7 @@ def version() -> None:
     epilog=examples(
         ("mindroom run", "Set up on first run, pair, and start"),
         ("mindroom run --provider anthropic", "Skip the provider question on first run"),
-        ("mindroom run --service", "Run in the background at login after setup"),
+        ("mindroom run --service", "Run in the background at login"),
         ("mindroom run --no-api", "Start without the dashboard"),
     ),
 )
@@ -445,7 +446,7 @@ def avatars_sync(
     "export",
     epilog=examples(
         ("mindroom threads export", "Export every room once"),
-        ("mindroom threads export --room lobby", "Export only rooms matching lobby"),
+        ("mindroom threads export --room lobby", "Only rooms matching lobby"),
         ("mindroom threads export --watch --interval 600", "Export again every 10 minutes"),
     ),
 )
@@ -906,17 +907,20 @@ def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> 
 
 def main() -> None:
     """Main entry point that shows help by default."""
-    # Help appears for -h/--help and for a bare command group such as `mindroom config`; the frequent
-    # deeper calls like `mindroom service status` skip loading Typer's help renderer for the theme.
-    if len(sys.argv) <= 2 or {"-h", "--help"} & set(sys.argv[1:]):
-        apply_help_theme()
-    # Print banner for top-level help (no subcommand given)
-    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help")):
-        console.print(
-            make_banner(tagline=("💊 What if I told you... ", "AI agents live in Matrix.")),
-        )
-
+    # Shell completion runs this program without arguments and evaluates what it prints.
+    if "_MINDROOM_COMPLETE" not in os.environ:
+        _prepare_help_output(sys.argv[1:])
     app()
+
+
+def _prepare_help_output(args: list[str]) -> None:
+    """Load the help theme when `args` can show help, and print the banner above the top-level help."""
+    # Help appears for -h/--help and for a bare command or group such as `mindroom config`; deeper calls
+    # such as `mindroom service status`, which the macOS app polls, skip loading Typer's help renderer.
+    if len(args) <= 1 or {"-h", "--help"} & set(args):
+        apply_help_theme()
+    if not args or args in (["-h"], ["--help"]):
+        console.print(make_banner(tagline=("💊 What if I told you... ", "AI agents live in Matrix.")))
 
 
 if __name__ == "__main__":

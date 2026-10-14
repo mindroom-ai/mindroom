@@ -817,7 +817,7 @@ def desktop_run(
         "--max-screenshot-width",
         min=320,
         max=3840,
-        help="Widest screenshot sent to agents, in pixels (default 1600).",
+        help="Widest screenshot sent to agents, in pixels; defaults to the saved setup (1568 unless changed).",
         rich_help_panel="Screenshots",
     ),
     jpeg_quality: int | None = typer.Option(
@@ -825,7 +825,7 @@ def desktop_run(
         "--jpeg-quality",
         min=40,
         max=95,
-        help="JPEG quality of screenshots sent to agents (default 80).",
+        help="JPEG quality of screenshots sent to agents; defaults to the saved setup (80 unless changed).",
         rich_help_panel="Screenshots",
     ),
     browser_extension: bool | None = typer.Option(

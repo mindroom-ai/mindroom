@@ -151,7 +151,7 @@ On a hosted install, the dashboard becomes available after pairing is approved.
  Examples
  mindroom run                       Set up on first run, pair, and start
  mindroom run --provider anthropic  Skip the provider question on first run
- mindroom run --service             Run in the background at login after setup
+ mindroom run --service             Run in the background at login
  mindroom run --no-api              Start without the dashboard
 
 
@@ -968,10 +968,12 @@ Applications stay observe-only unless `--allow-control` grants a short lease, an
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Screenshots ────────────────────────────────────────────────────────────────────────────────╮
 │ --max-screenshot-width        INTEGER RANGE [320<=x<=3840]  Widest screenshot sent to        │
-│                                                             agents, in pixels (default       │
-│                                                             1600).                           │
+│                                                             agents, in pixels; defaults to   │
+│                                                             the saved setup (1568 unless     │
+│                                                             changed).                        │
 │ --jpeg-quality                INTEGER RANGE [40<=x<=95]     JPEG quality of screenshots sent │
-│                                                             to agents (default 80).          │
+│                                                             to agents; defaults to the saved │
+│                                                             setup (80 unless changed).       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Browser ────────────────────────────────────────────────────────────────────────────────────╮
 │ --browser-extension      --no-browser-extens…                          Expose Playwright MCP │
@@ -1195,7 +1197,7 @@ See [threads export](thread-exports.md#threads-export) for requirements and outp
 
  Examples
  mindroom threads export                         Export every room once
- mindroom threads export --room lobby            Export only rooms matching lobby
+ mindroom threads export --room lobby            Only rooms matching lobby
  mindroom threads export --watch --interval 600  Export again every 10 minutes
 
 
@@ -1441,8 +1443,6 @@ Send one signed trigger request to MindRoom.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ *  --key-file          FILE  Base64 raw Ed25519 private key file. [required]           │
-│    --url               TEXT  MindRoom base URL.               [env var: MINDROOM_URL]  │
-│                              [default: http://127.0.0.1:8765]                          │
 │    --key-id            TEXT  Trigger signing key id. [default: default]                │
 │    --help      -h            Show this message and exit.                               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -1460,6 +1460,9 @@ Send one signed trigger request to MindRoom.
 │                                           [default: 10.0]                              │
 │ --verify-tls    --no-verify-tls           Verify TLS certificates.                     │
 │                                           [default: verify-tls]                        │
+│ --url                              TEXT   MindRoom base URL.                           │
+│                                           [env var: MINDROOM_URL]                      │
+│                                           [default: http://127.0.0.1:8765]             │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

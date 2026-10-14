@@ -475,10 +475,10 @@ def format_validation_errors(
     "init",
     rich_help_panel="Create and edit",
     epilog=examples(
-        ("mindroom config init", "Starter config for MindRoom Chat"),
-        ("mindroom config init --provider anthropic", "Use Anthropic models"),
-        ("mindroom config init --matrix-server self-hosted", "Use your own Matrix homeserver"),
-        ("mindroom config init --print", "Show the config without writing files"),
+        ("mindroom config init", "For MindRoom Chat"),
+        ("mindroom config init --provider anthropic", "With Anthropic models"),
+        ("mindroom config init --matrix-server self-hosted", "For your own homeserver"),
+        ("mindroom config init --print", "Print instead of writing"),
     ),
 )
 def config_init(

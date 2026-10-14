@@ -139,6 +139,7 @@ def send(
         "--url",
         envvar="MINDROOM_URL",
         help="MindRoom base URL.",
+        rich_help_panel="Connection",
     ),
     key_id: str = typer.Option(_DEFAULT_KEY_ID, "--key-id", help="Trigger signing key id."),
 ) -> None:

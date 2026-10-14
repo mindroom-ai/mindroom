@@ -42,7 +42,7 @@ Supported platforms:
 - macOS: launchd (`~/Library/LaunchAgents/`)
 - Linux: systemd user services (`~/.config/systemd/user/`)
 """,
-    rich_markup_mode="rich",
+    rich_markup_mode="markdown",
     no_args_is_help=True,
 )
 
