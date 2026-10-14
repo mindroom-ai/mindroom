@@ -282,14 +282,10 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 finalized=event["type"] == "session.closed" or (previous is not None and previous.finalized),
             )
             self._voice_usage[session_id] = usage
-            task = asyncio.create_task(self._record_usage(usage))
+            # The call audio process only forwards usage to MindRoom, which retries failed saves.
+            task = asyncio.ensure_future(options.record_usage(usage))
             self._usage_tasks.add(task)
             task.add_done_callback(self._usage_tasks.discard)
-
-        async def _record_usage(self, usage: LiveVoiceUsage) -> None:
-            # The call audio process only forwards usage to MindRoom, which retries failed saves.
-            if options.record_usage is not None:
-                await options.record_usage(usage)
 
         async def on_exit(self) -> None:
             self._exiting = True

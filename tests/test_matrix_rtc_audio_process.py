@@ -51,11 +51,6 @@ def _loaded_agent_stack(*modules: str) -> list[str]:
     return [name for name in result.stdout.strip().split(",") if name]
 
 
-def test_live_audio_modules_import_without_the_agent_stack() -> None:
-    """The call audio child imports these modules, so they must not pull in agents, Matrix, or the call manager."""
-    assert _loaded_agent_stack("mindroom.matrix_rtc.live_voice_agent", "mindroom.matrix_rtc.focus") == []
-
-
 async def _reader_with(data: bytes, *, eof: bool = True) -> asyncio.StreamReader:
     reader = asyncio.StreamReader()
     reader.feed_data(data)

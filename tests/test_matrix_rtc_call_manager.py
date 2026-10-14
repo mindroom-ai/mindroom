@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import sys
 import threading
 import time
@@ -5605,7 +5604,7 @@ async def test_join_closes_bridge_when_the_session_cannot_be_built(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    with contextlib.suppress(RuntimeError):
+    with pytest.raises(RuntimeError, match="session rejected"):
         await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.closed
