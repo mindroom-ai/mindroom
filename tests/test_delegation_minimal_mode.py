@@ -15,6 +15,7 @@ from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
 from mindroom import ai
+from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agents import apply_tool_approval_capability
@@ -459,3 +460,39 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
 
     assert "bash" not in models[1].seen_tools[0]
     assert "run_shell_command" in models[1].seen_tools[0]
+
+
+@pytest.mark.asyncio
+async def test_native_delegation_retires_the_callers_cli_binding_before_its_run_continues(tmp_path: Path) -> None:
+    """The caller's run continues in a new SDK pass that binds its CLI catalog again, so its first binding retires."""
+    config = _config(helper_tools=["shell"])
+    paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
+    entity_ids(config, paths)
+    toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=_identity())
+    events: list[str] = []
+
+    class _CallerOwner:
+        catalog = SimpleNamespace(agent=None)
+        control_executions: list[object] = []  # noqa: RUF012 - one stub per test
+
+        async def retire_binding(self) -> None:
+            events.append("retired")
+
+        async def close(self) -> None:
+            events.append("closed")
+
+    with tool_runtime_context(_live_context(config, paths)):
+        async with response_cli_lifetime() as lifetime:
+            lifetime.owner = _CallerOwner()
+            await _delegate(
+                toolkit,
+                config,
+                paths,
+                "run_subagent",
+                native=True,
+                task="Report",
+                agent_name="plain",
+                minimal=True,
+            )
+
+    assert events == ["retired", "closed"]

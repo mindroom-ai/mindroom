@@ -285,6 +285,8 @@ visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.response_turn",
     "mindroom.agent_cli.cli_shell_agent",
+    # Native delegation retires the caller's CLI binding before continuing its run.
+    "mindroom.delegation.execution",
 ]
 
 [[interfaces]]
@@ -7187,6 +7189,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.agent_cli.lifetime",
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.consumption",
     "mindroom.cancellation",

@@ -22,6 +22,7 @@ from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 
+from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.approval.receipt import install_approval_receipt_hooks
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import (
@@ -1484,6 +1485,9 @@ async def drive_delegations(  # noqa: C901, PLR0912
             await persist_delegation_state(entity, response, state)
             return response
         await persist_delegation_state(entity, response, state)
+        if (cli_lifetime := current_cli_lifetime()) is not None:
+            # The continuation is a new SDK pass that binds the response's CLI catalog again, as a rebuild does.
+            await cli_lifetime.retire_attempt()
         if isinstance(response, RunOutput):
             continuation_stream = cast("Agent", entity).acontinue_run(
                 run_id=response.run_id,
