@@ -399,7 +399,6 @@ async def _ensure_room_exists(
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
         _remove_room(room_key, runtime_paths=runtime_paths)
 
-    # A configured description becomes the topic; only rooms without one need an AI-generated topic.
     topic = configured_room_topic(room_key, config) or await generate_room_topic_ai(
         room_key,
         room_name,

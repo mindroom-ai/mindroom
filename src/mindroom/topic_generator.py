@@ -176,18 +176,18 @@ async def ensure_room_has_topic(
     if topic is None:
         logger.info("generate_room_topic", room_id=room_id, room_key=room_key, room_name=room_name)
         topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
-    if topic is None:
-        logger.warning("generate_room_topic_failed", room_id=room_id, room_key=room_key)
-        return False
+        if topic is None:
+            logger.warning("generate_room_topic_failed", room_id=room_id, room_key=room_key)
+            return False
 
-    # Generation can take seconds; a human topic added meanwhile must win.
-    response = await read_state_event(client, room_id, "m.room.topic")
-    if isinstance(response, nio.RoomGetStateEventResponse):
-        if response.content.get("topic"):
-            return True
-    elif response.status_code != "M_NOT_FOUND":
-        logger.warning("room_topic_recheck_failed", room_id=room_id, error=str(response))
-        return False
+        # Generation can take seconds; a human topic added meanwhile must win.
+        response = await read_state_event(client, room_id, "m.room.topic")
+        if isinstance(response, nio.RoomGetStateEventResponse):
+            if response.content.get("topic"):
+                return True
+        elif response.status_code != "M_NOT_FOUND":
+            logger.warning("room_topic_recheck_failed", room_id=room_id, error=str(response))
+            return False
 
     # Set the topic
     response = await client.room_put_state(

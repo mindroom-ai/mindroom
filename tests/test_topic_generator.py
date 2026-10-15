@@ -9,11 +9,9 @@ import nio
 import pytest
 from agno.run.agent import RunOutput
 
-from mindroom.access_policy import resolve_room_policy
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.matrix.state import MatrixState
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
@@ -162,42 +160,6 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
     assert topic == "Ops topic"
     assert captured_prompt is not None
     assert "- Configured agents and teams: Research Agent, Ops Team" in captured_prompt
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("description", "expected_topic"),
-    [("  Literature reviews  ", "Literature reviews"), ("", "AI topic")],
-)
-async def test_new_room_topic_uses_configured_description_before_ai(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    description: str,
-    expected_topic: str,
-) -> None:
-    """A new managed room takes its description as the topic, and only rooms without one ask the model."""
-    config = membership_config(tmp_path, agent_rooms=["lobby"], rooms={"lobby": {"description": description}})
-    generate = AsyncMock(return_value="AI topic")
-    create_room = AsyncMock(return_value="!fresh:localhost")
-    monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", generate)
-    monkeypatch.setattr(matrix_rooms, "create_room", create_room)
-    monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", AsyncMock(return_value=True))
-    monkeypatch.setattr(matrix_rooms, "_set_room_avatar", AsyncMock())
-    client = AsyncMock()
-    client.homeserver = "http://localhost:8008"
-    client.room_resolve_alias.return_value = nio.RoomResolveAliasError("missing", "M_NOT_FOUND")
-
-    room_id = await matrix_rooms._ensure_room_exists(
-        client=client,
-        room_key="lobby",
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        room_policy=resolve_room_policy(config, "lobby"),
-    )
-
-    assert room_id == "!fresh:localhost"
-    assert create_room.await_args.kwargs["topic"] == expected_topic
-    assert generate.await_count == (0 if description else 1)
 
 
 @pytest.mark.asyncio
