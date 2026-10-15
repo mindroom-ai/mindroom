@@ -48,7 +48,7 @@ No dedicated worker mounts `shared_directories/` or an owner directory below it,
 Primary-process `file` and `coding` reach shared directories only when no worker is configured, because worker code writes them and these tools list and search by path after checking it.
 A workspace or shared directory is mounted only when it is a real directory reached from the storage root without links.
 Because Docker resolves mount targets again on every container start, a worker whose mount target inside its writable root was replaced with a link by worker code is refused when it is created or restarted.
-Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write.
+Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write, or inside a shared directory that worker already mounts.
 Kubernetes mounts such knowledge read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
 
 ### Workspace files the primary reads and writes

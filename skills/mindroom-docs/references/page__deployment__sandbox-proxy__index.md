@@ -317,13 +317,13 @@ What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
-- **Dedicated Docker and Kubernetes workers** mount only the workspaces and shared directories listed in the [scope table](#worker-scopes), their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
+- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
 When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
-Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
+Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
 Kubernetes knowledge mounts are described in [Knowledge Source Visibility](https://docs.mindroom.chat/deployment/kubernetes/#knowledge-source-visibility).
 Any change to a dedicated worker's launch configuration, mounts, environment, or tool and plugin config recreates the worker on its next use, which ends its tmux sessions, background shells, and computer sessions.
 Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so those workers are recreated too.
