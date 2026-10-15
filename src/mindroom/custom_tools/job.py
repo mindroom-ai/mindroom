@@ -179,8 +179,9 @@ class JobTools(Toolkit):
         """Discover, wait for, or cancel this caller's managed work.
 
         Args:
-            action: Operation; list reports status and saved summaries, wait retrieves the stored result, and
-                collect returns and acknowledges every ended job.
+            action: Operation; list reports status, saved summaries, and the latest progress of running work, wait
+                retrieves the stored result or, when it times out, the job's progress, and collect returns and
+                acknowledges every ended job.
             job_id: Exact job ID, required for wait and cancel.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.

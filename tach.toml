@@ -5030,6 +5030,14 @@ path = "mindroom.tool_system.tool_calls"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
+path = "mindroom.tool_system.progress"
+depends_on = []
+visibility = [
+    "mindroom.delegation.lifecycle",
+    "mindroom.tool_jobs.runtime",
+]
+
+[[modules]]
 path = "mindroom.tool_system.call_record"
 depends_on = []
 visibility = [
@@ -7392,6 +7400,7 @@ depends_on = [
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.delegation.storage",
+    "mindroom.tool_system.progress",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
@@ -7978,6 +7987,7 @@ depends_on = [
     "mindroom.tool_jobs.instances",
     "mindroom.tool_jobs.resources",
     "mindroom.tool_system.call_record",
+    "mindroom.tool_system.progress",
 ]
 visibility = [
     "mindroom.tool_jobs.publication",
