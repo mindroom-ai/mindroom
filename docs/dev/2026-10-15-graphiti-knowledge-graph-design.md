@@ -44,9 +44,13 @@ Stored runs do not carry that source today, so the run metadata gains it when th
 Calls to the `knowledge_graph` tool and their results are never ingested and never become leads, or extracted claims would return as fresh tool evidence.
 
 Every fact is an attributed claim, not a verified truth.
-Each episode block is labeled with its provenance: `person` (a user message, an assertion by that person), `agent` (an assistant message, the agent's assertion), or `tool_result` (an observation of a source, whose arguments the model chose).
-Each episode's `source_description` names its origin: the room and thread for a conversation, or the tool, function, and argument digest for a tool result, plus the time it was observed.
-Search results return that provenance with every fact, so the agent can tell an observation from something it or a person said.
+Graphiti records which episodes support a fact, so provenance is per episode, and each episode has one kind:
+
+- `conversation`: the run's user and assistant messages as a Graphiti `message` episode, each line prefixed with its speaker (`person <Matrix ID>` or `agent <name>`), so extraction attributes assertions to whoever made them.
+- `tool_results`: the run's tool calls and results as a `text` episode, an observation of the sources the model chose to query.
+
+Each episode's `source_description` starts with its kind and names its origin: the room and thread, and for tool results the tool, function, and an argument digest for each call, plus the time of the run.
+Search results return the kinds and origins of each fact's episodes, so the agent can tell an observation from something it or a person said.
 
 Rejected: a `record_evidence` tool the agent calls during exploration.
 It lets a model paraphrase, omit, or invent evidence, and its own summaries would then return as fresh evidence on later runs.
@@ -82,7 +86,8 @@ A function a person drove while watching, such as sending mail, is not one an un
 FalkorDB keeps each Graphiti `group_id` in its own graph.
 The scope is derived from the agent name, or for a private agent from the requester's private instance, hashed so no Matrix ID appears in a graph name.
 No tool function takes a `group_id`; the model can never name another scope.
-The embedded database lives in primary-only storage at `<storage_root>/knowledge_graph/`, outside every workspace, and listens only on a Unix socket there, so worker code cannot reach it.
+The embedded database file lives in primary-only storage at `<storage_root>/knowledge_graph/`, outside every workspace.
+FalkorDB Lite's server opens no TCP port and listens on a Unix socket in its own `0700` temporary directory, which keeps the socket path under the 108-byte limit that a long storage path could exceed; worker containers cannot reach it.
 An external FalkorDB server is the operator's to keep off worker networks; graph names alone do not isolate a connection that a worker could open.
 The graph name also carries a fingerprint of the embedder provider, model, and dimensions, so changing the embedder starts a new graph that ingestion rebuilds from stored sessions, as Mem0 switches collections.
 
@@ -95,6 +100,7 @@ FalkorDB Lite starts one Redis server process per file, and per-scope graphs in 
 The embedder reuses `memory.embedder`, limited to providers with an OpenAI-compatible embeddings API (`openai`, and `ollama` through its `/v1` endpoint); other providers fail config validation when the graph is enabled.
 Graphiti's embedder needs a fixed dimension, so `memory.embedder.config.dimensions` is required when the graph is enabled.
 Search uses Graphiti's hybrid search with reciprocal-rank fusion and no cross-encoder, so a query costs no LLM call.
+Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI key, so MindRoom passes a reranker that is never called by the search recipes it uses.
 Graphiti's extraction tokens are recorded as helper usage of kind `knowledge_graph`, attributed to the agent and the conversation's requester.
 `GRAPHITI_TELEMETRY_ENABLED=false` joins the vendor telemetry opt-outs.
 
@@ -144,7 +150,7 @@ agents:
 1. Every `interval_seconds`, for each graph-enabled agent and private instance, list sessions updated since that scope's cursor.
 2. Skip sessions active within `idle_seconds`, and threads that automations other than `exploration` started.
 3. For each session, up to `max_sessions_per_cycle`, read the completed runs after the session's ingested-run marker from both the live session and the compaction archive, because compaction can move runs before ingestion reaches them.
-4. Render them with a dedicated episode renderer, not the skill-learning digest, which shortens older messages and drops older tool results: every message in full with its provenance label, tool calls with arguments, each tool result clipped to `max_tool_result_chars`, credential-like values redacted with the shared `redact_sensitive_text`, and the text split into episodes of at most `max_episode_chars` at run boundaries.
+4. Render them with a dedicated episode renderer, not the skill-learning digest, which shortens older messages and drops older tool results: every message in full with its speaker, tool calls with arguments, each tool result clipped to `max_tool_result_chars`, credential-like values redacted with the shared `redact_sensitive_text`, and consecutive runs merged into `conversation` and `tool_results` episodes of at most `max_episode_chars`, split only at run boundaries; a single run larger than the cap is clipped.
 5. Call `add_episode` for each episode with `reference_time` from its last run and the scope's `group_id`, then advance the marker past that episode's runs.
 6. The marker is the only record of completion; Graphiti's `add_episode(uuid=...)` loads an existing episode and extracts again rather than skipping it, so no UUID is passed, and a crash between the write and the marker update re-extracts one episode, whose entities and facts Graphiti's resolution merges with the first copy.
 7. A failure keeps the marker, logs, and retries the session next cycle with a growing cooldown.
@@ -188,7 +194,7 @@ The tool runs in the primary process and touches no files.
 
 ## Testing
 
-- Unit: lead collection from a seeded session DB (allowlist filtering, `knowledge_graph` exclusion, dedup, caps), episode rendering (provenance labels, conversation vs exploration threads, archived runs, splitting at run boundaries, redaction), marker advance and retry, scope derivation, graph-name hashing, and the embedder fingerprint.
+- Unit: lead collection from a seeded session DB (allowlist filtering, `knowledge_graph` exclusion, dedup, caps), episode rendering (episode kinds and speakers, conversation vs exploration threads, archived runs, splitting at run boundaries, redaction), marker advance and retry, scope derivation, graph-name hashing, and the embedder fingerprint.
 - Seam: exploration turns build with only allowlisted functions and no gated functions, and ordinary turns of the same agent are unchanged; the per-thread cap holds across a continuation.
 - Integration: a fake Graphiti client behind the store protocol for the worker loop; one opt-in test against real FalkorDB Lite and a local OpenAI-compatible model.
 - Live: the success scenario above with two real sources, checked for correct facts and source links.
@@ -206,4 +212,3 @@ The tool runs in the primary process and touches no files.
 
 
 - Whether default Graphiti extraction on a cheap model is accurate enough on real transcripts; the live evaluation decides the default `knowledge_graph.model` and whether custom entity types are needed.
-- Whether FalkorDB Lite's bundled server starts on NixOS development hosts without `nix-ld`; production images are unaffected.
