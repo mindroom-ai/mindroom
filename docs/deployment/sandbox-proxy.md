@@ -477,7 +477,8 @@ This mapping controls only who may manage a vault in the UI, never which worker 
 Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
 With [background jobs](../tools/agent-orchestration.md#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
-A shell command stops at its timeout unless it runs as a background job, and a runner or worker restart stops running commands; see the [shell tool](../tools/execution-and-coding.md#shell).
+A shell command stops at its `timeout`; without one, a background job's command runs until it ends or the job is cancelled, and any other command stops after 120 seconds.
+A runner or worker restart stops running commands; see the [shell tool](../tools/execution-and-coding.md#shell).
 
 ## Browsers in workers
 

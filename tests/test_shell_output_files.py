@@ -237,19 +237,22 @@ async def test_cancelled_capture_does_not_publish(shell_toolkit: Toolkit, tmp_pa
 
 @pytest.mark.asyncio
 async def test_a_stopped_command_keeps_the_existing_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
-    """A command stopped at its timeout cannot replace the destination with incomplete output."""
+    """A command stopped at its timeout keeps the destination and reports its output so far in the receipt."""
     destination = tmp_path / "killed.txt"
     destination.write_text("keep existing")
     result = await FunctionCall(
         function=shell_toolkit.async_functions["run_shell_command"],
         arguments={
-            "args": "printf partial >&2; exec sleep 300",
+            "args": "echo compiling; printf 'error: missing header' >&2; exec sleep 300",
             "timeout": 1,
             "mindroom_output_path": "killed.txt",
         },
     ).aexecute()
     assert json.loads(str(result.result)) == {
-        "mindroom_tool_output": {"status": "error", "error": "Stopped after 1s. No output file was saved."},
+        "mindroom_tool_output": {
+            "status": "error",
+            "error": "Stopped after 1s. No output file was saved.\nOutput:\ncompiling\nStderr:\nerror: missing header",
+        },
     }
     assert destination.read_text() == "keep existing"
 

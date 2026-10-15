@@ -284,6 +284,128 @@ async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_a_command_stopped_at_its_timeout_stops_the_cli_calls_it_started(tmp_path: Path) -> None:
+    """A command that ran its whole timeout was stopped, so its CLI calls end with it instead of holding its result."""
+    cancelled = asyncio.Event()
+
+    async def forever() -> str:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "unreachable"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [forever], authorize)
+
+    async def command() -> str:
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
+        )
+        await asyncio.sleep(0.3)
+        return "Stopped after 0.2s."
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command, command_timeout=0.2) == "Stopped after 0.2s."
+    assert cancelled.is_set()
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls(tmp_path: Path) -> None:
+    """Minimal Bash passes its timeout to the command's window, which stops the calls a stopped command started."""
+    cancelled = asyncio.Event()
+
+    async def forever() -> str:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "unreachable"
+
+    async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
+        )
+        await asyncio.sleep(0.3)
+        return f"Stopped after {timeout}s."
+
+    catalog = await _catalog(
+        tmp_path,
+        [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="calls", tools=[forever])],
+    )
+    catalog.run_response.agent_id = "helper"
+    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async def bash(command: str) -> str:
+        return command
+
+    function = Function.from_callable(bash)
+    message = Message(
+        role="assistant",
+        tool_calls=[
+            {"id": "outer-1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"x"}'}},
+        ],
+    )
+    async with response_cli_lifetime() as lifetime:
+        lifetime.bind_provider(owner.checkpoint, function)
+        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            result = await owner.execute_bash(
+                ToolKey("shell", "run_shell_command"),
+                {"args": "outer", "timeout": 0.2},
+                calls[0],
+            )
+    assert result == "Stopped after 0.2s."
+    assert cancelled.is_set()
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_ended_in_time_waits_for_its_cli_calls(tmp_path: Path) -> None:
+    """A command that ended before its timeout still lets the CLI calls it started finish."""
+    finished = asyncio.Event()
+
+    async def slow() -> str:
+        await asyncio.sleep(0.2)
+        finished.set()
+        return "slow done"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [slow], authorize)
+
+    async def command() -> str:
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="slow"),
+        )
+        return "returned"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command, command_timeout=10) == "returned"
+    assert finished.is_set()
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path: Path) -> None:
     """Media a failed command's CLI calls returned is dropped with it, not attached to the next command."""
 

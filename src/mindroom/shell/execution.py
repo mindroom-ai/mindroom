@@ -26,11 +26,12 @@ from mindroom.shell.output_capture import (
     ShellOutputDestination,
     format_shell_completion,
 )
+from mindroom.tool_jobs.control import job_owns_execution
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-DEFAULT_RUN_TIMEOUT_SECONDS = 120
+_DEFAULT_RUN_TIMEOUT_SECONDS = 120
 # Time a worker shell request needs beyond its command's foreground wait to deliver the answer.
 _SHELL_REQUEST_GRACE_SECONDS = 30.0
 
@@ -177,15 +178,22 @@ class ShellRunResult:
     output_file_handled: bool = False
 
 
+def shell_call_timeout(timeout: float | None) -> float | None:
+    """Return when a shell call's command is stopped: its own timeout, none for a job's call, else the default."""
+    if timeout is not None:
+        return timeout
+    return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
+
+
 def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
     """Return how long one worker request may take for this shell call, or 0 when it has no foreground wait."""
     if tool_name != "shell" or function_name != "run_shell_command":
         return 0.0
-    raw_timeout = kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS)
+    raw_timeout = kwargs.get("timeout", _DEFAULT_RUN_TIMEOUT_SECONDS)
     try:
         timeout = max(0.0, float(raw_timeout))
     except (TypeError, ValueError):
-        timeout = float(DEFAULT_RUN_TIMEOUT_SECONDS)
+        timeout = float(_DEFAULT_RUN_TIMEOUT_SECONDS)
     return timeout + _SHELL_REQUEST_GRACE_SECONDS
 
 
@@ -419,20 +427,20 @@ async def _stop_timed_out_process(
     """Stop a command at its timeout and report its output so far; a stopped command saves no output file."""
     await _terminate_process_group(process)
     await _await_reader_tasks_with_grace(stdout_reader, stderr_reader, grace_seconds=_POST_EXIT_READER_GRACE_SECONDS)
-    notice = f"Stopped after {timeout:g}s."
-    if output_capture is not None:
-        output_capture.incomplete = True
-        output_capture.interruption = f"{notice} No output file was saved."
-        try:
-            return ShellRunResult(message=output_capture.publish(process.returncode), output_file_handled=True)
-        finally:
-            output_capture.close()
-    lines = [notice]
+    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if output_capture is not None else "")]
     if output := stdout_buf.render(tail=tail):
         lines += ["Output:", output]
     if errors := stderr_buf.render():
         lines += ["Stderr:", errors]
-    return ShellRunResult(message="\n".join(lines))
+    message = "\n".join(lines)
+    if output_capture is None:
+        return ShellRunResult(message=message)
+    output_capture.incomplete = True
+    output_capture.interruption = message
+    try:
+        return ShellRunResult(message=output_capture.publish(process.returncode), output_file_handled=True)
+    finally:
+        output_capture.close()
 
 
 def _unused_handle(registry: dict[str, ProcessRecord]) -> str:

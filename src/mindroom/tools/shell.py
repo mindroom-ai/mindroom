@@ -19,10 +19,9 @@ from mindroom.constants import (
     subprocess_path_with_prepends,
     workspace_home_identity_env,
 )
-from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS, run_command
+from mindroom.shell.execution import run_command, shell_call_timeout
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
-from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -448,9 +447,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 if output_request is not None and output_request.path is not None
                 else None
             )
-            if timeout is None and not job_owns_execution():
-                # Read at call time, so the default covers only calls that hold a reply.
-                timeout = DEFAULT_RUN_TIMEOUT_SECONDS
+            stop_after = shell_call_timeout(timeout)
             if self._supervisor_socket is not None:
                 result = await run_command_via_supervisor(
                     self._supervisor_socket,
@@ -459,7 +456,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     env=subprocess_env,
                     cwd=cwd,
                     tail=tail,
-                    timeout=timeout,
+                    timeout=stop_after,
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
@@ -472,7 +469,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     env=subprocess_env,
                     cwd=cwd,
                     tail=tail,
-                    timeout=timeout,
+                    timeout=stop_after,
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,

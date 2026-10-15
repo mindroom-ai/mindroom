@@ -65,6 +65,5 @@ Job cards offer no timed automatic approvals, and automatic approvals granted on
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
 A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.
-A `mindroom-agent` call whose command was stopped at its `timeout` runs until its own limit or its job's cancellation.
 Unhooked synchronous local tools in a job run on Agno's shared thread pool, because Agno chooses that thread; worker calls and calls that async entrypoints offload get their own threads.
 The jobs bar does not show progress.

@@ -787,7 +787,7 @@ async def test_only_a_job_command_runs_past_the_default_time_limit(tmp_path: Pat
     assert entrypoint is not None
     command = ["bash", "-c", "sleep 0.6; echo done"]
 
-    with patch("mindroom.tools.shell.DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
         stopped = await entrypoint(command)
         with job_control_context(JobControl()):
             finished = await entrypoint(command)
