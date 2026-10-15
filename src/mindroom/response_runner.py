@@ -40,6 +40,7 @@ from mindroom.background_tasks import create_background_task, run_coroutine_unti
 from mindroom.budgets.monitor import budget_model
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -454,6 +455,13 @@ def _split_delivery_tool_trace(
         else:
             interrupted.append(trace_entry)
     return completed, interrupted
+
+
+def _run_metadata_with_hook_source(metadata: dict[str, Any] | None, hook_source: str | None) -> dict[str, Any] | None:
+    """Record the trusted hook source that started this turn, so stored runs show which automation asked."""
+    if hook_source is None:
+        return metadata
+    return {**(metadata or {}), HOOK_SOURCE_RUN_METADATA_KEY: hook_source}
 
 
 def _materialize_matrix_run_metadata(
@@ -3920,7 +3928,10 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_run_metadata_with_hook_source(
+                _materialize_matrix_run_metadata(request.matrix_run_metadata),
+                request.response_envelope.hook_source,
+            ),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
