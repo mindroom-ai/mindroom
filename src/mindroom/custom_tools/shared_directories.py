@@ -79,7 +79,7 @@ class SharedDirectoryTools(Toolkit):
         """Create a directory you can write and later share read-only with other agents.
 
         Args:
-            name: Directory name: 1-64 lowercase letters, digits, '-' or '_'.
+            name: Directory name: 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit.
 
         """
         resolved = self._context()
