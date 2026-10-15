@@ -89,19 +89,22 @@ No tool function takes a `group_id`; the model can never name another scope.
 The embedded database file lives in primary-only storage at `<storage_root>/knowledge_graph/`, outside every workspace.
 FalkorDB Lite's server opens no TCP port and listens on a Unix socket in its own `0700` temporary directory, which keeps the socket path under the 108-byte limit that a long storage path could exceed; worker containers cannot reach it.
 An external FalkorDB server is the operator's to keep off worker networks; graph names alone do not isolate a connection that a worker could open.
-The graph name also carries a fingerprint of the embedder provider, model, and dimensions, so changing the embedder starts a new graph that ingestion rebuilds from stored sessions, as Mem0 switches collections.
+The graph name also carries the effective embedder signature that names Mem0 collections, so changing the embedder starts a new graph that ingestion rebuilds from stored sessions, as Mem0 switches collections.
 
 Rejected: one embedded database file per agent or private instance.
 FalkorDB Lite starts one Redis server process per file, and per-scope graphs in one server already isolate data that code addresses.
 
 ### Graphiti's models come from MindRoom config
 
-`knowledge_graph.model` names a `models` entry; MindRoom maps its provider to Graphiti's client (`openai`, `anthropic`, `google`, and `OpenAIGenericClient` for OpenAI-compatible hosts such as OpenRouter and Ollama) with that model's credentials.
-The embedder reuses `memory.embedder`, limited to providers with an OpenAI-compatible embeddings API (`openai`, and `ollama` through its `/v1` endpoint); other providers fail config validation when the graph is enabled.
-Graphiti's embedder needs a fixed dimension, so `memory.embedder.config.dimensions` is required when the graph is enabled.
+`knowledge_graph.model` names a `models` entry.
+Graphiti's `LLMClient` and `EmbedderClient` are thin adapters over MindRoom's own model and embedder construction (`get_model_instance` with a structured-output Agno run, and `create_configured_embedder` for `memory.embedder`), so every provider, credential rule, and base URL MindRoom supports works without a second mapping.
+Each extraction call is an Agno run, so its tokens are recorded through the same helper-usage path as auto-flush.
+
+Rejected: mapping MindRoom providers onto Graphiti's own provider clients.
+It duplicates key precedence and base-URL rules per provider, covers fewer providers, and gives no usage accounting.
 Search uses Graphiti's hybrid search with reciprocal-rank fusion and no cross-encoder, so a query costs no LLM call.
 Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI key, so MindRoom passes a reranker that is never called by the search recipes it uses.
-Graphiti's extraction tokens are recorded as helper usage of kind `knowledge_graph`, attributed to the agent and the conversation's requester.
+Extraction tokens are recorded as helper usage of kind `knowledge_graph`, attributed to the agent and the conversation's requester.
 `GRAPHITI_TELEMETRY_ENABLED=false` joins the vendor telemetry opt-outs.
 
 Graphiti needs structured output; small local models may fail extraction, which the ingestion worker reports and retries rather than hides.
