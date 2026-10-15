@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shared_directories.store import (
     SHARED_DIRECTORIES_DIRNAME,
-    load_shared_directories,
+    agent_shared_directories,
     shared_directory_relative_path,
 )
 
@@ -72,23 +72,13 @@ def shared_directory_roots(
         return _mounted_roots(runtime_paths)
     if config is None or agent_name is None:
         return ()
-    agent = config.agents.get(agent_name)
-    if agent is None or agent.private is not None:
-        return ()
-    roots: list[SharedDirectoryRoot] = []
-    for directory in load_shared_directories(runtime_paths):
-        owner = config.agents.get(directory.owner)
-        if owner is None or owner.private is not None:
-            continue
-        if directory.owner != agent_name and agent_name not in directory.members:
-            continue
-        roots.append(
-            SharedDirectoryRoot(
-                path=runtime_paths.storage_root / shared_directory_relative_path(directory.owner, directory.name),
-                writable=directory.owner == agent_name,
-            ),
+    return tuple(
+        SharedDirectoryRoot(
+            path=runtime_paths.storage_root / shared_directory_relative_path(directory.owner, directory.name),
+            writable=directory.owner == agent_name,
         )
-    return tuple(roots)
+        for directory in agent_shared_directories(runtime_paths, config, agent_name)
+    )
 
 
 def _matching_root(

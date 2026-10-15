@@ -14,8 +14,10 @@ from mindroom.shared_directories.paths import agent_reads_shares_in_worker, shar
 from mindroom.shared_directories.store import (
     SharedDirectoryError,
     add_shared_directory_member,
+    agent_shared_directories,
     create_shared_directory,
     delete_shared_directory,
+    is_shareable_agent,
     load_shared_directories,
     remove_shared_directory_member,
 )
@@ -24,7 +26,6 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from mindroom.config.main import Config
     from mindroom.shared_directories.store import SharedDirectory
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -37,11 +38,6 @@ def _restart_notice(agent_names: Iterable[str]) -> str:
     names = list(agent_names)
     joined = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
     return f"{joined}: worker restarts on the next tool call, ending running background shells."
-
-
-def _is_shareable_agent(config: Config, agent_name: str) -> bool:
-    agent = config.agents.get(agent_name)
-    return agent is not None and agent.private is None
 
 
 class SharedDirectoryTools(Toolkit):
@@ -64,7 +60,7 @@ class SharedDirectoryTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return _payload("error", message="Shared directory tool context is unavailable in this runtime path.")
-        if not _is_shareable_agent(context.config, context.agent_name):
+        if not is_shareable_agent(context.config, context.agent_name):
             return _payload("error", message="Private agents cannot share directories.")
         return context
 
@@ -105,7 +101,7 @@ class SharedDirectoryTools(Toolkit):
             return f"'{agent_name}' is not an agent."
         if agent_name == context.agent_name:
             return "You cannot invite yourself."
-        if not _is_shareable_agent(config, agent_name):
+        if not is_shareable_agent(config, agent_name):
             return f"{agent_name} is private and cannot join shared directories."
         if not is_access_checked_requester_id(context.requester_id, config, context.runtime_paths):
             return "Agents can only be invited on behalf of a user."
@@ -200,7 +196,6 @@ class SharedDirectoryTools(Toolkit):
         context = self._context()
         if isinstance(context, str):
             return context
-        config = context.config
         entries = [
             {
                 "owner": directory.owner,
@@ -209,9 +204,7 @@ class SharedDirectoryTools(Toolkit):
                 "access": "read-write" if directory.owner == context.agent_name else "read-only",
                 "path": self._view_path(context, directory),
             }
-            for directory in load_shared_directories(context.runtime_paths)
-            if _is_shareable_agent(config, directory.owner)
-            and context.agent_name in {directory.owner, *directory.members}
+            for directory in agent_shared_directories(context.runtime_paths, context.config, context.agent_name)
         ]
         return _payload("ok", directories=entries)
 

@@ -9,6 +9,7 @@ import shutil
 import stat
 import tempfile
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -81,6 +82,7 @@ from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
 from mindroom.session_storage.agent_storage import get_agent_runtime_state_dbs
+from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.construction import get_toolkit_construction
@@ -540,6 +542,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -559,6 +562,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -583,6 +587,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
@@ -607,6 +612,7 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             file_access=file_access,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
+            shared_directories=(),
         )
         assert expected in rendered
         assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
@@ -614,6 +620,30 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): `duckdb`."
             in rendered
         )
+
+
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
+def test_agent_role_lists_the_shared_directories_the_agent_reaches(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """An agent learns the path, owner, and access of each shared directory it owns or joined."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    now = datetime(2026, 10, 15, tzinfo=UTC)
+    create_shared_directory(runtime_paths, owner="general", name="report", now=now)
+    create_shared_directory(runtime_paths, owner="calculator", name="sums", now=now)
+    add_shared_directory_member(runtime_paths, owner="general", name="report", member="calculator")
+    shares = runtime_paths.storage_root / "shared_directories"
+
+    calculator = _create_agent_for_test("calculator", config=config)
+    general = _create_agent_for_test("general", config=config)
+
+    assert (
+        f"- Shared directories: `{shares / 'calculator' / 'sums'}` (yours, read-write), "
+        f"`{shares / 'general' / 'report'}` (from general, read-only)."
+    ) in calculator.role
+    assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in general.role
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
@@ -626,6 +656,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         file_access="workspace",
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
     assert "Not confined by file_access" not in rendered
 

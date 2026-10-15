@@ -23,6 +23,7 @@ from mindroom.workers.worker_retirement import remove_directory_tree_at
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 SHARED_DIRECTORIES_DIRNAME = "shared_directories"
@@ -111,6 +112,27 @@ def _write_ledger(runtime_paths: RuntimePaths, directories: dict[str, SharedDire
 def load_shared_directories(runtime_paths: RuntimePaths) -> tuple[SharedDirectory, ...]:
     """Return every recorded shared directory, sorted by owner and name."""
     return tuple(sorted(_read_ledger(runtime_paths).values(), key=lambda directory: (directory.owner, directory.name)))
+
+
+def is_shareable_agent(config: Config, agent_name: str) -> bool:
+    """Return whether an agent may own or join shared directories: configured and not private."""
+    agent = config.agents.get(agent_name)
+    return agent is not None and agent.private is None
+
+
+def agent_shared_directories(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    agent_name: str,
+) -> tuple[SharedDirectory, ...]:
+    """Return the directories one agent owns or joined, skipping any whose owner can no longer share."""
+    if not is_shareable_agent(config, agent_name):
+        return ()
+    return tuple(
+        directory
+        for directory in load_shared_directories(runtime_paths)
+        if is_shareable_agent(config, directory.owner) and agent_name in {directory.owner, *directory.members}
+    )
 
 
 def _existing(directories: dict[str, SharedDirectory], owner: str, name: str) -> SharedDirectory:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -13,9 +14,11 @@ import pytest
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.shared_directories import SharedDirectoryTools
 from mindroom.message_target import MessageTarget
-from mindroom.shared_directories.store import load_shared_directories
+from mindroom.shared_directories.paths import agent_reads_shares_in_worker, shared_directory_view_path
+from mindroom.shared_directories.store import create_shared_directory, load_shared_directories
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -222,3 +225,43 @@ def test_invalid_name_is_reported_to_the_model(tmp_path: Path) -> None:
 
     assert payload["status"] == "error"
     assert "Shared directory names" in str(payload["message"])
+
+
+@pytest.mark.parametrize(
+    ("backend_env", "expected_root"),
+    [
+        ({"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test"}, Path("/app/worker")),
+        (
+            {
+                "MINDROOM_WORKER_BACKEND": "docker",
+                "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test",
+                "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH": "/srv/worker",
+            },
+            Path("/srv/worker"),
+        ),
+    ],
+)
+def test_paths_name_the_worker_mount_when_tools_run_in_a_dedicated_worker(
+    tmp_path: Path,
+    backend_env: dict[str, str],
+    expected_root: Path,
+) -> None:
+    """An agent whose file tools run in a dedicated worker is told the path its worker mounts."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", **backend_env},
+    )
+    config = bind_runtime_paths(
+        Config(agents={"alice": AgentConfig(display_name="Alice", worker_tools=["shell"])}),
+        runtime_paths,
+    )
+    directory = create_shared_directory(runtime_paths, owner="alice", name="report", now=datetime.now(UTC))
+
+    assert agent_reads_shares_in_worker(config, runtime_paths, "alice") is True
+    assert shared_directory_view_path(runtime_paths, directory, in_worker=True) == (
+        expected_root / "shared_directories" / "alice" / "report"
+    )
+    assert shared_directory_view_path(runtime_paths, directory, in_worker=False) == (
+        runtime_paths.storage_root / "shared_directories" / "alice" / "report"
+    )
