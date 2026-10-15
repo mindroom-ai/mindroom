@@ -435,6 +435,11 @@ class DefaultsConfig(BaseModel):
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
+    cheap_model: str | None = Field(
+        default=None,
+        description="Cheaper model key for agents without their own cheap_model, such as on cold-cache turns",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     compaction: CompactionConfig | None = Field(
         default_factory=CompactionConfig,
         description="Default text compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",

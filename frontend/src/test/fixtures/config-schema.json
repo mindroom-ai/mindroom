@@ -1378,6 +1378,22 @@
           "title": "Learning Mode",
           "type": "string"
         },
+        "cheap_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cheaper model key for agents without their own cheap_model, such as on cold-cache turns",
+          "title": "Cheap Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
         "compaction": {
           "anyOf": [
             {
@@ -4746,6 +4762,7 @@
         "max_consecutive_agent_replies": 50,
         "learning": true,
         "learning_mode": "always",
+        "cheap_model": null,
         "compaction": {
           "enabled": true,
           "fallback_model": null,

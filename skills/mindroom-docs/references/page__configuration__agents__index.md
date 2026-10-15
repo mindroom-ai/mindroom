@@ -59,7 +59,7 @@ agents:
 | `display_name` | string | *required* | Name shown in Matrix |
 | `role` | string | `""` | System prompt describing the agent's purpose and expertise |
 | `model` | string | `"default"` | Key of an entry under `models:` |
-| `cheap_model` | string or null | `null` | Cheaper model key this agent may switch to; used by `cold_cache`. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
+| `cheap_model` | string or null | `null` | Cheaper model key this agent may switch to; used by `cold_cache`. Inherits `defaults.cheap_model`. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `tools` | list | `[]` | Tool names or single-key dicts with per-agent overrides; see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration). The agent gets these plus `defaults.tools`, without duplicates |
 | `include_default_tools` | bool | `true` | Set `false` to leave out `defaults.tools` and its overrides for this agent |
 | `skills` | list | `[]` | Skill names the agent can use; see [Skills](https://docs.mindroom.chat/skills/) |
@@ -203,6 +203,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `markdown` | `true` |
 | `learning` | `true` |
 | `learning_mode` | `always` |
+| `cheap_model` | `null`; ignored for an agent whose `model` is the same. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compress_tool_results` | `false` |
 | `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |

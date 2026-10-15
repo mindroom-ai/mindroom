@@ -499,8 +499,9 @@ agents:
         threshold: 0.8
 ```
 
+Set `defaults.cheap_model` to give every agent the same cheap model; an agent's own `cheap_model` wins, and an agent whose `model` is the default cheap model has none.
 `cold_cache: {}` enables the switch with the default judge, which asks `cheap_model` itself whether it can answer.
-`cold_cache` requires `cheap_model`, and `cheap_model` needs `context_window` set on both models or neither; when set, it must be at least the agent model's.
+`cold_cache` requires a cheap model, and the cheap model needs `context_window` set on both models or neither; when set, it must be at least the agent model's.
 
 | `cold_cache` field | Type | Default | Description |
 |-------|------|---------|-------------|

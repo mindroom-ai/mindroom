@@ -1990,6 +1990,9 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_agent_helper_models(self) -> Config:
         """Validate dedicated judgment and skill-review model aliases for opted-in agents."""
+        if self.defaults.cheap_model is not None and self.defaults.cheap_model not in self.models:
+            msg = f"Unknown defaults.cheap_model: {self.defaults.cheap_model!r}"
+            raise ValueError(msg)
         for agent_name, agent in self.agents.items():
             for settings in (agent.participation, agent.mid_turn, agent.cold_cache):
                 if settings is None:
@@ -1998,16 +2001,29 @@ class Config(BaseModel):
                 if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
                     msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
                     raise ValueError(msg)
-            if agent.cheap_model is not None:
-                self._validate_cheap_model(agent_name, agent.model, agent.cheap_model)
+            cheap_model = self.get_agent_cheap_model(agent_name)
+            # An inherited default is checked only where an agent uses it.
+            if cheap_model is not None and (agent.cheap_model is not None or agent.cold_cache is not None):
+                self._validate_cheap_model(agent_name, agent.model, cheap_model)
             elif agent.cold_cache is not None:
-                msg = f"cold_cache needs a cheap_model for agent {agent_name!r}"
+                msg = (
+                    f"cold_cache needs a cheap_model for agent {agent_name!r}; "
+                    "set agents.<name>.cheap_model or defaults.cheap_model"
+                )
                 raise ValueError(msg)
             review_model = agent.skill_learning.model
             if review_model is not None and review_model not in self.models:
                 msg = f"Unknown skill_learning model for agent {agent_name!r}: {review_model!r}"
                 raise ValueError(msg)
         return self
+
+    def get_agent_cheap_model(self, agent_name: str) -> str | None:
+        """Return the agent's cheap model, ignoring an inherited default the agent already runs."""
+        agent = self.agents[agent_name]
+        if agent.cheap_model is not None:
+            return agent.cheap_model
+        default = self.defaults.cheap_model
+        return None if default == agent.model else default
 
     def _validate_cheap_model(self, agent_name: str, agent_model: str, cheap_model: str) -> None:
         """Keep a cheap-model turn from compacting history the agent model still needs."""

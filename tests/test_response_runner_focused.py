@@ -7959,6 +7959,7 @@ async def _cold_cache_reply_model(
     scheduled_model: str | None = None,
     room_model: str | None = None,
     media: MediaInputs | None = None,
+    inherit_cheap_model: bool = False,
 ) -> tuple[list[str | None], list[dict[str, object]]]:
     """Run one reply for a cold-cache agent and return the model it used and the selector calls."""
     bot = _bot(tmp_path)
@@ -7967,8 +7968,10 @@ async def _cold_cache_reply_model(
     config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
     config.models["cheap2"] = ModelConfig(provider="test", id="cheap2-model")
     config.agents["general"] = config.agents["general"].model_copy(
-        update={"cheap_model": "cheap", "cold_cache": ColdCacheConfig()},
+        update={"cheap_model": None if inherit_cheap_model else "cheap", "cold_cache": ColdCacheConfig()},
     )
+    if inherit_cheap_model:
+        config.defaults.cheap_model = "cheap"
     if room_model is not None:
         set_room_model_override(coordinator.deps.runtime_paths, room_id="!room:localhost", model_name=room_model)
     selector_calls: list[dict[str, object]] = []
@@ -8018,6 +8021,14 @@ async def test_cold_cache_model_used_for_reply(tmp_path: Path) -> None:
     assert call["session"] is None
     assert call["context"] == ()
     assert call["prompt"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_uses_default_cheap_model(tmp_path: Path) -> None:
+    """An agent without its own cheap_model switches to defaults.cheap_model."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, inherit_cheap_model=True)
+    assert active_models == ["cheap"]
+    assert [call["cheap_model"] for call in selector_calls] == ["cheap"]
 
 
 @pytest.mark.asyncio

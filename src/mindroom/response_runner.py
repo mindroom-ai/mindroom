@@ -5843,10 +5843,11 @@ class ResponseRunner:
         """Let a judge move a turn whose prompt cache expired to the agent's cheap model."""
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
+        cheap_model = config.get_agent_cheap_model(self.deps.agent_name) if agent is not None else None
         if (
             agent is None
             or agent.cold_cache is None
-            or agent.cheap_model is None
+            or cheap_model is None
             or request.scheduled_model is not None
             # Thread and room overrides are explicit choices.
             or resolved_model != agent.model
@@ -5881,7 +5882,7 @@ class ResponseRunner:
             runtime_paths=self.deps.runtime_paths,
             agent_name=self.deps.agent_name,
             agent_model=resolved_model,
-            cheap_model=agent.cheap_model,
+            cheap_model=cheap_model,
             session=session,
             context=context,
             prompt=request.prompt,

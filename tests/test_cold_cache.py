@@ -38,13 +38,17 @@ def _config(
     *,
     agent_model: str = "opus",
     cheap_model: str | None = "haiku",
+    default_cheap_model: str | None = None,
 ) -> Config:
     agent: dict[str, Any] = {"display_name": "Assistant", "model": agent_model}
     if cheap_model is not None:
         agent["cheap_model"] = cheap_model
     if cold_cache is not None:
         agent["cold_cache"] = cold_cache
-    return Config.model_validate({"models": _MODELS, "agents": {"assistant": agent}})
+    data: dict[str, Any] = {"models": _MODELS, "agents": {"assistant": agent}}
+    if default_cheap_model is not None:
+        data["defaults"] = {"cheap_model": default_cheap_model}
+    return Config.model_validate(data)
 
 
 def test_cold_cache_defaults_to_self_judging_cheap_model() -> None:
@@ -76,6 +80,32 @@ def test_cold_cache_requires_cheap_model() -> None:
     """Cold-cache turns switch to the agent's cheap model, so one must be configured."""
     with pytest.raises(ValidationError, match="cold_cache needs a cheap_model"):
         _config({}, cheap_model=None)
+
+
+def test_default_cheap_model_applies_to_agents_without_their_own() -> None:
+    """One defaults.cheap_model serves every agent, and an agent's own cheap_model wins."""
+    inherited = _config({}, cheap_model=None, default_cheap_model="haiku")
+    assert inherited.get_agent_cheap_model("assistant") == "haiku"
+    own = _config({}, cheap_model="haiku", default_cheap_model="unsized")
+    assert own.get_agent_cheap_model("assistant") == "haiku"
+
+
+def test_default_cheap_model_skips_the_agent_already_on_it() -> None:
+    """An agent whose model is the default cheap model has no cheaper alternative."""
+    config = _config(agent_model="haiku", cheap_model=None, default_cheap_model="haiku")
+    assert config.get_agent_cheap_model("assistant") is None
+    with pytest.raises(ValidationError, match="cold_cache needs a cheap_model"):
+        _config({}, agent_model="haiku", cheap_model=None, default_cheap_model="haiku")
+
+
+def test_default_cheap_model_is_validated() -> None:
+    """A misspelled default fails configuration, and an inherited default must fit the agent's window."""
+    with pytest.raises(ValidationError, match=r"Unknown defaults\.cheap_model"):
+        _config(cheap_model=None, default_cheap_model="nope")
+    with pytest.raises(ValidationError, match="context window"):
+        _config({}, cheap_model=None, default_cheap_model="tiny")
+    # Unused by an agent without cold_cache, an ill-fitting default is harmless.
+    assert _config(cheap_model=None, default_cheap_model="tiny").get_agent_cheap_model("assistant") == "tiny"
 
 
 @pytest.mark.parametrize(
