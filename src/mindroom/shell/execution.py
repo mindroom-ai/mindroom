@@ -289,6 +289,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
                 stderr_reader=stderr_reader,
                 output_capture=capture,
                 started_at=started_at,
+                kill_group_after_exit=kill_group_after_exit,
             )
 
         if kill_group_after_exit:
@@ -370,6 +371,7 @@ async def _background_process(
     stderr_reader: asyncio.Task[None],
     output_capture: ShellOutputCapture | None,
     started_at: float,
+    kill_group_after_exit: bool,
 ) -> ShellRunResult:
     active = sum(1 for record in registry.values() if not record.finished)
     if active >= MAX_BACKGROUNDED:
@@ -401,7 +403,7 @@ async def _background_process(
         started_at=started_at,
     )
     monitor_task = asyncio.create_task(
-        _monitor_process(registry, handle, process, stdout_reader, stderr_reader),
+        _monitor_process(registry, handle, process, stdout_reader, stderr_reader, kill_group_after_exit),
     )
     record._monitor_task = monitor_task
     registry[handle] = record
@@ -667,8 +669,9 @@ async def _monitor_process(
     process: asyncio.subprocess.Process,
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
+    kill_group_after_exit: bool,
 ) -> None:
-    """Wait for a backgrounded process to exit and update its record."""
+    """Wait for a backgrounded process to exit and update its record; detached children survive unless killed."""
     try:
         await _await_process_exit(process)
     finally:
@@ -681,8 +684,9 @@ async def _monitor_process(
                 _done, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
                 capture.incomplete |= bool(pending)
         finally:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
+            if kill_group_after_exit:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(process.pid, signal.SIGKILL)
         await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
         await _cancel_pending_tasks(stdout_reader, stderr_reader)
         record = registry.get(handle)

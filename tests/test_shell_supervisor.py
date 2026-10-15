@@ -11,6 +11,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import uuid
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -133,6 +134,11 @@ async def _run(
     return result.message
 
 
+def _script_handle() -> str:
+    """A caller-supplied handle, which marks a background script run as real script runs do."""
+    return f"shell:{uuid.uuid4().hex}"
+
+
 def _extract_handle(message: str) -> str:
     assert "Handle: " in message, message
     return message.split("Handle: ")[1].split("\n", maxsplit=1)[0]
@@ -232,6 +238,7 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
         process,
         stdout_reader,
         stderr_reader,
+        kill_group_after_exit=True,
     )
 
     assert record.finished is True
@@ -363,6 +370,7 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
             socket_path,
             [sys.executable, "-c", script, str(child_path), str(release_path)],
             timeout=0,
+            handle=_script_handle(),
             max_runtime_seconds=3,
         )
         handle = _extract_handle(result)
@@ -1103,7 +1111,12 @@ async def test_finished_script_kills_same_group_descendants(
         ")\n"
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')\n"
     )
-    result = await _run(socket_path, [sys.executable, "-c", script, str(child_pid_path)], timeout=0)
+    result = await _run(
+        socket_path,
+        [sys.executable, "-c", script, str(child_pid_path)],
+        timeout=0,
+        handle=_script_handle(),
+    )
     handle = _extract_handle(result)
     child_pid: int | None = None
     try:

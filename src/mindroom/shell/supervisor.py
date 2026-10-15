@@ -147,6 +147,8 @@ async def _handle_run(
             handle=handle_payload,
             handle_reservations=handle_reservations,
             output_destination=output_destination,
+            # A script run's leftover processes end with it; a shell command's detached children keep running.
+            kill_group_after_exit=handle_payload is not None,
         ),
     )
     # EOF before the run response means the client (a per-request tool
