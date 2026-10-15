@@ -24,35 +24,35 @@ class StopReplyTools(Toolkit):
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("stop_reply", status, **kwargs)
 
-    async def stop_agent_reply(self, agent: str) -> str:
+    async def stop_agent_reply(self, agent_name: str) -> str:
         """Stop the reply another agent or team is currently writing in this room and thread.
 
         The stop acts for the user you are working for, exactly as if they reacted 🛑 on that reply,
         so it only takes effect when that user may use the target agent.
 
         Args:
-            agent: Name of the agent or team whose reply to stop.
+            agent_name: Name of the agent or team whose reply to stop.
 
         """
         context = get_tool_runtime_context()
         if context is None:
             return self._payload("error", message="Stop reply tool context is unavailable in this runtime path.")
-        if agent in {context.agent_name, context.transport_agent_name}:
-            return self._payload("error", agent=agent, message="You cannot stop your own reply.")
+        if agent_name in {context.agent_name, context.transport_agent_name}:
+            return self._payload("error", agent=agent_name, message="You cannot stop your own reply.")
         # The relayed requester is whose access the target checks, as for any user's 🛑.
         if not is_access_checked_requester_id(context.requester_id, context.config, context.runtime_paths):
-            return self._payload("error", agent=agent, message="A reply can only be stopped on behalf of a user.")
+            return self._payload("error", agent=agent_name, message="A reply can only be stopped on behalf of a user.")
         room_id = context.target.room_id
         thread_id = context.target.resolved_thread_id
         orchestrator = context.orchestrator
         reply_event_id = (
-            await orchestrator.open_reply_event_id(agent, room_id, thread_id) if orchestrator is not None else None
+            await orchestrator.open_reply_event_id(agent_name, room_id, thread_id) if orchestrator is not None else None
         )
         if reply_event_id is None:
             return self._payload(
                 "error",
-                agent=agent,
-                message=f"{agent} has no reply in progress in this conversation.",
+                agent=agent_name,
+                message=f"{agent_name} has no reply in progress in this conversation.",
             )
 
         content = build_reaction_content(reply_event_id, "🛑")
@@ -68,13 +68,13 @@ class StopReplyTools(Toolkit):
         if not isinstance(response, nio.RoomSendResponse):
             return self._payload(
                 "error",
-                agent=agent,
+                agent=agent_name,
                 reply_event_id=reply_event_id,
                 message=f"Failed to send the stop: {response}",
             )
         return self._payload(
             "ok",
-            agent=agent,
+            agent=agent_name,
             room_id=room_id,
             thread_id=thread_id,
             reply_event_id=reply_event_id,

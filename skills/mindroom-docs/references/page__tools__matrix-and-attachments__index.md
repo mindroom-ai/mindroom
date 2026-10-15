@@ -193,13 +193,11 @@ set_thread_summary("Summary for the import thread.", thread_id="$threadRoot", ro
 
 ## [`stop_reply`]
 
-`stop_agent_reply(agent)` stops the reply another agent or team is writing in the current room and thread, for example when a coordinator sees a helper going off track.
+`stop_agent_reply(agent_name)` stops the reply another agent or team is writing in the current room and thread.
 It is not in starter configs or default tool sets.
 
-The tool reacts 🛑 on that reply on behalf of the user the calling agent is working for, so the stop behaves exactly like that user's own [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button) reaction: the reply ends with `**[Response cancelled by user]**`, including a reply waiting for tool approval.
-The stop takes effect only when that user may use the target agent.
-
-The tool returns an error without reacting when `agent` is the calling agent itself, when that agent or team has no unfinished reply in the current conversation, or when the calling agent is not acting for a user, for example in a run that another agent started on its own.
+The tool reacts 🛑 on that reply for the user the calling agent is working for, so it works like that user's own [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button) and needs that user's access to the stopped agent.
+It returns an error without reacting when the calling agent is not acting for a user, such as in a run another agent started on its own.
 
 ```yaml
 agents:

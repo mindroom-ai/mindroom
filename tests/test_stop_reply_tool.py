@@ -68,6 +68,14 @@ def _context(tmp_path: Path) -> ToolRuntimeContext:
     )
 
 
+def test_stop_agent_reply_schema_asks_the_model_for_the_target_name() -> None:
+    """The target is a model-supplied name, never a parameter Agno fills with the calling Agent."""
+    function = StopReplyTools().async_functions["stop_agent_reply"]
+    function.process_entrypoint(strict=False)
+
+    assert function.parameters["required"] == ["agent_name"]
+
+
 @pytest.mark.asyncio
 async def test_stop_agent_reply_sends_a_stop_for_the_requester_on_the_agents_reply(tmp_path: Path) -> None:
     """The stop is a 🛑 on the agent's reply in this conversation that relays the user the caller acts for."""
