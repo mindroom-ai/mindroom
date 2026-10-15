@@ -356,3 +356,38 @@ def test_a_worker_shell_call_streams_its_output_as_progress(monkeypatch: pytest.
     assert {"progress": "started"} in frames
     assert frames[-1]["ok"] is True
     assert frames[-1]["result"].endswith("started\nfinished")
+
+
+_EXITS_LEAVING_A_PIPE_HOLDER = """
+import pathlib, subprocess, sys
+holder = subprocess.Popen(["sleep", "30"])
+pathlib.Path(sys.argv[1]).write_text(str(holder.pid))
+print("out", end="")
+print("done", file=sys.stderr, end="")
+"""
+
+
+def test_a_spawned_child_that_exited_never_waits_for_a_process_that_holds_its_pipes(tmp_path: Path) -> None:
+    """A tool that leaves a server running gets its result once its process exits, and the server keeps running."""
+    pid_file = tmp_path / "holder.pid"
+    holder = None
+    try:
+        started = time.monotonic()
+        completed = sandbox_runner_module._run_request_subprocess(
+            [sys.executable, "-c", _EXITS_LEAVING_A_PIPE_HOLDER, str(pid_file)],
+            input="",
+            timeout=None,
+            env=None,
+            cwd=None,
+        )
+        holder = int(pid_file.read_text())
+
+        assert time.monotonic() - started < 10
+        assert completed.returncode == 0
+        assert completed.stdout == "out"
+        assert completed.stderr == "done"
+        os.kill(holder, 0)
+    finally:
+        if holder is not None:
+            with suppress(ProcessLookupError):
+                os.kill(holder, signal.SIGKILL)

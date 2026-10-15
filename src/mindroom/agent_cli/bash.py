@@ -48,7 +48,16 @@ class MinimalBashTools(Toolkit):
         tail: int = 100,
         fc: FunctionCall | None = None,
     ) -> str | ToolResult:
-        """Run a Bash command; past ``timeout`` seconds it is stopped with its output so far, as the shell tool does."""
+        """Run a Bash command and return its output.
+
+        Args:
+            command: The Bash command to run.
+            timeout: Seconds after which the command and every process it started are stopped, returning the output
+                so far; null stops it after 120 seconds, or never when it runs as part of a background job.
+            tail: The number of output lines to return.
+            fc: The provider's call, which the SDK supplies and the model never sees.
+
+        """
         if not isinstance(command, str) or not command.strip():
             msg = "Bash requires a command"
             raise ValueError(msg)

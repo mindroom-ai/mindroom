@@ -219,7 +219,7 @@ A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
 A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command and the processes it started.
-A shell call that cannot run as a job, such as during a voice call, in minimal mode, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
+A shell call that runs outside any job, such as during a voice call, in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Tools that run long in a [worker](../deployment/sandbox-proxy.md) are not limited by the worker's request timeouts while they run as a job.
 

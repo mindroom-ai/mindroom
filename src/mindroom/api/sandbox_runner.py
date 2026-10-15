@@ -1539,6 +1539,13 @@ def _kill_request_process_group(process: subprocess.Popen[str]) -> None:
         os.killpg(process.pid, signal.SIGKILL)
 
 
+def _decoded(output: bytes | str | None) -> str:
+    """Decode output a timed-out ``communicate`` read so far, which arrives as bytes even in text mode."""
+    if output is None:
+        return ""
+    return output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
+
+
 def _relay_child_progress(conn: socket.socket) -> None:
     """Report each progress line a request child writes on its socket as this call's progress."""
     with suppress(OSError), conn.makefile("rb") as lines:
@@ -1589,6 +1596,7 @@ def _run_request_subprocess(
 
             sandbox_request_cancellation.bind_request_stop(stop)
             pending_input: str | None = input
+            slices_since_exit = 0
             try:
                 while True:
                     remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -1598,14 +1606,18 @@ def _run_request_subprocess(
                             timeout=_SPAWN_POLL_SECONDS if remaining is None else min(_SPAWN_POLL_SECONDS, remaining),
                         )
                         break
-                    except subprocess.TimeoutExpired:
+                    except subprocess.TimeoutExpired as expired:
                         # Retrying keeps the input already sent and the output already read.
                         pending_input = None
                         if remaining == 0.0:
                             raise
-                        if stopped.is_set() and process.poll() is not None:
-                            stdout, stderr = "", ""
-                            break
+                        if process.poll() is not None:
+                            slices_since_exit += 1
+                            # The child exited, but a process it started, such as a server, still holds its pipes:
+                            # after one slice to read what the child wrote, stop waiting for their end.
+                            if stopped.is_set() or slices_since_exit > 1:
+                                stdout, stderr = _decoded(expired.stdout), _decoded(expired.stderr)
+                                break
             except BaseException:
                 _kill_request_process_group(process)
                 process.wait()

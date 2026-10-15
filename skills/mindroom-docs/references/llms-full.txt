@@ -7408,7 +7408,8 @@ After exit code `4`, check the original call ID before retrying, because submitt
 
 CLI calls follow the agent's existing approval rules and interactive questions, and an approval applies to the exact tool and arguments shown.
 Each Bash command starts a fresh shell: workspace files persist, but shell variables and directory changes do not carry over.
-A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far; start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
+A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far, while one inside a background job, such as a minimal subagent's, has no default limit.
+In a reply, start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
 A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.
 `calls wait` on earlier receipts works until the response ends.
@@ -12576,7 +12577,7 @@ A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
 A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command and the processes it started.
-A shell call that cannot run as a job, such as during a voice call, in minimal mode, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
+A shell call that runs outside any job, such as during a voice call, in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Tools that run long in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/) are not limited by the worker's request timeouts while they run as a job.
 
