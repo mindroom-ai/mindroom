@@ -1513,6 +1513,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
     approvals_as_jobs = (
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
+    # A standard agent's shell command runs to completion as one call, so its background job owns the whole run.
+    managed_shell = (
+        not minimal_mode
+        and not disable_runtime_capabilities
+        and background_tool_jobs_enabled(config, runtime_paths)
+        and not toolkit_is_background_excluded("shell", config, runtime_paths)
+    )
     persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
@@ -1621,6 +1628,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
+            if managed_shell:
+                # Before function filters, which may drop the check and kill functions the managed call polls with.
+                install_managed_shell([toolkit])
             if persona_tools is not None:
                 # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
                 _keep_persona_functions(toolkit, tool_name, persona_tools)
@@ -2243,14 +2253,6 @@ def create_agent(  # noqa: PLR0915
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
-    # A standard agent's shell command runs to completion as one call, so its background job owns the whole run.
-    if (
-        agent_mode == "standard"
-        and not disable_runtime_capabilities
-        and background_tool_jobs_enabled(config, runtime_paths)
-        and not toolkit_is_background_excluded("shell", config, runtime_paths)
-    ):
-        install_managed_shell(tool_assembly.tools)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     cli_shell = (
         agent_cli_in_shell

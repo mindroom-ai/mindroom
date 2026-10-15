@@ -19,7 +19,7 @@ from mindroom import agents, ai
 from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
@@ -199,6 +199,19 @@ def test_persona_tool_subset_hides_other_functions(tmp_path: Path) -> None:
     }
     assert "read_file" in toolkit_functions
     assert "run_shell_command" not in toolkit_functions
+
+
+@pytest.mark.asyncio
+async def test_persona_naming_only_run_shell_command_gets_the_managed_shell(tmp_path: Path) -> None:
+    """With background jobs, a persona offered only run_shell_command still builds its command-to-completion shell."""
+    runtime = _runtime(tmp_path, tools=["shell"])
+    runtime.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=True)
+    agent = _child(runtime, ["shell.run_shell_command"])
+
+    names = await _function_names(agent)
+
+    assert "run_shell_command" in names
+    assert "check_shell_command" not in names
 
 
 @pytest.mark.asyncio
