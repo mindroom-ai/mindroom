@@ -481,7 +481,7 @@ export function Schedules() {
 
   return (
     <div className="h-full flex flex-col gap-3 sm:gap-4">
-      <Card className="border border-white/40 dark:border-white/10 bg-white/75 dark:bg-stone-900/50 backdrop-blur-xl">
+      <Card>
         <CardContent className="py-3 px-4 sm:py-4 sm:px-5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">

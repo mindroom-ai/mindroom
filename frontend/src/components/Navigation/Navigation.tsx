@@ -4,7 +4,6 @@ import {
   Bot,
   Brain,
   CalendarClock,
-  Check,
   DoorOpen,
   Home,
   KeyRound,
@@ -135,10 +134,10 @@ function NavigationLinks({
   onNavigate?: () => void;
 }) {
   return (
-    <div className={cn("space-y-4", mobile && "space-y-3")}>
+    <div className="space-y-5">
       {NAV_GROUPS.map((group) => (
         <div key={group}>
-          <p className="px-3 pb-2.5 pt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+          <p className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-rail-muted">
             {group}
           </p>
           <div className="space-y-0.5">
@@ -152,26 +151,20 @@ function NavigationLinks({
                   onClick={onNavigate}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "group flex items-center gap-2.5 rounded-md px-3 text-[13px] font-medium text-muted-foreground outline-none transition-colors hover:bg-foreground/[0.045] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                    mobile ? "min-h-11" : "min-h-[38px]",
+                    "relative flex items-center gap-3 rounded-md px-3 text-sm font-medium text-rail-foreground/80 outline-none transition-colors duration-150 hover:bg-white/[0.06] hover:text-rail-foreground focus-visible:ring-2 focus-visible:ring-rail-accent",
+                    mobile ? "min-h-11" : "min-h-9",
                     active &&
-                      "bg-primary/[0.12] text-primary hover:bg-primary/[0.16]",
+                      "bg-white/10 text-rail-foreground before:absolute before:-left-3 before:top-2 before:bottom-2 before:w-[3px] before:rounded-r-full before:bg-rail-accent hover:bg-white/10",
                   )}
                 >
                   <ItemIcon
                     aria-hidden="true"
                     className={cn(
-                      "h-4 w-4 shrink-0 text-muted-foreground/80",
-                      active && "text-primary",
+                      "h-4 w-4 shrink-0 text-rail-muted",
+                      active && "text-rail-accent",
                     )}
                   />
                   <span>{item.label}</span>
-                  {active && (
-                    <Check
-                      aria-hidden="true"
-                      className="ml-auto h-3.5 w-3.5 shrink-0"
-                    />
-                  )}
                 </Link>
               );
             })}
@@ -179,6 +172,25 @@ function NavigationLinks({
         </div>
       ))}
     </div>
+  );
+}
+
+/** The logo and wordmark that lead back to Home from the rail. */
+export function BrandLink({ className }: { className?: string }) {
+  return (
+    <Link
+      to="/dashboard"
+      aria-label="MindRoom home"
+      className={cn(
+        "flex items-center gap-2.5 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-rail-accent",
+        className,
+      )}
+    >
+      <img src="/logo.svg" alt="" className="h-7 w-7 shrink-0" />
+      <span className="font-display text-[17px] font-semibold tracking-tight text-rail-foreground">
+        MindRoom
+      </span>
+    </Link>
   );
 }
 
@@ -200,21 +212,23 @@ export function Navigation({ mode = "all", className }: NavigationProps) {
               type="button"
               aria-label="Open navigation"
               className={cn(
-                "glass-control inline-flex h-11 w-11 shrink-0 items-center justify-center md:hidden",
+                "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-rail-foreground transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rail-accent md:hidden",
                 className,
               )}
             >
-              <Menu aria-hidden="true" className="h-4 w-4" />
+              <Menu aria-hidden="true" className="h-5 w-5" />
             </button>
           </DialogTrigger>
-          <DialogContent className="glass-overlay left-3 top-3 h-[calc(100dvh-1.5rem)] w-[min(20rem,calc(100%-1.5rem))] max-w-none translate-x-0 translate-y-0 overflow-y-auto p-3 sm:rounded-xl">
-            <DialogHeader className="px-2 pb-2 pt-1 text-left">
-              <DialogTitle className="text-base">Navigate</DialogTitle>
-              <DialogDescription className="text-xs">
+          <DialogContent className="left-0 top-0 h-dvh w-[min(18rem,85vw)] max-w-none translate-x-0 translate-y-0 content-start gap-3 overflow-y-auto rounded-none border-0 border-r border-white/10 bg-rail p-3 text-rail-foreground shadow-2xl sm:rounded-none [&>button]:text-rail-foreground [&>button:hover]:bg-white/10">
+            <DialogHeader className="px-2 pb-1 pt-2 text-left">
+              <DialogTitle className="font-display text-lg text-rail-foreground">
+                Navigate
+              </DialogTitle>
+              <DialogDescription className="text-xs text-rail-muted">
                 MindRoom configuration sections
               </DialogDescription>
             </DialogHeader>
-            <nav aria-label="Mobile navigation">
+            <nav aria-label="Mobile navigation" className="px-3">
               <NavigationLinks
                 currentValue={currentValue}
                 mobile
@@ -227,12 +241,19 @@ export function Navigation({ mode = "all", className }: NavigationProps) {
 
       {mode !== "mobile" && (
         <aside
+          aria-label="MindRoom"
           className={cn(
-            "glass-panel shell-navigation mb-4 ml-4 hidden w-52 shrink-0 overflow-y-auto rounded-xl px-3 py-4 md:block",
+            "hidden w-56 shrink-0 flex-col bg-rail text-rail-foreground md:flex",
             className,
           )}
         >
-          <nav aria-label="Primary navigation">
+          <div className="flex h-14 shrink-0 items-center px-5">
+            <BrandLink />
+          </div>
+          <nav
+            aria-label="Primary navigation"
+            className="min-h-0 flex-1 overflow-y-auto px-3 pb-6 pt-3"
+          >
             <NavigationLinks currentValue={currentValue} />
           </nav>
         </aside>

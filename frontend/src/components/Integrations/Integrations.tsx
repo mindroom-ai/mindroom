@@ -1142,12 +1142,12 @@ export function Integrations() {
               <CardTitle className="text-lg">{integration.name}</CardTitle>
             </div>
             {isConnected ? (
-              <Badge className="bg-gradient-to-r from-green-500 to-emerald-500 text-white border-0">
+              <Badge className="bg-emerald-700 text-white border-0">
                 <CheckCircle2 className="h-3 w-3 mr-1" />
                 Connected
               </Badge>
             ) : (
-              <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
+              <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 border-amber-500/20">
                 <Circle className="h-3 w-3 mr-1" />
                 {statusLabel}
               </Badge>

@@ -59,31 +59,22 @@ export function FilterSelector({
   return (
     <div
       className={cn(
-        "inline-flex gap-1 rounded-lg p-1.5",
-        "bg-white dark:bg-stone-900/70",
-        "backdrop-blur-xl",
-        "border border-gray-200 dark:border-white/10",
+        "inline-flex gap-1 rounded-lg border border-border bg-secondary p-1",
         className,
       )}
     >
       {options.map((option) => (
         <button
           key={option.value}
+          type="button"
+          aria-pressed={isSelected(option.value)}
           onClick={() => handleClick(option.value)}
           className={cn(
-            "relative rounded-md font-medium transition-all duration-200",
-            "hover:bg-gray-100 dark:hover:bg-white/5",
+            "relative rounded-md font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             sizeClasses[size],
-            isSelected(option.value) && [
-              "bg-amber-500/20 dark:bg-amber-500/20",
-              "text-amber-900 dark:text-amber-200",
-              "shadow-sm",
-              "hover:bg-amber-500/30 dark:hover:bg-amber-500/30",
-            ],
-            !isSelected(option.value) && [
-              "text-gray-600 dark:text-gray-400",
-              "hover:text-gray-900 dark:hover:text-gray-200",
-            ],
+            isSelected(option.value)
+              ? "bg-card text-foreground shadow-sm"
+              : "text-muted-foreground hover:bg-card/60 hover:text-foreground",
           )}
         >
           <span className="flex items-center gap-1.5">
@@ -93,8 +84,7 @@ export function FilterSelector({
                   <Filter
                     className={cn(
                       "w-3.5 h-3.5",
-                      isSelected(option.value) &&
-                        "text-amber-600 dark:text-amber-400",
+                      isSelected(option.value) && "text-primary",
                     )}
                   />
                 )}
@@ -106,8 +96,8 @@ export function FilterSelector({
                   "min-w-[1.25rem] h-5 px-1 rounded-full",
                   "text-xs font-medium",
                   isSelected(option.value)
-                    ? "bg-amber-600/30 dark:bg-amber-400/30 text-amber-900 dark:text-amber-200"
-                    : "bg-gray-600/20 dark:bg-gray-600/30 text-gray-700 dark:text-gray-400",
+                    ? "bg-accent text-accent-foreground"
+                    : "bg-foreground/[0.07] text-muted-foreground",
                 )}
               >
                 {option.count}

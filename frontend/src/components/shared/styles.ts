@@ -31,11 +31,12 @@ export const sharedStyles = {
   item: {
     container:
       "w-full text-left px-3 py-3 sm:py-2 rounded-md transition-colors duration-150 min-h-[44px] sm:min-h-0",
-    containerHover: "hover:bg-foreground/[0.045]",
+    containerHover: "hover:bg-secondary",
     containerCard:
-      "cursor-pointer rounded-lg outline-none transition-colors hover:bg-foreground/[0.045] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-    selected: "bg-primary/[0.10] text-foreground hover:bg-primary/[0.14]",
-    selectedCard: "bg-primary/[0.10]",
+      "cursor-pointer rounded-lg outline-none transition-colors duration-150 hover:bg-secondary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+    selected: "bg-accent text-foreground hover:bg-accent",
+    selectedCard:
+      "bg-accent shadow-[inset_3px_0_0_hsl(var(--primary))] hover:bg-accent",
     iconContainer: "flex items-center gap-2 transition-colors duration-150",
     icon: "h-4 w-4 transition-colors duration-150",
     iconSelected: "text-primary dark:text-primary",
@@ -51,8 +52,8 @@ export const sharedStyles = {
 
   // Creation forms
   creation: {
-    container: "border-2 border-blue-500",
-    containerTeam: "border-2 border-orange-500",
+    container: "border border-primary",
+    containerTeam: "border border-primary",
     inputContainer: "flex items-center gap-2",
     input: "flex-1",
     content: "p-3",

@@ -1,5 +1,4 @@
 import React, { ReactNode } from "react";
-import { Check } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { sharedStyles, getSelectionStyles } from "./styles";
@@ -114,12 +113,6 @@ export function ItemCard({
               )}
             >
               <span className="min-w-0 flex-1">{title}</span>
-              {isSelected && (
-                <Check
-                  aria-hidden="true"
-                  className="mt-0.5 h-4 w-4 shrink-0 text-primary"
-                />
-              )}
             </h3>
             {description && (
               <p className={sharedStyles.item.cardDescription}>{description}</p>

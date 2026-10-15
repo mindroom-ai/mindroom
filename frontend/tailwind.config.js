@@ -6,20 +6,25 @@ export default {
     extend: {
       fontFamily: {
         sans: [
+          '"Hanken Grotesk Variable"',
           "system-ui",
           "-apple-system",
           "BlinkMacSystemFont",
           "Segoe UI",
-          "Roboto",
           "sans-serif",
         ],
         display: [
+          '"Bricolage Grotesque Variable"',
+          '"Hanken Grotesk Variable"',
           "system-ui",
-          "-apple-system",
-          "BlinkMacSystemFont",
-          "Segoe UI",
-          "Roboto",
           "sans-serif",
+        ],
+        mono: [
+          '"JetBrains Mono Variable"',
+          "ui-monospace",
+          "SFMono-Regular",
+          "Menlo",
+          "monospace",
         ],
       },
       borderRadius: {
@@ -61,6 +66,12 @@ export default {
         card: {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
+        },
+        rail: {
+          DEFAULT: "hsl(var(--rail))",
+          foreground: "hsl(var(--rail-foreground))",
+          muted: "hsl(var(--rail-muted))",
+          accent: "hsl(var(--rail-accent))",
         },
       },
       animation: {

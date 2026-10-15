@@ -211,7 +211,7 @@ function ComingUp({
                       kind="room"
                       id={room?.id ?? task.room_id}
                       name={roomName}
-                      className="h-6 w-6 rounded-lg"
+                      className="h-6 w-6"
                     />
                     <span title={roomName}>{roomName}</span>
                   </div>
@@ -320,7 +320,7 @@ function Home({
                   kind="room"
                   id={room.id}
                   name={room.display_name}
-                  className="h-[52px] w-[52px] rounded-lg text-lg"
+                  className="h-[52px] w-[52px] text-lg"
                 />
                 <span className="home-room-body">
                   <span className="home-room-name" title={room.display_name}>
@@ -345,7 +345,7 @@ function Home({
                           kind={member.kind}
                           id={member.id}
                           name={member.name}
-                          className="h-[22px] w-[22px] rounded-full text-[8px] ring-2 ring-background"
+                          className="h-[22px] w-[22px] text-[8px] ring-2 ring-card"
                         />
                       ))}
                       {members.length > 4 && (
@@ -390,7 +390,7 @@ function Home({
                 kind="agent"
                 id={agent.id}
                 name={agent.display_name}
-                className="h-9 w-9 rounded-full"
+                className="h-9 w-9"
               />
               <span title={agent.display_name}>{agent.display_name}</span>
             </button>

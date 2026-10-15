@@ -33,9 +33,7 @@ export function ToolSelectionRow({
   onToggleSettings,
 }: ToolSelectionRowProps) {
   const activeClass =
-    isActive && showSettings
-      ? "bg-blue-50 dark:bg-blue-500/10"
-      : "hover:bg-gray-50 dark:hover:bg-white/5";
+    isActive && showSettings ? "bg-accent" : "hover:bg-secondary";
 
   return (
     <div className={`rounded-lg p-2 transition-colors ${activeClass}`}>

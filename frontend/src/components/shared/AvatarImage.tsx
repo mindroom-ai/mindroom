@@ -36,7 +36,7 @@ export function AvatarImage({
     <span
       aria-hidden="true"
       className={cn(
-        "flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-accent text-xs font-medium text-primary",
+        "flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-[28%] bg-accent text-xs font-semibold text-accent-foreground",
         className,
       )}
     >

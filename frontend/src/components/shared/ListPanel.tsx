@@ -202,8 +202,8 @@ export function ListPanel<T extends ListItem>({
 
   const creationBorderClass =
     creationBorderVariant === "orange"
-      ? "border-2 border-orange-500"
-      : "border-2 border-blue-500";
+      ? sharedStyles.creation.containerTeam
+      : sharedStyles.creation.container;
 
   const headerContent = (
     <>

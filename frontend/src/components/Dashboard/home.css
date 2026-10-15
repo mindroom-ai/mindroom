@@ -18,11 +18,13 @@
   gap: 20px;
 }
 .home-heading h2 {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 37px;
-  font-weight: 400;
-  line-height: 1.2;
-  letter-spacing: -0.045em;
+  font-family:
+    "Bricolage Grotesque Variable", "Hanken Grotesk Variable", system-ui,
+    sans-serif;
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
   outline: none;
 }
 .home-heading p {
@@ -32,15 +34,16 @@
 }
 .home-browse {
   gap: 9px;
-  font-weight: 400;
-  color: hsl(var(--muted-foreground));
   border-radius: var(--radius);
 }
 .home-day-surface {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  padding: 20px 0 25px;
-  border-bottom: 1px solid hsl(var(--border) / 0.6);
+  padding: 24px 28px;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) + 8px);
+  background: hsl(var(--card));
+  box-shadow: 0 1px 2px hsl(var(--foreground) / 0.04);
 }
 .home-today {
   min-width: 0;
@@ -60,10 +63,9 @@
   gap: 12px;
 }
 .home-page h3 {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 19px;
-  font-weight: 400;
-  letter-spacing: -0.015em;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 .home-runtime {
   display: inline-flex;
@@ -91,11 +93,10 @@
 }
 .home-run-count strong,
 .home-count-placeholder {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 62px;
-  font-weight: 400;
-  line-height: 1.2;
-  letter-spacing: -0.055em;
+  font-size: 52px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.04em;
   font-variant-numeric: tabular-nums;
 }
 .home-run-count > span {
@@ -110,7 +111,7 @@
 }
 .home-bar-column {
   text-align: center;
-  font-size: 10px;
+  font-size: 11px;
   color: hsl(var(--muted-foreground));
 }
 .home-bar-track {
@@ -148,7 +149,7 @@
 }
 .home-report-date {
   margin-top: 3px;
-  font-size: 10px;
+  font-size: 11px;
   color: hsl(var(--muted-foreground));
 }
 .home-link {
@@ -200,7 +201,7 @@
   width: 60px;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
-  font-size: 10px;
+  font-size: 11px;
   color: hsl(var(--muted-foreground));
 }
 .home-schedule-time strong {
@@ -286,7 +287,7 @@
   cursor: pointer;
 }
 .home-room:hover {
-  background-color: hsl(var(--primary) / 0.05);
+  background-color: hsl(var(--secondary));
 }
 .home-room-body {
   display: flex;
@@ -323,7 +324,7 @@
 .home-room-members > .home-member-overflow {
   margin-left: 7px;
   color: hsl(var(--muted-foreground));
-  font-size: 10px;
+  font-size: 11px;
 }
 .home-room-arrow {
   flex-shrink: 0;
@@ -342,18 +343,23 @@
 .home-agent {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   min-width: 0;
+  padding: 6px;
+  margin: -6px;
   text-align: left;
   cursor: pointer;
-  border-radius: 20px;
+  border-radius: var(--radius);
+}
+.home-agent:hover {
+  background-color: hsl(var(--secondary));
 }
 .home-agent > span:last-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  font-weight: 500;
 }
 .home-agent:hover > span:last-child {
   color: hsl(var(--primary));
@@ -396,19 +402,19 @@
     gap: 16px;
   }
   .home-heading h2 {
-    font-size: 30px;
+    font-size: 28px;
   }
   .home-browse {
     font-size: 12px;
   }
   .home-day-surface {
-    padding: 12px 0 22px;
+    padding: 18px;
   }
   .home-run-count {
     gap: 10px;
   }
   .home-run-count strong {
-    font-size: 58px;
+    font-size: 44px;
   }
   .home-bars {
     gap: 9px;
