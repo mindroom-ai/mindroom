@@ -66,4 +66,5 @@ Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowled
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
 A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.
 Unhooked synchronous local tools in a job run on Agno's shared thread pool, because Agno chooses that thread; worker calls and calls that async entrypoints offload get their own threads.
+A shell command run through `mindroom-agent` that is stopped at its `timeout` leaves the CLI calls it started running until they end or its job is cancelled, because it shares its caller's CLI window.
 The jobs bar does not show progress.

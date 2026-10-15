@@ -285,10 +285,11 @@ async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
 
 @pytest.mark.asyncio
 async def test_a_command_stopped_at_its_timeout_stops_the_cli_calls_it_started(tmp_path: Path) -> None:
-    """A command that ran its whole timeout was stopped, so its CLI calls end with it instead of holding its result."""
-    cancelled = asyncio.Event()
+    """A command the shell stopped at its timeout ends the CLI calls it started instead of waiting for them."""
+    started, cancelled = asyncio.Event(), asyncio.Event()
 
     async def forever() -> str:
+        started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -306,11 +307,11 @@ async def test_a_command_stopped_at_its_timeout_stops_the_cli_calls_it_started(t
             window=cli_window(),
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
         )
-        await asyncio.sleep(0.3)
-        return "Stopped after 0.2s."
+        await started.wait()
+        return f"[cwd: {tmp_path}]\nStopped after 0.2s.\nOutput:\nstarted"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        assert await owner.run_native_shell(command, command_timeout=0.2) == "Stopped after 0.2s."
+        assert await owner.run_native_shell(command) == f"[cwd: {tmp_path}]\nStopped after 0.2s.\nOutput:\nstarted"
     assert cancelled.is_set()
     await owner.close()
 
@@ -318,9 +319,10 @@ async def test_a_command_stopped_at_its_timeout_stops_the_cli_calls_it_started(t
 @pytest.mark.asyncio
 async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls(tmp_path: Path) -> None:
     """Minimal Bash passes its timeout to the command's window, which stops the calls a stopped command started."""
-    cancelled = asyncio.Event()
+    started, cancelled = asyncio.Event(), asyncio.Event()
 
     async def forever() -> str:
+        started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -333,8 +335,8 @@ async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls
             window=cli_window(),
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
         )
-        await asyncio.sleep(0.3)
-        return f"Stopped after {timeout}s."
+        await started.wait()
+        return f"Stopped after {timeout:g}s."
 
     catalog = await _catalog(
         tmp_path,
@@ -379,7 +381,7 @@ async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls
 
 @pytest.mark.asyncio
 async def test_a_command_that_ended_in_time_waits_for_its_cli_calls(tmp_path: Path) -> None:
-    """A command that ended before its timeout still lets the CLI calls it started finish."""
+    """A command that ended on its own, however long it took, still lets the CLI calls it started finish."""
     finished = asyncio.Event()
 
     async def slow() -> str:
@@ -397,10 +399,12 @@ async def test_a_command_that_ended_in_time_waits_for_its_cli_calls(tmp_path: Pa
             window=cli_window(),
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="slow"),
         )
+        # Slower than the timeout the call asked for, as after a cold worker start, but not stopped.
+        await asyncio.sleep(0.3)
         return "returned"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        assert await owner.run_native_shell(command, command_timeout=10) == "returned"
+        assert await owner.run_native_shell(command) == "returned"
     assert finished.is_set()
     await owner.close()
 
