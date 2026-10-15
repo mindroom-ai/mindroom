@@ -657,6 +657,33 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Stop the reply another agent or team is writing in the current conversation",
+      "display_name": "Stop Reply",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "stop_agent_reply"
+      ],
+      "helper_text": null,
+      "icon": "MessageSquare",
+      "icon_color": "text-red-500",
+      "name": "stop_reply",
+      "requires_conversation": false,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
       "config_fields": [
         {
           "authored_override": true,

@@ -131,6 +131,7 @@ from mindroom.tools.sleep import sleep_tools
 from mindroom.tools.spider import spider_tools
 from mindroom.tools.spotify import spotify_tools
 from mindroom.tools.sql import sql_tools
+from mindroom.tools.stop_reply import stop_reply_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
@@ -269,6 +270,7 @@ __all__ = [
     "spider_tools",
     "spotify_tools",
     "sql_tools",
+    "stop_reply_tools",
     "tavily_tools",
     "telegram_tools",
     "thread_model_tools",

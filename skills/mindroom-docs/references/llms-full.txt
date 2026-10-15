@@ -4507,6 +4507,7 @@ When `defaults.show_stop_button` is `true` (the default), MindRoom adds that �
 Setting `show_stop_button: false` hides only that reaction; a 🛑 reaction you add yourself still cancels.
 
 The stop button only works on messages still being generated, and 🛑 reactions from agents are ignored.
+The one exception is an agent with the [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply) tool, whose stop acts for the user it is working for and needs that user's access to the agent being stopped.
 See [Cancellation and Errors](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for how a cancelled response is finalized.
 
 # Streaming Responses
@@ -6794,7 +6795,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
@@ -10634,7 +10635,7 @@ create_playlist("MindRoom Picks", description="Tracks from this week's chat")
 
 # Matrix & Threads
 
-These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, make low-level Matrix API calls, and reuse conversation attachments.
+These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, stop another agent's reply, make low-level Matrix API calls, and reuse conversation attachments.
 This page also covers automatic thread summaries.
 
 ## Tools On This Page
@@ -10646,6 +10647,7 @@ This page also covers automatic thread summaries.
 - [`thread_resolution`] - Resolve or reopen threads in the current room.
 - [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
+- [`stop_reply`] - Stop the reply another agent or team is writing in the current thread.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
@@ -10822,6 +10824,27 @@ Both fields are omitted for a thread whose complete history cannot be read, the 
 set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
 set_thread_summary("Routine status update.", pin=False)
 set_thread_summary("Summary for the import thread.", thread_id="$threadRoot", room_id="!ops:example.org")
+```
+
+## [`stop_reply`]
+
+`stop_agent_reply(agent)` stops the reply another agent or team is writing in the current room and thread, for example when a coordinator sees a helper going off track.
+It is not in starter configs or default tool sets.
+
+The tool reacts 🛑 on that reply on behalf of the user the calling agent is working for, so the stop behaves exactly like that user's own [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button) reaction: the reply ends with `**[Response cancelled by user]**`, including a reply waiting for tool approval.
+The stop takes effect only when that user may use the target agent.
+
+The tool returns an error without reacting when `agent` is the calling agent itself, when that agent or team has no unfinished reply in the current conversation, or when the calling agent is not acting for a user, for example in a run that another agent started on its own.
+
+```yaml
+agents:
+  coordinator:
+    tools:
+      - stop_reply
+```
+
+```python
+stop_agent_reply("researcher")
 ```
 
 ## [`matrix_api`]
@@ -14368,6 +14391,7 @@ Do not report or "fix" these; they are deliberate.
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
+- An agent's own 🛑 reaction, its Stop button included, stops nothing; a 🛑 from an agent with [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply) relays the human or bot account it acts for and counts as that requester's own Stop, under that requester's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.

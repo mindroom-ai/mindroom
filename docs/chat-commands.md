@@ -107,4 +107,5 @@ When `defaults.show_stop_button` is `true` (the default), MindRoom adds that �
 Setting `show_stop_button: false` hides only that reaction; a 🛑 reaction you add yourself still cancels.
 
 The stop button only works on messages still being generated, and 🛑 reactions from agents are ignored.
+The one exception is an agent with the [`stop_reply`](tools/matrix-and-attachments.md#stop_reply) tool, whose stop acts for the user it is working for and needs that user's access to the agent being stopped.
 See [Cancellation and Errors](streaming.md#cancellation-and-errors) for how a cancelled response is finalized.

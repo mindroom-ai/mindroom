@@ -393,6 +393,7 @@ spotify = [
 sql = [
   "sqlalchemy",
 ]
+stop_reply = []
 supabase = [
   "supabase>=2.18.1",
 ]

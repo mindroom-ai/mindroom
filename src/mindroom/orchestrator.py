@@ -1519,6 +1519,13 @@ class _MultiAgentOrchestrator:
             return None
         return bot.client
 
+    async def open_reply_event_id(self, entity_name: str, room_id: str, thread_id: str | None) -> str | None:
+        """Return the event of one running managed entity's unfinished reply in one conversation."""
+        bot = self.agent_bots.get(entity_name)
+        if bot is None or not bot.running:
+            return None
+        return await bot.journal_principal().replies.open_event_id(room_id, thread_id)
+
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
         if failed_agents:

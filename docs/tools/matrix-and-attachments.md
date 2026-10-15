@@ -4,7 +4,7 @@ icon: lucide/hash
 
 # Matrix & Threads
 
-These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, make low-level Matrix API calls, and reuse conversation attachments.
+These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, stop another agent's reply, make low-level Matrix API calls, and reuse conversation attachments.
 This page also covers automatic thread summaries.
 
 ## Tools On This Page
@@ -16,6 +16,7 @@ This page also covers automatic thread summaries.
 - [`thread_resolution`] - Resolve or reopen threads in the current room.
 - [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
+- [`stop_reply`] - Stop the reply another agent or team is writing in the current thread.
 - [`thread_model`](../configuration/models.md#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
 - [`attachments`](../attachments.md#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
@@ -192,6 +193,27 @@ Both fields are omitted for a thread whose complete history cannot be read, the 
 set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
 set_thread_summary("Routine status update.", pin=False)
 set_thread_summary("Summary for the import thread.", thread_id="$threadRoot", room_id="!ops:example.org")
+```
+
+## [`stop_reply`]
+
+`stop_agent_reply(agent)` stops the reply another agent or team is writing in the current room and thread, for example when a coordinator sees a helper going off track.
+It is not in starter configs or default tool sets.
+
+The tool reacts 🛑 on that reply on behalf of the user the calling agent is working for, so the stop behaves exactly like that user's own [Stop Button](../chat-commands.md#stop-button) reaction: the reply ends with `**[Response cancelled by user]**`, including a reply waiting for tool approval.
+The stop takes effect only when that user may use the target agent.
+
+The tool returns an error without reacting when `agent` is the calling agent itself, when that agent or team has no unfinished reply in the current conversation, or when the calling agent is not acting for a user, for example in a run that another agent started on its own.
+
+```yaml
+agents:
+  coordinator:
+    tools:
+      - stop_reply
+```
+
+```python
+stop_agent_reply("researcher")
 ```
 
 ## [`matrix_api`]

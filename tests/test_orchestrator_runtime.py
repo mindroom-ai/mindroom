@@ -139,6 +139,29 @@ def test_running_entity_client_returns_only_running_bot_clients(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_open_reply_event_id_reads_only_running_bots_replies(tmp_path: Path) -> None:
+    """A stopped or unknown entity has no reply for another agent's tool to stop."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+
+    def bot(*, running: bool) -> AgentBot:
+        managed_bot = MagicMock(spec=AgentBot)
+        managed_bot.running = running
+        managed_bot.journal_principal.return_value.replies.open_event_id = AsyncMock(return_value="$reply")
+        return managed_bot
+
+    orchestrator.agent_bots = {"running": bot(running=True), "stopped": bot(running=False)}
+
+    assert await orchestrator.open_reply_event_id("running", "!room", "$thread") == "$reply"
+    orchestrator.agent_bots["running"].journal_principal.return_value.replies.open_event_id.assert_awaited_once_with(
+        "!room",
+        "$thread",
+    )
+    assert await orchestrator.open_reply_event_id("stopped", "!room", "$thread") is None
+    assert await orchestrator.open_reply_event_id("unknown", "!room", "$thread") is None
+
+
+@pytest.mark.asyncio
 async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_reconciliation(
     tmp_path: Path,
 ) -> None:

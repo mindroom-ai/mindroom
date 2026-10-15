@@ -2278,6 +2278,18 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.stop_reply"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
+    "mindroom.requester_identity",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.thread_move"
 depends_on = [
     "mindroom.constants",
@@ -3497,6 +3509,7 @@ visibility = [
     "mindroom.custom_tools.chat_ui",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
+    "mindroom.custom_tools.stop_reply",
     "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
     "mindroom.matrix.client",
