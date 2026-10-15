@@ -28,7 +28,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, config_relative_path
+from mindroom.constants import RuntimePaths, config_relative_path, runtime_paths_with_storage_root
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import (
@@ -49,8 +49,10 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
+    SharedDirectoryMount,
     agent_names_addressed_by_worker_key,
     plan_scoped_workspace_mounts,
+    plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
@@ -1655,6 +1657,18 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
         )
+        mounts.extend(
+            {
+                "name": WORKER_STORAGE_VOLUME_NAME,
+                "mountPath": str(shared_mount.worker_visible_path),
+                "subPath": str(shared_mount.local_path.relative_to(self.storage_root)),
+                **({"readOnly": True} if shared_mount.read_only else {}),
+            }
+            for shared_mount in self.plan_shared_directory_mounts(
+                worker_key,
+                state_scope_worker_key=state_scope_worker_key,
+            )
+        )
         mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
         if include_agent_vault:
             mounts.append(
@@ -1822,6 +1836,20 @@ class KubernetesResourceManager:
             duplicate_label="Kubernetes mountPath",
         )
         return mounts
+
+    def plan_shared_directory_mounts(
+        self,
+        worker_key: str,
+        *,
+        state_scope_worker_key: str | None,
+    ) -> tuple[SharedDirectoryMount, ...]:
+        """Return the shared directories one worker mounts from the storage volume."""
+        return plan_shared_directory_mounts(
+            worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
+            runtime_paths=runtime_paths_with_storage_root(self.runtime_paths, self.storage_root),
+            worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+            resolved_agent_policies=self.resolved_agent_policies,
+        )
 
     def _workspace_storage_mounts(
         self,
