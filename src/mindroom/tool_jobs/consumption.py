@@ -76,6 +76,8 @@ class ConsumptionOwner:
     ) -> None:
         """Keep a claim until the parent run ``run_id`` is saved with its tool call ``call_id`` finished."""
         self._claims.append(_Consumption(runtime, job_id, claim, run_id, team, call_id, returned_inline))
+        if returned_inline:
+            runtime.hold_inline(job_id, claim)
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""

@@ -686,6 +686,33 @@ async def test_listing_skips_calls_that_returned_their_outcome_to_their_own_call
 
 
 @pytest.mark.asyncio
+async def test_listing_hides_an_inline_outcome_only_while_its_reply_holds_it(tmp_path: Path) -> None:
+    """An inline call is hidden while its reply holds the outcome, and listed again when that reply is not saved."""
+    runtime = await tool_job_runtime(tmp_path)
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        await start_job(
+            runtime,
+            "inline",
+            tool_name="search",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=completed,
+        )
+        held = await runtime.wait("inline", owner=job_owner(), depth=0)
+        runtime.hold_inline("inline", held.claim)
+        assert await runtime.list_jobs(owner=job_owner(), depth=0) == []
+        await runtime.release_wait("inline", held.claim)
+        assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["inline"]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_scoped_listing_keeps_consumed_outcomes_across_turns_and_restart(tmp_path: Path) -> None:
     """Discovery survives forgotten handles without exposing another caller or consuming results."""
     runtime = await tool_job_runtime(tmp_path)
