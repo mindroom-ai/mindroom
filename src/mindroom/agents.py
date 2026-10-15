@@ -1517,6 +1517,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
     managed_shell = (
         not minimal_mode
         and not disable_runtime_capabilities
+        # Only Matrix conversations run background jobs; other channels keep the native timeout and handles.
+        and execution_identity is not None
+        and execution_identity.channel == "matrix"
         and background_tool_jobs_enabled(config, runtime_paths)
         and not toolkit_is_background_excluded("shell", config, runtime_paths)
     )
