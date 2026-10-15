@@ -75,7 +75,9 @@ An exploration turn is marked by its trusted automation hook source, and its age
 
 The existing per-turn cap counts each Agno response loop afresh, so a continuation would reset it; exploration instead counts executed calls per exploration thread and declines calls past the cap, and the restrictions apply to every continuation and deferred tool in that thread.
 
-Observed tool calls from conversations become leads only when their function is on the allowlist.
+The allowlist rejects, at config load, toolkits that start other agent runs or change the agent itself (`delegate`, `dynamic_tools`, `dynamic_workflow`, `scheduler`, `matrix_message`, `invite_router`, `self_config`, `skill_manage`, `memory`, `compact_context`, `thread_model`, `script`), because a call to one would act outside the allowlist.
+Listing a code-executing tool such as `shell` or `python` is allowed and gives exploration everything that tool can reach, as the trust model states for any agent.
+Observed tool calls are leads, not permissions: stored tool executions record only the function name, so the prompt lists every observed call and the agent can follow only those its pruned tools allow.
 Prompt text is never the boundary: a document the agent reads can contain instructions, and the allowlist plus hidden gated functions bound what such an injection can do.
 
 Rejected: defaulting the allowlist to every function seen in conversations.
@@ -126,13 +128,14 @@ knowledge_graph:
     max_sessions_per_cycle: 10
     max_episode_chars: 24000
     max_tool_result_chars: 4000
+    backfill_days: 7
 
 agents:
   mind:
     knowledge_graph: true       # passive ingestion and the knowledge_graph tool
     automations:
       - name: exploration
-        cron: "0 */6 * * *"
+        cron: "0 */6 * * *"         # default "30 2 * * *"
         room: "#mind-exploration"
         tools: [mcp_github, mcp_linear.list_issues, web_search]
         max_tool_calls: 40
@@ -144,6 +147,7 @@ agents:
 - `agents.<name>.knowledge_graph` (bool, default `false`, inheritable from `defaults`) turns on ingestion and gives the agent the `knowledge_graph` tool.
 - `exploration` requires `knowledge_graph: true`; `tools` entries are toolkit names or `toolkit.function`, must be on the agent's own tool list, and must be non-empty.
 - `max_tool_calls` (default `40`, min 1) caps one run, and the agent's own `max_tool_calls_per_turn` still applies when lower.
+- `ingest.backfill_days` (default `7`) limits a newly enabled graph, or a graph rebuilt after an embedder change, to sessions active in that many days, as dreaming does for its first run.
 - `max_leads` (default `20`) caps observed tool calls listed in one prompt; `revisit_days` (default `7`) runs a pass without new leads once that long has passed since the last run.
 
 ## Data flow
@@ -164,7 +168,7 @@ The exploration automation's final step wakes the worker so an exploration threa
 
 ### Exploration automation
 
-1. The check, in code, collects leads: distinct allowlisted `(function, arguments)` calls in the agent's conversations since the last run, with counts and last-seen times, newest first, capped at `max_leads`.
+1. The check, in code, collects leads: distinct `(function, arguments)` calls in the agent's conversations since the last run, excluding `knowledge_graph` calls and exploration threads, arguments redacted, with counts and last-seen times, newest first, capped at `max_leads`.
 2. With no leads and `revisit_days` not elapsed, it returns `None` and costs nothing.
 3. Otherwise it asks the agent, in a new thread, to: check what the graph knows with `knowledge_graph`, re-read the sources behind the leads for changes, follow references into containers not yet seen, and look for owners, dates, and links the graph lacks, using only read operations, then end with a short report of what it checked and what remains unknown.
 4. When the run ends, the step wakes ingestion, posts a notice with the tool calls made, and resolves the thread.
@@ -184,6 +188,8 @@ The tool runs in the primary process and touches no files.
 
 - The graph is a primary-side store fed by worker-produced text (tool results); it is data, never executed, and extraction prompt injection can at worst add wrong facts, which carry their source.
 - A shared agent's graph holds what it saw in every requester's conversations, including tool results, and any requester of that agent can query it; this matches shared-agent memory and must be stated on the user page and in `security-posture.md`.
+- Exploration prompts list redacted arguments of recent tool calls from the agent's conversations, so everyone who can read the exploration room sees them; operators choose that room accordingly, and private agents post in the requester's own personal room.
+- Only top-level, completed Matrix runs are ingested: runs with a `room_id`, not OpenAI-compatible API sessions, dynamic-workflow participant sessions, or team-member runs.
 - Private agents get one graph per requester instance and explore as that requester, with that requester's credentials, as automations already do.
 - Exploration authority is the allowlist and hidden gated functions, enforced in the agent build, not the prompt.
 - Credential-like values are redacted best-effort before ingestion with the shared `redact_sensitive_text`, the single redaction implementation.
