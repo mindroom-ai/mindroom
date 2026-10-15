@@ -289,6 +289,10 @@ class AgentConfig(BaseModel):
     )
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
+    knowledge_graph: bool | None = Field(
+        default=None,
+        description="Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
+    )
     learning_mode: AgentLearningMode | None = Field(
         default=None,
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",

@@ -45,6 +45,7 @@ from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.knowledge_graph import KnowledgeGraphConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
     migrate_access_config_data,
@@ -444,6 +445,10 @@ class Config(BaseModel):
     )
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
+    knowledge_graph: KnowledgeGraphConfig = Field(
+        default_factory=KnowledgeGraphConfig,
+        description="Knowledge graph built from graph-enabled agents' conversations",
+    )
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
@@ -1908,6 +1913,15 @@ class Config(BaseModel):
                     raise ValueError(msg)
         return self
 
+    def agent_uses_knowledge_graph(self, agent_name: str) -> bool:
+        """Return whether an agent builds and reads a knowledge graph."""
+        agent = self.get_agent(agent_name)
+        return agent.knowledge_graph if agent.knowledge_graph is not None else self.defaults.knowledge_graph
+
+    def knowledge_graph_agents(self) -> list[str]:
+        """Return the agents that build a knowledge graph."""
+        return [agent_name for agent_name in self.agents if self.agent_uses_knowledge_graph(agent_name)]
+
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""
         if not self.agents:
@@ -2002,6 +2016,26 @@ class Config(BaseModel):
             if review_model is not None and review_model not in self.models:
                 msg = f"Unknown skill_learning model for agent {agent_name!r}: {review_model!r}"
                 raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_knowledge_graph(self) -> Config:
+        """Validate the graph's model and database once any agent enables the graph."""
+        settings = self.knowledge_graph
+        if settings.backend == "falkordb" and not settings.url:
+            msg = "knowledge_graph.url is required for the falkordb backend"
+            raise ValueError(msg)
+        if settings.backend == "falkordb_lite" and settings.url:
+            msg = "knowledge_graph.url is only used by the falkordb backend"
+            raise ValueError(msg)
+        if not self.knowledge_graph_agents():
+            return self
+        if settings.model is None:
+            msg = "knowledge_graph.model is required when an agent enables knowledge_graph"
+            raise ValueError(msg)
+        if settings.model not in self.models:
+            msg = f"Unknown knowledge_graph model: {settings.model!r}"
+            raise ValueError(msg)
         return self
 
     def _entity_model_name(self, entity_name: str) -> str:

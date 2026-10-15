@@ -165,6 +165,19 @@
           "description": "Enable Agno Learning (defaults to true when omitted)",
           "title": "Learning"
         },
+        "knowledge_graph": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
+          "title": "Knowledge Graph"
+        },
         "learning_mode": {
           "anyOf": [
             {
@@ -1320,6 +1333,12 @@
           "title": "Learning",
           "type": "boolean"
         },
+        "knowledge_graph": {
+          "default": false,
+          "description": "Default knowledge graph setting",
+          "title": "Knowledge Graph",
+          "type": "boolean"
+        },
         "learning_mode": {
           "default": "always",
           "description": "Default Agno Learning mode",
@@ -2064,6 +2083,113 @@
         "repo_url"
       ],
       "title": "KnowledgeGitConfig",
+      "type": "object"
+    },
+    "KnowledgeGraphConfig": {
+      "additionalProperties": false,
+      "description": "The Graphiti knowledge graph that graph-enabled agents build from their conversations and exploration.",
+      "properties": {
+        "backend": {
+          "default": "falkordb_lite",
+          "description": "falkordb_lite runs an embedded database in MindRoom storage; falkordb connects to a FalkorDB server",
+          "enum": [
+            "falkordb_lite",
+            "falkordb"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "FalkorDB server URL for the falkordb backend, for example redis://user:password@graph:6379",
+          "title": "Url"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model alias that extracts entities and facts; required when any agent enables the graph",
+          "title": "Model"
+        },
+        "ingest": {
+          "$ref": "#/$defs/KnowledgeGraphIngestConfig",
+          "default": {
+            "interval_seconds": 600,
+            "idle_seconds": 120,
+            "max_sessions_per_cycle": 10,
+            "max_episode_chars": 24000,
+            "max_tool_result_chars": 4000,
+            "backfill_days": 7
+          },
+          "description": "Conversation ingestion settings"
+        }
+      },
+      "title": "KnowledgeGraphConfig",
+      "type": "object"
+    },
+    "KnowledgeGraphIngestConfig": {
+      "additionalProperties": false,
+      "description": "How the background worker turns finished conversation turns into graph episodes.",
+      "properties": {
+        "interval_seconds": {
+          "default": 600,
+          "description": "Seconds between ingestion passes",
+          "minimum": 30,
+          "title": "Interval Seconds",
+          "type": "integer"
+        },
+        "idle_seconds": {
+          "default": 120,
+          "description": "Seconds a conversation must be idle before its new turns are ingested",
+          "minimum": 0,
+          "title": "Idle Seconds",
+          "type": "integer"
+        },
+        "max_sessions_per_cycle": {
+          "default": 10,
+          "description": "Conversations ingested per pass",
+          "minimum": 1,
+          "title": "Max Sessions Per Cycle",
+          "type": "integer"
+        },
+        "max_episode_chars": {
+          "default": 24000,
+          "description": "Largest episode sent for extraction, in characters; turns are split into episodes at turn boundaries",
+          "maximum": 60000,
+          "minimum": 1000,
+          "title": "Max Episode Chars",
+          "type": "integer"
+        },
+        "max_tool_result_chars": {
+          "default": 4000,
+          "description": "Characters kept from each tool result",
+          "minimum": 100,
+          "title": "Max Tool Result Chars",
+          "type": "integer"
+        },
+        "backfill_days": {
+          "default": 7,
+          "description": "A new graph starts from conversations active within this many days",
+          "minimum": 0,
+          "title": "Backfill Days",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgeGraphIngestConfig",
       "type": "object"
     },
     "LLMJudgmentConfig": {
@@ -4697,6 +4823,7 @@
         "show_stop_button": true,
         "max_consecutive_agent_replies": 50,
         "learning": true,
+        "knowledge_graph": false,
         "learning_mode": "always",
         "compaction": {
           "enabled": true,
@@ -4789,6 +4916,23 @@
         }
       },
       "description": "Memory configuration"
+    },
+    "knowledge_graph": {
+      "$ref": "#/$defs/KnowledgeGraphConfig",
+      "default": {
+        "backend": "falkordb_lite",
+        "url": null,
+        "model": null,
+        "ingest": {
+          "backfill_days": 7,
+          "idle_seconds": 120,
+          "interval_seconds": 600,
+          "max_episode_chars": 24000,
+          "max_sessions_per_cycle": 10,
+          "max_tool_result_chars": 4000
+        }
+      },
+      "description": "Knowledge graph built from graph-enabled agents' conversations"
     },
     "knowledge_bases": {
       "additionalProperties": {
