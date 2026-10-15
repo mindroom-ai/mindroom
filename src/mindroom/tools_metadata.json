@@ -9413,7 +9413,7 @@
       ],
       "description": "Create directories that other agents can read from their own workers",
       "display_name": "Shared Directories",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
       "executes_code": false,
       "file_access": "none",
       "function_names": [

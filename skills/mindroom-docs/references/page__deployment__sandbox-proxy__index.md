@@ -302,8 +302,9 @@ It changes how tool runtimes are isolated, not where agent data lives.
 | `user` | One per user, shared across that user's agents | The workspaces of every non-private agent on `worker_scope: user`, plus that user's own private workspaces of `private.per: user` agents |
 | `user_agent` | One per user and agent pair | That agent's workspace |
 
+Dedicated workers also mount the [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) of the agents they serve, read-write for directories those agents own and read-only for directories they joined.
 Use `user_agent` when you need per-agent filesystem isolation.
-Treat `user` as a shared workstation: it mounts every `worker_scope: user` agent's workspace, including files other requesters leave there, but never agents on other scopes.
+Treat `user` as a shared workstation: it mounts every `worker_scope: user` agent's workspace and shared directories, including files other requesters leave there, but never agents on other scopes.
 A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside a visible workspace or the worker root`).
 
 ### Filesystem isolation and agent data
@@ -315,7 +316,7 @@ Worker runtimes also keep their own virtualenvs, caches, and scratch files, whic
 What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
-- **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
+- **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 

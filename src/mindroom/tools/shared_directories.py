@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     icon="FolderOpen",
     icon_color="text-amber-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
     function_names=(
         "create_shared_directory",
         "invite_to_shared_directory",

@@ -13,6 +13,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`shell`] - Shell commands with background handles, environment passthrough, and PATH prepends.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
+- [`shared_directories`] - Directories an agent shares read-only with other agents, each reading it from its own worker.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
 - [`reasoning`] - `think` and `analyze` scratchpad steps.
@@ -237,6 +238,41 @@ find_files("**/*.md", path="docs")
 edit_file("docs/example.md", "old text", "new text")
 write_file("scratch/todo.txt", "first line\nsecond line\n")
 ls("src")
+```
+
+## [`shared_directories`]
+
+`shared_directories` lets an agent create a directory and invite other agents, who can then read it from their own workers.
+It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, and `list_shared_directories()`, and has no configuration fields.
+Only the agent that created a directory can change or delete it, and deleting it removes every file in it.
+Names use 1 to 64 lowercase letters, digits, `-`, or `_`.
+
+The owner reads and writes the directory, and invited agents only read it.
+`shell`, `python`, `file`, and `coding` reach it by the path that `create_shared_directory` and `list_shared_directories` return, and every agent that owns or joined a directory sees its path in its prompt.
+Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories, and paths inside a directory are listed relative to it.
+Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
+
+An agent can be invited only on behalf of a user who may use that agent, and private agents can neither create nor join shared directories.
+Invited agents read the directory with `shell`, `python`, `file`, or `coding` and do not need `shared_directories` themselves.
+Creating, joining, leaving, or deleting a directory restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
+
+Only [dedicated Docker and Kubernetes workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) keep agents from reading directories they did not join; the Kubernetes `static_runner` sidecar and agents without workers can read every shared directory.
+
+```yaml
+agents:
+  researcher:
+    tools:
+      - shell
+      - shared_directories
+  writer:
+    tools:
+      - file
+```
+
+```python
+create_shared_directory("report")
+invite_to_shared_directory("report", "writer")
+list_shared_directories()
 ```
 
 ## [`docker`]
