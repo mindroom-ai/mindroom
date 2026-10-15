@@ -59,8 +59,6 @@ from mindroom.credentials.manager import CredentialsManager, get_runtime_credent
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
-from mindroom.shell import managed as managed_shell
-from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.declarations import ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -82,12 +80,7 @@ from mindroom.tool_system.runtime_context import (
     worker_progress_pump_scope,
     worker_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import (
-    SyncToolCompletionTracker,
-    build_tool_hook_bridge,
-    prepend_tool_hook_bridge,
-    track_sync_tool_completion,
-)
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -6026,52 +6019,6 @@ def _proxied_shell(
     )
     assert entrypoint is not None
     return entrypoint, calls
-
-
-@pytest.mark.asyncio
-async def test_a_managed_worker_shell_command_polls_until_it_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A job's worker shell command that outlives its slice is polled with short requests until it finishes."""
-    monkeypatch.setattr(managed_shell, "_POLL_START_SECONDS", 0.01)
-    monkeypatch.setattr(managed_shell, "_POLL_MAX_SECONDS", 0.01)
-    statuses = iter(["Status: RUNNING (PID 7, elapsed 1.0s)", "Status: RUNNING (PID 7, elapsed 2.0s)"])
-
-    def responder(_url: str, payload: dict[str, Any]) -> object:
-        if payload["function_name"] == "run_shell_command":
-            return {"ok": True, "result": "[cwd: /w]\nCommand timed out after 15s.\nHandle: shell:abcd1234\n"}
-        if payload["kwargs"].get("output") is False:
-            return {"ok": True, "result": next(statuses, "Status: FINISHED (exit code 0, ran for 3.0s)")}
-        return {"ok": True, "result": "Status: FINISHED (exit code 0, ran for 3.0s)\nOutput:\ndone"}
-
-    runtime_paths = _configure_proxy_runtime(
-        monkeypatch,
-        proxy_url="http://sandbox-runner:8765",
-        proxy_token=_TEST_AUTH_TOKEN,
-        execution_mode="selective",
-        proxy_tools={"shell"},
-    )
-    calls: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy.httpx.Client",
-        _recording_client_class(captured_calls=calls, responder=responder),
-    )
-    toolkit = get_tool_by_name("shell", runtime_paths, worker_target=None)
-    assert managed_shell.install_managed_shell([toolkit])
-    entrypoint = toolkit.get_async_functions()["run_shell_command"].entrypoint
-    assert entrypoint is not None
-
-    with (
-        ThreadPoolExecutor(max_workers=2) as executor,
-        track_sync_tool_completion(SyncToolCompletionTracker(executor=executor)),
-        job_control_context(JobControl()),
-    ):
-        result = await entrypoint(args="make")
-
-    assert result == "[cwd: /w]\nStatus: FINISHED (exit code 0, ran for 3.0s)\nOutput:\ndone"
-    assert [(payload["function_name"], payload["kwargs"].get("output")) for _url, payload in calls] == [
-        ("run_shell_command", None),
-        *[("check_shell_command", False)] * 3,
-        ("check_shell_command", None),
-    ]
 
 
 @pytest.mark.asyncio

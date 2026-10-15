@@ -57,7 +57,6 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
 )
 from mindroom.session_storage import agent_storage
-from mindroom.shell.managed import install_managed_shell
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_call_budget import install_model_call_cap
@@ -1513,16 +1512,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
     approvals_as_jobs = (
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
-    # A standard agent's shell command runs to completion as one call, so its background job owns the whole run.
-    managed_shell = (
-        not minimal_mode
-        and not disable_runtime_capabilities
-        # Only Matrix conversations run background jobs; other channels keep the native timeout and handles.
-        and execution_identity is not None
-        and execution_identity.channel == "matrix"
-        and background_tool_jobs_enabled(config, runtime_paths)
-        and not toolkit_is_background_excluded("shell", config, runtime_paths)
-    )
     persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
@@ -1631,9 +1620,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-            if managed_shell:
-                # Before function filters, which may drop the check and kill functions the managed call polls with.
-                install_managed_shell([toolkit])
             if persona_tools is not None:
                 # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
                 _keep_persona_functions(toolkit, tool_name, persona_tools)

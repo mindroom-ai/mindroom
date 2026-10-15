@@ -289,7 +289,6 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
                 stderr_reader=stderr_reader,
                 output_capture=capture,
                 started_at=started_at,
-                kill_group_after_exit=kill_group_after_exit,
             )
 
         if kill_group_after_exit:
@@ -371,7 +370,6 @@ async def _background_process(
     stderr_reader: asyncio.Task[None],
     output_capture: ShellOutputCapture | None,
     started_at: float,
-    kill_group_after_exit: bool,
 ) -> ShellRunResult:
     active = sum(1 for record in registry.values() if not record.finished)
     if active >= MAX_BACKGROUNDED:
@@ -403,7 +401,7 @@ async def _background_process(
         started_at=started_at,
     )
     monitor_task = asyncio.create_task(
-        _monitor_process(registry, handle, process, stdout_reader, stderr_reader, kill_group_after_exit),
+        _monitor_process(registry, handle, process, stdout_reader, stderr_reader),
     )
     record._monitor_task = monitor_task
     registry[handle] = record
@@ -440,8 +438,8 @@ async def _discard_unregistered_process(
     await _cancel_pending_tasks(stdout_reader, stderr_reader)
 
 
-def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str, output: bool = True) -> str:
-    """Poll the status of a backgrounded shell command in *registry*; without ``output``, only its status line."""
+def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str) -> str:
+    """Poll the status of a backgrounded shell command in *registry*."""
     record = registry.get(handle)
     if record is None or record.namespace != namespace:
         return f"Error: Unknown handle '{handle}'"
@@ -450,24 +448,21 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     elapsed = ended_at - record.started_at
 
     if record.finished:
-        status = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)"
-        if not output:
-            return status
         if record.output_receipt is not None:
             return record.output_receipt
-        output_text = record.stdout_buf.render(tail=record.tail)
+        output = record.stdout_buf.render(tail=record.tail)
         errors = record.stderr_buf.render()
-        result = f"{status}\n"
+        result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
         if record.return_code != 0 and errors:
             result += f"Stderr:\n{errors}\n"
-        result += f"Output:\n{output_text}"
+        result += f"Output:\n{output}"
         return result
 
-    status = f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)"
-    if not output:
-        return status
     partial = record.stdout_buf.render(tail=50)
-    return f"{status}\nPartial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
+    return (
+        f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)\n"
+        f"Partial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
+    )
 
 
 def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str, force: bool = False) -> str:
@@ -669,9 +664,8 @@ async def _monitor_process(
     process: asyncio.subprocess.Process,
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
-    kill_group_after_exit: bool,
 ) -> None:
-    """Wait for a backgrounded process to exit and update its record; detached children survive unless killed."""
+    """Wait for a backgrounded process to exit and update its record."""
     try:
         await _await_process_exit(process)
     finally:
@@ -684,9 +678,8 @@ async def _monitor_process(
                 _done, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
                 capture.incomplete |= bool(pending)
         finally:
-            if kill_group_after_exit:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
         await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
         await _cancel_pending_tasks(stdout_reader, stderr_reader)
         record = registry.get(handle)

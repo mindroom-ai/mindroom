@@ -4159,7 +4159,7 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
         runtime_paths,
     )
 
-    agent = _create_agent_for_test("helper", config, delegation_depth=depth, execution_identity=_matrix_identity())
+    agent = _create_agent_for_test("helper", config, delegation_depth=depth)
 
     functions = {
         name: function
@@ -4171,43 +4171,6 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
     assert (functions["add"].requires_confirmation, functions["add"].approval_type) == (not asks_as_job, expected)
     shell = functions["run_shell_command"]
     assert (shell.requires_confirmation, shell.approval_type) == (not asks_as_job, expected)
-    # With jobs on, a standard agent's command runs to completion as the shell's only function.
-    assert ("check_shell_command" in functions) is not enabled
-    assert ("kill_shell_command" in functions) is not enabled
-    assert ("timeout" in shell.parameters["properties"]) is not enabled
-
-
-def _matrix_identity(channel: str = "matrix") -> ToolExecutionIdentity:
-    return ToolExecutionIdentity(
-        channel=channel,
-        agent_name="helper",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-1",
-    )
-
-
-@pytest.mark.parametrize(("channel", "managed"), [("matrix", True), ("openai_compat", False)])
-def test_only_a_matrix_agent_gets_the_shell_that_runs_as_jobs(tmp_path: Path, *, channel: str, managed: bool) -> None:
-    """OpenAI-compatible requests run no background jobs, so their shell keeps its native timeout and handles."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = _bind_runtime_paths(
-        Config(
-            agents={"helper": AgentConfig(display_name="Helper", tools=["shell"])},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-        ),
-        runtime_paths,
-    )
-
-    agent = _create_agent_for_test("helper", config, execution_identity=_matrix_identity(channel))
-
-    functions = {
-        name for toolkit in agent.tools if isinstance(toolkit, Toolkit) for name in toolkit.get_async_functions()
-    }
-    assert ("check_shell_command" in functions) is not managed
 
 
 def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
