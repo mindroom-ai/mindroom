@@ -678,8 +678,46 @@ async def test_a_shell_job_approved_after_its_reply_finished_still_calls_its_too
 
 
 @pytest.mark.asyncio
+async def test_a_second_shell_job_approved_after_the_first_ended_still_calls_its_tools(tmp_path: Path) -> None:
+    """One job's shell ending must not close the catalog a later-approved job of the same reply still needs."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    first_running = asyncio.Event()
+    first_may_end = asyncio.Event()
+
+    async def first() -> str:
+        first_running.set()
+        await first_may_end.wait()
+        return "first done"
+
+    async def second() -> str:
+        return str((await _settled_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            first_job, second_job = resources.acquire(), resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                first_task = asyncio.create_task(owner.run_native_shell(first))
+                await first_running.wait()
+                await lifetime.retire_attempt()
+        first_may_end.set()
+        assert await first_task == "first done"
+        await first_job.release()
+        # The second job was waiting for its approval and opens its shell only now.
+        assert await owner.run_native_shell(second) == "completed"
+        await second_job.release()
+
+
+@pytest.mark.asyncio
 async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog(tmp_path: Path) -> None:
-    """A retired attempt's catalog stays open for a running shell command and closes once the command ends."""
+    """A retired attempt's catalog stays open for a running shell command and closes with the response's owner."""
 
     async def ping() -> str:
         return "pong"
@@ -709,9 +747,9 @@ async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog
         rebuilt.set()
         assert await window == "completed"
 
+    await owner.close()
     with pytest.raises(RuntimeError, match="closed"):
         await old.bind(ToolKey("calls", "ping"))
-    await owner.close()
 
 
 @pytest.mark.asyncio

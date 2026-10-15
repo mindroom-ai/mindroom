@@ -177,7 +177,7 @@ class LiveTurnTools(TurnToolBridge):
         self._windows: dict[str, Context] = {}
         self._closed = False
         self._binding_retired = False
-        # Retired attempt catalogs that open shell windows still call through, closed once the last window drains.
+        # Retired attempt catalogs that open shell windows still call through, closed with this owner.
         self._retired_catalogs: list[PreparedAgentToolCatalog] = []
         self.control_executions: list[ToolExecution] = []
         self._close_task: asyncio.Task[None] | None = None
@@ -375,10 +375,6 @@ class LiveTurnTools(TurnToolBridge):
             for task in tasks:
                 self._active.pop(task, None)
             failures.extend(result for result in results if isinstance(result, Exception))
-        if not self._windows and self._retired_catalogs:
-            retired, self._retired_catalogs = self._retired_catalogs, []
-            for catalog in retired:
-                await catalog.close()
         if failures:
             msg = "Agent CLI admitted operation failed"
             raise ExceptionGroup(msg, failures)
@@ -811,9 +807,11 @@ class LiveTurnTools(TurnToolBridge):
         """
         async with self._outer:
             self._binding_retired = True
+            if defer_execution_cleanup(self.catalog.close, resource=self.catalog):
+                return
             if self._windows:
                 self._retired_catalogs.append(self.catalog)
-            elif not defer_execution_cleanup(self.catalog.close, resource=self.catalog):
+            else:
                 await self.catalog.close()
 
     def bind_catalog(self, catalog: PreparedAgentToolCatalog, *, context: Mapping[str, str] | None = None) -> None:
@@ -849,4 +847,6 @@ class LiveTurnTools(TurnToolBridge):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._calls.clear()
-        await self.catalog.close()
+        for catalog in (*self._retired_catalogs, self.catalog):
+            await catalog.close()
+        self._retired_catalogs.clear()
