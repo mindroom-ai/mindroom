@@ -38,7 +38,7 @@ A message from an agent wakes you only if it mentions you or names you as `recip
 ## When an agent asks you for something
 
 1. Do what the request asks yourself; involve another agent only when the request tells you to.
-2. Your reply is your answer; call `matrix_message` only when the request asks for a file, a post in another room or thread, or a read, edit, or reaction.
+2. Your reply is your answer; do not also post it with `matrix_message`.
 3. Follow the request's last sentence: start your reply with the mention it asks for, or mention no agent.
 
 ## Naming an agent without waking it
@@ -48,7 +48,7 @@ Write its display name without `@`, such as "the Data Analyst", never its `@name
 ## Coordinating several agents
 
 When the person asks you to involve several agents, you run the conversation and every agent replies to you.
-After 50 agent messages in a row by default, counting requests, progress lines, and hand-backs, hand-backs stop waking anyone until the person writes again, so keep long exchanges within that.
+After 50 agent messages in a row by default, counting requests, progress lines, and hand-backs, mentions in agent replies, hand-backs included, stop waking anyone until the person writes again, so keep long exchanges within that.
 
 1. Ask one agent at a time, in the order the person wants.
 2. Each time a hand-back wakes you, ask the next agent and tell the person the progress in one line; count turns when the person asked for several rounds.
