@@ -253,7 +253,7 @@ Names use 1 to 64 lowercase letters, digits, `-`, or `_`.
 
 The owner reads and writes the directory, and invited agents only read it.
 `shell`, `python`, `file`, and `coding` reach it by the path that `create_shared_directory` and `list_shared_directories` return, and every agent that owns or joined a directory sees its path in its prompt.
-Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories and list them by absolute path.
+Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories and list them by absolute path, when they run in a worker or when MindRoom runs without workers; with workers, an agent whose `file` or `coding` runs in the primary process reads shared directories with its worker tools instead.
 Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
 
 An agent can be invited only on behalf of a user who may use it outside the current room, through `access.users`, administrator rights, `access.members_of_rooms`, or the default access of its configured rooms; `access.current_room_members` does not count.

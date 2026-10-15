@@ -15,7 +15,7 @@ The worker boundary between agents must not weaken for anything else.
 - Private agents can neither own nor join a directory, because their data is per requester while a member's worker may serve every requester.
 - An invitation needs the requester's access to the invited agent, matching the rule that a mentioned entity acts for the requesting human.
 - Membership changes recreate the affected workers, because neither Docker nor Kubernetes adds a mount to a running container.
-- The tool reports the path the agent's code tools see, which differs between the primary and a dedicated worker because workers mount storage at their own mount path; primary-process `file` and `coding` accept both spellings so one advertised path works for every tool.
+- The tool reports the path the agent's code tools see, which differs between the primary and a dedicated worker because workers mount storage at their own mount path.
 - Deleting a directory empties it instead of removing it.
   Docker bind mounts and Kubernetes `subPath` mounts keep pointing at a removed directory, so a directory created again under the same name before a worker's next call would stay invisible to that worker; reusing the same directory keeps every existing mount current.
 
@@ -52,7 +52,9 @@ Rejected because it has no per-directory access, so an invitation would mean not
 ## Constraints
 
 - The `static_runner` sidecar can write `shared_directories/`, so it mounts every directory and keeps none apart, consistent with it already seeing every agent's state; the charts never combine it with dedicated workers, whose mount sources it could otherwise redirect.
-- For the same reason, primary-process `file` and `coding` reach no shared directory beside the sidecar: the sidecar could replace an owner directory with a link, and a share named after a primary-only directory such as `tracking` would then lead a primary path tool there.
+- Primary-process `file` and `coding` reach shared directories only when no worker is configured.
+  Worker code writes shared directories, the sidecar can even replace an owner directory with a link, and these tools list and search by path after checking it, so a swapped entry, or a share named after a primary-only directory such as `tracking`, would lead a primary path tool into primary-only storage.
+  Agents that keep `file` or `coding` in the primary beside workers read shared directories with their worker tools instead.
 - In a worker, the share roots `file` and `coding` accept are the directories mounted there, because the worker cannot read the primary-only ledger.
 
 ## Limitations and open questions
