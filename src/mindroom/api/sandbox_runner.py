@@ -27,7 +27,7 @@ from uuid import uuid4
 
 import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants, yaml_io
@@ -2133,18 +2133,31 @@ async def cancel_tool_call(payload: SandboxRunnerCancelRequest) -> SandboxRunner
     return SandboxRunnerCancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
 
 
-@router.post("/execute")
-async def execute_tool_call(request: Request, payload: SandboxRunnerExecuteRequest) -> StreamingResponse:
+@dataclass(frozen=True)
+class _PreparedToolCall:
+    execute: Callable[[], Coroutine[object, object, SandboxRunnerExecuteResponse]]
+    # Persistent browser actions are short and keep their own deadline, and cancelling one closes the shared
+    # browser, so they answer in one response that neither a dropped connection nor /execute/cancel stops.
+    streamed: bool = True
+
+
+@router.post("/execute", response_model=None)
+async def execute_tool_call(request: Request, payload: SandboxRunnerExecuteRequest) -> Response:
     """Execute a tool function locally, streaming its progress and keep-alives, then its serialized result.
 
     Validation and worker preparation answer with their own status codes before the stream starts. The primary
     stops the call through /execute/cancel or by hanging up.
     """
-    execute = _prepare_tool_call(request, payload)
+    call = _prepare_tool_call(request, payload)
+    if not call.streamed:
+        with sandbox_request_cancellation.track_request(payload.request_id):
+            cancelled = sandbox_request_cancellation.request_cancelled()
+            result = _cancelled_response() if cancelled else await call.execute()
+        return JSONResponse(result.model_dump(mode="json"))
     return StreamingResponse(
         sandbox_execute_stream.stream_execution(
             payload.request_id or uuid4().hex,
-            execute,
+            call.execute,
             keepalive_seconds=EXECUTE_KEEPALIVE_SECONDS,
             failure=_streamed_failure_response,
         ),
@@ -2169,10 +2182,29 @@ def _streamed_failure_response(error: Exception) -> SandboxRunnerExecuteResponse
     )
 
 
+def _persistent_browser_runtime(
+    app: FastAPI,
+    payload: SandboxRunnerExecuteRequest,
+) -> WorkerComputerRuntime | WorkerBrowserRuntime | None:
+    """Return the worker's long-lived browser runtime when this call drives it."""
+    if payload.tool_name != "browser_mcp" and (payload.tool_name, payload.function_name) != (
+        "browser",
+        "browser_control",
+    ):
+        return None
+    computer = getattr(app.state, "worker_computer", None)
+    if isinstance(computer, WorkerComputerRuntime):
+        return computer
+    if payload.tool_name == "browser_mcp":
+        raise HTTPException(status_code=400, detail="browser_mcp requires an enabled dedicated computer worker.")
+    browser = getattr(app.state, "worker_browser", None)
+    return browser if isinstance(browser, WorkerBrowserRuntime) else None
+
+
 def _prepare_tool_call(  # noqa: C901 - validated dispatch branches
     request: Request,
     payload: SandboxRunnerExecuteRequest,
-) -> Callable[[], Coroutine[object, object, SandboxRunnerExecuteResponse]]:
+) -> _PreparedToolCall:
     """Validate and prepare one call, returning its dispatch; a job's request runs as part of its job."""
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
@@ -2210,38 +2242,23 @@ def _prepare_tool_call(  # noqa: C901 - validated dispatch branches
                 async def failed() -> SandboxRunnerExecuteResponse:
                     return failure
 
-                return failed
+                return _PreparedToolCall(failed)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if (computer := _persistent_browser_runtime(request.app, payload)) is not None:
+
+        async def browse() -> SandboxRunnerExecuteResponse:
+            return await _execute_worker_browser(
+                computer,
+                payload,
+                runtime_paths,
+                config,
+                prepared_worker,
+                runner_token,
+            )
+
+        return _PreparedToolCall(browse, streamed=False)
 
     async def dispatch() -> SandboxRunnerExecuteResponse:
-        if payload.tool_name == "browser_mcp" or (
-            payload.tool_name == "browser" and payload.function_name == "browser_control"
-        ):
-            try:
-                computer = request.app.state.worker_computer
-            except AttributeError:
-                computer = None
-            if not isinstance(computer, WorkerComputerRuntime):
-                if payload.tool_name == "browser_mcp":
-                    raise HTTPException(
-                        status_code=400,
-                        detail="browser_mcp requires an enabled dedicated computer worker.",
-                    )
-                try:
-                    computer = request.app.state.worker_browser
-                except AttributeError:
-                    computer = None
-            if isinstance(computer, (WorkerComputerRuntime, WorkerBrowserRuntime)):
-                # Not cancellable: the browser runtime treats cancellation as closing the shared browser, and on
-                # computer workers its display, while its actions are short and keep their own deadline.
-                return await _execute_worker_browser(
-                    computer,
-                    payload,
-                    runtime_paths,
-                    config,
-                    prepared_worker,
-                    runner_token,
-                )
         if sandbox_exec.runner_uses_subprocess(runtime_paths):
             return await _execute_request_subprocess(
                 payload,
@@ -2289,7 +2306,7 @@ def _prepare_tool_call(  # noqa: C901 - validated dispatch branches
         with job_control_context(JobControl()) if payload.run_as_job else nullcontext():
             return await dispatch()
 
-    return execute
+    return _PreparedToolCall(execute)
 
 
 async def _run_cancellable(
