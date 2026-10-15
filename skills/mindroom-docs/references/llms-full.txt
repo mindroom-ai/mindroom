@@ -17185,7 +17185,7 @@ Deploy the runtime chart in a namespace of its own when an instance needs dedica
 
 The primary runtime reaches the sidecar over `localhost`, and all proxied tool calls share one runner process.
 The sidecar shares agent workspaces with the primary but cannot read the credential store, Matrix state, or the credentials encryption key, and it is not an isolation boundary between agents.
-The hosted instance chart's `egressBroker.enabled` gives the sidecar [brokered credentials](https://docs.mindroom.chat/deployment/egress-broker/#kubernetes), but the platform provisioner does not forward it yet, so a value set by hand is overwritten by the next provision.
+For brokered credentials on hosted instances, see [Hosted instances](https://docs.mindroom.chat/deployment/egress-broker/#hosted-instances-sandbox-runner-sidecar).
 To enable encrypted credential storage, set `workers.sandbox.credentialsEncryptionKey.existingSecret`; only the primary runtime receives that key.
 See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-proxy/#kubernetes-shared-sidecar-workerbackend-static_runner) for its mounts and limits.
 
@@ -17794,7 +17794,7 @@ There are three supported shapes:
 
 - **Native egress broker** runs inside the primary runtime and injects secrets from primary-only credential stores that workers never read.
   See [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) for configuration, secret management, and deployment.
-  This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values, but hosted instances cannot use it yet because the platform provisioner does not forward the instance chart's `egressBroker.enabled` (see [Kubernetes](https://docs.mindroom.chat/deployment/egress-broker/#kubernetes)).
+  This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values; for hosted instances, see [Hosted instances](https://docs.mindroom.chat/deployment/egress-broker/#hosted-instances-sandbox-runner-sidecar).
 - **Per-worker Agent Vault egress** (Kubernetes backend), the legacy path, which gives each worker its own vault for per-user or per-agent isolation, described below.
 - **A shared credential-injecting proxy** that you run, configured through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`, the chart's `egressProxy` integration, or the worker proxy environment on other backends.
   The proxy holds the real credential and workers receive only its URL.
@@ -18120,9 +18120,9 @@ egress_broker:
       display_name: GitHub (agent-cli only)
       restrict_to_rules: true
       rules:
-        - { host: api.github.com, path_prefix: /repos/basnijholt/agent-cli, auth: { type: bearer } }
-        - { host: github.com, path_prefix: /basnijholt/agent-cli, auth: { type: basic, username: x-access-token } }
-        - { host: github.com, path_prefix: /basnijholt/agent-cli.git, auth: { type: basic, username: x-access-token } }
+        - { host: api.github.com, path_prefix: /repos/octo-org/octo-repo, auth: { type: bearer } }
+        - { host: github.com, path_prefix: /octo-org/octo-repo, auth: { type: basic, username: x-access-token } }
+        - { host: github.com, path_prefix: /octo-org/octo-repo.git, auth: { type: basic, username: x-access-token } }
 ```
 
 GitHub's GraphQL endpoint (`api.github.com` `/graphql`) is refused under `restrict_to_rules` unless a rule of the restricting party lists it.
@@ -18154,7 +18154,7 @@ The helper writes:
 
 A service with `restrict_only: true` only limits paths, and only users' own services may set it.
 It is how a user narrows an administrator's service, such as GitHub, to some repositories: its rules count in the requester's check like those of a user service with `restrict_to_rules`, but they never choose a credential, so the administrator's service keeps sending the user's own connected account or API key for the paths the limit allows.
-For example, with the administrator's `github: {preset: github}` and a limit to `basnijholt/agent-cli`, `api.github.com/repos/basnijholt/agent-cli/pulls` gets the administrator's credential and `api.github.com/user` gets 403 `path_not_allowed` naming the limit.
+For example, with the administrator's `github: {preset: github}` and a limit to `octo-org/octo-repo`, `api.github.com/repos/octo-org/octo-repo/pulls` gets the administrator's credential and `api.github.com/user` gets 403 `path_not_allowed` naming the limit.
 A limit has no key, account login, or placeholder variables (it may not set `oauth_provider`, `placeholder_env`, or `oauth_on_shared_workers`, and its rules need no `auth`), the broker refuses to store a key for it, and the [`egress_credentials` tool](#agent-tool) leaves it out.
 On the personal page, users who can manage the agent get **Limit to repositories** on an administrator's service with a rule on `github.com`, `api.github.com`, or `uploads.github.com`, which opens the [limit editor](#the-limit-editor) and saves one.
 
@@ -18244,6 +18244,7 @@ Keys for `user` and `user_agent` agents, private agents included, belong to each
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
 The dashboard's routes are under `/api/egress-broker/`, the personal page's under `/api/connections/egress`, and the broker's root CA certificate is at `/api/egress-broker/ca.pem`.
+A script can set a shared or unscoped agent's key with `PUT /api/egress-broker/services/<name>/secret?agent_name=<agent>` and the body `{"secret": "..."}`, and remove it with `DELETE` on the same URL; without `agent_name` it sets the key that agents without a scope share.
 
 ### Connecting an account
 
@@ -18262,7 +18263,7 @@ Every service of the agent that uses the provider, and on the Connections portal
 A connection that everyone using an agent shares never gets a link; connect it at `manage_url` instead.
 
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
-On `shared` and unscoped agents only administrators and the agent's `credential_managers` do, and they can change each other's keys and services (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects their own account.
+On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects their own account.
 
 The personal egress page and its API need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
 Without that signed identity gate, such as on a host that has no upstream proxy, the personal page is not served and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
@@ -18273,7 +18274,7 @@ When more than one user can sign in through the gateway, set `MINDROOM_CONNECTIO
 
 A user service is a service the user defines for their own scope instead of an administrator defining it in `config.yaml`.
 Users manage them on the personal egress page at `/connections/egress`, which needs [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT.
-They have the same fields and validators as a config service (a preset or `rules`, `placeholder_env`, `oauth_provider`, `restrict_to_rules`), plus [`restrict_only`](#limiting-in-place), except `oauth_on_shared_workers`, which only `config.yaml` may set.
+They have the same fields and validators as a config service (a preset or `rules`, `placeholder_env`, `oauth_provider`, `restrict_to_rules`), plus [`restrict_only`](#limiting-in-place), but not `oauth_on_shared_workers`.
 
 On `user` and `user_agent` agents each requester adds their own, which apply only to that requester's workers.
 On `shared` and unscoped agents administrators and the agent's `credential_managers` add them, the same rule as for keys, and other users of the agent can read but not change them.
@@ -18287,7 +18288,7 @@ A user service routes only that scope's keys and accounts, so it cannot reach an
 On a host that both a config service and a user service name, the usual matching order applies, with config services before user services on a tie, so a longer user prefix takes those paths for that user only.
 
 **Inactive entries.** An entry that a config service later shadows, or that no longer validates (for example after an upgrade tightened a rule), is ignored but kept, and the personal page lists it as **Inactive** with the reason and a **Delete** button.
-A shadowed entry becomes active again if the config service is removed, and deleting it keeps the key, which the config service uses.
+A shadowed entry becomes active again if the config service is removed.
 
 **Caps.** A scope can hold at most 50 user services, counting inactive ones, and a service at most 50 rules and 16 KiB.
 
@@ -18314,7 +18315,7 @@ When a config service sets the same variable, the config value wins, and the edi
 One editor adds, edits, and deletes services in two places:
 
 - **Personal egress page** (`/connections/egress`): each agent has an **Add service** button where the caller may manage services (their own personal agents, and shared or unscoped agents they manage as an administrator or credential manager).
-  A user's own services have **Edit service** and **Delete service**, and deleting also deletes the service's key.
+  A user's own services have **Edit service** and **Delete service**.
   Services from `config.yaml` appear read-only under "From your administrator" and keep their key and account controls; a service that covers GitHub also offers **Limit to repositories** (see [The limit editor](#the-limit-editor)).
 - **Dashboard Credentials page**: the **Agent Keys** panel adds, edits, and deletes the services of `config.yaml`, and shows the selected scope's user services read-only.
   Deleting one removes it from the configuration but keeps its saved keys, which apply again if a service with the same name is added back.
@@ -18351,9 +18352,9 @@ A `CONNECT` row that reads "Passed through (no key added)" is a tunnel to a host
 Administrators see every requester's requests in the **Request log** under the dashboard's **Agent Keys** panel, with filters for user, agent, host, and service.
 The same rows come from `GET /api/connections/egress/logs?agent_name=&limit=` (at most 200) and, for administrators, `GET /api/egress-broker/logs` with `requester`, `agent_name`, `host`, `service`, and `limit` (at most 1000).
 
-Each row records the time, kind (`request`, `tunnel`, or `denied`), scope, agent, requester, method, host, path without its query string, status, bytes up and down, duration, and the broker's error `code`, which is `null` when the upstream's response was relayed.
+Each row records the time, kind (`request`, `tunnel`, or `denied`), scope, agent, requester, method, host, path without its query string, service, status, bytes up and down, duration, and the broker's error `code`, which is `null` when the upstream's response was relayed.
 The broker never logs header values, request bodies, query strings, tokens, connect links, or secrets.
-Rows are kept for 30 days.
+Rows are kept for up to 30 days, at most the newest 100,000.
 
 ## Agent tool
 
@@ -18472,7 +18473,7 @@ The broker keeps its root CA, the key that signs worker tokens, and the request 
 To reset it, stop the primary, delete `egress_broker/`, and start the primary again.
 The broker then creates a new CA, which new calls trust on their own, and a new token key, so every worker token issued before gets 407, and the request log is gone.
 Stored keys, connected accounts, and user services are kept, because they live in the credential store.
-`ca.key` is encrypted with `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, so after changing that key the broker fails to start until you remove `egress_broker/`.
+`ca.key` is encrypted with `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` when one is set, so after setting, changing, or removing that key the broker fails to start until you remove `egress_broker/`.
 
 ## Error responses
 

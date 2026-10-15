@@ -416,7 +416,7 @@ There are three supported shapes:
 
 - **Native egress broker** runs inside the primary runtime and injects secrets from primary-only credential stores that workers never read.
   See [Agent Keys](egress-broker.md) for configuration, secret management, and deployment.
-  This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values, but hosted instances cannot use it yet because the platform provisioner does not forward the instance chart's `egressBroker.enabled` (see [Kubernetes](egress-broker.md#kubernetes)).
+  This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values; for hosted instances, see [Hosted instances](egress-broker.md#hosted-instances-sandbox-runner-sidecar).
 - **Per-worker Agent Vault egress** (Kubernetes backend), the legacy path, which gives each worker its own vault for per-user or per-agent isolation, described below.
 - **A shared credential-injecting proxy** that you run, configured through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`, the chart's `egressProxy` integration, or the worker proxy environment on other backends.
   The proxy holds the real credential and workers receive only its URL.
