@@ -55,7 +55,7 @@ class _WorkerProxyStreamedResponse(Protocol):
 
     def read(self) -> bytes: ...
 
-    def iter_lines(self) -> Iterator[str]: ...
+    def iter_bytes(self) -> Iterator[bytes]: ...
 
 
 class _WorkerProxyClient(Protocol):
@@ -294,6 +294,21 @@ def _post_execute_cancel(
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
 
 
+def _ndjson_lines(chunks: Iterator[bytes]) -> Iterator[str]:
+    """Split a streamed body on newlines alone, since JSON text may hold other Unicode line separators."""
+    pending = bytearray()
+    for chunk in chunks:
+        start = 0
+        while (end := chunk.find(b"\n", start)) != -1:
+            pending += chunk[start:end]
+            yield pending.decode("utf-8")
+            pending = bytearray()
+            start = end + 1
+        pending += chunk[start:]
+    if pending:
+        yield pending.decode("utf-8")
+
+
 def _read_execute_stream(
     response: _WorkerProxyStreamedResponse,
     *,
@@ -304,7 +319,7 @@ def _read_execute_stream(
 
     Dropping the stream stops the call at the runner, so a cancelled call stops reading at its next line.
     """
-    for line in response.iter_lines():
+    for line in _ndjson_lines(response.iter_bytes()):
         if not line:
             continue
         frame = _json_object(json.loads(line))

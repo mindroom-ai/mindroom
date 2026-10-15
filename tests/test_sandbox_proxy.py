@@ -398,8 +398,8 @@ class _LineResponse:
     def read(self) -> bytes:
         return b""
 
-    def iter_lines(self) -> Iterator[str]:
-        yield json.dumps(self._response.json())
+    def iter_bytes(self) -> Iterator[bytes]:
+        yield json.dumps(self._response.json()).encode() + b"\n"
 
 
 class _StreamsFromPost:

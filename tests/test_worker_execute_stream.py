@@ -16,6 +16,7 @@ from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.worker_proxy_client import (
     WorkerCallCancellation,
     WorkerProxyClientConfig,
+    _ndjson_lines,
     execute_worker_proxy_request,
 )
 from mindroom.workers.in_flight import touch_workers_in_flight
@@ -54,8 +55,9 @@ class _StreamedResponse:
     def read(self) -> bytes:
         return b""
 
-    def iter_lines(self) -> Iterator[str]:
-        yield from self._lines()
+    def iter_bytes(self) -> Iterator[bytes]:
+        for line in self._lines():
+            yield line.encode() + b"\n"
 
 
 def _client(lines: Callable[[dict[str, Any]], Iterator[str]], seen: list[dict[str, Any]]) -> type:
@@ -205,3 +207,60 @@ def test_a_call_keeps_its_worker_from_idle_cleanup_while_it_runs() -> None:
 
     assert during == ["agent:test"]
     assert manager.touched == []
+
+
+def test_a_result_with_unicode_line_separators_arrives_whole() -> None:
+    """Only a newline ends a streamed line, so text with U+2028, U+2029, or U+0085 in it is one result."""
+    text = "a\u2028b\u2029c\x85d"
+    body = (
+        json.dumps({"keepalive": True}).encode()
+        + b"\n"
+        + json.dumps(
+            {"ok": True, "result": text, "error": None, "failure_kind": None},
+            ensure_ascii=False,
+        ).encode()
+    )
+    manager = _Manager()
+
+    class _Client:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return
+
+        @contextmanager
+        def stream(self, method: str, url: str, **_kwargs: Any) -> Iterator[httpx.Response]:  # noqa: ANN401
+            yield httpx.Response(200, content=body, request=httpx.Request(method, url))
+
+    result = execute_worker_proxy_request(
+        config=WorkerProxyClientConfig(
+            proxy_url=None,
+            proxy_token=None,
+            proxy_timeout_seconds=7.0,
+            credential_lease_ttl_seconds=60,
+            credential_policy={},
+            lease_tool_credentials=False,
+        ),
+        payload={"tool_name": "shell", "function_name": "run_shell_command"},
+        credentials_manager=None,
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_target=None,
+        worker_handle=_HANDLE,
+        worker_manager=manager,
+        client_factory=_Client,
+    )
+
+    assert result == text
+    assert manager.failures == []
+
+
+def test_streamed_lines_survive_any_chunk_boundary() -> None:
+    """A line, or a character inside it, split across network chunks still arrives whole."""
+    chunks = [b'{"a": "\xe2\x80', b'\xa8x"}\n{"b"', b": 1}\n", b'{"c": 2}']
+
+    assert list(_ndjson_lines(iter(chunks))) == ['{"a": "\u2028x"}', '{"b": 1}', '{"c": 2}']
