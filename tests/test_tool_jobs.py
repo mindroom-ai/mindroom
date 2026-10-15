@@ -672,6 +672,10 @@ async def test_listing_skips_calls_that_returned_their_outcome_to_their_own_call
         waiting = await runtime.wait(job_id, owner=job_owner(), depth=0)
         await runtime.acknowledge_wait(job_id, waiting.claim, returned_inline=returned_inline)
     assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["collected"]
+    # Reading the inline call's result again through job(action="wait") does not turn it into a job.
+    rereading = await runtime.wait("inline", owner=job_owner(), depth=0)
+    await runtime.acknowledge_wait("inline", rereading.claim)
+    assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["collected"]
     await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
     try:

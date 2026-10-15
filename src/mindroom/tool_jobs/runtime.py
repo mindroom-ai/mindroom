@@ -688,6 +688,8 @@ class ToolJobRuntime:
             if claim is None or entry.claim != claim:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
+            # A later reread of an inline call's result does not make it a job.
+            returned_inline = entry.job.returned_inline or returned_inline
             await self._publish(entry, _updated(entry.job, consumed=True, returned_inline=returned_inline))
             entry.claim = None
 
