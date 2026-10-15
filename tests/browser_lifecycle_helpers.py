@@ -27,10 +27,6 @@ class LifecyclePage:
         """Register a native page event listener."""
         self.listeners.setdefault(event, []).append(callback)
 
-    def remove_listener(self, event: str, callback: Callable[..., object]) -> None:
-        """Unregister a native page event listener."""
-        self.listeners[event].remove(callback)
-
     async def emit(self, event: str, value: object) -> None:
         """Deliver one native event and await asynchronous side effects."""
         for callback in self.listeners.get(event, []):
