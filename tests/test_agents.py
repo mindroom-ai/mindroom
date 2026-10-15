@@ -9,7 +9,6 @@ import shutil
 import stat
 import tempfile
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -630,9 +629,8 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
     """An agent learns the path, owner, and access of each shared directory it owns or joined."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
-    now = datetime(2026, 10, 15, tzinfo=UTC)
-    create_shared_directory(runtime_paths, owner="general", name="report", now=now)
-    create_shared_directory(runtime_paths, owner="calculator", name="sums", now=now)
+    create_shared_directory(runtime_paths, owner="general", name="report")
+    create_shared_directory(runtime_paths, owner="calculator", name="sums")
     add_shared_directory_member(runtime_paths, owner="general", name="report", member="calculator")
     shares = runtime_paths.storage_root / "shared_directories"
 

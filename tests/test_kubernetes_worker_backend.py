@@ -12,7 +12,6 @@ import time
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
-from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -5561,7 +5560,7 @@ router:
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-    create_shared_directory(runtime_paths, owner="alpha", name="report", now=datetime.now(UTC))
+    create_shared_directory(runtime_paths, owner="alpha", name="report")
     return backend, apps_api, runtime_paths
 
 

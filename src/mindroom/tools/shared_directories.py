@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     requires_primary_runtime=True,
+    requires_room_context=True,
     icon="FolderOpen",
     icon_color="text-amber-500",
     dependencies=["agno"],

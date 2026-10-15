@@ -36,6 +36,7 @@ from mindroom.tools.path_safety import (
     read_resolved_file,
     resolve_base_dir_path,
     resolve_tool_base_dir,
+    spelled_output_path,
     split_search_pattern,
     write_resolved_file,
 )
@@ -458,7 +459,7 @@ def _list_directory(target: Path, limit: int) -> str:
     entries: list[str] = []
     try:
         for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
-            name = item.name + ("/" if item.is_dir() else "")
+            name = (spelled_output_path(item) or item.name) + ("/" if item.is_dir() else "")
             entries.append(name)
             if len(entries) > limit:
                 break

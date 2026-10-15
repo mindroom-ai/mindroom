@@ -54,22 +54,22 @@ def describe_agent_shared_directories(config: Config, runtime_paths: RuntimePath
     )
 
 
+def _real_subdirectories(directory: Path) -> list[str]:
+    with os.scandir(directory) as entries:
+        return sorted(entry.name for entry in entries if entry.is_dir(follow_symlinks=False))
+
+
 def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
     # A dedicated worker mounts exactly the directories its agents own or joined, read-only where they only joined;
     # the shared sidecar sees every directory.
+    if not root.is_dir():
+        return ()
     roots: list[SharedDirectoryRoot] = []
-    try:
-        with os.scandir(root) as owner_entries:
-            owners = sorted(entry.name for entry in owner_entries if entry.is_dir(follow_symlinks=False))
-        for owner in owners:
-            with os.scandir(root / owner) as name_entries:
-                names = sorted(entry.name for entry in name_entries if entry.is_dir(follow_symlinks=False))
-            for name in names:
-                path = root / owner / name
-                writable = not os.statvfs(path).f_flag & os.ST_RDONLY
-                roots.append(SharedDirectoryRoot(path=path, writable=writable, spellings=(path,)))
-    except OSError:
-        return tuple(roots)
+    for owner in _real_subdirectories(root):
+        for name in _real_subdirectories(root / owner):
+            path = root / owner / name
+            writable = not os.statvfs(path).f_flag & os.ST_RDONLY
+            roots.append(SharedDirectoryRoot(path=path, writable=writable, spellings=(path,)))
     return tuple(roots)
 
 

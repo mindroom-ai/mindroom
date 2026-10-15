@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +21,6 @@ from tests.conftest import test_runtime_paths
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-_NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
 _WORKER_ROOT = Path("/app/worker")
 
 
@@ -54,7 +52,7 @@ def _agents(**scopes: str | None) -> dict[str, object]:
 
 
 def _shared_report(runtime_paths: RuntimePaths, *members: str) -> Path:
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     for member in members:
         add_shared_directory_member(runtime_paths, owner="alice", name="report", member=member)
     return runtime_paths.storage_root / "shared_directories" / "alice" / "report"
@@ -104,7 +102,7 @@ def test_user_worker_addressing_owner_and_member_mounts_read_write(tmp_path: Pat
     """A user worker serves every user-scope agent, so it mounts what any of them owns read-write."""
     runtime_paths = test_runtime_paths(tmp_path)
     _shared_report(runtime_paths, "bob")
-    create_shared_directory(runtime_paths, owner="carl", name="notes", now=_NOW)
+    create_shared_directory(runtime_paths, owner="carl", name="notes")
     add_shared_directory_member(runtime_paths, owner="carl", name="notes", member="bob")
     config_data = _agents(alice="user", bob="user", carl=None)
 
@@ -142,7 +140,7 @@ def test_planner_skips_missing_and_linked_directories(tmp_path: Path) -> None:
     """A directory removed or replaced by a link is never mounted, and the skip is logged."""
     runtime_paths = test_runtime_paths(tmp_path)
     share = _shared_report(runtime_paths, "bob")
-    create_shared_directory(runtime_paths, owner="alice", name="gone", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="gone")
     (share.parent / "gone").rmdir()
     outside = tmp_path / "outside"
     outside.mkdir()

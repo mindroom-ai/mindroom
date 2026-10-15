@@ -25,7 +25,6 @@ from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from datetime import datetime
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -47,7 +46,6 @@ class SharedDirectory:
     owner: str
     name: str
     members: tuple[str, ...]
-    created_at: str
 
 
 def shared_directory_relative_path(owner: str, name: str) -> Path:
@@ -63,11 +61,10 @@ def _parse_record(key: str, raw: object) -> SharedDirectory | None:
     if not isinstance(raw, dict):
         return None
     record = cast("dict[str, object]", raw)
-    owner, name, members, created_at = (record.get(field) for field in ("owner", "name", "members", "created_at"))
+    owner, name, members = (record.get(field) for field in ("owner", "name", "members"))
     if (
         not isinstance(owner, str)
         or not isinstance(name, str)
-        or not isinstance(created_at, str)
         or not isinstance(members, list)
         or not _NAME_PATTERN.fullmatch(name)
         or key != f"{owner}/{name}"
@@ -80,7 +77,6 @@ def _parse_record(key: str, raw: object) -> SharedDirectory | None:
         owner=owner,
         name=name,
         members=tuple(sorted(set(cast("list[str]", member_names)))),
-        created_at=created_at,
     )
 
 
@@ -114,7 +110,6 @@ def _write_ledger(runtime_paths: RuntimePaths, directories: dict[str, SharedDire
             "owner": directory.owner,
             "name": directory.name,
             "members": list(directory.members),
-            "created_at": directory.created_at,
         }
         for key, directory in directories.items()
     }
@@ -156,7 +151,7 @@ def _existing(directories: dict[str, SharedDirectory], owner: str, name: str) ->
     return directory
 
 
-def create_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: str, now: datetime) -> SharedDirectory:
+def create_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: str) -> SharedDirectory:
     """Create one directory below the storage root and record it with no members."""
     if not _NAME_PATTERN.fullmatch(name):
         msg = "Shared directory names use 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit."
@@ -178,7 +173,7 @@ def create_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: st
         except OSError as exc:
             msg = f"The shared directory '{name}' could not be created: {exc.strerror or exc}"
             raise SharedDirectoryError(msg) from exc
-        directory = SharedDirectory(owner=owner, name=name, members=(), created_at=now.isoformat())
+        directory = SharedDirectory(owner=owner, name=name, members=())
         directories[key] = directory
         _write_ledger(runtime_paths, directories)
         return directory

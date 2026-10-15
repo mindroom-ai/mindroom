@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,7 +23,6 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 if TYPE_CHECKING:
     import pytest
 
-_NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
 _WORKER_KEY = "v1:tenant:shared:bob"
 
 
@@ -140,7 +138,7 @@ def test_coding_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
     assert "shared world" in tool.read_file(str(share / "summary.md"))
     assert f"{share / 'summary.md'}:2:" in tool.grep("shared", str(share))
     assert str(share / "summary.md") in tool.find_files("*.md", str(share))
-    assert "summary.md" in tool.ls(str(share))
+    assert tool.ls(str(share)) == str(share / "summary.md")
     assert "only read" in tool.write_file(str(share / "new.md"), "x")
     assert "only read" in tool.edit_file(str(share / "summary.md"), "hello", "bye")
     assert (share / "summary.md").read_text(encoding="utf-8").startswith("hello")
@@ -173,7 +171,7 @@ def _ledger_config(runtime_paths: RuntimePaths) -> Config:
         ),
         runtime_paths,
     )
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
     add_shared_directory_member(runtime_paths, owner="alice", name="report", member="carol")
     return config
@@ -311,3 +309,17 @@ def test_worker_roots_mounted_read_only_refuse_writes(tmp_path: Path, monkeypatc
         _root(report, writable=True),
         _root(notes, writable=False),
     )
+
+
+def test_worker_without_shared_directories_has_no_roots(tmp_path: Path) -> None:
+    """A worker that mounts no shared directory reaches none."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "dedicated",
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
+            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(tmp_path / "worker"),
+        },
+    )
+
+    assert shared_directory_roots(runtime_paths, None, None) == ()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -86,12 +85,7 @@ class SharedDirectoryTools(Toolkit):
         if isinstance(context, str):
             return context
         try:
-            directory = create_shared_directory(
-                context.runtime_paths,
-                owner=context.agent_name,
-                name=name,
-                now=datetime.now(UTC),
-            )
+            directory = create_shared_directory(context.runtime_paths, owner=context.agent_name, name=name)
         except SharedDirectoryError as exc:
             return _payload("error", name=name, message=str(exc))
         return _payload(
@@ -119,7 +113,10 @@ class SharedDirectoryTools(Toolkit):
             context.runtime_paths,
             context.require_agent_reply_memberships(),
         ):
-            return f"The user you act for may not use {agent_name}, so it cannot be invited."
+            return (
+                f"The user you act for has no access to {agent_name} outside the current room, so it cannot be invited; "
+                "access through access.current_room_members does not count."
+            )
         return None
 
     def invite_to_shared_directory(self, name: str, agent_name: str) -> str:

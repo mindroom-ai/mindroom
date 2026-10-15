@@ -62,12 +62,21 @@ def blocked_git_metadata_message(action: str, requested_path: str) -> str:
     return f"Error {action}: path '{requested_path}' is inside Git metadata ('.git'), which file tools may not modify."
 
 
+def spelled_output_path(path: str | Path) -> str | None:
+    """Return ``path`` as the caller spelled the shared directory holding it, or ``None`` outside one."""
+    if (spelling := _output_spelling.get()) is None:
+        return None
+    root, spelled = spelling
+    try:
+        return str(spelled / Path(path).relative_to(root))
+    except ValueError:
+        return None
+
+
 def format_path_for_output(path: str | Path, base_dir: Path) -> str:
     """Prefer base-dir-relative output, falling back to absolute paths outside the base dir."""
-    if (spelling := _output_spelling.get()) is not None:
-        root, spelled = spelling
-        with suppress(ValueError):
-            return str(spelled / Path(path).relative_to(root))
+    if (spelled := spelled_output_path(path)) is not None:
+        return spelled
     try:
         return str(Path(path).relative_to(base_dir))
     except ValueError:

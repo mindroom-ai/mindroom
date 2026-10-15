@@ -11,7 +11,6 @@ import textwrap
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
@@ -5917,7 +5916,7 @@ def test_docker_workers_mount_shared_directories_for_owner_and_members(
     """The owner's worker mounts its shared directory read-write and an invited agent's worker read-only."""
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
-    create_shared_directory(backend._runtime_paths, owner="alpha", name="report", now=datetime.now(UTC))
+    create_shared_directory(backend._runtime_paths, owner="alpha", name="report")
     add_shared_directory_member(backend._runtime_paths, owner="alpha", name="report", member="beta")
     share = str((tmp_path / "shared_directories" / "alpha" / "report").resolve())
 
@@ -5938,7 +5937,7 @@ def test_docker_worker_restarts_after_an_invitation_changes_its_mounts(
     """An invitation reaches a running worker by recreating it on its next use."""
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
-    create_shared_directory(backend._runtime_paths, owner="alpha", name="report", now=datetime.now(UTC))
+    create_shared_directory(backend._runtime_paths, owner="alpha", name="report")
     handle = backend.ensure_worker(WorkerSpec(_shared_worker_key("beta")), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
 

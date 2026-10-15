@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003
 
 import pytest
@@ -19,16 +18,14 @@ from mindroom.shared_directories.store import (
 )
 from tests.conftest import test_runtime_paths
 
-_NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
-
 
 def test_create_writes_ledger_and_real_directory(tmp_path: Path) -> None:
     """Creating a directory records it and makes a real directory below the storage root."""
     runtime_paths = test_runtime_paths(tmp_path)
 
-    created = create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    created = create_shared_directory(runtime_paths, owner="alice", name="report")
 
-    assert created == SharedDirectory(owner="alice", name="report", members=(), created_at=_NOW.isoformat())
+    assert created == SharedDirectory(owner="alice", name="report", members=())
     assert (runtime_paths.storage_root / "shared_directories" / "alice" / "report").is_dir()
     assert load_shared_directories(runtime_paths) == (created,)
 
@@ -36,10 +33,10 @@ def test_create_writes_ledger_and_real_directory(tmp_path: Path) -> None:
 def test_create_refuses_duplicate(tmp_path: Path) -> None:
     """An owner cannot create two directories with the same name."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
 
     with pytest.raises(SharedDirectoryError, match="alice already has a shared directory named 'report'"):
-        create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+        create_shared_directory(runtime_paths, owner="alice", name="report")
 
 
 @pytest.mark.parametrize("name", ["..", "a/b", "Report", "-x", "x" * 65, ""])
@@ -48,7 +45,7 @@ def test_invalid_names_are_refused(tmp_path: Path, name: str) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
 
     with pytest.raises(SharedDirectoryError, match="Shared directory names"):
-        create_shared_directory(runtime_paths, owner="alice", name=name, now=_NOW)
+        create_shared_directory(runtime_paths, owner="alice", name=name)
 
     assert not (runtime_paths.storage_root / "shared_directories").exists()
     assert load_shared_directories(runtime_paths) == ()
@@ -63,7 +60,7 @@ def test_create_refuses_owner_directory_replaced_by_link(tmp_path: Path) -> None
     (runtime_paths.storage_root / "shared_directories" / "alice").symlink_to(outside)
 
     with pytest.raises(SharedDirectoryError, match="could not be created"):
-        create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+        create_shared_directory(runtime_paths, owner="alice", name="report")
 
     assert list(outside.iterdir()) == []
     assert load_shared_directories(runtime_paths) == ()
@@ -72,7 +69,7 @@ def test_create_refuses_owner_directory_replaced_by_link(tmp_path: Path) -> None
 def test_members_add_and_remove(tmp_path: Path) -> None:
     """Adding and removing members is idempotent and keeps members sorted."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
 
     added, changed = add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
     assert (added.members, changed) == (("bob",), True)
@@ -90,7 +87,7 @@ def test_members_add_and_remove(tmp_path: Path) -> None:
 def test_delete_empties_the_directory_without_following_links(tmp_path: Path) -> None:
     """Deleting removes the record and every file, never what a planted link points at."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
     share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
     (share / "notes").mkdir()
@@ -102,7 +99,7 @@ def test_delete_empties_the_directory_without_following_links(tmp_path: Path) ->
 
     removed = delete_shared_directory(runtime_paths, owner="alice", name="report")
 
-    assert removed == SharedDirectory(owner="alice", name="report", members=("bob",), created_at=_NOW.isoformat())
+    assert removed == SharedDirectory(owner="alice", name="report", members=("bob",))
     assert list(share.iterdir()) == []
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
     assert load_shared_directories(runtime_paths) == ()
@@ -111,7 +108,7 @@ def test_delete_empties_the_directory_without_following_links(tmp_path: Path) ->
 def test_delete_succeeds_when_the_tree_is_already_gone(tmp_path: Path) -> None:
     """Deleting a directory whose tree is already gone still forgets it."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     (runtime_paths.storage_root / "shared_directories" / "alice" / "report").rmdir()
 
     delete_shared_directory(runtime_paths, owner="alice", name="report")
@@ -145,19 +142,19 @@ def test_unreadable_ledger_lists_nothing_and_refuses_changes(tmp_path: Path) -> 
 
     assert load_shared_directories(runtime_paths) == ()
     with pytest.raises(SharedDirectoryError, match="nothing was changed"):
-        create_shared_directory(runtime_paths, owner="alice", name="notes", now=_NOW)
+        create_shared_directory(runtime_paths, owner="alice", name="notes")
     assert ledger.read_text(encoding="utf-8") == broken
 
 
 def test_recreating_a_deleted_directory_reuses_it(tmp_path: Path) -> None:
     """Workers that still mount a deleted directory reach the files of the one created again under its name."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
     mounted = share.stat()
     delete_shared_directory(runtime_paths, owner="alice", name="report")
 
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
 
     assert share.stat().st_ino == mounted.st_ino
 
@@ -165,7 +162,7 @@ def test_recreating_a_deleted_directory_reuses_it(tmp_path: Path) -> None:
 def test_malformed_records_are_dropped(tmp_path: Path) -> None:
     """Records with an invalid shape or name are ignored."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     ledger = runtime_paths.storage_root / "tracking" / "shared_directories.json"
     ledger.write_text(
         ledger.read_text(encoding="utf-8").replace(
@@ -182,7 +179,7 @@ def test_malformed_records_are_dropped(tmp_path: Path) -> None:
 def test_concurrent_invites_keep_every_member(tmp_path: Path) -> None:
     """Concurrent invitations never lose a member."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     members = [f"m{index}" for index in range(16)]
     threads = [
         threading.Thread(
@@ -204,7 +201,7 @@ def test_concurrent_invites_keep_every_member(tmp_path: Path) -> None:
 def test_delete_keeps_the_record_when_the_owner_directory_is_a_link(tmp_path: Path) -> None:
     """A linked owner directory is never followed, and the record stays so the delete can be retried."""
     runtime_paths = test_runtime_paths(tmp_path)
-    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
     owner_directory = runtime_paths.storage_root / "shared_directories" / "alice"
     moved = tmp_path / "moved"
     owner_directory.rename(moved)

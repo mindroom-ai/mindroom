@@ -9429,7 +9429,7 @@
       "name": "shared_directories",
       "requires_conversation": false,
       "requires_primary_runtime": true,
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },

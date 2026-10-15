@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -19,6 +18,7 @@ from mindroom.custom_tools.shared_directories import SharedDirectoryTools
 from mindroom.message_target import MessageTarget
 from mindroom.shared_directories.paths import agent_reads_shares_in_worker, shared_directory_view_path
 from mindroom.shared_directories.store import create_shared_directory, load_shared_directories
+from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -149,7 +149,7 @@ def test_invite_refuses_requester_without_access_to_the_invitee(tmp_path: Path) 
     payload = _call(context, "invite_to_shared_directory", "report", "bob")
 
     assert payload["status"] == "error"
-    assert "may not use bob" in str(payload["message"])
+    assert "no access to bob outside the current room" in str(payload["message"])
     assert load_shared_directories(context.runtime_paths)[0].members == ()
 
 
@@ -267,7 +267,7 @@ def test_paths_name_the_worker_mount_when_tools_run_in_a_dedicated_worker(
         Config(agents={"alice": AgentConfig(display_name="Alice", worker_tools=["shell"])}),
         runtime_paths,
     )
-    directory = create_shared_directory(runtime_paths, owner="alice", name="report", now=datetime.now(UTC))
+    directory = create_shared_directory(runtime_paths, owner="alice", name="report")
 
     assert agent_reads_shares_in_worker(config, runtime_paths, "alice") is True
     assert shared_directory_view_path(runtime_paths, directory, in_worker=True) == (
@@ -287,3 +287,8 @@ def test_restart_notice_appears_only_with_dedicated_workers(tmp_path: Path) -> N
 
     assert "restart" not in str(created["message"])
     assert invited["message"] == "bob can now read it."
+
+
+def test_mcp_gateway_never_offers_the_tool() -> None:
+    """Gateway calls run without the requester and room the tool authorizes against, so the gateway leaves it out."""
+    assert TOOL_METADATA["shared_directories"].mcp_available is False
