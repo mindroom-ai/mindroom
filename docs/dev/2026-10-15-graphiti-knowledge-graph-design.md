@@ -210,5 +210,4 @@ The tool runs in the primary process and touches no files.
 
 ## Open questions
 
-
 - Whether default Graphiti extraction on a cheap model is accurate enough on real transcripts; the live evaluation decides the default `knowledge_graph.model` and whether custom entity types are needed.
