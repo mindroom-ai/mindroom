@@ -9,6 +9,7 @@ so worker code cannot replace a directory another worker mounts with a link.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from dataclasses import dataclass, replace
@@ -17,11 +18,13 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
     from mindroom.config.main import Config
@@ -29,8 +32,8 @@ if TYPE_CHECKING:
 
 _LEDGER_FILENAME = "shared_directories.json"
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _ledger_lock = threading.Lock()
+logger = get_logger(__name__)
 
 
 class SharedDirectoryError(ValueError):
@@ -66,13 +69,12 @@ def _parse_record(key: str, raw: object) -> SharedDirectory | None:
         or not isinstance(name, str)
         or not isinstance(created_at, str)
         or not isinstance(members, list)
-        or not _AGENT_NAME_PATTERN.fullmatch(owner)
         or not _NAME_PATTERN.fullmatch(name)
         or key != f"{owner}/{name}"
     ):
         return None
     member_names = cast("list[object]", members)
-    if not all(isinstance(member, str) and _AGENT_NAME_PATTERN.fullmatch(member) for member in member_names):
+    if not all(isinstance(member, str) for member in member_names):
         return None
     return SharedDirectory(
         owner=owner,
@@ -82,12 +84,22 @@ def _parse_record(key: str, raw: object) -> SharedDirectory | None:
     )
 
 
-def _read_ledger(runtime_paths: RuntimePaths) -> dict[str, SharedDirectory]:
+def _read_ledger(runtime_paths: RuntimePaths, *, for_update: bool) -> dict[str, SharedDirectory]:
+    """Read the ledger; a change refuses an unreadable one so it never writes back without its records."""
     try:
         data = json.loads(_ledger_path(runtime_paths).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        if for_update:
+            msg = f"The shared directory records could not be read, so nothing was changed: {exc}"
+            raise SharedDirectoryError(msg) from exc
+        logger.warning("Shared directory records could not be read", error=str(exc))
         return {}
     if not isinstance(data, dict):
+        if for_update:
+            msg = "The shared directory records are not a JSON object, so nothing was changed."
+            raise SharedDirectoryError(msg)
         return {}
     directories = {}
     for key, raw in cast("dict[object, object]", data).items():
@@ -111,7 +123,8 @@ def _write_ledger(runtime_paths: RuntimePaths, directories: dict[str, SharedDire
 
 def load_shared_directories(runtime_paths: RuntimePaths) -> tuple[SharedDirectory, ...]:
     """Return every recorded shared directory, sorted by owner and name."""
-    return tuple(sorted(_read_ledger(runtime_paths).values(), key=lambda directory: (directory.owner, directory.name)))
+    directories = _read_ledger(runtime_paths, for_update=False).values()
+    return tuple(sorted(directories, key=lambda directory: (directory.owner, directory.name)))
 
 
 def is_shareable_agent(config: Config, agent_name: str) -> bool:
@@ -149,7 +162,7 @@ def create_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: st
         msg = "Shared directory names use 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit."
         raise SharedDirectoryError(msg)
     with _ledger_lock:
-        directories = _read_ledger(runtime_paths)
+        directories = _read_ledger(runtime_paths, for_update=True)
         key = f"{owner}/{name}"
         if key in directories:
             msg = f"{owner} already has a shared directory named '{name}'."
@@ -171,44 +184,82 @@ def create_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: st
         return directory
 
 
-def add_shared_directory_member(runtime_paths: RuntimePaths, *, owner: str, name: str, member: str) -> bool:
-    """Add one member; return ``False`` when it already was one."""
+def _set_members(
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    name: str,
+    members: Callable[[tuple[str, ...]], tuple[str, ...]],
+) -> tuple[SharedDirectory, bool]:
     with _ledger_lock:
-        directories = _read_ledger(runtime_paths)
+        directories = _read_ledger(runtime_paths, for_update=True)
         directory = _existing(directories, owner, name)
-        if member in directory.members:
-            return False
-        directories[f"{owner}/{name}"] = replace(directory, members=tuple(sorted((*directory.members, member))))
+        updated = replace(directory, members=members(directory.members))
+        if updated == directory:
+            return directory, False
+        directories[f"{owner}/{name}"] = updated
         _write_ledger(runtime_paths, directories)
-        return True
+        return updated, True
 
 
-def remove_shared_directory_member(runtime_paths: RuntimePaths, *, owner: str, name: str, member: str) -> bool:
-    """Remove one member; return ``False`` when it was not one."""
-    with _ledger_lock:
-        directories = _read_ledger(runtime_paths)
-        directory = _existing(directories, owner, name)
-        if member not in directory.members:
-            return False
-        directories[f"{owner}/{name}"] = replace(
-            directory,
-            members=tuple(existing for existing in directory.members if existing != member),
-        )
-        _write_ledger(runtime_paths, directories)
-        return True
+def add_shared_directory_member(
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    name: str,
+    member: str,
+) -> tuple[SharedDirectory, bool]:
+    """Add one member; return the directory and whether it changed."""
+    return _set_members(
+        runtime_paths,
+        owner=owner,
+        name=name,
+        members=lambda members: tuple(sorted({*members, member})),
+    )
+
+
+def remove_shared_directory_member(
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    name: str,
+    member: str,
+) -> tuple[SharedDirectory, bool]:
+    """Remove one member; return the directory and whether it changed."""
+    return _set_members(
+        runtime_paths,
+        owner=owner,
+        name=name,
+        members=lambda members: tuple(existing for existing in members if existing != member),
+    )
+
+
+def _empty_directory(directory_fd: int) -> None:
+    with os.scandir(directory_fd) as entries:
+        names = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+    for name, is_directory in names:
+        if is_directory:
+            remove_directory_tree_at(directory_fd, name)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
 
 
 def delete_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: str) -> SharedDirectory:
-    """Remove one directory's tree without following links, then forget it."""
+    """Remove every file in one directory without following links, then forget it.
+
+    The directory itself stays, empty and unmounted, because running workers may still
+    mount it; a directory created again under the same name reuses it, so those mounts
+    keep reaching the current files instead of a deleted directory.
+    """
     with _ledger_lock:
-        directories = _read_ledger(runtime_paths)
+        directories = _read_ledger(runtime_paths, for_update=True)
         directory = _existing(directories, owner, name)
         try:
             with open_directory_within_root(
                 runtime_paths.storage_root,
-                Path(SHARED_DIRECTORIES_DIRNAME, owner),
-            ) as owner_fd:
-                remove_directory_tree_at(owner_fd, name)
+                shared_directory_relative_path(owner, name),
+            ) as directory_fd:
+                _empty_directory(directory_fd)
         except FileNotFoundError:
             pass
         except OSError as exc:

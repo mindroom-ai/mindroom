@@ -5101,6 +5101,7 @@ path = "mindroom.workers.worker_retirement"
 depends_on = []
 visibility = [
     "mindroom.script_runs.manager",
+    "mindroom.shared_directories.store",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.docker_projection",
     "mindroom.workers.backends.legacy_docker_worker_metadata",

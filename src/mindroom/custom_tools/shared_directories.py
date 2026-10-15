@@ -18,11 +18,9 @@ from mindroom.shared_directories.store import (
     create_shared_directory,
     delete_shared_directory,
     is_shareable_agent,
-    load_shared_directories,
     remove_shared_directory_member,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.workers.runtime import primary_worker_backend_is_dedicated
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -36,10 +34,14 @@ def _payload(status: str, **fields: object) -> str:
 
 
 def _changed_message(context: ToolRuntimeContext, agent_names: Iterable[str], done: str) -> str:
-    # Only dedicated workers mount shared directories one by one, so only they restart on a change.
-    if not primary_worker_backend_is_dedicated(context.runtime_paths):
+    # Only dedicated workers mount shared directories one by one, so only agents using them restart on a change.
+    names = [
+        agent_name
+        for agent_name in agent_names
+        if agent_reads_shares_in_worker(context.config, context.runtime_paths, agent_name)
+    ]
+    if not names:
         return done
-    names = list(agent_names)
     joined = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
     return f"{done} {joined}: worker restarts on the next tool call, ending running background shells."
 
@@ -109,14 +111,13 @@ class SharedDirectoryTools(Toolkit):
             return f"{agent_name} is private and cannot join shared directories."
         if not is_access_checked_requester_id(context.requester_id, config, context.runtime_paths):
             return "Agents can only be invited on behalf of a user."
-        memberships = context.agent_reply_memberships
-        if memberships is None or not is_sender_allowed_for_responder(
+        if not is_sender_allowed_for_responder(
             context.requester_id,
             agent_name,
             None,
             config,
             context.runtime_paths,
-            memberships,
+            context.require_agent_reply_memberships(),
         ):
             return f"The user you act for may not use {agent_name}, so it cannot be invited."
         return None
@@ -135,7 +136,7 @@ class SharedDirectoryTools(Toolkit):
         if (error := self._invitation_error(context, agent_name)) is not None:
             return _payload("error", name=name, agent=agent_name, message=error)
         try:
-            added = add_shared_directory_member(
+            directory, added = add_shared_directory_member(
                 context.runtime_paths,
                 owner=context.agent_name,
                 name=name,
@@ -147,7 +148,7 @@ class SharedDirectoryTools(Toolkit):
             "ok",
             name=name,
             agent=agent_name,
-            members=list(self._members(context, name)),
+            members=list(directory.members),
             message=_changed_message(context, [agent_name], f"{agent_name} can now read it.")
             if added
             else f"{agent_name} is already a member.",
@@ -165,7 +166,7 @@ class SharedDirectoryTools(Toolkit):
         if isinstance(context, str):
             return context
         try:
-            removed = remove_shared_directory_member(
+            directory, removed = remove_shared_directory_member(
                 context.runtime_paths,
                 owner=context.agent_name,
                 name=name,
@@ -177,7 +178,7 @@ class SharedDirectoryTools(Toolkit):
             "ok",
             name=name,
             agent=agent_name,
-            members=list(self._members(context, name)),
+            members=list(directory.members),
             message=_changed_message(context, [agent_name], f"{agent_name} can no longer read it.")
             if removed
             else f"{agent_name} is not a member.",
@@ -219,14 +220,3 @@ class SharedDirectoryTools(Toolkit):
             for directory in agent_shared_directories(context.runtime_paths, context.config, context.agent_name)
         ]
         return _payload("ok", directories=entries)
-
-    @staticmethod
-    def _members(context: ToolRuntimeContext, name: str) -> tuple[str, ...]:
-        return next(
-            (
-                directory.members
-                for directory in load_shared_directories(context.runtime_paths)
-                if directory.owner == context.agent_name and directory.name == name
-            ),
-            (),
-        )

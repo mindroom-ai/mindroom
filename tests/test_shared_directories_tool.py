@@ -216,7 +216,7 @@ def test_invite_and_remove_are_idempotent(tmp_path: Path) -> None:
 
 
 def test_delete_removes_the_directory_and_names_every_restart(tmp_path: Path) -> None:
-    """Deleting forgets the directory, removes its files, and names the owner and members."""
+    """Deleting forgets the directory, removes every file in it, and names the owner and members."""
     context = _context(_config(tmp_path))
     created = _call(context, "create_shared_directory", "report")
     context = _context(_config(tmp_path, dedicated_workers=True))
@@ -226,7 +226,7 @@ def test_delete_removes_the_directory_and_names_every_restart(tmp_path: Path) ->
 
     assert payload["status"] == "ok"
     assert "alice and bob: worker restarts" in str(payload["message"])
-    assert not Path(str(created["path"])).exists()
+    assert list(Path(str(created["path"])).iterdir()) == []
     assert load_shared_directories(context.runtime_paths) == ()
 
 

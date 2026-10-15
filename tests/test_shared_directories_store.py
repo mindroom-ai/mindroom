@@ -74,18 +74,21 @@ def test_members_add_and_remove(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
 
-    assert add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob") is True
-    assert add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob") is False
-    assert add_shared_directory_member(runtime_paths, owner="alice", name="report", member="ann") is True
+    added, changed = add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
+    assert (added.members, changed) == (("bob",), True)
+    assert add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")[1] is False
+    added, _ = add_shared_directory_member(runtime_paths, owner="alice", name="report", member="ann")
+    assert added.members == ("ann", "bob")
     assert load_shared_directories(runtime_paths)[0].members == ("ann", "bob")
 
-    assert remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob") is True
-    assert remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob") is False
+    removed, changed = remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
+    assert (removed.members, changed) == (("ann",), True)
+    assert remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")[1] is False
     assert load_shared_directories(runtime_paths)[0].members == ("ann",)
 
 
-def test_delete_removes_tree_without_following_links(tmp_path: Path) -> None:
-    """Deleting removes the record and tree, never what a planted link points at."""
+def test_delete_empties_the_directory_without_following_links(tmp_path: Path) -> None:
+    """Deleting removes the record and every file, never what a planted link points at."""
     runtime_paths = test_runtime_paths(tmp_path)
     create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
     add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
@@ -100,7 +103,7 @@ def test_delete_removes_tree_without_following_links(tmp_path: Path) -> None:
     removed = delete_shared_directory(runtime_paths, owner="alice", name="report")
 
     assert removed == SharedDirectory(owner="alice", name="report", members=("bob",), created_at=_NOW.isoformat())
-    assert not share.exists()
+    assert list(share.iterdir()) == []
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
     assert load_shared_directories(runtime_paths) == ()
 
@@ -132,14 +135,31 @@ def test_unknown_directory_is_refused(tmp_path: Path, operation: object) -> None
         operation(runtime_paths)  # type: ignore[operator]
 
 
-def test_unreadable_ledger_reads_as_empty(tmp_path: Path) -> None:
-    """An unparseable ledger reads as having no directories."""
+def test_unreadable_ledger_lists_nothing_and_refuses_changes(tmp_path: Path) -> None:
+    """An unparseable ledger lists no directories, and no change writes over its records."""
     runtime_paths = test_runtime_paths(tmp_path)
     ledger = runtime_paths.storage_root / "tracking" / "shared_directories.json"
     ledger.parent.mkdir(parents=True)
-    ledger.write_text('{"alice/report": {"owner": "alice"}, "broken": 3', encoding="utf-8")
+    broken = '{"alice/report": {"owner": "alice"}, "broken": 3'
+    ledger.write_text(broken, encoding="utf-8")
 
     assert load_shared_directories(runtime_paths) == ()
+    with pytest.raises(SharedDirectoryError, match="nothing was changed"):
+        create_shared_directory(runtime_paths, owner="alice", name="notes", now=_NOW)
+    assert ledger.read_text(encoding="utf-8") == broken
+
+
+def test_recreating_a_deleted_directory_reuses_it(tmp_path: Path) -> None:
+    """Workers that still mount a deleted directory reach the files of the one created again under its name."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
+    mounted = share.stat()
+    delete_shared_directory(runtime_paths, owner="alice", name="report")
+
+    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+
+    assert share.stat().st_ino == mounted.st_ino
 
 
 def test_malformed_records_are_dropped(tmp_path: Path) -> None:
