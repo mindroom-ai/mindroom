@@ -21,7 +21,7 @@ from agno.models.message import Message
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.response import ModelResponse
-from agno.tools.function import Function, ToolResult
+from agno.tools.function import ToolResult
 from starlette.responses import StreamingResponse
 
 from mindroom.config.main import Config
@@ -958,73 +958,6 @@ async def test_one_rejected_file_does_not_strip_later_pdfs_for_the_route(tmp_pat
     pdf_call = model.blocking_calls[2]
     assert pdf_call[0].files
     assert len(pdf_call) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize(
-    ("error", "later_request_inlines_media"),
-    [
-        (
-            ModelProviderError(
-                message="Error code: 400 - [{'error': {'code': 400, 'message': "
-                "'The message size (74029796 bytes) exceeds 30.000MB limit.', 'status': 'FAILED_PRECONDITION'}}]",
-                status_code=400,
-            ),
-            False,
-        ),
-        (
-            ModelProviderError(
-                message="Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': "
-                "'messages.0.content.1.image.source.base64: image exceeds 5 MB maximum: 7340032 bytes > 5242880 bytes'}}",
-                status_code=400,
-            ),
-            False,
-        ),
-        (ModelProviderError(message="payload too large", status_code=413), False),
-        (RuntimeError("unknown provider failure"), True),
-    ],
-    ids=["request_size", "image_size", "payload_too_large", "unclassified"],
-)
-async def test_size_rejection_keeps_inline_media_out_of_the_rest_of_the_run(
-    tmp_path: Path,
-    streaming: bool,
-    error: Exception,
-    later_request_inlines_media: bool,
-) -> None:
-    """Media a provider rejected for size stays out of the run's later requests, but not out of the next run."""
-    tool_call = ModelResponse(
-        content="Checking.",
-        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}],
-    )
-    outcomes: list[ModelResponse | Exception] = [
-        error,
-        tool_call,
-        ModelResponse(content="done"),
-        ModelResponse(content="next run"),
-    ]
-    model = _load(
-        _FakeModel(
-            blocking_outcomes=list(outcomes),
-            streaming_outcomes=[item if isinstance(item, Exception) else [item] for item in outcomes],
-        ),
-        tmp_path,
-    )
-
-    def probe() -> str:
-        return "probed"
-
-    for _run in range(2):
-        tools = [Function.from_callable(probe)]
-        if streaming:
-            _ = [event async for event in model.aresponse_stream(messages=[_image_message()], tools=tools)]
-        else:
-            await model.aresponse(messages=[_image_message()], tools=tools)
-
-    calls = model.streaming_calls if streaming else model.blocking_calls
-    sent_images = [any(message.images for message in call) for call in calls]
-    assert sent_images == [True, False, later_request_inlines_media, True]
-    assert any(message.role == "tool" for message in calls[2])
 
 
 @pytest.mark.asyncio

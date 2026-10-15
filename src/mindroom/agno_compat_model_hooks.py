@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
 type _AsyncInvoke = Callable[..., Coroutine[object, object, ModelResponse]]
 type _AsyncStream = Callable[..., AsyncIterator[ModelResponse]]
-type _AsyncResponseStream = Callable[..., AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]]
 type _SyncStream = Callable[..., Iterator[ModelResponse]]
 type _RetryPredicate = Callable[[ModelProviderError], bool]
 
@@ -467,20 +466,17 @@ def temporary_response_observer(model: Model, observe: Callable[[dict[str, objec
 
 
 # AGNO_COMPAT: Retry cycles lack public context and classification hooks.
-# Reason: Request-scoped media state must enclose Agno's private retry loops, and
-# run-scoped media state its response loops, while the owner's retry classifier
-# must compose with Agno's predicate.
+# Reason: Request-scoped media state must enclose Agno's private retry loops,
+# while the owner's retry classifier must compose with Agno's predicate.
 # Upstream issue: No matching public retry-cycle context/predicate hook identified.
 # Upstream PR: None identified for this extension point.
-# Remove when: Public hooks enclose the whole retry cycle and response loop and compose
-# classifiers; preserve owner media capability learning, redaction, and replay safety.
+# Remove when: Public hooks enclose the whole retry cycle and compose classifiers;
+# preserve owner media capability learning, redaction, and replay safety.
 # Coverage: tests/test_provider_media_fallback.py.
 def install_retry_cycle_hooks(
     model: Model,
     *,
     marker: str,
-    wrap_response: Callable[[_AsyncInvoke], _AsyncInvoke],
-    wrap_response_stream: Callable[[_AsyncResponseStream], _AsyncResponseStream],
     wrap_retry: Callable[[_AsyncInvoke], _AsyncInvoke],
     wrap_retry_stream: Callable[[_AsyncStream], _AsyncStream],
     wrap_predicate: Callable[[_RetryPredicate], _RetryPredicate],
@@ -491,8 +487,6 @@ def install_retry_cycle_hooks(
     model_dict = vars(model)
     if model_dict.get(marker) is True:
         return
-    model_dict["aresponse"] = wrap_response(model.aresponse)
-    model_dict["aresponse_stream"] = wrap_response_stream(model.aresponse_stream)
     model_dict["_ainvoke_with_retry"] = wrap_retry(model._ainvoke_with_retry)
     model_dict["_ainvoke_stream_with_retry"] = wrap_retry_stream(model._ainvoke_stream_with_retry)
     model_dict["_is_retryable_error"] = wrap_predicate(model._is_retryable_error)

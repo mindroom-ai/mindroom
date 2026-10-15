@@ -31,8 +31,6 @@ if TYPE_CHECKING:
 
     from agno.models.base import Model
     from agno.models.response import ModelResponse
-    from agno.run.agent import RunOutputEvent
-    from agno.run.team import TeamRunOutputEvent
 
     from mindroom.media_inputs import MediaKind
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -48,12 +46,12 @@ logger = get_logger(__name__)
 _INSTALLED_ATTR = "_mindroom_provider_media_fallback_installed"
 _FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _PAYLOAD_TOO_LARGE_STATUS = 413
+_RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
 _MAX_LOGGED_ERROR_CHARS = 500
 # Rejections that name one input's size or media type prove only that this input
 # failed, not that the route rejects the whole media kind.
-_SIZE_ERROR_MARKERS = ("exceed", "too large")
-_MEDIA_TYPE_ERROR_MARKERS = ("media_type", "mime type", "mime_type")
+_INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "media_type", "mime type", "mime_type")
 # Providers reject one undecodable, oversized, or oddly formatted input with the
 # same errors as a model without that input kind, so only a rejection that names
 # the missing capability may change later requests on the whole route.
@@ -80,17 +78,6 @@ class _ModelMediaRoute:
 
 
 @dataclass(slots=True)
-class _MediaFallbackRunState:
-    """Media kinds a provider rejected for size, removed for the rest of one Agno response loop.
-
-    A run only appends messages, so every later request of the run would resend
-    the rejected media and fail the same way before falling back again.
-    """
-
-    oversized_kinds: frozenset[MediaKind] = frozenset()
-
-
-@dataclass(slots=True)
 class _MediaFallbackRequestState:
     """Media removed for the remainder of one provider retry cycle."""
 
@@ -98,15 +85,10 @@ class _MediaFallbackRequestState:
     failure: Exception | None = None
     failed_kinds: frozenset[MediaKind] = frozenset()
     stream_output_produced: bool = False
-    run: _MediaFallbackRunState | None = None
 
 
 _REQUEST_STATES: ContextVar[dict[int, _MediaFallbackRequestState] | None] = ContextVar(
     "mindroom_provider_media_fallback_request_states",
-    default=None,
-)
-_RUN_STATES: ContextVar[dict[int, _MediaFallbackRunState] | None] = ContextVar(
-    "mindroom_provider_media_fallback_run_states",
     default=None,
 )
 
@@ -192,36 +174,11 @@ def install_provider_media_fallback(model: Model, *, fallback_prompt: str) -> No
     install_retry_cycle_hooks(
         model,
         marker=_INSTALLED_ATTR,
-        wrap_response=lambda original: partial(_aresponse_in_run_scope, model, original),
-        wrap_response_stream=lambda original: partial(_aresponse_stream_in_run_scope, model, original),
         wrap_retry=lambda original: partial(_ainvoke_in_request_scope, model, original),
         wrap_retry_stream=lambda original: partial(_ainvoke_stream_in_request_scope, model, original),
         wrap_predicate=lambda original: partial(_is_retryable_provider_error, model, original),
         wrap_invoke=lambda original: partial(_fallback_ainvoke, model, original, fallback_prompt),
         wrap_stream=lambda original: partial(_fallback_ainvoke_stream, model, original, fallback_prompt),
-    )
-
-
-async def _aresponse_in_run_scope(
-    model: Model,
-    original_aresponse: Callable[..., Coroutine[object, object, ModelResponse]],
-    *args: object,
-    **kwargs: object,
-) -> ModelResponse:
-    with _media_fallback_run(model, _MediaFallbackRunState()):
-        return await original_aresponse(*args, **kwargs)
-
-
-def _aresponse_stream_in_run_scope(
-    model: Model,
-    original_aresponse_stream: Callable[..., AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]],
-    *args: object,
-    **kwargs: object,
-) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
-    state = _MediaFallbackRunState()
-    return context_bound_async_stream(
-        context_factory=lambda: _media_fallback_run(model, state),
-        stream_factory=lambda: original_aresponse_stream(*args, **kwargs),
     )
 
 
@@ -243,7 +200,7 @@ def _ainvoke_stream_in_request_scope(
 ) -> AsyncIterator[ModelResponse]:
     # Keep retry state for this stream, but never carry a ContextVar token across
     # a yield: consumers may resume or close the stream in another task.
-    state = _request_state(model) or _new_request_state(model)
+    state = _request_state(model) or _MediaFallbackRequestState()
     return context_bound_async_stream(
         context_factory=lambda: _media_fallback_request(model, state=state),
         stream_factory=lambda: original_ainvoke_stream_with_retry(*args, **kwargs),
@@ -281,7 +238,7 @@ async def _ainvoke_with_fallback(
     messages = _request_messages(args, kwargs)
     route = _model_media_route(model)
     present_kinds = _media_kinds(messages)
-    request_state = _request_state(model) or _new_request_state(model)
+    request_state = _request_state(model) or _MediaFallbackRequestState()
     known_unsupported = (_known_unsupported_media_kinds(route) | _adapter_omitted_media(model)) & present_kinds
     removed_kinds = known_unsupported | (request_state.removed_kinds & present_kinds)
     initial_args, initial_kwargs = _call_without_media_kinds(
@@ -349,7 +306,7 @@ async def _stream_with_fallback(
     messages = _request_messages(args, kwargs)
     route = _model_media_route(model)
     present_kinds = _media_kinds(messages)
-    request_state = _request_state(model) or _new_request_state(model)
+    request_state = _request_state(model) or _MediaFallbackRequestState()
     known_unsupported = (_known_unsupported_media_kinds(route) | _adapter_omitted_media(model)) & present_kinds
     removed_kinds = known_unsupported | (request_state.removed_kinds & present_kinds)
     initial_args, initial_kwargs = _call_without_media_kinds(
@@ -514,13 +471,6 @@ def _request_state(model: Model) -> _MediaFallbackRequestState | None:
     return states.get(id(model)) if states is not None else None
 
 
-def _new_request_state(model: Model) -> _MediaFallbackRequestState:
-    """Start a retry cycle without the media its run already saw rejected for size."""
-    run_states = _RUN_STATES.get()
-    run = run_states.get(id(model)) if run_states is not None else None
-    return _MediaFallbackRequestState(removed_kinds=run.oversized_kinds if run is not None else frozenset(), run=run)
-
-
 def _remember_request_fallback(
     state: _MediaFallbackRequestState,
     failure: Exception,
@@ -534,8 +484,6 @@ def _remember_request_fallback(
 def _learn_from_request_fallback(route: _ModelMediaRoute, state: _MediaFallbackRequestState) -> None:
     if state.failure is not None and _should_learn(state.failure, state.failed_kinds):
         _record_unsupported_media_kinds(route, state.failed_kinds)
-    if state.failure is not None and state.run is not None and _is_size_rejection(state.failure):
-        state.run.oversized_kinds |= state.failed_kinds
     state.failure = None
     state.failed_kinds = frozenset()
 
@@ -635,32 +583,22 @@ def _should_retry(error: Exception) -> bool:
     )
 
 
-def _is_transient_status(error: Exception) -> bool:
-    return isinstance(error, ModelProviderError) and (
-        error.status_code in TRANSIENT_PROVIDER_STATUS_CODES or error.status_code >= _SERVER_ERROR_STATUS
-    )
-
-
-def _is_size_rejection(error: Exception) -> bool:
-    """Return whether the provider rejected the request or one of its inputs for its size."""
-    if isinstance(error, ContextWindowExceededError):
-        return True
-    if isinstance(error, ModelProviderError) and error.status_code == _PAYLOAD_TOO_LARGE_STATUS:
-        return True
-    if _is_transient_status(error):
-        return False
-    lowered_error_text = str(error).lower()
-    return f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text or any(
-        marker in lowered_error_text for marker in _SIZE_ERROR_MARKERS
-    )
-
-
 def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:
     """Return whether stripped success isolates one media kind the provider says the model lacks."""
-    if len(media_kinds) != 1 or _is_size_rejection(error) or _is_transient_status(error):
+    if len(media_kinds) != 1:
+        return False
+    if isinstance(error, ContextWindowExceededError):
+        return False
+    if isinstance(error, ModelProviderError) and (
+        error.status_code in (_PAYLOAD_TOO_LARGE_STATUS, _RATE_LIMIT_STATUS)
+        or error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
+        or error.status_code >= _SERVER_ERROR_STATUS
+    ):
         return False
     lowered_error_text = str(error).lower()
-    if any(marker in lowered_error_text for marker in _MEDIA_TYPE_ERROR_MARKERS):
+    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text or any(
+        marker in lowered_error_text for marker in _INPUT_SPECIFIC_ERROR_MARKERS
+    ):
         return False
     if any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS):
         return False
@@ -677,23 +615,13 @@ def _active_model(model: Model) -> Iterator[None]:
 
 
 @contextmanager
-def _media_fallback_run(model: Model, state: _MediaFallbackRunState) -> Iterator[None]:
-    states = _RUN_STATES.get() or {}
-    token = _RUN_STATES.set({**states, id(model): state})
-    try:
-        yield
-    finally:
-        _RUN_STATES.reset(token)
-
-
-@contextmanager
 def _media_fallback_request(
     model: Model,
     *,
     state: _MediaFallbackRequestState | None = None,
 ) -> Iterator[None]:
     states = _REQUEST_STATES.get() or {}
-    state = state or states.get(id(model)) or _new_request_state(model)
+    state = state or states.get(id(model)) or _MediaFallbackRequestState()
     token = _REQUEST_STATES.set({**states, id(model): state})
     try:
         yield
