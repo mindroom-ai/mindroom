@@ -5,8 +5,8 @@ the full runtime import (~11-17 s on a 2-CPU worker pod) on every request.
 This module keeps one long-lived *template* process per interpreter that pays
 that import once and then blocks on a unix socket. Each request forks the
 template; the fork child applies the per-request env and cwd, executes the
-already-prepared envelope, streams the response back over the socket, and
-exits. Isolation semantics match spawn-per-call - every request still runs in
+already-prepared envelope, streams its progress and then the response back
+over the socket, and exits. Isolation semantics match spawn-per-call - every request still runs in
 its own fresh process - at ~ms fork cost instead of the import cost.
 
 The template must stay fork-safe: it only imports modules and then blocks on
@@ -116,7 +116,7 @@ class _ChildRequest:
     env: dict[str, str] | None
     cwd: str | None
     envelope: str
-    timeout_seconds: float
+    timeout_seconds: float | None
 
 
 def _stderr_tail(stderr_path: Path) -> str:
@@ -144,17 +144,17 @@ class _ConnectionClosedError(RuntimeError):
 
 
 class _SocketLineReader:
-    """Read newline-framed protocol lines from a socket under one deadline."""
+    """Read newline-framed protocol lines from a socket under one deadline, or none."""
 
-    def __init__(self, conn: socket.socket, deadline: float) -> None:
+    def __init__(self, conn: socket.socket, deadline: float | None) -> None:
         self._conn = conn
         self._deadline = deadline
         self._buffer = bytearray()
 
     def read_line(self) -> bytes:
         while b"\n" not in self._buffer:
-            remaining = self._deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = None if self._deadline is None else self._deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 raise TimeoutError
             self._conn.settimeout(remaining)
             chunk = self._conn.recv(_RECV_CHUNK_BYTES)
@@ -190,18 +190,24 @@ class _SandboxForkserver:
         request_env: dict[str, str] | None,
         request_cwd: str | None,
         envelope: str,
-        timeout_seconds: float,
+        timeout_seconds: float | None,
+        startup_timeout_seconds: float,
         bind_stop: Callable[[Callable[[], None]], None],
+        on_progress: Callable[[str], None],
     ) -> subprocess.CompletedProcess[str]:
         """Execute one prepared envelope in a fresh fork of the warm template.
 
-        ``bind_stop`` receives a function that stops the request by hanging up on its forked child.
+        ``timeout_seconds`` of ``None`` lets the request run however long it takes; getting a warm template still
+        has ``startup_timeout_seconds``. ``bind_stop`` receives a function that stops the request by hanging up on
+        its forked child. ``on_progress`` receives each progress report the child sends before its response.
         """
-        deadline = time.monotonic() + timeout_seconds
+        now = time.monotonic()
+        deadline = None if timeout_seconds is None else now + timeout_seconds
+        startup_deadline = deadline if deadline is not None else now + startup_timeout_seconds
         key = python_executable or sys.executable
         fingerprint = _template_fingerprint(key, template_env)
         key_lock = self._key_lock(key)
-        remaining = deadline - time.monotonic()
+        remaining = startup_deadline - time.monotonic()
         if remaining <= 0 or not key_lock.acquire(timeout=remaining):
             msg = "Timed out waiting for the sandbox forkserver template."
             raise ForkserverTimeoutError(msg)
@@ -210,7 +216,7 @@ class _SandboxForkserver:
                 key=key,
                 fingerprint=fingerprint,
                 template_env=template_env,
-                deadline=deadline,
+                deadline=startup_deadline,
             )
         finally:
             key_lock.release()
@@ -222,6 +228,7 @@ class _SandboxForkserver:
             envelope=envelope,
             deadline=deadline,
             bind_stop=bind_stop,
+            on_progress=on_progress,
         )
 
     def shutdown(self) -> None:
@@ -388,11 +395,12 @@ class _SandboxForkserver:
         request_env: dict[str, str] | None,
         request_cwd: str | None,
         envelope: str,
-        deadline: float,
+        deadline: float | None,
         bind_stop: Callable[[Callable[[], None]], None],
+        on_progress: Callable[[str], None],
     ) -> subprocess.CompletedProcess[str]:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
             # Never deliver a request the caller has no budget left for; a
             # delivered request forks a child the parent may not learn about.
             raise ForkserverTimeoutError
@@ -409,12 +417,14 @@ class _SandboxForkserver:
             raise ForkserverError(msg) from exc
         child_pid: int | None = None
         try:
-            conn.settimeout(remaining)
+            # Handing a job's request over still has a bound; only waiting for its response does not.
+            conn.settimeout(remaining if remaining is not None else _CHILD_REQUEST_READ_TIMEOUT_SECONDS)
             self._send_request(conn, key, template, request_payload, bind_stop)
             reader = _SocketLineReader(conn, deadline)
             try:
                 child_pid = int(json.loads(reader.read_line())["pid"])
-                response = json.loads(reader.read_line())
+                while "progress" in (response := json.loads(reader.read_line())):
+                    on_progress(str(response["progress"]))
                 returncode = int(response["returncode"])
                 stdout_text = str(response["stdout"])
                 stderr_text = str(response["stderr"])
@@ -470,8 +480,13 @@ def get_sandbox_forkserver() -> _SandboxForkserver:
         return _forkserver
 
 
-def serve_template(socket_path: str, run_payload: Callable[[str], tuple[int, str, str]]) -> int:
+def serve_template(
+    socket_path: str,
+    run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
+) -> int:
     """Template process main loop: accept one connection per request and fork.
+
+    ``run_payload`` executes one envelope and receives the function that sends its progress to the runner.
 
     Runs inside ``python -m mindroom.api.sandbox_runner --sandbox-forkserver-template``
     after the heavy runtime import has completed. Must stay fork-safe: no
@@ -517,7 +532,10 @@ def serve_template(socket_path: str, run_payload: Callable[[str], tuple[int, str
         server.close()
 
 
-def _child_main(conn: socket.socket, run_payload: Callable[[str], tuple[int, str, str]]) -> NoReturn:
+def _child_main(
+    conn: socket.socket,
+    run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
+) -> NoReturn:
     """Fork-child request handler; never returns to the template loop."""
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     exit_code = 1
@@ -559,11 +577,12 @@ def _parse_child_request(request_line: bytes) -> _ChildRequest:
 def _run_child_request(
     conn: socket.socket,
     request: _ChildRequest,
-    run_payload: Callable[[str], tuple[int, str, str]],
+    run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
 ) -> int:
-    # Self-destruct backstop for the rare case where the runner never learned
-    # this child's pid; the grace keeps the runner-side SIGKILL primary.
-    signal.alarm(max(1, math.ceil(request.timeout_seconds + _CHILD_TIMEOUT_GRACE_SECONDS)))
+    if request.timeout_seconds is not None:
+        # Self-destruct backstop for the rare case where the runner never learned
+        # this child's pid; the grace keeps the runner-side SIGKILL primary.
+        signal.alarm(max(1, math.ceil(request.timeout_seconds + _CHILD_TIMEOUT_GRACE_SECONDS)))
     if request.env is not None:
         os.environ.clear()
         os.environ.update(request.env)
@@ -573,9 +592,17 @@ def _run_child_request(
         # The runner hung up while handing this request over; never start it.
         return 1
     threading.Thread(target=_exit_when_runner_hangs_up, args=(conn,), daemon=True).start()
-    returncode, stdout_text, stderr_text = run_payload(request.envelope)
-    conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
-    _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})
+    # Tool threads report progress too; one lock keeps every line whole and the response last.
+    lines = threading.Lock()
+
+    def report(text: str) -> None:
+        with lines, suppress(OSError):
+            _send_json(conn, {"progress": text})
+
+    returncode, stdout_text, stderr_text = run_payload(request.envelope, report)
+    with lines:
+        conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
+        _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})
     return 0
 
 

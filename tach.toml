@@ -1948,9 +1948,28 @@ path = "mindroom.api.sandbox_protocol"
 depends_on = []
 
 [[modules]]
+path = "mindroom.api.sandbox_execute_stream"
+depends_on = [
+    "mindroom.api.sandbox_request_cancellation",
+    "mindroom.tool_system.progress",
+]
+visibility = ["mindroom.api.sandbox_runner"]
+
+[[modules]]
+path = "mindroom.tool_system.dedicated_threads"
+depends_on = []
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.tool_jobs.agno_execution",
+]
+
+[[modules]]
 path = "mindroom.api.sandbox_request_cancellation"
 depends_on = []
-visibility = ["mindroom.api.sandbox_runner"]
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.sandbox_execute_stream",
+]
 
 [[modules]]
 path = "mindroom.api.worker_responses"
@@ -2004,6 +2023,11 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backends.local",
+    "mindroom.api.sandbox_execute_stream",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_system.dedicated_threads",
+    "mindroom.tool_system.progress",
+    "mindroom.tool_system.worker_proxy_client",
 ]
 
 [[modules]]
@@ -5035,6 +5059,9 @@ depends_on = []
 visibility = [
     "mindroom.delegation.lifecycle",
     "mindroom.tool_jobs.runtime",
+    "mindroom.api.sandbox_execute_stream",
+    "mindroom.api.sandbox_runner",
+    "mindroom.tool_system.worker_proxy_client",
 ]
 
 [[modules]]
@@ -5085,11 +5112,14 @@ depends_on = [
     "mindroom.credentials.manager",
     "mindroom.runtime_env_policy",
     "mindroom.workers.models",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_system.progress",
 ]
 visibility = [
     "mindroom.mcp_gateway.tools",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_media",
+    "mindroom.api.sandbox_runner",
 ]
 
 [[modules]]
@@ -8034,6 +8064,8 @@ visibility = [
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.approvals",
+    "mindroom.api.sandbox_runner",
+    "mindroom.tool_system.worker_proxy_client",
 ]
 
 [[modules]]
@@ -8084,6 +8116,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.dedicated_threads",
 ]
 visibility = [
     # Agent assembly asks which gated functions can ask for their approval as their job.

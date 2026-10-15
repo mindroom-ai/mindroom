@@ -9,23 +9,32 @@ import io
 import json
 import os
 import secrets
+import signal
+import socket
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Mapping
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout, suppress
+from contextvars import copy_context
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from uuid import uuid4
 
 import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants, yaml_io
 from mindroom.api import (
     sandbox_env_assembly,
     sandbox_exec,
+    sandbox_execute_stream,
     sandbox_forkserver,
     sandbox_protocol,
     sandbox_request_cancellation,
@@ -54,6 +63,7 @@ from mindroom.runtime_env_policy import (
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -67,6 +77,7 @@ from mindroom.tool_system.catalog import (
     sanitize_tool_init_overrides,
     validate_authored_tool_entry_overrides,
 )
+from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -76,9 +87,11 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
+from mindroom.tool_system.worker_proxy_client import EXECUTE_KEEPALIVE_SECONDS
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -104,6 +117,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
+# A spawned request child writes its progress lines to this socket descriptor.
+_PROGRESS_FD_ARG = "--progress-fd"
+# How often a spawn-per-call wait looks up from its child to notice a stop or its deadline.
+_SPAWN_POLL_SECONDS = 1.0
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
 _STARTUP_RUNTIME_PATHS_JSON_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 
@@ -475,6 +492,8 @@ class SandboxRunnerExecuteRequest(BaseModel):
     config_snapshot: dict[str, Any] | None = None
     # Lets the primary stop this call through /execute/cancel when it stops waiting for it.
     request_id: str | None = Field(default=None, max_length=64)
+    # A background job's call runs as long as its tool does, and its tools know they run as part of a job.
+    run_as_job: bool = False
 
 
 class SandboxRunnerCancelRequest(BaseModel):
@@ -507,6 +526,7 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     execution_env: dict[str, str] = Field(default_factory=dict)
     runtime_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_output_workspace_root: str | None = None
+    run_as_job: bool = False
 
 
 class SandboxRunnerLeaseRequest(BaseModel):
@@ -720,6 +740,19 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+async def _call_entrypoint(entrypoint: Callable[..., object], args: list[Any], kwargs: dict[str, Any]) -> object:
+    if inspect.iscoroutinefunction(entrypoint):
+        return await entrypoint(*args, **kwargs)
+    # A blocking function on the loop would stop the call's stream from sending keep-alives.
+    executor = JOB_CALL_EXECUTOR if job_owns_execution() else None
+    value = await asyncio.get_running_loop().run_in_executor(
+        executor,
+        copy_context().run,
+        partial(entrypoint, *args, **kwargs),
+    )
+    return await _maybe_await(value)
+
+
 async def _run_toolkit_entrypoint(
     toolkit: Toolkit,
     entrypoint: Callable[..., object],
@@ -727,11 +760,11 @@ async def _run_toolkit_entrypoint(
     kwargs: dict[str, Any],
 ) -> object:
     if not toolkit.requires_connect:
-        return await _maybe_await(entrypoint(*args, **kwargs))
+        return await _call_entrypoint(entrypoint, args, kwargs)
 
     await _maybe_await(toolkit.connect())
     try:
-        return await _maybe_await(entrypoint(*args, **kwargs))
+        return await _call_entrypoint(entrypoint, args, kwargs)
     finally:
         await _maybe_await(toolkit.close())
 
@@ -1128,6 +1161,7 @@ def _prepare_execute_request(
     prepared_request = PreparedSandboxRunnerExecuteRequest(
         tool_name=request.tool_name,
         function_name=request.function_name,
+        run_as_job=request.run_as_job,
         args=list(request.args),
         kwargs=dict(kwargs),
         worker_key=request.worker_key,
@@ -1339,7 +1373,7 @@ def _execute_request_forkserver(
     *,
     subprocess_context: _PreparedSandboxSubprocessContext,
     envelope: str,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
 ) -> SandboxRunnerExecuteResponse | None:
     """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call."""
     try:
@@ -1350,7 +1384,9 @@ def _execute_request_forkserver(
             request_cwd=subprocess_context.subprocess_cwd,
             envelope=envelope,
             timeout_seconds=timeout_seconds,
+            startup_timeout_seconds=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
             bind_stop=sandbox_request_cancellation.bind_request_stop,
+            on_progress=report_tool_progress,
         )
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
@@ -1367,22 +1403,24 @@ def _execute_request_forkserver(
 def _shell_subprocess_dispatch_context(
     prepared: PreparedSandboxRunnerExecuteRequest,
     subprocess_context: _PreparedSandboxSubprocessContext,
-    timeout_seconds: float,
-) -> tuple[_PreparedSandboxSubprocessContext, float]:
+    timeout_seconds: float | None,
+) -> tuple[_PreparedSandboxSubprocessContext, float | None]:
     """Attach the shell supervisor socket and cover the shell timeout in the budget.
 
-    Background shell handles live in the runner's long-lived supervisor
-    process, so the per-request subprocess only relays the call. Its budget
-    must outlast the shell command's own foreground timeout or the runner
-    would kill the relay (and with it the supervised command) mid-wait.
+    Shell commands run in the runner's long-lived supervisor process, which
+    stops a command whose relay dies, so the per-request subprocess only relays
+    the call. Its budget must outlast the shell command's own timeout or the
+    runner would kill the relay (and with it the supervised command) mid-wait;
+    a job's call has no budget to extend.
     """
     socket_path = shell_supervisor.ensure_shell_supervisor()
     subprocess_env = dict(subprocess_context.subprocess_env or {})
     subprocess_env[shell_supervisor.SHELL_SUPERVISOR_SOCKET_ENV] = socket_path
-    timeout_seconds = max(
-        timeout_seconds,
-        shell_request_budget_seconds(prepared.tool_name, prepared.function_name, prepared.kwargs),
-    )
+    if timeout_seconds is not None:
+        timeout_seconds = max(
+            timeout_seconds,
+            shell_request_budget_seconds(prepared.tool_name, prepared.function_name, prepared.kwargs),
+        )
     return replace(subprocess_context, subprocess_env=subprocess_env), timeout_seconds
 
 
@@ -1432,7 +1470,10 @@ def _execute_request_subprocess_sync(
         runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
         config_yaml=_subprocess_config_yaml(prepared_request.config, prepared_request.request.tool_name),
     )
-    timeout_seconds = sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)
+    # A job's call runs as long as its tool does; any other call keeps the runner's limit.
+    timeout_seconds = (
+        None if prepared_request.request.run_as_job else sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)
+    )
     if prepared_request.request.tool_name == "shell":
         try:
             subprocess_context, timeout_seconds = _shell_subprocess_dispatch_context(
@@ -1471,7 +1512,7 @@ def _execute_request_spawn(
     *,
     subprocess_context: _PreparedSandboxSubprocessContext,
     envelope: str,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
 ) -> SandboxRunnerExecuteResponse:
     """Dispatch one prepared request to a freshly spawned child process."""
     try:
@@ -1492,35 +1533,89 @@ def _execute_request_spawn(
     return _parse_subprocess_response(request, runtime_paths, completed)
 
 
+def _kill_request_process_group(process: subprocess.Popen[str]) -> None:
+    """Kill a request child and every process it started, which share its process group."""
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+def _relay_child_progress(conn: socket.socket) -> None:
+    """Report each progress line a request child writes on its socket as this call's progress."""
+    with suppress(OSError), conn.makefile("rb") as lines:
+        for line in lines:
+            with suppress(ValueError, KeyError, TypeError):
+                report_tool_progress(str(json.loads(line)["progress"]))
+
+
 def _run_request_subprocess(
     args: list[str],
     *,
     input: str,  # noqa: A002 - mirrors subprocess.run
-    timeout: float,
+    timeout: float | None,
     env: dict[str, str] | None,
     cwd: str | None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one request child like ``subprocess.run``, killable by the primary's cancel."""
-    with subprocess.Popen(
-        args,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        cwd=cwd,
-    ) as process:
-        sandbox_request_cancellation.bind_request_stop(process.kill)
-        try:
-            stdout, stderr = process.communicate(input, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # Like subprocess.run: a grandchild may hold the pipes open, so wait for the child, not for EOF.
-            process.kill()
-            process.wait()
-            raise
-        except BaseException:
-            process.kill()
-            raise
+    """Run one request child like ``subprocess.run``, killable by the primary's cancel, relaying its progress.
+
+    ``None`` waits however long the child runs. The child leads its own process group, so stopping it stops
+    everything it started; like subprocess.run, a stopped child is waited for, not its pipes, which a process it
+    started may still hold.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    progress_reader, progress_writer = socket.socketpair()
+    try:
+        with subprocess.Popen(
+            [*args, _PROGRESS_FD_ARG, str(progress_writer.fileno())],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=cwd,
+            start_new_session=True,
+            pass_fds=(progress_writer.fileno(),),
+        ) as process:
+            progress_writer.close()
+            threading.Thread(
+                target=copy_context().run,
+                args=(_relay_child_progress, progress_reader),
+                daemon=True,
+            ).start()
+            stopped = threading.Event()
+
+            def stop() -> None:
+                stopped.set()
+                _kill_request_process_group(process)
+
+            sandbox_request_cancellation.bind_request_stop(stop)
+            pending_input: str | None = input
+            try:
+                while True:
+                    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    try:
+                        stdout, stderr = process.communicate(
+                            pending_input,
+                            timeout=_SPAWN_POLL_SECONDS if remaining is None else min(_SPAWN_POLL_SECONDS, remaining),
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        # Retrying keeps the input already sent and the output already read.
+                        pending_input = None
+                        if remaining == 0.0:
+                            raise
+                        if stopped.is_set() and process.poll() is not None:
+                            stdout, stderr = "", ""
+                            break
+            except BaseException:
+                _kill_request_process_group(process)
+                process.wait()
+                raise
+    finally:
+        progress_writer.close()
+        # Wakes a relay still waiting on a process the child started; the child's own end is closed by now.
+        with suppress(OSError):
+            progress_reader.shutdown(socket.SHUT_RDWR)
+        progress_reader.close()
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
@@ -1533,7 +1628,7 @@ async def _execute_request_subprocess(
     runner_token: str | None = None,
     apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
-    return await asyncio.to_thread(
+    execute = partial(
         _execute_request_subprocess_sync,
         request,
         runtime_paths,
@@ -1542,10 +1637,16 @@ async def _execute_request_subprocess(
         runner_token=runner_token,
         apply_workspace_env_hook=apply_workspace_env_hook,
     )
+    # A job's request may wait for its child for hours, so it never holds a thread of the shared pool.
+    executor = JOB_CALL_EXECUTOR if request.run_as_job else None
+    return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, execute)
 
 
-def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
-    """Execute one serialized envelope; return (exit_code, tool_output, marked_response)."""
+def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str], None]) -> tuple[int, str, str]:
+    """Execute one serialized envelope, reporting its tool's progress; return (exit_code, tool_output, marked_response).
+
+    A job's request binds its job, so its tools know they run as part of one.
+    """
     if not payload.strip():
         response = SandboxRunnerExecuteResponse(
             ok=False,
@@ -1579,7 +1680,8 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
     if request.tool_name == "python":
         # Children start with `-P`; python-tool code may still import workspace modules, after installed ones.
         sys.path.append(str(Path.cwd()))
-    with redirect_stdout(captured_out), redirect_stderr(captured_err):
+    job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
+    with redirect_stdout(captured_out), redirect_stderr(captured_err), tool_progress_reporter(report_progress), job:
         # A fresh child registers the request's plugin tools itself.
         _ensure_registry_loaded_with_config(runtime_paths, config)
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
@@ -1588,8 +1690,28 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
     return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json())
 
 
+def _spawned_progress_reporter() -> Callable[[str], None]:
+    """Write progress lines to the socket the runner passed this spawned child, if it passed one."""
+    if _PROGRESS_FD_ARG not in sys.argv:
+        return lambda _text: None
+    descriptor = int(sys.argv[sys.argv.index(_PROGRESS_FD_ARG) + 1])
+    # Processes the tool starts must not hold the runner's progress socket open.
+    os.set_inheritable(descriptor, False)
+    conn = socket.socket(fileno=descriptor)
+    lock = threading.Lock()
+
+    def report(text: str) -> None:
+        with lock, suppress(OSError):
+            conn.sendall(json.dumps({"progress": text}).encode("utf-8") + b"\n")
+
+    return report
+
+
 def _run_subprocess_worker() -> int:
-    exit_code, tool_output, marked_response = _run_subprocess_worker_payload(sys.stdin.read())
+    exit_code, tool_output, marked_response = _run_subprocess_worker_payload(
+        sys.stdin.read(),
+        _spawned_progress_reporter(),
+    )
     # Flush captured tool output to real stdout (informational only), then
     # write the response JSON to stderr after the marker.
     if tool_output:
@@ -2011,19 +2133,47 @@ async def cancel_tool_call(payload: SandboxRunnerCancelRequest) -> SandboxRunner
     return SandboxRunnerCancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
 
 
-@router.post("/execute", response_model=SandboxRunnerExecuteResponse)
-async def execute_tool_call(request: Request, payload: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
-    """Execute a tool function locally and return the serialized result, unless the primary cancels it."""
-    with sandbox_request_cancellation.track_request(payload.request_id):
-        if sandbox_request_cancellation.request_cancelled():
-            return _cancelled_response()
-        return await _execute_tool_call(request, payload)
+@router.post("/execute")
+async def execute_tool_call(request: Request, payload: SandboxRunnerExecuteRequest) -> StreamingResponse:
+    """Execute a tool function locally, streaming its progress and keep-alives, then its serialized result.
+
+    Validation and worker preparation answer with their own status codes before the stream starts. The primary
+    stops the call through /execute/cancel or by hanging up.
+    """
+    execute = _prepare_tool_call(request, payload)
+    return StreamingResponse(
+        sandbox_execute_stream.stream_execution(
+            payload.request_id or uuid4().hex,
+            execute,
+            keepalive_seconds=EXECUTE_KEEPALIVE_SECONDS,
+            failure=_streamed_failure_response,
+        ),
+        media_type="application/x-ndjson",
+    )
 
 
-async def _execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branches
+def _streamed_failure_response(error: Exception) -> SandboxRunnerExecuteResponse:
+    """Report an error raised after the stream started as its result, blaming the worker unless the request was bad."""
+    if isinstance(error, HTTPException):
+        detail = error.detail if isinstance(error.detail, str) else str(error.detail)
+        return SandboxRunnerExecuteResponse(
+            ok=False,
+            error=detail,
+            failure_kind="tool" if error.status_code < 500 else "worker",
+        )
+    logger.exception("sandbox_execute_failed")
+    return SandboxRunnerExecuteResponse(
+        ok=False,
+        error=f"Sandbox execution failed: {type(error).__name__}: {error}",
+        failure_kind="worker",
+    )
+
+
+def _prepare_tool_call(  # noqa: C901 - validated dispatch branches
     request: Request,
     payload: SandboxRunnerExecuteRequest,
-) -> SandboxRunnerExecuteResponse:
+) -> Callable[[], Coroutine[object, object, SandboxRunnerExecuteResponse]]:
+    """Validate and prepare one call, returning its dispatch; a job's request runs as part of its job."""
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
     config = request_runtime_config(request.app, payload.config_snapshot)
@@ -2055,76 +2205,91 @@ async def _execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branch
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
             if exc.failure_kind == "worker":
-                return SandboxRunnerExecuteResponse(ok=False, error=str(exc), failure_kind="worker")
+                failure = SandboxRunnerExecuteResponse(ok=False, error=str(exc), failure_kind="worker")
+
+                async def failed() -> SandboxRunnerExecuteResponse:
+                    return failure
+
+                return failed
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if payload.tool_name == "browser_mcp" or (
-        payload.tool_name == "browser" and payload.function_name == "browser_control"
-    ):
-        try:
-            computer = request.app.state.worker_computer
-        except AttributeError:
-            computer = None
-        if not isinstance(computer, WorkerComputerRuntime):
-            if payload.tool_name == "browser_mcp":
-                raise HTTPException(
-                    status_code=400,
-                    detail="browser_mcp requires an enabled dedicated computer worker.",
-                )
+
+    async def dispatch() -> SandboxRunnerExecuteResponse:
+        if payload.tool_name == "browser_mcp" or (
+            payload.tool_name == "browser" and payload.function_name == "browser_control"
+        ):
             try:
-                computer = request.app.state.worker_browser
+                computer = request.app.state.worker_computer
             except AttributeError:
                 computer = None
-        if isinstance(computer, (WorkerComputerRuntime, WorkerBrowserRuntime)):
-            # Not cancellable: the browser runtime treats cancellation as closing the shared
-            # browser, and on computer workers its display, while its actions are short.
-            return await _execute_worker_browser(
-                computer,
+            if not isinstance(computer, WorkerComputerRuntime):
+                if payload.tool_name == "browser_mcp":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="browser_mcp requires an enabled dedicated computer worker.",
+                    )
+                try:
+                    computer = request.app.state.worker_browser
+                except AttributeError:
+                    computer = None
+            if isinstance(computer, (WorkerComputerRuntime, WorkerBrowserRuntime)):
+                # Not cancellable: the browser runtime treats cancellation as closing the shared browser, and on
+                # computer workers its display, while its actions are short and keep their own deadline.
+                return await _execute_worker_browser(
+                    computer,
+                    payload,
+                    runtime_paths,
+                    config,
+                    prepared_worker,
+                    runner_token,
+                )
+        if sandbox_exec.runner_uses_subprocess(runtime_paths):
+            return await _execute_request_subprocess(
+                payload,
+                runtime_paths,
+                prepared_worker,
+                config=config,
+                runner_token=runner_token,
+            )
+        if payload.tool_name == "python" and sandbox_exec.request_execution_env(
+            payload.tool_name,
+            payload.execution_env,
+            runtime_paths,
+        ):
+            return await _execute_request_subprocess(
+                payload,
+                runtime_paths,
+                prepared_worker,
+                config=config,
+                runner_token=runner_token,
+            )
+        # Worker-routed execution stays on the subprocess path so the per-worker
+        # virtualenv and worker-specific process environment remain authoritative,
+        # even when this pod is itself a dedicated worker runtime.
+        if payload.worker_key is not None:
+            return await _execute_request_subprocess(
+                payload,
+                runtime_paths,
+                prepared_worker,
+                config=config,
+                runner_token=runner_token,
+            )
+        return await _run_cancellable(
+            _execute_request_inprocess(
                 payload,
                 runtime_paths,
                 config,
                 prepared_worker,
-                runner_token,
-            )
-    if sandbox_exec.runner_uses_subprocess(runtime_paths):
-        return await _execute_request_subprocess(
-            payload,
-            runtime_paths,
-            prepared_worker,
-            config=config,
-            runner_token=runner_token,
+                runner_token=runner_token,
+            ),
         )
-    if payload.tool_name == "python" and sandbox_exec.request_execution_env(
-        payload.tool_name,
-        payload.execution_env,
-        runtime_paths,
-    ):
-        return await _execute_request_subprocess(
-            payload,
-            runtime_paths,
-            prepared_worker,
-            config=config,
-            runner_token=runner_token,
-        )
-    # Worker-routed execution stays on the subprocess path so the per-worker
-    # virtualenv and worker-specific process environment remain authoritative,
-    # even when this pod is itself a dedicated worker runtime.
-    if payload.worker_key is not None:
-        return await _execute_request_subprocess(
-            payload,
-            runtime_paths,
-            prepared_worker,
-            config=config,
-            runner_token=runner_token,
-        )
-    return await _run_cancellable(
-        _execute_request_inprocess(
-            payload,
-            runtime_paths,
-            config,
-            prepared_worker,
-            runner_token=runner_token,
-        ),
-    )
+
+    async def execute() -> SandboxRunnerExecuteResponse:
+        if sandbox_request_cancellation.request_cancelled():
+            return _cancelled_response()
+        with job_control_context(JobControl()) if payload.run_as_job else nullcontext():
+            return await dispatch()
+
+    return execute
 
 
 async def _run_cancellable(

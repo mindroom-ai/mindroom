@@ -385,7 +385,43 @@ class _FakeResponse:
         return self._payload
 
 
+class _LineResponse:
+    """One fake runner response, streamed as the single result line a quick call sends."""
+
+    def __init__(self, response: Any) -> None:  # noqa: ANN401
+        self._response = response
+        self.status_code = getattr(response, "status_code", 200)
+
+    def raise_for_status(self) -> None:
+        self._response.raise_for_status()
+
+    def read(self) -> bytes:
+        return b""
+
+    def iter_lines(self) -> Iterator[str]:
+        yield json.dumps(self._response.json())
+
+
+class _StreamsFromPost:
+    """Serve a fake client's streamed execute request from its ``post``."""
+
+    @contextlib.contextmanager
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: object,
+    ) -> Iterator[_LineResponse]:
+        del method, timeout
+        yield _LineResponse(self.post(url, json=json, headers=headers))
+
+
 class _TrackingWorkerManager:
+    cleanup_locator = None
+
     def __init__(self) -> None:
         self.touched: list[str] = []
         self.failures: list[tuple[str, str]] = []
@@ -453,7 +489,7 @@ class _HttpStatusErrorResponse:
 
 
 def _http_status_client_class(*, status_code: int, payload: dict[str, object] | None = None) -> type:
-    class _HttpStatusClient:
+    class _HttpStatusClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             del timeout
 
@@ -477,7 +513,7 @@ def _recording_client_class(
     captured_calls: list[tuple[str, dict[str, Any]]] | None = None,
     responder: Callable[[str, dict[str, Any]], object] | None = None,
 ) -> type:
-    class _FakeClient:
+    class _FakeClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             if captured is not None:
                 captured["timeout"] = timeout
@@ -641,7 +677,7 @@ def _run_worker_proxy_request_with_exception(
         created_at=0.0,
     )
 
-    class _TimeoutClient:
+    class _TimeoutClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             _ = timeout
 
@@ -786,6 +822,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "args": [1, 2],
         "kwargs": {},
         "config_snapshot": None,
+        "run_as_job": False,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
 
@@ -3411,6 +3448,8 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
     )
 
     class _FakeWorkerManager:
+        cleanup_locator = None
+
         def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
             nonlocal lease_active
             _ = now
@@ -3512,6 +3551,8 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
     )
 
     class _FakeWorkerManager:
+        cleanup_locator = None
+
         def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
             _ = now
             msg = f"unexpected touch bookkeeping for {worker_key}"
@@ -3592,7 +3633,7 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Proxy mode should fail closed when no shared token is configured."""
 
-    class _FakeClient:
+    class _FakeClient(_StreamsFromPost):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             return
 
@@ -3635,7 +3676,7 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         def json(self) -> dict[str, object]:
             return self._data
 
-    class _FakeClient:
+    class _FakeClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             self.timeout = timeout
 
@@ -3839,7 +3880,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         def json(self) -> dict[str, object]:
             return {"ok": True, "result": "sandbox-result"}
 
-    class _FakeClient:
+    class _FakeClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             captured["timeout"] = timeout
 
@@ -3950,7 +3991,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
         def json(self) -> dict[str, object]:
             return {"ok": True, "result": "sandbox-result"}
 
-    class _FakeClient:
+    class _FakeClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             captured["timeout"] = timeout
 
@@ -4205,7 +4246,7 @@ def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> N
             msg = "Success payload should not be parsed for HTTP failures."
             raise AssertionError(msg)
 
-    class _FakeClient:
+    class _FakeClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             _ = timeout
 
@@ -5190,6 +5231,8 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
     captured_config_snapshots: list[dict[str, object]] = []
 
     class FakeKubernetesBackend:
+        cleanup_locator = None
+
         backend_name = "kubernetes"
         idle_timeout_seconds = 60.0
 
@@ -5336,6 +5379,8 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
     config_snapshot = workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
 
     class FakeKubernetesBackend:
+        cleanup_locator = None
+
         backend_name = "kubernetes"
         idle_timeout_seconds = 60.0
 
@@ -6374,6 +6419,8 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
     )
 
     class _FakeWorkerManager:
+        cleanup_locator = None
+
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
             del now
             assert progress_sink is not None
@@ -6400,7 +6447,7 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
             del worker_key, now
             return None
 
-    class _BlockingClient:
+    class _BlockingClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             del timeout
 
@@ -6499,7 +6546,7 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
         execution_mode="off",
     )
 
-    class _ToolErrorClient:
+    class _ToolErrorClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             del timeout
 
@@ -6575,7 +6622,7 @@ def test_worker_routed_oauth_connection_result_survives_proxy_boundary(
         "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
     }
 
-    class _OAuthResultClient:
+    class _OAuthResultClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             del timeout
 
@@ -6639,7 +6686,7 @@ def test_worker_routed_worker_failure_records_worker_failure(
     assert worker_target.worker_key is not None
     manager = _TrackingWorkerManager()
 
-    class _WorkerFailureClient:
+    class _WorkerFailureClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             del timeout
 
@@ -6709,7 +6756,7 @@ def test_worker_routed_legacy_structured_failure_records_worker_failure(
     assert worker_target.worker_key is not None
     manager = _TrackingWorkerManager()
 
-    class _LegacyFailureClient:
+    class _LegacyFailureClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             del timeout
 
@@ -6778,7 +6825,7 @@ def test_worker_routed_malformed_success_payload_records_worker_failure(
     assert worker_target.worker_key is not None
     manager = _TrackingWorkerManager()
 
-    class _MalformedSuccessClient:
+    class _MalformedSuccessClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             del timeout
 

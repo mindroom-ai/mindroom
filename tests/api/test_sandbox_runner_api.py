@@ -2009,7 +2009,10 @@ def test_subprocess_worker_encodes_browser_media_results(
         config_yaml="{}\n",
     )
 
-    exit_code, _tool_output, marked_response = sandbox_runner_module._run_subprocess_worker_payload(envelope)
+    exit_code, _tool_output, marked_response = sandbox_runner_module._run_subprocess_worker_payload(
+        envelope,
+        lambda _text: None,
+    )
 
     assert exit_code == 0
     response_json = sandbox_protocol_module.extract_response_json(marked_response)
@@ -3131,8 +3134,9 @@ def test_sandbox_runner_runs_agent_known_only_to_primary_config_snapshot(
         "tool_init_overrides": {"base_dir": str(workspace)},
     }
 
-    with pytest.raises(ValueError, match="Unknown agent: mind"):
-        runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+    unknown = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request).json()
+    assert unknown["ok"] is False
+    assert "Unknown agent: mind" in unknown["error"]
     response = runner_client.post(
         "/api/sandbox-runner/execute",
         headers=SANDBOX_HEADERS,
@@ -3333,7 +3337,7 @@ def test_sandbox_runner_reloads_edited_snapshot_plugins_and_logs_only_changes(
         disabled = greet({"plugins": [{"path": "./plugins/snapshot-only", "enabled": False}]})
 
     assert results == ["hello", "hello", "hello", "edited"]
-    assert disabled.status_code == 404
+    assert disabled.json()["failure_kind"] == "tool"
     assert [entry for entry in logs if entry["event"] == "Loaded plugins"] == [
         {"event": "Loaded plugins", "log_level": "info", "plugins": ["snapshot_only_plugin"]},
     ] * 2
@@ -4157,8 +4161,13 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         },
     )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Tool 'demo_plugin' does not expose 'missing'."
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "result": None,
+        "error": "Tool 'demo_plugin' does not expose 'missing'.",
+        "failure_kind": "tool",
+    }
 
 
 def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_override_validation(
@@ -4222,8 +4231,13 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         },
     )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Tool 'demo_plugin_init' does not expose 'missing'."
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "result": None,
+        "error": "Tool 'demo_plugin_init' does not expose 'missing'.",
+        "failure_kind": "tool",
+    }
 
 
 def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
@@ -4647,8 +4661,11 @@ def test_sandbox_runner_subprocess_consumes_lease(runner_client: TestClient, mon
     assert execute_response.json()["ok"] is True
 
 
-def test_sandbox_runner_unknown_tool_returns_404(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unknown tools should return 404 instead of an unhandled server error."""
+def test_sandbox_runner_unknown_tool_is_a_tool_failure(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown tool fails the call as the tool's failure, not as an unhandled server error."""
     _set_sandbox_token(monkeypatch)
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -4660,8 +4677,10 @@ def test_sandbox_runner_unknown_tool_returns_404(runner_client: TestClient, monk
             "kwargs": {},
         },
     )
-    assert response.status_code == 404
-    assert "Unknown tool" in response.json()["detail"]
+    # The tool resolves in the call's own process, after the response started, so its result reports it.
+    assert response.status_code == 200
+    assert response.json()["failure_kind"] == "tool"
+    assert "Unknown tool" in response.json()["error"]
 
 
 def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
@@ -7750,6 +7769,18 @@ def _forwarding_client_factory(runner_client: TestClient) -> type[Any]:
 
         def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> object:
             return runner_client.post(url, json=json, headers=headers)
+
+        def stream(
+            self,
+            method: str,
+            url: str,
+            *,
+            json: dict[str, Any],
+            headers: dict[str, str],
+            timeout: object,
+        ) -> object:
+            del timeout
+            return runner_client.stream(method, url, json=json, headers=headers)
 
     return _RunnerClient
 

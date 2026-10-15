@@ -49,7 +49,12 @@ from pathlib import Path
 from mindroom.api.sandbox_forkserver import serve_template
 
 
-def _run_payload(payload: str) -> tuple[int, str, str]:
+def _run_payload(payload: str, report) -> tuple[int, str, str]:
+    if payload.startswith("progress:"):
+        for text in payload.removeprefix("progress:").split(","):
+            report(text)
+    if payload.startswith("nap:"):
+        time.sleep(float(payload.removeprefix("nap:")))
     if payload.startswith("sleep:"):
         pid_file = Path(payload.removeprefix("sleep:"))
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
@@ -128,8 +133,9 @@ def _stub_execute(
     request_env: dict[str, str] | None = None,
     request_cwd: str | None = None,
     envelope: str = "payload",
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float | None = 30.0,
     bind_stop: Callable[[Callable[[], None]], None] = lambda _stop: None,
+    on_progress: Callable[[str], None] = lambda _text: None,
 ) -> subprocess.CompletedProcess[str]:
     return manager.execute(
         python_executable=None,
@@ -138,7 +144,9 @@ def _stub_execute(
         request_cwd=request_cwd,
         envelope=envelope,
         timeout_seconds=timeout_seconds,
+        startup_timeout_seconds=30.0,
         bind_stop=bind_stop,
+        on_progress=on_progress,
     )
 
 
@@ -170,6 +178,31 @@ def test_execute_round_trips_and_reuses_one_template(
     assert second.stdout.split("|")[2] == "marker-2"
     assert _template_pid(first) == _template_pid(second)
     assert len(spawned) == 1
+
+
+def test_a_forked_child_sends_its_progress_before_its_response(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+) -> None:
+    """Progress the child reports reaches the runner in order, and the response still arrives."""
+    manager, _spawned = stub_manager
+    reports: list[str] = []
+
+    completed = _stub_execute(manager, envelope="progress:one,two", on_progress=reports.append)
+
+    assert reports == ["one", "two"]
+    assert completed.returncode == 0
+
+
+def test_a_request_without_a_timeout_runs_past_any_limit(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+) -> None:
+    """A job's request has no deadline, while the same request with one times out."""
+    manager, _spawned = stub_manager
+    assert _stub_execute(manager).returncode == 0
+
+    with pytest.raises(ForkserverTimeoutError):
+        _stub_execute(manager, envelope="nap:1.0", timeout_seconds=0.5)
+    assert _stub_execute(manager, envelope="nap:1.0", timeout_seconds=None).returncode == 0
 
 
 def test_stop_after_its_request_ended_never_signals_the_reaped_child(

@@ -69,6 +69,7 @@ from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
@@ -319,7 +320,7 @@ async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> Too
     """Drain one SDK dispatch without sharing its synchronous leaf, checking it as its own call."""
     if not job_owns_execution():
         return await original(call)
-    tracker = SyncToolCompletionTracker()
+    tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR)
     asynchronous = uses_sdk_async_dispatch(call.function)
     try:
         # A model embedded without MindRoom's executor still reaches this dispatch.
