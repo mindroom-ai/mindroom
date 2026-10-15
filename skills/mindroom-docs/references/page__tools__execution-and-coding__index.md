@@ -249,7 +249,7 @@ Names use 1 to 64 lowercase letters, digits, `-`, or `_`.
 
 The owner reads and writes the directory, and invited agents only read it.
 `shell`, `python`, `file`, and `coding` reach it by the path that `create_shared_directory` and `list_shared_directories` return, and every agent that owns or joined a directory sees its path in its prompt.
-Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories, and paths inside a directory are listed relative to it.
+Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories and list them by absolute path.
 Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
 
 An agent can be invited only on behalf of a user who may use that agent, and private agents can neither create nor join shared directories.

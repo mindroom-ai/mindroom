@@ -198,12 +198,12 @@ This is the default `static_runner` mode of both Helm charts; see [Kubernetes De
 
 The sidecar mounts only these parts of the storage PVC:
 
-- The `agents` and `private_instances` directories, read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
+- The `agents`, `private_instances`, and `shared_directories` directories, read-write at their usual paths, so agent workspaces and [shared directories](../tools/execution-and-coding.md#shared_directories) persist and stay shared with the primary runtime.
 - Its own `sandbox-runner` directory as its storage root, for worker-local files, virtualenvs, and caches.
 
 It gets no config file and resolves agents from the [live config snapshot](#live-config-snapshots), so agents added or changed after the pod started work immediately.
 It cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and it never receives the credentials-encryption key.
-The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner`, because the sidecar can write those directories.
+The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, `shared_directories`, or `sandbox-runner`, because the sidecar can write those directories.
 
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
@@ -321,13 +321,13 @@ What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
-- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
+- **Dedicated Docker and Kubernetes workers** mount only the workspaces and shared directories listed in the [scope table](#worker-scopes), their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
 When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
-Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
+Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
 Kubernetes knowledge mounts are described in [Knowledge Source Visibility](kubernetes.md#knowledge-source-visibility).
 Any change to a dedicated worker's launch configuration, mounts, environment, or tool and plugin config recreates the worker on its next use, which ends its tmux sessions, background shells, and computer sessions.
 Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so those workers are recreated too.

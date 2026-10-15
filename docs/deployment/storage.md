@@ -15,6 +15,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
+- `shared_directories/` - [Shared directories](../tools/execution-and-coding.md#shared_directories), one per owning agent and name; a deleted one stays as an empty folder, and those of agents removed from the config stay until you delete them
 - `knowledge_db/` - Knowledge base vector stores
 - `knowledge_git/` - Git data of [Git-backed knowledge bases](../knowledge.md#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
