@@ -652,6 +652,32 @@ async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_a_shell_job_approved_after_its_reply_finished_still_calls_its_tools(tmp_path: Path) -> None:
+    """A job waiting for approval opens its shell window only after the reply ended, and its CLI still works."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+
+    async def command() -> str:
+        return str((await _settled_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            job = resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                # The reply ends while the job still waits for its approval, so no shell window is open yet.
+                await lifetime.retire_attempt()
+        assert await owner.run_native_shell(command) == "completed"
+        await job.release()
+
+
+@pytest.mark.asyncio
 async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog(tmp_path: Path) -> None:
     """A retired attempt's catalog stays open for a running shell command and closes once the command ends."""
 

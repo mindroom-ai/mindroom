@@ -42,6 +42,7 @@ from mindroom.agno_compat_prepared_tools import stop_function_call
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
 from mindroom.response_turn import PausedAttempt
+from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -803,12 +804,16 @@ class LiveTurnTools(TurnToolBridge):
                 )
 
     async def retire_binding(self) -> None:
-        """Retire this attempt while retaining receipts and the response grant; open shell windows keep its catalog."""
+        """Retire this attempt while retaining receipts and the response grant.
+
+        Open shell windows keep its catalog until they drain, and background jobs, which may still open a window
+        once approved, keep it until they settle.
+        """
         async with self._outer:
             self._binding_retired = True
             if self._windows:
                 self._retired_catalogs.append(self.catalog)
-            else:
+            elif not defer_execution_cleanup(self.catalog.close, resource=self.catalog):
                 await self.catalog.close()
 
     def bind_catalog(self, catalog: PreparedAgentToolCatalog, *, context: Mapping[str, str] | None = None) -> None:

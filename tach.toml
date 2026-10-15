@@ -385,6 +385,7 @@ depends_on = [
     "mindroom.agno_compat_prepared_tools",
     "mindroom.cancellation",
     "mindroom.response_turn",
+    "mindroom.tool_jobs.resources",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
@@ -8130,6 +8131,7 @@ path = "mindroom.tool_jobs.resources"
 depends_on = []
 visibility = [
     "mindroom.agent_cli.lifetime",
+    "mindroom.agent_cli.turn",
     "mindroom.ai",
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.history.session_context",
