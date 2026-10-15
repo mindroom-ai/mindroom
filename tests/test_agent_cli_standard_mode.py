@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
 from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, _cli_callable
@@ -331,5 +332,32 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
         assert isinstance(agent, CliShellAgent) is eligible
         assert isinstance(agent, KnowledgeToolDescribingAgent)
         assert (STANDARD_CLI_NOTE in agent.instructions) is eligible
+    finally:
+        close_agent_runtime_state_dbs(agent)
+
+
+def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> None:
+    """A standard subagent's shell runs as a plain shell, never inside its caller's CLI window or grant."""
+    runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
+    set_api_server_address("127.0.0.1", 8765)
+    try:
+        agent = agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            build_execution_identity_from_runtime_context(runtime),
+            agent_cli_in_shell=True,
+            delegation_depth=1,
+        )
+    finally:
+        clear_api_server_address()
+
+    try:
+        assert not isinstance(agent, CliShellAgent)
+        assert STANDARD_CLI_NOTE not in agent.instructions
+        shell = next(tool for tool in agent.tools if isinstance(tool, Toolkit) and tool.name == "shell_tools")
+        run = shell.get_async_functions()["run_shell_command"].entrypoint
+        assert run is not None
+        assert run.__name__ != "windowed"
     finally:
         close_agent_runtime_state_dbs(agent)
