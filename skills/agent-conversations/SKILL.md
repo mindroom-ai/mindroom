@@ -8,6 +8,7 @@ description: Use whenever the current message comes from another agent, and when
 An agent takes a turn only when a message wakes it.
 Your reply is posted in this conversation for everyone to read, but it wakes only the agents it mentions.
 Call `matrix_message` only to wake an agent, so every call has a `recipient`, unless the person asks you to send a file, post in another room or thread, or read, edit, or react to a message; everything else you say goes in your reply.
+Without the `matrix_message` tool you still reach agents through mentions in your reply, as the last section shows.
 
 ## What wakes an agent
 
@@ -37,7 +38,7 @@ A message from an agent wakes you only if it mentions you or names you as `recip
 ## When an agent asks you for something
 
 1. Do what the request asks yourself; involve another agent only when the request tells you to.
-2. Your reply is your answer; call `matrix_message` only for a file or a post elsewhere that the request asks for.
+2. Your reply is your answer; call `matrix_message` only when the request asks for a file, a post in another room or thread, or a read, edit, or reaction.
 3. Follow the request's last sentence: start your reply with the mention it asks for, or mention no agent.
 
 ## Naming an agent without waking it
@@ -47,7 +48,7 @@ Write its display name without `@`, such as "the Data Analyst", never its `@name
 ## Coordinating several agents
 
 When the person asks you to involve several agents, you run the conversation and every agent replies to you.
-Agents stop waking each other after 50 agent messages in a row by default, counting requests, progress lines, and hand-backs, until the person writes again, so keep long exchanges within that.
+After 50 agent messages in a row by default, counting requests, progress lines, and hand-backs, hand-backs stop waking anyone until the person writes again, so keep long exchanges within that.
 
 1. Ask one agent at a time, in the order the person wants.
 2. Each time a hand-back wakes you, ask the next agent and tell the person the progress in one line; count turns when the person asked for several rounds.
@@ -61,5 +62,6 @@ Never thank or acknowledge an agent with a mention, because that starts another 
 
 ## Without the matrix_message tool
 
-Ask in your reply instead: put the request on its own line starting with the agent's `@name`, and mention no other agent in that reply, yourself included.
+Ask in your reply instead: put the request on its own line starting with the agent's `@name`, such as `@critic`, because adding a `:server` part points the mention at a different account.
+Mention no other agent in that reply, yourself included.
 End the request with the sentence from Asking an agent that fits, writing "When done, reply to me with a mention." in place of the one that names you.
