@@ -159,6 +159,30 @@ async def test_a_command_whose_handle_disappears_fails(shell_toolkit: Toolkit, m
 
 
 @pytest.mark.asyncio
+async def test_a_timeout_from_an_older_call_is_ignored(shell_toolkit: Toolkit) -> None:
+    """A model repeating the native timeout argument from older history still runs the command."""
+    call = FunctionCall(
+        function=shell_toolkit.get_async_functions()["run_shell_command"],
+        arguments={"args": "echo hi", "timeout": 5},
+    )
+    with job_control_context(JobControl()):
+        await call.aexecute()
+
+    assert call.error is None
+    assert "hi" in str(call.result)
+
+
+def test_a_shell_configured_without_check_and_kill_stays_native(tmp_path: Path) -> None:
+    """A shell whose settings remove its check and kill functions keeps its native run instead of disappearing."""
+    toolkit = _native_shell(tmp_path)
+    toolkit.functions.pop("check_shell_command")
+    toolkit.async_functions.pop("check_shell_command", None)
+
+    assert not managed.install_managed_shell([toolkit])
+    assert "timeout" in toolkit.get_async_functions()["run_shell_command"].parameters["properties"]
+
+
+@pytest.mark.asyncio
 async def test_large_running_output_does_not_end_the_call_early(shell_toolkit: Toolkit) -> None:
     """Output big enough to be saved to a file never makes a still-running command look finished."""
     started = asyncio.get_running_loop().time()

@@ -14,6 +14,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.logging_config import get_logger
 from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS
 from mindroom.shell.supervisor import parse_shell_supervisor_status
 from mindroom.tool_jobs.control import job_owns_execution
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from agno.tools import Toolkit
+
+logger = get_logger(__name__)
 
 _SLICE_SECONDS = 15
 # A call that cannot continue in the background must not hold its reply forever.
@@ -57,10 +60,14 @@ def install_managed_shell(tools: Sequence[Toolkit]) -> bool:
         # The registry name matches presets and aliases, as background-job exclusion does.
         if construction is None or construction.name != "shell" or run is None or run.entrypoint is None:
             continue
-        check = functions["check_shell_command"].entrypoint
-        kill = functions["kill_shell_command"].entrypoint
-        assert check is not None
-        assert kill is not None
+        check_function = functions.get("check_shell_command")
+        kill_function = functions.get("kill_shell_command")
+        check = check_function.entrypoint if check_function is not None else None
+        kill = kill_function.entrypoint if kill_function is not None else None
+        if check is None or kill is None:
+            # Settings that remove check or kill leave nothing to follow a long command with.
+            logger.warning("managed_shell_needs_check_and_kill", toolkit=toolkit.name)
+            continue
         original = run.entrypoint
         managed = _managed_run(original, check, kill)
         declare_tool_schema_source(managed, original)
@@ -84,6 +91,8 @@ def _managed_run(
         limit = None if job_owns_execution() else _NOT_A_JOB_LIMIT_SECONDS
         deadline = None if limit is None else loop.time() + limit
         first_slice = _SLICE_SECONDS if limit is None else min(_SLICE_SECONDS, limit)
+        # A model repeating the native argument from older history; the slice decides the native wait.
+        kwargs.pop("timeout", None)
         first = await _call(run, args=args, tail=tail, timeout=first_slice, **kwargs)
         handle = _HANDLE_RE.search(first) if isinstance(first, str) else None
         if handle is None:
