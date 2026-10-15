@@ -1799,3 +1799,42 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         ("assistant", "\n\nStarted a deep_research job."),
         ("user", _hook_context("deep_research done · confident · 2 rounds", "$done")),
     ]
+
+
+def test_unseen_context_labels_relayed_hook_prompt_under_its_requester() -> None:
+    """A hook prompt relayed for a person keeps that person as sender and still says a hook posted it."""
+    thread_history = [
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="Summarize today's notes",
+            event_id="$prompt",
+            content={
+                "body": "Summarize today's notes",
+                SOURCE_KIND_KEY: HOOK_DISPATCH_SOURCE_KIND,
+                HOOK_SOURCE_KEY: "automation/daily",
+                ORIGINAL_SENDER_KEY: "@alice:localhost",
+            },
+        ),
+        make_visible_message(sender="@alice:localhost", body="Thanks", event_id="$question"),
+    ]
+
+    messages, _ = _build_unseen_context_messages(
+        "Thanks",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$question",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert (messages[0].role, messages[0].content) == (
+        "user",
+        render_msg_tag(
+            sender="@alice:localhost",
+            body="[posted automatically by hook automation/daily, not written by you or any agent]\n"
+            "Summarize today's notes",
+            event_id="$prompt",
+        ),
+    )
