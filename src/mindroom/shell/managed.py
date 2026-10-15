@@ -18,6 +18,7 @@ from mindroom.shell.supervisor import parse_shell_supervisor_status
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.declarations import declare_tool_schema_source
+from mindroom.tool_system.tool_hooks import track_sync_tool_completion
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -110,12 +111,12 @@ async def _until_finished(
     while True:
         if deadline is not None and loop.time() >= deadline:
             await _stop(check, kill, handle)
-            reply = str(await _call(check, handle))
+            reply = str(await _internal_call(check, handle))
             return f"{reply}\n\nStopped after {_NOT_A_JOB_LIMIT_SECONDS:g}s because this call cannot run in the background."
         wait = delay if deadline is None else min(delay, max(0.0, deadline - loop.time()))
         await asyncio.sleep(wait)
         delay = min(delay * 2, _POLL_MAX_SECONDS)
-        reply = str(await _call(check, handle))
+        reply = str(await _internal_call(check, handle))
         status = parse_shell_supervisor_status(reply)
         if status.state == "running":
             continue
@@ -127,15 +128,21 @@ async def _until_finished(
 
 async def _stop(check: Callable[..., object], kill: Callable[..., object], handle: str) -> None:
     """Terminate the command's process group, then force it if it is still running after a short grace."""
-    await _call(kill, handle)
+    await _internal_call(kill, handle)
     await asyncio.sleep(_STOP_GRACE_SECONDS)
-    if parse_shell_supervisor_status(str(await _call(check, handle))).state == "running":
-        await _call(kill, handle, force=True)
+    if parse_shell_supervisor_status(str(await _internal_call(check, handle))).state == "running":
+        await _internal_call(kill, handle, force=True)
 
 
 async def _call(function: Callable[..., object], *args: object, **kwargs: object) -> object:
     result = function(*args, **kwargs)
     return await result if inspect.isawaitable(result) else result
+
+
+async def _internal_call(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+    """Poll or stop the command outside the tool call, whose one tracked entrypoint is the command itself."""
+    with track_sync_tool_completion(None):
+        return await _call(function, *args, **kwargs)
 
 
 def _without_timeout(parameters: dict[str, Any]) -> dict[str, Any]:
