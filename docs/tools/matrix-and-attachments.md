@@ -16,7 +16,7 @@ This page also covers automatic thread summaries.
 - [`thread_resolution`] - Resolve or reopen threads in the current room.
 - [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
-- [`stop_reply`] - Stop the reply another agent or team is writing in the current thread.
+- [`stop_reply`] - Stop the reply another agent or team is writing in the current conversation.
 - [`thread_model`](../configuration/models.md#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
 - [`attachments`](../attachments.md#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
