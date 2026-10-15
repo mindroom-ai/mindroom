@@ -28,7 +28,7 @@ from mindroom.shell.output_capture import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 # Time a worker shell request needs beyond its command's foreground wait to deliver the answer.
@@ -41,6 +41,9 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
+# A running command reports the tail of its output at most this often, and only when it changed.
+_PROGRESS_INTERVAL_SECONDS = 2.0
+_PROGRESS_TAIL_LINES = 20
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 
 
@@ -93,6 +96,11 @@ class _OutputBuffer:
         output = self._rendered_text()
         return len(output.split("\n")) if output else 0
 
+    def last_lines(self, count: int) -> str:
+        """Return the last ``count`` lines retained so far, without the truncation notice."""
+        output = self._rendered_text()
+        return "\n".join(output.split("\n")[-count:]) if output else ""
+
     def _rendered_text(self) -> str:
         return "".join(self.chunks).rstrip("\n")
 
@@ -127,6 +135,29 @@ class ProcessRecord:
     output_capture: ShellOutputCapture | None = None
     output_receipt: str | None = None
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+
+class _OutputProgress:
+    """Report a running command's latest output, at most every few seconds and only when it changed."""
+
+    def __init__(self, report: Callable[[str], None], stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer) -> None:
+        self._report = report
+        self._stdout_buf = stdout_buf
+        self._stderr_buf = stderr_buf
+        self._sent = ""
+        self._due = time.monotonic() + _PROGRESS_INTERVAL_SECONDS
+
+    def poll(self) -> None:
+        now = time.monotonic()
+        if now < self._due:
+            return
+        self._due = now + _PROGRESS_INTERVAL_SECONDS
+        text = self._stdout_buf.last_lines(_PROGRESS_TAIL_LINES)
+        if errors := self._stderr_buf.last_lines(_PROGRESS_TAIL_LINES):
+            text = f"{text}\nStderr:\n{errors}" if text else f"Stderr:\n{errors}"
+        if text and text != self._sent:
+            self._sent = text
+            self._report(text)
 
 
 @dataclass(frozen=True)
@@ -168,6 +199,7 @@ async def run_command(
     tail: int,
     timeout: float | None,  # noqa: ASYNC109
     on_timeout: Literal["background", "kill"] = "background",
+    on_progress: Callable[[str], None] | None = None,
     handle: str | None = None,
     handle_reservations: set[str] | None = None,
     output_destination: ShellOutputDestination | None = None,
@@ -187,6 +219,7 @@ async def run_command(
     running under *registry* and a handle string is returned for
     ``check_command``/``kill_command``.
     Cancellation stops a running command's process group and drops any registered handle.
+    ``on_progress`` receives the tail of the output while the command runs in the foreground.
 
     Callers that manage output themselves pass ``output_capture`` instead of
     ``output_destination``. ``stdin`` and ``stderr`` go to the subprocess as
@@ -216,6 +249,7 @@ async def run_command(
             tail=tail,
             timeout=timeout,
             on_timeout=on_timeout,
+            on_progress=on_progress,
             handle=handle,
             output_destination=output_destination,
             output_capture=output_capture,
@@ -239,6 +273,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
     tail: int,
     timeout: float | None,  # noqa: ASYNC109
     on_timeout: Literal["background", "kill"],
+    on_progress: Callable[[str], None] | None,
     handle: str | None,
     output_destination: ShellOutputDestination | None,
     output_capture: ShellOutputCapture | None,
@@ -278,7 +313,11 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
 
     try:
         try:
-            await _await_process_exit(process, timeout_seconds=timeout)
+            await _await_process_exit(
+                process,
+                timeout_seconds=timeout,
+                on_poll=_OutputProgress(on_progress, stdout_buf, stderr_buf).poll if on_progress is not None else None,
+            )
         except TimeoutError:
             assert timeout is not None
             if on_timeout == "kill":
@@ -616,8 +655,9 @@ async def _await_process_exit(
     process: asyncio.subprocess.Process,
     *,
     timeout_seconds: float | None = None,
+    on_poll: Callable[[], None] | None = None,
 ) -> None:
-    """Wait for the process to exit without depending on inherited pipe EOF."""
+    """Wait for the process to exit without depending on inherited pipe EOF, calling ``on_poll`` while it runs."""
     if process.returncode is not None:
         return
     if timeout_seconds is not None and timeout_seconds <= 0:
@@ -640,6 +680,8 @@ async def _await_process_exit(
             if wait_task in done_tasks:
                 await wait_task
                 return
+            if on_poll is not None:
+                on_poll()
     finally:
         if not wait_task.done():
             wait_task.cancel()

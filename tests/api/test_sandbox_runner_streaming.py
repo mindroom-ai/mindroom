@@ -338,3 +338,21 @@ def test_stopping_a_spawned_child_kills_its_group_and_never_waits_for_a_pipe_hol
         if escaped is not None:
             with suppress(ProcessLookupError):
                 os.kill(escaped, signal.SIGKILL)
+
+
+@pytest.mark.usefixtures("runner")
+def test_a_worker_shell_call_streams_its_output_as_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shell command in a per-request child reports its output tail through the supervisor to the stream."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    _refresh_runner()
+    with TestClient(sandbox_runner_app) as client:
+        frames = _stream(
+            client,
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=["echo started; sleep 2.5; echo finished"],
+        )
+
+    assert {"progress": "started"} in frames
+    assert frames[-1]["ok"] is True
+    assert frames[-1]["result"].endswith("started\nfinished")

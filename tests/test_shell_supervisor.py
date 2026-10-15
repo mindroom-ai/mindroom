@@ -202,6 +202,29 @@ async def test_a_stopping_run_has_no_limit_without_a_timeout_and_stops_at_one() 
 
 
 @pytest.mark.asyncio
+async def test_a_supervised_run_relays_its_progress_before_its_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that asks for progress gets the command's output tail while it runs, then the usual result."""
+    monkeypatch.setattr("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1)
+    registry: dict[str, ProcessRecord] = {}
+    reports: list[str] = []
+    async with _running_server(registry) as socket_path:
+        result = await run_command_via_supervisor(
+            socket_path,
+            namespace="ns",
+            argv=["bash", "-c", "echo started; sleep 0.5; echo done"],
+            env=_MINIMAL_ENV,
+            cwd=None,
+            tail=100,
+            timeout=None,
+            on_timeout="kill",
+            on_progress=reports.append,
+        )
+
+    assert result.message == "started\ndone"
+    assert reports[0] == "started"
+
+
+@pytest.mark.asyncio
 async def test_run_nonzero_exit_returns_stderr() -> None:
     """Non-zero exits should surface stderr as an error message."""
     registry: dict[str, ProcessRecord] = {}

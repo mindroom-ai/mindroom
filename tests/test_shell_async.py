@@ -17,6 +17,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_ho
 from mindroom.shell.execution import _MAX_OUTPUT_BYTES
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tools.shell import (
     _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
@@ -793,3 +794,17 @@ async def test_only_a_job_command_runs_past_the_default_time_limit(tmp_path: Pat
 
     assert stopped == "Stopped after 0.2s."
     assert finished == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_shell_call_reports_its_output_as_its_progress(tmp_path: Path) -> None:
+    """A shell call's output tail reaches whoever owns the call, such as its job, while the command runs."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    assert entrypoint is not None
+    reports: list[str] = []
+
+    with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1), tool_progress_reporter(reports.append):
+        result = await entrypoint(["bash", "-c", "echo building; sleep 0.5; echo built"])
+
+    assert result == "building\nbuilt"
+    assert reports[0] == "building"

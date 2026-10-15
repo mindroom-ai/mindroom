@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import os
 import shlex
 import signal
@@ -340,3 +341,31 @@ async def test_a_command_without_a_timeout_runs_until_it_ends(
     )
 
     assert result.message == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_running_command_reports_its_latest_output_as_progress(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While it runs, a command reports the tail of both streams when it changed, never the same text twice."""
+    monkeypatch.setattr("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1)
+    reports: list[str] = []
+
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo one; sleep 0.5; echo two; echo warn >&2; sleep 0.5"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=10,
+        on_timeout="kill",
+        on_progress=reports.append,
+    )
+
+    assert result.message == "one\ntwo"
+    assert reports[0] == "one"
+    assert reports[-1] == "one\ntwo\nStderr:\nwarn"
+    assert all(earlier != later for earlier, later in itertools.pairwise(reports))

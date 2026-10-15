@@ -43,7 +43,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.shell.execution import (
@@ -56,6 +56,9 @@ from mindroom.shell.execution import (
     run_command,
 )
 from mindroom.shell.output_capture import ShellOutputDestination
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = get_logger(__name__)
 
@@ -113,8 +116,13 @@ async def _handle_run(
     payload: dict[str, object],
     reader: asyncio.StreamReader,
     deadline_tasks: set[asyncio.Task[None]] | None = None,
+    *,
+    write_progress: Callable[[str], None] | None = None,
 ) -> ShellRunResult | None:
-    """Run one command, cancelling it if the client disconnects mid-wait."""
+    """Run one command, cancelling it if the client disconnects mid-wait.
+
+    A client that asks for progress gets it through ``write_progress`` before the result.
+    """
     argv_payload = payload["argv"]
     env_payload = payload["env"]
     if not isinstance(argv_payload, list) or not isinstance(env_payload, dict):
@@ -147,6 +155,7 @@ async def _handle_run(
             tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
             timeout=response_timeout,
             on_timeout=_on_timeout(payload),
+            on_progress=write_progress if payload.get("progress") is True else None,
             handle=handle_payload,
             handle_reservations=handle_reservations,
             output_destination=output_destination,
@@ -182,6 +191,10 @@ async def _handle_run(
                 deadline_tasks.add(task)
                 task.add_done_callback(deadline_tasks.discard)
     return result
+
+
+def _write_progress(writer: asyncio.StreamWriter, text: str) -> None:
+    writer.write(json.dumps({"progress": text}).encode("utf-8") + b"\n")
 
 
 def _on_timeout(payload: dict[str, object]) -> Literal["background", "kill"]:
@@ -250,7 +263,14 @@ async def _handle_connection(
         payload = json.loads(line)
         op = payload.get("op")
         if op == "run":
-            result = await _handle_run(registry, handle_reservations, payload, reader, deadline_tasks)
+            result = await _handle_run(
+                registry,
+                handle_reservations,
+                payload,
+                reader,
+                deadline_tasks,
+                write_progress=partial(_write_progress, writer),
+            )
             if result is None:
                 return
         elif op == "check":
@@ -337,6 +357,7 @@ async def run_command_via_supervisor(
     tail: int,
     timeout: float | None,  # noqa: ASYNC109
     on_timeout: Literal["background", "kill"] = "background",
+    on_progress: Callable[[str], None] | None = None,
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
@@ -358,17 +379,25 @@ async def run_command_via_supervisor(
         request["max_runtime_seconds"] = max_runtime_seconds
     if output_destination is not None:
         request["output_destination"] = asdict(output_destination)
+    if on_progress is not None:
+        request["progress"] = True
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:
         return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}")
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout is None else loop.time() + timeout + _RUN_RESPONSE_GRACE_SECONDS
     try:
         writer.write(json.dumps(request).encode("utf-8") + b"\n")
         await writer.drain()
-        line = await asyncio.wait_for(
-            reader.readline(),
-            timeout=None if timeout is None else timeout + _RUN_RESPONSE_GRACE_SECONDS,
-        )
+        while True:
+            line = await asyncio.wait_for(
+                reader.readline(),
+                timeout=None if deadline is None else deadline - loop.time(),
+            )
+            if on_progress is None or (text := _progress_text(line)) is None:
+                break
+            on_progress(text)
     except TimeoutError:
         return ShellRunResult(message="Error: Shell supervisor did not respond in time.")
     except OSError as exc:
@@ -391,6 +420,15 @@ def kill_command_via_supervisor(socket_path: str, *, namespace: str, handle: str
         socket_path,
         {"op": "kill", "namespace": namespace, "handle": handle, "force": force},
     )
+
+
+def _progress_text(line: bytes) -> str | None:
+    """Return the text of a progress line, or None for the result line."""
+    try:
+        payload = json.loads(line)
+    except ValueError:
+        return None
+    return str(payload["progress"]) if isinstance(payload, dict) and "progress" in payload else None
 
 
 def _sync_supervisor_request(socket_path: str, request: dict[str, object]) -> str:

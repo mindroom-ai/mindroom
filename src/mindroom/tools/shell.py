@@ -33,6 +33,7 @@ from mindroom.tool_system.declarations import (
     ToolStatus,
 )
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
+from mindroom.tool_system.progress import report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
@@ -460,6 +461,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     tail=tail,
                     timeout=timeout,
                     on_timeout="kill",
+                    on_progress=report_tool_progress,
                     output_destination=output_destination,
                 )
             else:
@@ -472,6 +474,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     tail=tail,
                     timeout=timeout,
                     on_timeout="kill",
+                    on_progress=report_tool_progress,
                     output_destination=output_destination,
                 )
             message = result.message
