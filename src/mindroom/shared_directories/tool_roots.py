@@ -21,11 +21,10 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class SharedDirectoryRoot:
-    """One shared directory a path tool may use, the paths that name it, and whether it may write there."""
+    """One shared directory a path tool may use and whether it may write there."""
 
     path: Path
     writable: bool
-    spellings: tuple[Path, ...]
 
 
 def no_shared_directory_roots() -> tuple[SharedDirectoryRoot, ...]:
@@ -43,8 +42,8 @@ def _matching_root(
     raw_path: object,
     base_dir: Path,
     roots: Callable[[], tuple[SharedDirectoryRoot, ...]],
-) -> tuple[SharedDirectoryRoot, Path, Path] | None:
-    """Return the shared directory a path names, the spelling it used, and the path below that spelling."""
+) -> tuple[SharedDirectoryRoot, Path] | None:
+    """Return the shared directory a path names and the path below it."""
     if not isinstance(raw_path, str) or not raw_path:
         return None
     requested = Path(raw_path).expanduser()
@@ -53,9 +52,8 @@ def _matching_root(
     if candidate.is_relative_to(base_dir):
         return None
     for root in roots():
-        for spelling in root.spellings:
-            if candidate.is_relative_to(spelling):
-                return root, spelling, candidate.relative_to(spelling)
+        if candidate.is_relative_to(root.path):
+            return root, candidate.relative_to(root.path)
     return None
 
 
@@ -75,7 +73,7 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
             match = _matching_root(raw_path, toolkit.base_dir, toolkit.shared_directory_roots)
             if match is None:
                 return method(*args, **kwargs)
-            root, spelling, relative = match
+            root, relative = match
             if writes and not root.writable:
                 return f"Error: {raw_path} is in a shared directory you can only read."
             # The tools package imports every toolkit, and those toolkits import this module.
@@ -90,7 +88,7 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
             bound.arguments["self"] = rooted
             # An absolute path below the pinned root keeps the toolkit's own messages absolute too.
             bound.arguments[path_parameter] = str(rooted.base_dir / relative)
-            with spell_output_paths(rooted.base_dir, spelling):
+            with spell_output_paths(rooted.base_dir, root.path):
                 return method(*bound.args, **bound.kwargs)
 
         return wrapper

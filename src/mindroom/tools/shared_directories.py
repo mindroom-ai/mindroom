@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     requires_primary_runtime=True,
     requires_room_context=True,
+    managed_init_args=(ToolManagedInitArg.AGENT_NAME,),
     icon="FolderOpen",
     icon_color="text-amber-500",
     dependencies=["agno"],

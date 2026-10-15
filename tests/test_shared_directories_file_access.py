@@ -38,8 +38,8 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     return workspace, share, other
 
 
-def _root(path: Path, *, writable: bool, spellings: tuple[Path, ...] = ()) -> SharedDirectoryRoot:
-    return SharedDirectoryRoot(path=path, writable=writable, spellings=spellings or (path,))
+def _root(path: Path, *, writable: bool) -> SharedDirectoryRoot:
+    return SharedDirectoryRoot(path=path, writable=writable)
 
 
 def _file_tool(workspace: Path, *roots: SharedDirectoryRoot) -> object:
@@ -102,16 +102,6 @@ def test_file_tool_refuses_links_out_of_a_share(tmp_path: Path) -> None:
     tool = _file_tool(workspace, _root(share, writable=False))
 
     assert tool.read_file(str(share / "escape.md")).startswith("Error")
-
-
-def test_a_share_named_by_its_worker_path_reaches_the_same_files(tmp_path: Path) -> None:
-    """When a share's worker path is advertised, primary-process tools accept it and answer in that spelling."""
-    workspace, share, _other = _layout(tmp_path)
-    worker_path = Path("/app/worker/shared_directories/alice/report")
-    tool = _file_tool(workspace, _root(share, writable=False, spellings=(share, worker_path)))
-
-    assert tool.read_file(str(worker_path / "summary.md")) == "hello\nshared world\n"
-    assert json.loads(tool.list_files(str(worker_path))) == [str(worker_path / "summary.md")]
 
 
 def test_shares_created_after_the_toolkit_are_reachable(tmp_path: Path) -> None:
@@ -190,19 +180,16 @@ def test_primary_roots_follow_the_ledger(tmp_path: Path) -> None:
     assert shared_directory_roots(runtime_paths, None, "alice") == ()
 
 
-def test_primary_roots_also_accept_the_worker_path(tmp_path: Path) -> None:
-    """With dedicated workers, primary-process tools accept the worker path the prompt may have named."""
+def test_primary_tools_never_reach_shares_beside_dedicated_workers(tmp_path: Path) -> None:
+    """Owners' workers write their shares, so primary-process path tools must not search anything there."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test"},
     )
     config = _ledger_config(runtime_paths)
-    share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
 
-    assert shared_directory_roots(runtime_paths, config, "bob") == (
-        _root(share, writable=False, spellings=(share, Path("/app/worker/shared_directories/alice/report"))),
-    )
+    assert shared_directory_roots(runtime_paths, config, "bob") == ()
 
 
 def test_primary_tools_never_reach_shares_beside_the_static_runner_sidecar(tmp_path: Path) -> None:

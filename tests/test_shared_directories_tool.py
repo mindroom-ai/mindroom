@@ -78,9 +78,10 @@ def _context(config: Config, agent_name: str = "alice") -> ToolRuntimeContext:
     )
 
 
-def _call(context: ToolRuntimeContext, function: str, *args: str) -> dict[str, object]:
+def _call(context: ToolRuntimeContext, function: str, *args: str, acting_agent: str | None = None) -> dict[str, object]:
+    tools = SharedDirectoryTools(agent_name=acting_agent or context.agent_name)
     with tool_runtime_context(context):
-        return json.loads(getattr(SharedDirectoryTools(), function)(*args))
+        return json.loads(getattr(tools, function)(*args))
 
 
 def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
@@ -292,3 +293,39 @@ def test_restart_notice_appears_only_with_dedicated_workers(tmp_path: Path) -> N
 def test_mcp_gateway_never_offers_the_tool() -> None:
     """Gateway calls run without the requester and room the tool authorizes against, so the gateway leaves it out."""
     assert TOOL_METADATA["shared_directories"].mcp_available is False
+
+
+def test_a_team_member_shares_as_itself(tmp_path: Path) -> None:
+    """In a team run the tool acts for the member that calls it, not for the team."""
+    config = _config(tmp_path)
+    team_context = _context(config, "crew")
+
+    created = _call(team_context, "create_shared_directory", "report", acting_agent="alice")
+    invited = _call(team_context, "invite_to_shared_directory", "report", "bob", acting_agent="alice")
+
+    assert created["status"] == "ok"
+    assert invited["status"] == "ok"
+    assert [
+        (directory.owner, directory.members) for directory in load_shared_directories(runtime_paths_for(config))
+    ] == [
+        ("alice", ("bob",)),
+    ]
+
+
+@pytest.mark.parametrize("function", ["remove_from_shared_directory", "delete_shared_directory"])
+def test_changes_succeed_after_a_member_left_the_config(tmp_path: Path, function: str) -> None:
+    """A member removed from the config can still be removed, and the directory deleted, with dedicated workers."""
+    config = _config(tmp_path, dedicated_workers=True)
+    _call(_context(config), "create_shared_directory", "report")
+    _call(_context(config), "invite_to_shared_directory", "report", "bob")
+    without_bob = bind_runtime_paths(
+        config.model_copy(update={"agents": {k: v for k, v in config.agents.items() if k != "bob"}, "teams": {}}),
+        runtime_paths_for(config),
+    )
+
+    args = ("report", "bob") if function == "remove_from_shared_directory" else ("report",)
+    payload = _call(_context(without_bob), function, *args)
+
+    assert payload["status"] == "ok"
+    assert "bob:" not in str(payload["message"])
+    assert "and bob" not in str(payload["message"])

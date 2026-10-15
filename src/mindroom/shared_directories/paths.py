@@ -11,7 +11,7 @@ from mindroom.shared_directories.store import agent_shared_directories, shared_d
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
-from mindroom.workers.runtime import primary_worker_backend_name, worker_visible_storage_root
+from mindroom.workers.runtime import primary_worker_backend_is_dedicated, worker_visible_storage_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,7 +25,7 @@ _SHARE_READING_TOOLS = ("shell", "python", "file", "coding")
 
 def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> bool:
     """Return whether the agent's file-reading tools run in a dedicated worker that mounts its shares."""
-    if worker_visible_storage_root(runtime_paths) is None:
+    if agent_name not in config.agents or worker_visible_storage_root(runtime_paths) is None:
         return False
     worker_tools = config.get_agent_worker_tools(agent_name)
     return any(
@@ -69,7 +69,7 @@ def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
         for name in _real_subdirectories(root / owner):
             path = root / owner / name
             writable = not os.statvfs(path).f_flag & os.ST_RDONLY
-            roots.append(SharedDirectoryRoot(path=path, writable=writable, spellings=(path,)))
+            roots.append(SharedDirectoryRoot(path=path, writable=writable))
     return tuple(roots)
 
 
@@ -83,16 +83,14 @@ def shared_directory_roots(
         return _mounted_roots(runner_storage_root(runtime_paths) / SHARED_DIRECTORIES_DIRNAME)
     if config is None or agent_name is None:
         return ()
-    if primary_worker_backend_name(runtime_paths) == "static_runner" and sandbox_proxy_config(runtime_paths).proxy_url:
-        # The shared sidecar writes shared_directories/, so it could swap an owner directory for a link that a
-        # primary-process path tool would follow into primary-only storage.
+    if primary_worker_backend_is_dedicated(runtime_paths) or sandbox_proxy_config(runtime_paths).proxy_url:
+        # Workers write shared directories, and file and coding list and search by path after checking it, so worker
+        # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
         return ()
-    worker_root = worker_visible_storage_root(runtime_paths)
-    roots: list[SharedDirectoryRoot] = []
-    for directory in agent_shared_directories(runtime_paths, config, agent_name):
-        relative_path = shared_directory_relative_path(directory.owner, directory.name)
-        path = runtime_paths.storage_root / relative_path
-        # Prompts name the worker path when the agent's other tools run in a worker, so both spellings work here.
-        spellings = (path,) if worker_root is None else (path, worker_root / relative_path)
-        roots.append(SharedDirectoryRoot(path=path, writable=directory.owner == agent_name, spellings=spellings))
-    return tuple(roots)
+    return tuple(
+        SharedDirectoryRoot(
+            path=runtime_paths.storage_root / shared_directory_relative_path(directory.owner, directory.name),
+            writable=directory.owner == agent_name,
+        )
+        for directory in agent_shared_directories(runtime_paths, config, agent_name)
+    )

@@ -48,7 +48,9 @@ def _changed_message(context: ToolRuntimeContext, agent_names: Iterable[str], do
 class SharedDirectoryTools(Toolkit):
     """Create directories other agents can read from their own workers."""
 
-    def __init__(self) -> None:
+    def __init__(self, agent_name: str | None = None) -> None:
+        # The calling agent, bound when the tool is built, so a team member shares as itself rather than as the team.
+        self._agent_name = agent_name
         super().__init__(
             name="shared_directories",
             tools=[
@@ -60,18 +62,17 @@ class SharedDirectoryTools(Toolkit):
             ],
         )
 
-    @staticmethod
-    def _context() -> ToolRuntimeContext | str:
+    def _context(self) -> tuple[ToolRuntimeContext, str] | str:
         context = get_tool_runtime_context()
-        if context is None:
+        if context is None or self._agent_name is None:
             return _payload("error", message="Shared directory tool context is unavailable in this runtime path.")
-        if not is_shareable_agent(context.config, context.agent_name):
+        if not is_shareable_agent(context.config, self._agent_name):
             return _payload("error", message="Private agents cannot share directories.")
-        return context
+        return context, self._agent_name
 
     @staticmethod
-    def _view_path(context: ToolRuntimeContext, directory: SharedDirectory) -> str:
-        in_worker = agent_reads_shares_in_worker(context.config, context.runtime_paths, context.agent_name)
+    def _view_path(context: ToolRuntimeContext, agent_name: str, directory: SharedDirectory) -> str:
+        in_worker = agent_reads_shares_in_worker(context.config, context.runtime_paths, agent_name)
         return str(shared_directory_view_path(context.runtime_paths, directory, in_worker=in_worker))
 
     def create_shared_directory(self, name: str) -> str:
@@ -81,25 +82,27 @@ class SharedDirectoryTools(Toolkit):
             name: Directory name: 1-64 lowercase letters, digits, '-' or '_'.
 
         """
-        context = self._context()
-        if isinstance(context, str):
-            return context
+        resolved = self._context()
+        if isinstance(resolved, str):
+            return resolved
+        context, agent = resolved
         try:
-            directory = create_shared_directory(context.runtime_paths, owner=context.agent_name, name=name)
+            directory = create_shared_directory(context.runtime_paths, owner=agent, name=name)
         except SharedDirectoryError as exc:
             return _payload("error", name=name, message=str(exc))
         return _payload(
             "ok",
             name=name,
-            path=self._view_path(context, directory),
-            message=_changed_message(context, [context.agent_name], "Created."),
+            path=self._view_path(context, agent, directory),
+            message=_changed_message(context, [agent], "Created."),
         )
 
-    def _invitation_error(self, context: ToolRuntimeContext, agent_name: str) -> str | None:
+    @staticmethod
+    def _invitation_error(context: ToolRuntimeContext, agent: str, agent_name: str) -> str | None:
         config = context.config
         if agent_name not in config.agents:
             return f"'{agent_name}' is not an agent."
-        if agent_name == context.agent_name:
+        if agent_name == agent:
             return "You cannot invite yourself."
         if not is_shareable_agent(config, agent_name):
             return f"{agent_name} is private and cannot join shared directories."
@@ -127,15 +130,16 @@ class SharedDirectoryTools(Toolkit):
             agent_name: Name of the agent to invite.
 
         """
-        context = self._context()
-        if isinstance(context, str):
-            return context
-        if (error := self._invitation_error(context, agent_name)) is not None:
+        resolved = self._context()
+        if isinstance(resolved, str):
+            return resolved
+        context, agent = resolved
+        if (error := self._invitation_error(context, agent, agent_name)) is not None:
             return _payload("error", name=name, agent=agent_name, message=error)
         try:
             directory, added = add_shared_directory_member(
                 context.runtime_paths,
-                owner=context.agent_name,
+                owner=agent,
                 name=name,
                 member=agent_name,
             )
@@ -159,13 +163,14 @@ class SharedDirectoryTools(Toolkit):
             agent_name: Name of the member to remove.
 
         """
-        context = self._context()
-        if isinstance(context, str):
-            return context
+        resolved = self._context()
+        if isinstance(resolved, str):
+            return resolved
+        context, agent = resolved
         try:
             directory, removed = remove_shared_directory_member(
                 context.runtime_paths,
-                owner=context.agent_name,
+                owner=agent,
                 name=name,
                 member=agent_name,
             )
@@ -188,11 +193,12 @@ class SharedDirectoryTools(Toolkit):
             name: Name of a directory you created.
 
         """
-        context = self._context()
-        if isinstance(context, str):
-            return context
+        resolved = self._context()
+        if isinstance(resolved, str):
+            return resolved
+        context, agent = resolved
         try:
-            directory = delete_shared_directory(context.runtime_paths, owner=context.agent_name, name=name)
+            directory = delete_shared_directory(context.runtime_paths, owner=agent, name=name)
         except SharedDirectoryError as exc:
             return _payload("error", name=name, message=str(exc))
         return _payload(
@@ -203,17 +209,18 @@ class SharedDirectoryTools(Toolkit):
 
     def list_shared_directories(self) -> str:
         """List the shared directories you own or were invited to, with their paths and your access."""
-        context = self._context()
-        if isinstance(context, str):
-            return context
+        resolved = self._context()
+        if isinstance(resolved, str):
+            return resolved
+        context, agent = resolved
         entries = [
             {
                 "owner": directory.owner,
                 "name": directory.name,
                 "members": list(directory.members),
-                "access": "read-write" if directory.owner == context.agent_name else "read-only",
-                "path": self._view_path(context, directory),
+                "access": "read-write" if directory.owner == agent else "read-only",
+                "path": self._view_path(context, agent, directory),
             }
-            for directory in agent_shared_directories(context.runtime_paths, context.config, context.agent_name)
+            for directory in agent_shared_directories(context.runtime_paths, context.config, agent)
         ]
         return _payload("ok", directories=entries)
