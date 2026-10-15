@@ -5610,6 +5610,7 @@ depends_on = [
     "mindroom.knowledge.github_app_auth",
     "mindroom.knowledge.legacy_git_checkout",
     "mindroom.knowledge.redaction",
+    "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.knowledge.manager"]
 
@@ -6482,6 +6483,7 @@ from = ["mindroom.thread_export"]
 [[interfaces]]
 expose = [
     "normalize_worker_key_part",
+    "SHARED_DIRECTORIES_DIRNAME",
     "ResolvedWorkerTarget",
     "ResolvedWorkerKeyScope",
     "SerializedToolExecutionIdentity",
