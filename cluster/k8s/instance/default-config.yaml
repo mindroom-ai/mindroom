@@ -141,6 +141,9 @@ room_defaults:
   - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
   admins:
   - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+rooms:
+  personal:
+    description: Your private room with Mind, who remembers across sessions 🧠
 matrix_space:
   enabled: true
   name: MindRoom

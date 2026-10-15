@@ -1283,6 +1283,11 @@ room_defaults:
   admins:
     - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
+rooms:
+  personal:
+    # Also the room's topic, so creating it needs no model call.
+    description: Your private room with Mind, who remembers across sessions 🧠
+
 matrix_space:
   enabled: true
   name: MindRoom
