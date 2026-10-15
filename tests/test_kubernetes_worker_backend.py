@@ -2334,6 +2334,7 @@ router:
         ("agents/other/workspace/docs", "link"),
         ("agents/other/workspace/docs", "directory"),
         ("workers/other/docs", "directory"),
+        ("shared_directories/other/report/docs", "directory"),
         ("knowledge/docs", "link"),
     ],
 )

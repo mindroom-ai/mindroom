@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.runtime_resolution import shared_knowledge_path
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_unscoped_worker_key, resolve_worker_key
 from mindroom.workers.backends._dedicated_worker_common import (
@@ -156,3 +157,15 @@ def test_planner_skips_missing_and_linked_directories(tmp_path: Path) -> None:
         "alice/gone",
         "alice/report",
     ]
+
+
+def test_knowledge_inside_a_shared_directory_never_follows_a_planted_link(tmp_path: Path) -> None:
+    """Owners' workers write shared directories, so the primary never follows a link found there."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    share = _shared_report(runtime_paths)
+    secret = tmp_path / "primary-only"
+    secret.mkdir()
+    (share / "docs").symlink_to(secret, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="shared knowledge base path"):
+        shared_knowledge_path(str(share / "docs"), runtime_paths)

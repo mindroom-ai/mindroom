@@ -256,7 +256,7 @@ An agent can be invited only on behalf of a user who may use that agent, and pri
 Invited agents read the directory with `shell`, `python`, `file`, or `coding` and do not need `shared_directories` themselves.
 Creating, joining, leaving, or deleting a directory restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
 
-Only [dedicated Docker and Kubernetes workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) keep agents from reading directories they did not join; the Kubernetes `static_runner` sidecar and agents without workers can read every shared directory.
+Only [dedicated Docker and Kubernetes workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) keep shared directories read-only for invited agents and out of reach for everyone else; with the Kubernetes `static_runner` sidecar or without workers, every agent can read and write every shared directory.
 
 ```yaml
 agents:

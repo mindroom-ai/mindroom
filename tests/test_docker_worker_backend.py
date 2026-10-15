@@ -1927,6 +1927,7 @@ agents:
         ("agents/other/workspace/docs", "directory"),
         ("private_instances/someone/docs", "directory"),
         ("workers/other/docs", "directory"),
+        ("shared_directories/other/report/docs", "directory"),
         ("knowledge/docs", "link"),
     ],
 )

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.path_confinement import open_directory_within_root
+from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 _LEDGER_FILENAME = "shared_directories.json"
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")

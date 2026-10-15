@@ -16,11 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.shared_directories.store import (
-    SHARED_DIRECTORIES_DIRNAME,
-    agent_shared_directories,
-    shared_directory_relative_path,
-)
+from mindroom.shared_directories.store import agent_shared_directories, shared_directory_relative_path
+from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
 
 if TYPE_CHECKING:
     from collections.abc import Callable
