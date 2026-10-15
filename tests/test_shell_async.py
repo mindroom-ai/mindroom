@@ -608,12 +608,18 @@ async def test_a_finished_command_reports_its_whole_run_time(tmp_path: Path) -> 
 
     result = await run_fn("sleep 1.2", timeout=1)
     handle = result.split("Handle: ")[1].split("\n")[0]
-    await asyncio.sleep(1.5)
-    status = check_fn(handle)
-
+    for _ in range(200):
+        status = check_fn(handle)
+        if "FINISHED" in status:
+            break
+        await asyncio.sleep(0.05)
     assert "FINISHED" in status
     ran = float(status.split("ran for ")[1].split("s)")[0])
-    assert 1.1 <= ran < 1.5
+    await asyncio.sleep(0.5)
+    later = float(check_fn(handle).split("ran for ")[1].split("s)")[0])
+
+    assert ran >= 1.1
+    assert later == ran
 
 
 @pytest.mark.asyncio
