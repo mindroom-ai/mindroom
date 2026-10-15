@@ -90,7 +90,7 @@ Optional features:
 - [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
 - [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, the Agent Vault server's `extraEnv` and `envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
 - [Approved Egress](approved-egress.md) gives workers human-approved temporary hostname grants.
-- [Egress broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) (`egressBroker`) injects stored credentials into workers' outbound HTTPS requests, so workers never hold the secret; see [Agent Keys](egress-broker.md#kubernetes) for the topologies.
+- [Egress broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) (`egressBroker`) injects stored credentials into workers' outbound HTTPS requests, so workers never hold the secret.
 - [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
 - Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
 - The client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy the MatrixRTC chart's call backend.
@@ -113,7 +113,7 @@ Deploy the runtime chart in a namespace of its own when an instance needs dedica
 
 The primary runtime reaches the sidecar over `localhost`, and all proxied tool calls share one runner process.
 The sidecar shares agent workspaces with the primary but cannot read the credential store, Matrix state, or the credentials encryption key, and it is not an isolation boundary between agents.
-The hosted instance chart can give it brokered credentials with `egressBroker.enabled`: the primary then serves the [egress broker](egress-broker.md#hosted-instances-sandbox-runner-sidecar) on loopback port 8768, which the sidecar reaches without a Service or NetworkPolicy.
+The hosted instance chart's `egressBroker.enabled` gives the sidecar [brokered credentials](egress-broker.md#kubernetes), but the platform provisioner does not forward it yet, so a value set by hand is overwritten by the next provision.
 To enable encrypted credential storage, set `workers.sandbox.credentialsEncryptionKey.existingSecret`; only the primary runtime receives that key.
 See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-workerbackend-static_runner) for its mounts and limits.
 
@@ -186,31 +186,8 @@ Workers do not inherit the runtime's `.env` or provider keys; for per-workspace 
 ### Brokered Egress
 
 Set `egressBroker.enabled: true` in the runtime chart to let workers call authenticated HTTP APIs without holding the credential.
-The primary serves the broker on its own port behind a `<fullname>-egress-broker` Service, workers send their traffic through it, and it injects the secret stored for the matching service and worker scope.
-It runs in two modes:
-
-- **Direct mode** points workers at the broker Service.
-  With `egressProxy` as well, the chart adds a worker egress rule for the broker port, and the broker reaches the internet through the operator proxy when the primary's `HTTPS_PROXY` is set.
-- **Chain mode** (with `approvedEgress.enabled`) keeps the approved egress proxy as the first hop, so grants still apply, and renders the broker as Squid's parent.
-
-It requires `workers.backend: kubernetes` and cannot be combined with `workers.kubernetes.agentVault`.
-[Agent Keys](egress-broker.md#kubernetes) has the topology table, what the chart renders, and the migration from Agent Vault.
-
-Users who have no dashboard access still manage their own egress on the personal Connections page at `/connections/egress`:
-
-- Their own services, which can narrow the administrator's egress policy but never widen it, including a GitHub "Limit to repositories" helper and a limit in place on the administrator's GitHub service (**Limit to repositories**, then **Change limit** and **Remove limit**), which limits its paths without replacing its credential.
-  A service that sets "Refuse other paths on these hosts" also limits the administrator's services on those hosts, for the agents that share its scope only.
-  On shared and unscoped agents only administrators and credential managers change services.
-- Their own keys, set in the same step as the service, and their Google, GitHub, and Atlassian account connections.
-  For a shared agent's team account (the Google providers), Connect first asks for confirmation, because everyone who uses the agent acts as the account, and every user sees which account is connected.
-- Their own request log, a **Recent requests** table per agent with the latest 10 requests and **Show all** for the rest, which on a shared or unscoped agent they manage holds everyone's requests.
-
-This needs [trusted upstream auth](trusted-upstream-auth.md) with JWT, set through `env.extra` because the runtime chart has no values for it, an HTTPS `MINDROOM_PUBLIC_URL`, and a gateway that forwards `/connections`, `/api/connections`, and `/api/oauth` to the runtime.
-`MINDROOM_CONNECTIONS_AGENT` is required whenever more than one user can sign in through the gateway; set it to a private agent (`private.per: user` or `user_agent`).
-The egress page itself works without it, but without it every user the gateway admits gets full dashboard access, whatever `administrators` lists: they can edit the configuration, set shared keys, and read every requester's request log.
-With it, a user outside `administrators` reaches only the Connections routes and the OAuth callback pages, and a dashboard page they open in a browser redirects (303) to `/connections?notice=admin-only`, which says the dashboard is for administrators.
-Personal GitHub and Atlassian accounts also need agents with worker scope `user` or `user_agent` (`worker_scope`, or `private.per` for private agents) on the Kubernetes worker backend.
-The runtime chart's [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section has the variables and an example.
+The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section lists the [trusted upstream auth](trusted-upstream-auth.md) and gateway settings that users without dashboard access need.
+[Agent Keys](egress-broker.md) covers how the broker works, the users' Connections pages, and the migration from Agent Vault.
 
 ### Knowledge Source Visibility
 
@@ -311,10 +288,7 @@ For the Tuwunel volume, use an offline snapshot or Tuwunel's own database backup
   A missing index is rebuilt in the background the next time the base is used, repeating every embedding call, and agents report the base as initializing meanwhile.
   The sources, including files uploaded through the dashboard, are not rebuildable unless they come from Git, in which case they are cloned again from the configured repository.
 - `logs/` only holds runtime log files.
-- `egress_broker/` holds the broker's CA, token signing key, and request log.
-  Deleting it generates them again and loses the request log.
-  Outstanding worker tokens stop working, and calls already running with the old CA certificate fail TLS until their next call, because each call gets a fresh token and CA from the primary.
-  `ca.key` is encrypted with `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, so changing that key makes the broker fail to start until you remove `egress_broker/`.
+- `egress_broker/` holds the broker's CA, token signing key, and request log; deleting it loses the log, and the broker generates the rest again (see [Resetting broker state](egress-broker.md#resetting-broker-state)).
 - The approved egress volume only holds temporary grants, which expire after at most `approvedEgress.maxTtlSeconds`.
 
 Everything else on the storage, sessions, state, and journal volumes is not rebuildable.

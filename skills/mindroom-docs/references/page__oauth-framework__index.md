@@ -86,9 +86,6 @@ The API routes are:
 | `POST` | `/api/oauth/{provider}/disconnect` | Remove the stored token; the tool's editable settings stay |
 | `GET`, `POST` | `/api/oauth/{provider}/reset` | Browser-confirmed reset (see [`oauth_connections`](#oauth_connections)) |
 
-The authorize and callback routes are opened by the browser, so their success and error pages are styled HTML with a **Close window** button, not JSON, and keep the status the JSON error would have had.
-The provider's own `error` is shown only when it is a plain code (lowercase letters and underscores), and `access_denied` reads "Authorization cancelled".
-
 Add `agent_name` to target a connection for one agent's credential scope.
 The dashboard connects to the agent's saved scope, so save a `worker_scope` change before connecting.
 
@@ -164,8 +161,8 @@ These rules apply to built-in providers and to providers that plugins register (
 - `allowed_email_domains`, `allowed_hosted_domains`, and a custom `claim_validator` restrict which accounts may connect.
   If a restriction cannot be checked from the provider's verified claims, the connection fails and nothing is saved.
 - `account_claims_reader` (callable, default `None`) takes the token data of a finished code exchange and returns verified account claims, such as `{"login": "octo"}`, for a provider whose token response names no account.
-  It runs once per connection and never on refresh, which keeps the stored claims, and it should return `{}` instead of raising and answer within a few seconds, because the callback waits for it: a failed read (or one that raises) still connects the account, without a label.
-  The Connections pages show the claim `email`, else `login`, as the connected account; the built-in GitHub provider reads its login this way.
+  It runs once per connection, never on refresh, and the callback waits for it, so it should answer within a few seconds; if it raises or returns `{}`, the account still connects, without a label.
+  The Connections pages label the account with the claim `email`, else `login`.
 
 ### Troubleshooting OAuth Connections
 

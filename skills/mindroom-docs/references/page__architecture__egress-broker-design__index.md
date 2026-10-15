@@ -29,7 +29,6 @@ Any of those would otherwise let a request carry one host's secret to another ho
 
 **A request only gets the credential of the service definition that routed it.**
 A service changed while the request waited for its secret, by a user-service save or a config change, may hold a key or account meant for other hosts, so the request gets a retryable 502 instead, and worker code cannot catch a key or account in the moment a service changes.
-The broker checks the definition after reading the key: config changes do not take the user-service lock, and a key saved after the config moved is only read once the new config is current.
 
 **Ambiguous paths are refused, not normalized.**
 Path limits only hold if the broker and the upstream agree on what a path means.
@@ -37,7 +36,7 @@ Dot segments at any decoding layer (including Unicode look-alikes), NUL, invalid
 
 **Requests are rebuilt from what `h11` parsed, never copied byte for byte.**
 This stops bytes that another parser would read as a second request from reaching an upstream.
-Bodies are streamed rather than buffered, so a valid head can reach the upstream before a bad or oversized body gets 400 or 413 and the upstream connection is aborted; buffering every body would cost memory and latency.
+Bodies are streamed rather than buffered, because buffering every body would cost memory and latency.
 
 **`TRACE` and `TRACK` are refused on hosts with rules.**
 They ask the server to echo the request, which would return the injected credential.
@@ -58,7 +57,7 @@ Anyone who could read a value back, including an agent with access to some API, 
 
 **Worker tokens are stateless HMAC tokens minted per call, valid for 7 days by default.**
 There is no session table to store or clean up, long-running background commands keep working, and a leaked token stops working on its own.
-The trade-off is that a single token cannot be revoked; deleting `egress_broker/token.key` in the primary's storage and restarting revokes all of them.
+The trade-off is that a single token cannot be revoked, only all of them at once; see [Resetting broker state](https://docs.mindroom.chat/deployment/egress-broker/#resetting-broker-state).
 
 **The proxy password is the fixed text `mindroom`.**
 Python `urllib` and Node `fetch` only send `Proxy-Authorization` when both the user name (the token) and the password are non-empty.

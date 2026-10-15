@@ -823,7 +823,6 @@ See [Background Python Scripts](../../../docs/tools/background-scripts.md#worker
 
 The egress broker lets agents call authenticated HTTP APIs from Kubernetes workers without the worker ever holding the credential.
 The primary runs the broker on its own port, workers send their traffic through it, and it injects the stored credential for the matching service.
-The primary needs no extra pod, and workers need no changes: each call carries its own token and CA certificate.
 For configuration, secret management, and error codes, see [Agent Keys](../../../docs/deployment/egress-broker.md).
 
 The chart supports direct and chain modes:
@@ -843,10 +842,7 @@ The chart supports direct and chain modes:
 > The broker connects through the operator proxy to the IP address it validated, so the proxy must allow CONNECT to IP addresses on ports 80 and 443.
 > The chart does not enforce either setting yet.
 
-The broker's environment also replaces `NO_PROXY` for `shell` and `python` calls with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's callback URLs.
-`egressProxy.noProxy` entries no longer apply to those calls, so requests to other internal hosts go to the broker (through Squid in chain mode), which refuses private addresses with 403 `destination_blocked`.
-
-The SaaS instance chart (`cluster/k8s/instance`) has its own `egressBroker.enabled`, which sets the loopback env on the primary for its sandbox-runner sidecar and renders no Service or NetworkPolicy.
+`egressProxy.noProxy` entries do not apply to brokered `shell` and `python` calls, so their requests to other internal hosts go to the broker (through Squid in chain mode), which refuses private addresses with 403 `destination_blocked`.
 
 Set `egressBroker.enabled` to have the primary serve that listener:
 
@@ -865,10 +861,12 @@ The primary container then exposes an `egress-broker` port and gets `MINDROOM_EG
 The URL points workers at a `<fullname>-egress-broker` ClusterIP Service for that port.
 The Service is separate from the main runtime Service so `service.type` never exposes the broker port outside the cluster.
 Workers need no changes: each call carries its own token and CA certificate.
-Worker images must still come from a release that includes the broker, because older runners ignore the CA in the call's environment and requests to matched hosts then fail TLS verification.
+Worker images must still come from a release that includes the broker; see [Worker images](../../../docs/deployment/egress-broker.md#worker-images).
 When `networkPolicy.create` is true, a `<fullname>-egress-broker` NetworkPolicy admits workers to that port on the control-plane pod.
 When the chart's worker egress NetworkPolicy exists (`egressProxy.enabled` with `egressProxy.networkPolicy.create=true`), a `<fullname>-egress-broker-workers` NetworkPolicy in the worker namespace adds egress from workers to the broker port on the control-plane pod.
 Without that policy workers already have unrestricted egress, so the chart adds no worker rule.
+If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
+The broker runs in the primary: a primary restart interrupts brokered connections in flight, and brokered TLS uses the primary's CPU, so leave room in its resource requests.
 
 With `approvedEgress.enabled` as well, workers keep the approved egress proxy (Squid) as their first hop, so Squid still enforces per-worker grants by pod IP.
 The chart then renders Squid's parent chain to the broker Service and port itself, without `approvedEgress.parentProxy.enabled`, the same way `parentProxy` chains Agent Vault: requests that carry a token go to the broker, and `parentProxy.bypassDomains` still skip it.
@@ -877,56 +875,19 @@ Changing `egressBroker.port` rolls the Squid pod.
 Leave `approvedEgress.parentProxy.host` at its default in this setup, because the chart rejects a custom parent instead of dropping it silently.
 
 `egressBroker.enabled` requires `workers.backend=kubernetes`, and `egressBroker.port` must differ from `runtime.apiPort` and `scriptGateway.port`.
-It cannot be combined with `workers.kubernetes.agentVault`.
-To migrate from Agent Vault, switch in one upgrade and have users enter their keys afterwards, because keys can only be entered once the broker is on and Agent Vault's secrets do not carry over:
-
-1. Add the services to the deployment's `config.yaml` under `egress_broker.services`.
-2. Run one `helm upgrade` with `egressBroker.enabled=true` and `workers.kubernetes.agentVault.enabled=false`.
-   If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in that upgrade.
-3. Have users and credential managers enter secrets on `/connections/egress` or the dashboard.
-   Until they do, brokered calls answer 403 `credential_not_configured` with a message that says where to add the key.
-   The personal page needs trusted upstream auth with JWT; without it the dashboard sets only the keys of `shared` and unscoped agents, and `user` and `user_agent` agents get none until it is enabled or they get a shared worker scope.
-4. Verify with brokered calls from real workers, then delete the Agent Vault bootstrap Secret and PVC after a grace period.
-The broker connects directly from the primary pod, unless the primary's `HTTPS_PROXY`/`NO_PROXY` routes it through an operator proxy.
-If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
-The broker shares the primary's lifecycle, so a primary restart interrupts brokered connections that are in flight.
+It cannot be combined with `workers.kubernetes.agentVault`; to switch an existing deployment, see [Migrating from Agent Vault](../../../docs/deployment/egress-broker.md#migrating-from-agent-vault).
 
 ### Self-service for users
 
-In a full Kubernetes deployment with this chart, most users have no dashboard access.
-With the broker on, each of them still gets the personal Connections page at `/connections/egress`:
-
-- The egress services of every agent they may use, with the state of their own keys and accounts.
-- Their own services: add, edit, and delete them on `user` and `user_agent` agents, including a GitHub "Limit to repositories" helper.
-  The editor saves the service and its API key in one step.
-  On shared and unscoped agents only administrators and the agent's `credential_managers` change services.
-- Limits in place: **Limit to repositories** on the administrator's GitHub service saves a `restrict_only` service of the user's own, which limits the paths of that service without replacing its credential, so the user's account or key still applies.
-  The row then reads "Limited to {repos}" with **Change limit** and **Remove limit**.
-  It has no key, and the broker refuses to store one.
-- Their own keys, and **Connect** and **Disconnect** for their Google, GitHub, and Atlassian accounts.
-  For a shared agent's team account (the Google providers), **Connect** first asks "Connect a shared account?", and every user of the agent sees the connected account.
-  The login popup tells the page how it ended (connected, cancelled, or failed) and closes itself.
-- Each row says how the service sends its key ("Sent as a bearer token", "Sent as header {name}", and so on), what the agent sees ("Your agent sees GH_TOKEN=mindroom-brokered"), and what happens while no key is set.
-- Their own request log, a **Recent requests** table per agent that shows the latest 10 requests, with **Show all** for the rest, which on a shared or unscoped agent they manage holds everyone's requests.
-
-Both Connections pages show "Signed in as {matrix_user_id}" and link to each other as "Agents" and "Agent Keys"; administrators also get a "Dashboard" link.
-With `MINDROOM_CONNECTIONS_AGENT` set, a user outside `administrators` who opens a dashboard page in a browser is redirected (303) to `/connections?notice=admin-only`, which says the dashboard is for administrators; API calls keep the 403.
-The Connections portal links every agent the user may use for egress to its section on this page with **Manage services**, even an agent that has no services yet.
-Services from `config.yaml` appear read-only under "From your administrator".
-Users' services can narrow what the administrator allows but never widen it, and a user's "Refuse other paths on these hosts" also limits the administrator's services on those hosts for that scope; see [User services](../../../docs/deployment/egress-broker.md#user-services), [Limiting paths and repositories](../../../docs/deployment/egress-broker.md#limiting-paths-and-repositories), and [Limiting in place](../../../docs/deployment/egress-broker.md#limiting-in-place).
-A refused request tells the agent why: the broker's reason phrase is the message, `X-MindRoom-Error` carries the code, and `git` prints `remote error: <message>` with the manage link; see [Error responses](../../../docs/deployment/egress-broker.md#error-responses).
-
+With the broker on, users without dashboard access manage their own keys, services, account connections, and request log on the personal Connections page at `/connections/egress`; see [Connections pages](../../../docs/deployment/egress-broker.md#connections-pages).
 The page needs these settings, which the chart does not render for you:
 
-- **Trusted upstream auth with JWT.** The Connections routes accept only a signed Matrix identity, so the gateway in front of the runtime must authenticate users and sign a JWT.
-  This chart has no values for it; set the `MINDROOM_TRUSTED_UPSTREAM_*` variables through `env.extra`, as below (the instance chart's `trustedUpstreamAuth` values are the equivalent there).
-  Header-only mode is not enough, and `MINDROOM_PUBLIC_URL` must be an HTTPS origin because every change checks the browser's `Origin` against it.
+- **Trusted upstream auth with JWT.** The gateway in front of the runtime must authenticate users and sign a JWT; header-only mode is not enough.
+  This chart has no values for it, so set the `MINDROOM_TRUSTED_UPSTREAM_*` variables and an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
 - **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service.
   The chart creates no ingress.
-- **Dedicated workers for personal GitHub and Atlassian accounts.** The broker already needs `workers.backend: kubernetes`.
-  Personal GitHub and Atlassian accounts work for agents with worker scope `user` or `user_agent` (`worker_scope`, or `private.per` for private agents); on shared and unscoped agents they need `oauth_on_shared_workers: true` on the service.
-  Google accounts follow the agent's worker scope.
-- **OAuth clients.** The administrator configures the providers' OAuth clients once; see [Built-In Providers](../../../docs/oauth-framework.md#built-in-providers).
+- **`MINDROOM_CONNECTIONS_AGENT`.** Set it to a private agent (`private.per: user` or `user_agent`), as in the example, whenever more than one user can sign in through the gateway.
+  Without it, every user the gateway admits gets full dashboard access, whatever `administrators` lists.
 
 ```yaml
 env:
@@ -945,13 +906,8 @@ env:
     MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: matrix_user_id
 ```
 
-The JWT must carry the email claim, and the Matrix identity comes from a signed claim as above or from an email-to-Matrix template.
-See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every variable, the Matrix identity options, and the Connections portal.
-
-Required for multi-user self-service: also set `MINDROOM_CONNECTIONS_AGENT` to a private agent (`private.per: user` or `user_agent`), as in the example.
-The egress page itself works without it, and only the portal's catalog needs it, but without it `_require_connections_route_authorized` returns early, so nothing keeps trusted users outside the administrator routes and every user the gateway admits gets full dashboard access: configuration edits, shared keys, and the full admin request log, whatever `administrators` lists.
-With it, a user outside `administrators` reaches only the Connections routes and the OAuth callback pages.
-Without trusted upstream auth with JWT, the personal page is not served: administrators set the keys and accounts of `shared` and unscoped agents in the **Agent Keys** panel on the dashboard's Credentials page, but no page sets the keys of `user` and `user_agent` agents, private agents included, so give those agents a shared worker scope; users cannot add services or see their requests.
+See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every variable, the Matrix identity options, and what users outside `administrators` can reach.
+Connecting accounts also needs the providers' [OAuth clients](../../../docs/oauth-framework.md#built-in-providers), and personal GitHub and Atlassian accounts need agents with worker scope `user` or `user_agent` unless the service sets `oauth_on_shared_workers`; see [Personal accounts and shared sandboxes](../../../docs/deployment/egress-broker.md#personal-accounts-and-shared-sandboxes).
 
 ## Matrix Managed Account Authentication
 

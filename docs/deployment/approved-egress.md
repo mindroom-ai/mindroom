@@ -138,22 +138,16 @@ approvedEgress:
     tag: v0.1.10
 ```
 
-With both enabled, the chart renders Squid's parent as the broker Service and port, so you do not set `approvedEgress.parentProxy`.
-Workers keep Squid as their first hop: the primary sets `MINDROOM_EGRESS_BROKER_URL` to Squid's URL, and each worker call carries its broker token as the proxy username.
-After the allowlist and grant check, requests that carry a token go on to the broker, which still validates the token and injects credentials, while requests without a token go directly to the internet.
-The broker's ingress NetworkPolicy admits only the approved egress pods in this mode, and changing `egressBroker.port` restarts the proxy.
-
-By design, Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
-After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
-This is the intended behavior of the chain, not something that has been demonstrated on a live cluster.
+With both enabled, the chart renders Squid's parent as the broker itself, so you do not set `approvedEgress.parentProxy`; the runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has what it renders in this mode and the values it refuses.
 `approvedEgress.parentProxy.bypassDomains` still skips the broker for destinations such as signed URLs.
 
-The chart refuses `approvedEgress.parentProxy.enabled` with a host other than the default while the broker is enabled, so a custom parent is not dropped silently, and it refuses the broker together with `workers.kubernetes.agentVault`.
-See [Agent Keys](egress-broker.md#kubernetes) for the other Kubernetes topologies and the migration from Agent Vault.
+Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
+After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
+Chain mode has not yet been run end to end on a live cluster.
 
 ## Agent Vault Chaining
 
-Agent Vault is the legacy credential-injecting path; the native [egress broker](#egress-broker-chaining) replaces it, and the chart does not allow both at once.
+Agent Vault is the legacy credential-injecting path; the native [egress broker](#egress-broker-chaining) replaces it (see [Migrating from Agent Vault](egress-broker.md#migrating-from-agent-vault)), and the chart does not allow both at once.
 Use this section only for deployments that still run Agent Vault.
 When approved egress and [Agent Vault](sandbox-proxy.md) are used together, the chain must be:
 
