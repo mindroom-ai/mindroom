@@ -22,6 +22,7 @@ from mindroom.shared_directories.store import (
     remove_shared_directory_member,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.workers.runtime import primary_worker_backend_is_dedicated
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -34,10 +35,13 @@ def _payload(status: str, **fields: object) -> str:
     return custom_tool_payload("shared_directories", status, **fields)
 
 
-def _restart_notice(agent_names: Iterable[str]) -> str:
+def _changed_message(context: ToolRuntimeContext, agent_names: Iterable[str], done: str) -> str:
+    # Only dedicated workers mount shared directories one by one, so only they restart on a change.
+    if not primary_worker_backend_is_dedicated(context.runtime_paths):
+        return done
     names = list(agent_names)
     joined = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
-    return f"{joined}: worker restarts on the next tool call, ending running background shells."
+    return f"{done} {joined}: worker restarts on the next tool call, ending running background shells."
 
 
 class SharedDirectoryTools(Toolkit):
@@ -92,7 +96,7 @@ class SharedDirectoryTools(Toolkit):
             "ok",
             name=name,
             path=self._view_path(context, directory),
-            message=_restart_notice([context.agent_name]),
+            message=_changed_message(context, [context.agent_name], "Created."),
         )
 
     def _invitation_error(self, context: ToolRuntimeContext, agent_name: str) -> str | None:
@@ -144,7 +148,9 @@ class SharedDirectoryTools(Toolkit):
             name=name,
             agent=agent_name,
             members=list(self._members(context, name)),
-            message=_restart_notice([agent_name]) if added else f"{agent_name} is already a member.",
+            message=_changed_message(context, [agent_name], f"{agent_name} can now read it.")
+            if added
+            else f"{agent_name} is already a member.",
         )
 
     def remove_from_shared_directory(self, name: str, agent_name: str) -> str:
@@ -172,7 +178,9 @@ class SharedDirectoryTools(Toolkit):
             name=name,
             agent=agent_name,
             members=list(self._members(context, name)),
-            message=_restart_notice([agent_name]) if removed else f"{agent_name} is not a member.",
+            message=_changed_message(context, [agent_name], f"{agent_name} can no longer read it.")
+            if removed
+            else f"{agent_name} is not a member.",
         )
 
     def delete_shared_directory(self, name: str) -> str:
@@ -189,7 +197,11 @@ class SharedDirectoryTools(Toolkit):
             directory = delete_shared_directory(context.runtime_paths, owner=context.agent_name, name=name)
         except SharedDirectoryError as exc:
             return _payload("error", name=name, message=str(exc))
-        return _payload("ok", name=name, message=_restart_notice([directory.owner, *directory.members]))
+        return _payload(
+            "ok",
+            name=name,
+            message=_changed_message(context, [directory.owner, *directory.members], "Deleted."),
+        )
 
     def list_shared_directories(self) -> str:
         """List the shared directories you own or were invited to, with their paths and your access."""

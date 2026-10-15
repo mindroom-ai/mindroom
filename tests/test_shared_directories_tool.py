@@ -36,8 +36,18 @@ _ROOM = "!room:localhost"
 _USER = "@user:localhost"
 
 
-def _config(tmp_path: Path, **bob_overrides: object) -> Config:
+_DOCKER_WORKERS = {"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test"}
+
+
+def _config(tmp_path: Path, *, dedicated_workers: bool = False, **bob_overrides: object) -> Config:
     allowed = ResponderAccessConfig(users=[_USER])
+    runtime_paths = test_runtime_paths(tmp_path)
+    if dedicated_workers:
+        runtime_paths = resolve_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=runtime_paths.storage_root,
+            process_env={**runtime_paths.process_env, **_DOCKER_WORKERS},
+        )
     return bind_runtime_paths(
         Config(
             agents={
@@ -47,7 +57,7 @@ def _config(tmp_path: Path, **bob_overrides: object) -> Config:
             },
             teams={"crew": TeamConfig(display_name="Crew", role="Crew", agents=["alice", "bob"])},
         ),
-        test_runtime_paths(tmp_path),
+        runtime_paths,
     )
 
 
@@ -74,16 +84,16 @@ def _call(context: ToolRuntimeContext, function: str, *args: str) -> dict[str, o
 
 
 def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
-    """The owner creates a directory, invites an agent, and lists it as read-write."""
-    context = _context(_config(tmp_path))
-    storage_root = context.runtime_paths.storage_root
+    """The owner creates a directory, invites an agent, and lists it as read-write by its worker path."""
+    context = _context(_config(tmp_path, dedicated_workers=True))
+    worker_path = "/app/worker/shared_directories/alice/report"
 
     created = _call(context, "create_shared_directory", "report")
     invited = _call(context, "invite_to_shared_directory", "report", "bob")
     listed = _call(context, "list_shared_directories")
 
     assert created["status"] == "ok"
-    assert created["path"] == str(storage_root / "shared_directories" / "alice" / "report")
+    assert created["path"] == worker_path
     assert "alice: worker restarts on the next tool call" in str(created["message"])
     assert invited["status"] == "ok"
     assert invited["members"] == ["bob"]
@@ -94,7 +104,7 @@ def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
             "name": "report",
             "members": ["bob"],
             "access": "read-write",
-            "path": str(storage_root / "shared_directories" / "alice" / "report"),
+            "path": worker_path,
         },
     ]
 
@@ -188,7 +198,7 @@ def test_only_the_owner_changes_a_directory(tmp_path: Path, function: str, args:
 
 def test_invite_and_remove_are_idempotent(tmp_path: Path) -> None:
     """Repeating an invitation or removal reports the state without restarting anything."""
-    context = _context(_config(tmp_path))
+    context = _context(_config(tmp_path, dedicated_workers=True))
     _call(context, "create_shared_directory", "report")
     _call(context, "invite_to_shared_directory", "report", "bob")
 
@@ -209,6 +219,7 @@ def test_delete_removes_the_directory_and_names_every_restart(tmp_path: Path) ->
     """Deleting forgets the directory, removes its files, and names the owner and members."""
     context = _context(_config(tmp_path))
     created = _call(context, "create_shared_directory", "report")
+    context = _context(_config(tmp_path, dedicated_workers=True))
     _call(context, "invite_to_shared_directory", "report", "bob")
 
     payload = _call(context, "delete_shared_directory", "report")
@@ -265,3 +276,14 @@ def test_paths_name_the_worker_mount_when_tools_run_in_a_dedicated_worker(
     assert shared_directory_view_path(runtime_paths, directory, in_worker=False) == (
         runtime_paths.storage_root / "shared_directories" / "alice" / "report"
     )
+
+
+def test_restart_notice_appears_only_with_dedicated_workers(tmp_path: Path) -> None:
+    """Without dedicated workers nothing restarts, so the result does not claim it."""
+    context = _context(_config(tmp_path))
+
+    created = _call(context, "create_shared_directory", "report")
+    invited = _call(context, "invite_to_shared_directory", "report", "bob")
+
+    assert "restart" not in str(created["message"])
+    assert invited["message"] == "bob can now read it."
