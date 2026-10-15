@@ -16,7 +16,8 @@ from mindroom.shared_directories import paths as shared_paths
 from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.worker_routing import resolve_worker_target, worker_dir_name
 from mindroom.tools.file import file_tools
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -173,11 +174,11 @@ def test_primary_roots_follow_the_ledger(tmp_path: Path) -> None:
     config = _ledger_config(runtime_paths)
     share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
 
-    assert shared_directory_roots(runtime_paths, config, "alice") == (_root(share, writable=True),)
-    assert shared_directory_roots(runtime_paths, config, "bob") == (_root(share, writable=False),)
-    assert shared_directory_roots(runtime_paths, config, "dave") == ()
-    assert shared_directory_roots(runtime_paths, config, "carol") == ()
-    assert shared_directory_roots(runtime_paths, None, "alice") == ()
+    assert shared_directory_roots(config, runtime_paths, "alice") == (_root(share, writable=True),)
+    assert shared_directory_roots(config, runtime_paths, "bob") == (_root(share, writable=False),)
+    assert shared_directory_roots(config, runtime_paths, "dave") == ()
+    assert shared_directory_roots(config, runtime_paths, "carol") == ()
+    assert shared_directory_roots(None, runtime_paths, "alice") == ()
 
 
 def test_primary_tools_never_reach_shares_beside_dedicated_workers(tmp_path: Path) -> None:
@@ -189,7 +190,7 @@ def test_primary_tools_never_reach_shares_beside_dedicated_workers(tmp_path: Pat
     )
     config = _ledger_config(runtime_paths)
 
-    assert shared_directory_roots(runtime_paths, config, "bob") == ()
+    assert shared_directory_roots(config, runtime_paths, "bob") == ()
 
 
 def test_primary_tools_never_reach_shares_beside_the_static_runner_sidecar(tmp_path: Path) -> None:
@@ -201,7 +202,7 @@ def test_primary_tools_never_reach_shares_beside_the_static_runner_sidecar(tmp_p
     )
     config = _ledger_config(runtime_paths)
 
-    assert shared_directory_roots(runtime_paths, config, "alice") == ()
+    assert shared_directory_roots(config, runtime_paths, "alice") == ()
 
 
 def _mount_shares(root: Path) -> tuple[Path, Path]:
@@ -226,7 +227,7 @@ def test_docker_worker_roots_are_its_mounted_shares(tmp_path: Path) -> None:
         },
     )
 
-    assert shared_directory_roots(runtime_paths, None, None) == (
+    assert shared_directory_roots(None, runtime_paths, None) == (
         _root(report, writable=True),
         _root(notes, writable=True),
     )
@@ -248,7 +249,7 @@ def test_kubernetes_worker_roots_are_its_mounted_shares(tmp_path: Path) -> None:
         },
     )
 
-    assert shared_directory_roots(runtime_paths, None, None) == (
+    assert shared_directory_roots(None, runtime_paths, None) == (
         _root(report, writable=True),
         _root(notes, writable=True),
     )
@@ -263,7 +264,7 @@ def test_static_runner_roots_are_below_its_storage_root(tmp_path: Path) -> None:
         process_env={SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true"},
     )
 
-    assert shared_directory_roots(runtime_paths, None, None) == (
+    assert shared_directory_roots(None, runtime_paths, None) == (
         _root(report, writable=True),
         _root(notes, writable=True),
     )
@@ -292,7 +293,7 @@ def test_worker_roots_mounted_read_only_refuse_writes(tmp_path: Path, monkeypatc
         },
     )
 
-    assert shared_directory_roots(runtime_paths, None, None) == (
+    assert shared_directory_roots(None, runtime_paths, None) == (
         _root(report, writable=True),
         _root(notes, writable=False),
     )
@@ -309,4 +310,29 @@ def test_worker_without_shared_directories_has_no_roots(tmp_path: Path) -> None:
         },
     )
 
-    assert shared_directory_roots(runtime_paths, None, None) == ()
+    assert shared_directory_roots(None, runtime_paths, None) == ()
+
+
+def test_built_file_and_coding_tools_reach_the_calling_agents_shares(tmp_path: Path) -> None:
+    """Toolkits built for an agent get its shared directories, so the owner writes and a member only reads."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _ledger_config(runtime_paths)
+    share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def build(tool_name: str, agent_name: str) -> object:
+        return get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            disable_sandbox_proxy=True,
+            runtime_config=config,
+            tool_init_overrides={"base_dir": workspace},
+            worker_target=resolve_worker_target(None, agent_name, None),
+        )
+
+    assert build("coding", "alice").write_file(str(share / "summary.md"), "shared\n").startswith("Wrote")
+    assert build("file", "bob").read_file(str(share / "summary.md")) == "shared\n"
+    assert "only read" in build("file", "bob").save_file("x", str(share / "summary.md"))
+    assert "only read" in build("coding", "bob").write_file(str(share / "summary.md"), "x")
+    assert build("file", "dave").read_file(str(share / "summary.md")).startswith("Error")

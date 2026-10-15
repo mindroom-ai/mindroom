@@ -43,7 +43,7 @@ def shared_directory_view_path(runtime_paths: RuntimePaths, directory: SharedDir
 
 def describe_agent_shared_directories(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> tuple[str, ...]:
     """Describe each shared directory one agent reaches by its path, owner, and access."""
-    directories = agent_shared_directories(runtime_paths, config, agent_name)
+    directories = agent_shared_directories(config, runtime_paths, agent_name)
     if not directories:
         return ()
     in_worker = agent_reads_shares_in_worker(config, runtime_paths, agent_name)
@@ -74,8 +74,8 @@ def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
 
 
 def shared_directory_roots(
-    runtime_paths: RuntimePaths,
     config: Config | None,
+    runtime_paths: RuntimePaths,
     agent_name: str | None,
 ) -> tuple[SharedDirectoryRoot, ...]:
     """Return the shared directories one agent's path tools may use in this runtime."""
@@ -92,5 +92,5 @@ def shared_directory_roots(
             path=runtime_paths.storage_root / shared_directory_relative_path(directory.owner, directory.name),
             writable=directory.owner == agent_name,
         )
-        for directory in agent_shared_directories(runtime_paths, config, agent_name)
+        for directory in agent_shared_directories(config, runtime_paths, agent_name)
     )

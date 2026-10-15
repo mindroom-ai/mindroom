@@ -129,8 +129,8 @@ def is_shareable_agent(config: Config, agent_name: str) -> bool:
 
 
 def agent_shared_directories(
-    runtime_paths: RuntimePaths,
     config: Config,
+    runtime_paths: RuntimePaths,
     agent_name: str,
 ) -> tuple[SharedDirectory, ...]:
     """Return the directories one agent owns or joined, skipping any whose owner can no longer share."""

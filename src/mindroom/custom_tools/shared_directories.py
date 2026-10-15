@@ -221,6 +221,6 @@ class SharedDirectoryTools(Toolkit):
                 "access": "read-write" if directory.owner == agent else "read-only",
                 "path": self._view_path(context, agent, directory),
             }
-            for directory in agent_shared_directories(context.runtime_paths, context.config, agent)
+            for directory in agent_shared_directories(context.config, context.runtime_paths, agent)
         ]
         return _payload("ok", directories=entries)

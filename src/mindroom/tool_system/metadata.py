@@ -679,8 +679,8 @@ def _build_managed_tool_init_kwargs(
         # Shared directories change during a response, so path tools resolve them on each call.
         ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: functools.partial(
             shared_directory_roots,
-            runtime_paths,
             runtime_config,
+            runtime_paths,
             worker_target.routing_agent_name if worker_target is not None else None,
         ),
     }
