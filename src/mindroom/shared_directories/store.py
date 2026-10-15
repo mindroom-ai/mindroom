@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_SHARED_DIRECTORIES_DIRNAME = "shared_directories"
+SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 _LEDGER_FILENAME = "shared_directories.json"
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
@@ -48,7 +48,7 @@ class SharedDirectory:
 
 def shared_directory_relative_path(owner: str, name: str) -> Path:
     """Return a directory's location relative to the storage root."""
-    return Path(_SHARED_DIRECTORIES_DIRNAME, owner, name)
+    return Path(SHARED_DIRECTORIES_DIRNAME, owner, name)
 
 
 def _ledger_path(runtime_paths: RuntimePaths) -> Path:
@@ -186,7 +186,7 @@ def delete_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: st
         try:
             with open_directory_within_root(
                 runtime_paths.storage_root,
-                Path(_SHARED_DIRECTORIES_DIRNAME, owner),
+                Path(SHARED_DIRECTORIES_DIRNAME, owner),
             ) as owner_fd:
                 remove_directory_tree_at(owner_fd, name)
         except FileNotFoundError:
