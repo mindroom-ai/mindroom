@@ -516,7 +516,9 @@ A thread's cache counts as cold when its newest run used a different model, or w
 - Claude providers: one hour, or five minutes with `extra_kwargs.extended_cache_time: false`. Anthropic refreshes the lifetime on every cache hit, so the expiry is exact.
 - Other providers: one hour, the upper bound of OpenAI's in-memory retention, so a warm cache is not mistaken for a cold one.
 
-On a cold turn, the judge sees up to seven recent thread messages and the new request, and decides whether the cheap model can answer as well as the agent model; the question names both by their configured model `id`.
+On a cold turn, the judge sees the thread and the new request, and decides whether the cheap model can continue the whole conversation as well as the agent model; the question names both by their configured model `id`.
+A simple request in a thread about coding, planning, or other demanding work counts as a no.
+Long threads reach the judge as their newest messages that fit its 16 KB request, with long messages shortened to their start and end.
 Only an accepting decision switches; a decline, abstention, timeout, or missing credential keeps the agent model.
 Warm turns make no judgment call.
 After a switch the agent model's cache stays cold, so each later turn is judged again, and a harder request returns to the agent model.

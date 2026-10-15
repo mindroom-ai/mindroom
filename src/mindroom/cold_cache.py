@@ -22,8 +22,8 @@ logger = get_logger(__name__)
 # Anthropic's TTLs, refreshed on every cache hit.
 _EXTENDED_CACHE_TTL_SECONDS = 3600
 _DEFAULT_CACHE_TTL_SECONDS = 300
-# The judge needs the gist of the conversation, not the whole thread.
-_MAX_CONTEXT_MESSAGES = 7
+# The cheap model takes over the whole thread, so the judge sees as much of it as the request budget fits.
+_MAX_CONTEXT_MESSAGES = 63
 
 _COLD_CACHE_QUESTION_ID = "cold_cache_model"
 
@@ -33,17 +33,19 @@ def _cold_cache_question(agent_model_id: str, cheap_model_id: str) -> JudgmentQu
     return JudgmentQuestion(
         id=_COLD_CACHE_QUESTION_ID,
         instructions=(
-            f"Can the cheaper model {cheap_model_id} answer the current request as well as "
-            f"the agent's main model {agent_model_id}? "
-            "Use the recent conversation only to understand the current request."
+            f"Can the cheaper model {cheap_model_id} continue this conversation, including the current request, "
+            f"as well as the agent's main model {agent_model_id}? "
+            "The cheaper model would take over the whole conversation, "
+            "so judge the conversation so far and the current request together."
         ),
         when_true=(
-            "Short conversational replies, acknowledgements, simple factual answers, small edits, "
-            "lookups, or routine tool use with clear steps."
+            "The whole conversation is simple: short conversational exchanges, acknowledgements, "
+            "simple factual answers, small edits, lookups, or routine tool use with clear steps."
         ),
         when_false=(
-            "Multi-step reasoning, planning, coding or debugging, long or nuanced writing, ambiguous requests, "
-            "high-stakes advice, or answers that depend on details from much earlier in the conversation."
+            "The conversation so far or the current request involves multi-step reasoning, planning, "
+            "coding or debugging, long or nuanced writing, ambiguity, or high-stakes advice, "
+            "even when the current request alone looks simple."
         ),
     )
 

@@ -245,9 +245,9 @@ async def test_select_warm_skips_judgment(tmp_path: Path, monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 async def test_select_cold_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An accepting judge moves a cold turn to the smaller model, judging recent context and the request."""
+    """An accepting judge moves a cold turn to the cheap model, judging the whole conversation and the request."""
     judge = _FakeJudge(decision=True)
-    context = tuple(JudgmentMessage("user" if index % 2 else "assistant", f"turn {index}") for index in range(12))
+    context = tuple(JudgmentMessage("user" if index % 2 else "assistant", f"turn {index}") for index in range(40))
     with capture_logs() as logs:
         chosen = await _select(tmp_path, monkeypatch, judge, session=None, context=context)
     assert chosen == "haiku"
@@ -256,9 +256,11 @@ async def test_select_cold_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     payload = json.loads(body)
     assert "cheaper model claude-haiku-5-5" in payload["question"]["instructions"]
     assert "main model claude-opus-5-5" in payload["question"]["instructions"]
+    assert "conversation so far and the current request together" in payload["question"]["instructions"]
+    assert "even when the current request alone looks simple" in payload["question"]["criteria"]["false"]
     conversation = payload["state"]["conversation"]
     assert [message["text"] for message in conversation] == [
-        *(f"turn {index}" for index in range(5, 12)),
+        *(f"turn {index}" for index in range(40)),
         "What time is it in Tokyo?",
     ]
     selected = [log for log in logs if log["event"] == "Cold cache model selected"]
