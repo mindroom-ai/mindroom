@@ -44,14 +44,12 @@ from mindroom.runtime_env_policy import (
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     descriptive_worker_id_for_key,
-    normalize_worker_key_part,
-    resolved_worker_key_scope,
-    worker_key_agent_name,
     worker_log_id,
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
+    agent_names_addressed_by_worker_key,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
@@ -75,7 +73,6 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
@@ -686,41 +683,6 @@ def _plan_knowledge_storage_mounts(
             raise WorkerBackendError(msg)
         plans.append(_KnowledgeStorageMountPlan(relative_path=relative_path, mount_path=mount_path))
     return tuple(plans)
-
-
-def _agent_names_addressed_by_worker_key(
-    worker_key: str,
-    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
-) -> tuple[str, ...]:
-    scope = resolved_worker_key_scope(worker_key)
-    if scope == "user":
-        return tuple(
-            agent_name
-            for agent_name, policy in resolved_agent_policies.items()
-            if policy.effective_execution_scope == "user"
-        )
-
-    encoded_agent_name = worker_key_agent_name(worker_key)
-    if encoded_agent_name is None:
-        return ()
-    if scope == "user_agent":
-        matches = tuple(
-            agent_name
-            for agent_name in resolved_agent_policies
-            if normalize_worker_key_part(agent_name) == encoded_agent_name
-        )
-    else:
-        expected_scope = None if scope == "unscoped" else scope
-        matches = tuple(
-            agent_name
-            for agent_name, policy in resolved_agent_policies.items()
-            if policy.effective_execution_scope == expected_scope
-            and normalize_worker_key_part(agent_name) == encoded_agent_name
-        )
-    if len(matches) > 1:
-        msg = f"Worker '{worker_log_id(worker_key)}' has an ambiguous normalized agent name."
-        raise WorkerBackendError(msg)
-    return matches
 
 
 class KubernetesResourceManager:
@@ -1916,7 +1878,7 @@ class KubernetesResourceManager:
         knowledge_base_configs = cast("Mapping[str, object]", raw_knowledge_bases)
 
         base_ids: set[str] = set()
-        for agent_name in _agent_names_addressed_by_worker_key(worker_key, self.resolved_agent_policies):
+        for agent_name in agent_names_addressed_by_worker_key(worker_key, self.resolved_agent_policies):
             raw_agent = agent_configs.get(agent_name)
             if not isinstance(raw_agent, Mapping):
                 continue
