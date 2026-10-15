@@ -25,21 +25,27 @@ _DEFAULT_CACHE_TTL_SECONDS = 300
 # The judge needs the gist of the conversation, not the whole thread.
 _MAX_CONTEXT_MESSAGES = 7
 
-_COLD_CACHE_QUESTION = JudgmentQuestion(
-    id="cold_cache_model",
-    instructions=(
-        "Can a smaller, faster model answer the current request as well as the agent's main model? "
-        "Use the recent conversation only to understand the current request."
-    ),
-    when_true=(
-        "Short conversational replies, acknowledgements, simple factual answers, small edits, "
-        "lookups, or routine tool use with clear steps."
-    ),
-    when_false=(
-        "Multi-step reasoning, planning, coding or debugging, long or nuanced writing, ambiguous requests, "
-        "high-stakes advice, or answers that depend on details from much earlier in the conversation."
-    ),
-)
+_COLD_CACHE_QUESTION_ID = "cold_cache_model"
+
+
+def _cold_cache_question(agent_model_id: str, cheap_model_id: str) -> JudgmentQuestion:
+    """Name both models, since a judge can only compare models it knows."""
+    return JudgmentQuestion(
+        id=_COLD_CACHE_QUESTION_ID,
+        instructions=(
+            f"Can the cheaper model {cheap_model_id} answer the current request as well as "
+            f"the agent's main model {agent_model_id}? "
+            "Use the recent conversation only to understand the current request."
+        ),
+        when_true=(
+            "Short conversational replies, acknowledgements, simple factual answers, small edits, "
+            "lookups, or routine tool use with clear steps."
+        ),
+        when_false=(
+            "Multi-step reasoning, planning, coding or debugging, long or nuanced writing, ambiguous requests, "
+            "high-stakes advice, or answers that depend on details from much earlier in the conversation."
+        ),
+    )
 
 
 def _prompt_cache_ttl_seconds(model_config: ModelConfig) -> int:
@@ -117,12 +123,13 @@ async def _judge(
 ) -> tuple[bool | None, str]:
     """Return the judgment decision, or None, with why it was or was not made."""
     model_config = config.models.get(agent_model)
-    if model_config is None or _is_thread_cache_warm(session, model_config, now=now):
+    cheap_config = config.models.get(cheap_model)
+    if model_config is None or cheap_config is None or _is_thread_cache_warm(session, model_config, now=now):
         return None, "warm"
     if context is None:
         return None, "history_unavailable"
     request = fit_judgment_request(
-        _COLD_CACHE_QUESTION,
+        _cold_cache_question(model_config.id, cheap_config.id),
         context,
         JudgmentMessage("user", prompt),
         instructions="",
@@ -135,7 +142,7 @@ async def _judge(
         config,
         runtime_paths,
         owner=f"{runtime_paths.storage_root}:{agent_name}",
-        question_id=_COLD_CACHE_QUESTION.id,
+        question_id=_COLD_CACHE_QUESTION_ID,
     )
     if evaluate is None:
         return None, "judgment_unavailable"

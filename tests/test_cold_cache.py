@@ -253,7 +253,10 @@ async def test_select_cold_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert chosen == "haiku"
     body = judge.requests[0].body
     assert body is not None
-    conversation = json.loads(body)["state"]["conversation"]
+    payload = json.loads(body)
+    assert "cheaper model claude-haiku-5-5" in payload["question"]["instructions"]
+    assert "main model claude-opus-5-5" in payload["question"]["instructions"]
+    conversation = payload["state"]["conversation"]
     assert [message["text"] for message in conversation] == [
         *(f"turn {index}" for index in range(5, 12)),
         "What time is it in Tokyo?",
