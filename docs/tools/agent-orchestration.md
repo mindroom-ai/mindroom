@@ -218,7 +218,7 @@ The generic runtime adds no `background_after`, creates no job, and does not rel
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-A standard agent's shell command runs until it finishes, like any other managed call: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command and the processes it started.
+In a Matrix conversation, a standard agent's shell command runs until it finishes, like any other managed call: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command and the processes it started.
 Its shell then has no `timeout`, `check_shell_command`, or `kill_shell_command`, and a shell call that cannot run as a job, such as during a voice call, is stopped after 120 seconds.
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Listing `shell` in `exclude_toolkits` restores the native `timeout` and `shell:...` handles, which minimal-mode agents always keep.

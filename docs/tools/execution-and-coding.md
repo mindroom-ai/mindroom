@@ -137,7 +137,7 @@ A backgrounded command with `mindroom_output_path` saves its output when it fini
 Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
 Records of finished commands are cleared about 10 minutes after they finish.
 For how stopping a response and worker restarts affect background commands, see [Stopping and background commands](../deployment/sandbox-proxy.md#stopping-and-background-commands).
-With [background jobs](agent-orchestration.md#background-jobs) enabled, a standard agent's shell instead runs each command until it finishes as a job, without `timeout`, handles, `check_shell_command()`, or `kill_shell_command()`.
+With [background jobs](agent-orchestration.md#background-jobs) enabled, a standard agent's shell in a Matrix conversation instead runs each command until it finishes as a job, without `timeout`, handles, `check_shell_command()`, or `kill_shell_command()`.
 
 Worker-routed `shell` sees only a small default environment; which variables pass by default and which `extra_env_passthrough` never passes are listed in [Shell environment and PATH](../deployment/sandbox-proxy.md#shell-environment-and-path).
 
