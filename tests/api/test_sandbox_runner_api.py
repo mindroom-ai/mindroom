@@ -3809,12 +3809,12 @@ def test_sandbox_runner_executes_tool_call_in_subprocess_mode(
     assert '"result": 3' in data["result"]
 
 
-def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
+def test_sandbox_runner_stops_a_shell_command_past_its_timeout_in_subprocess_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Shell background handles should keep working across requests in subprocess runner mode."""
+    """A worker shell call past its timeout returns its output so far, through the runner's subprocess relay."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
@@ -3826,51 +3826,24 @@ def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
 
-    run_response = runner_client.post(
+    response = runner_client.post(
         "/api/sandbox-runner/execute",
         headers=SANDBOX_HEADERS,
         json={
             "tool_name": "shell",
             "function_name": "run_shell_command",
-            "args": [["sleep", "3"]],
-            "kwargs": {"timeout": 0},
+            "args": [["bash", "-c", "echo started; sleep 300"]],
+            "kwargs": {"timeout": 1},
         },
     )
-    assert run_response.status_code == 200
-    run_data = run_response.json()
-    assert run_data["ok"] is True
-    assert "Handle: " in run_data["result"]
-    handle = run_data["result"].split("Handle: ")[1].split("\n")[0]
 
-    check_response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "shell",
-            "function_name": "check_shell_command",
-            "args": [handle],
-            "kwargs": {},
-        },
-    )
-    assert check_response.status_code == 200
-    check_data = check_response.json()
-    assert check_data["ok"] is True
-    assert "Unknown handle" not in check_data["result"]
-
-    kill_response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "shell",
-            "function_name": "kill_shell_command",
-            "args": [handle],
-            "kwargs": {"force": True},
-        },
-    )
-    assert kill_response.status_code == 200
-    kill_data = kill_response.json()
-    assert kill_data["ok"] is True
-    assert "Unknown handle" not in kill_data["result"]
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "result": "Stopped after 1s.\nOutput:\nstarted",
+        "error": None,
+        "failure_kind": None,
+    }
 
 
 def test_sandbox_runner_rejects_missing_token(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

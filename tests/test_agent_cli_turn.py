@@ -43,6 +43,7 @@ from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -394,6 +395,33 @@ async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp
         await first_task
 
     assert seen["first"] == "first"
+    await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_job", [False, True])
+async def test_a_cli_call_from_a_job_command_runs_as_part_of_that_job(tmp_path: Path, *, in_job: bool) -> None:
+    """A CLI call inherits whether its command runs as a job, so its own shell gets no default time limit there."""
+
+    async def owned() -> str:
+        return str(job_owns_execution())
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [owned], authorize)
+
+    async def command() -> str:
+        return (await _settled_receipt(owner, "owned"))["outcome"]
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        if in_job:
+            with job_control_context(JobControl()):
+                seen = await owner.run_native_shell(command)
+        else:
+            seen = await owner.run_native_shell(command)
+
+    assert seen == str(in_job)
     await owner.close()
 
 

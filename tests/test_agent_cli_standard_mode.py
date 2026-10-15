@@ -250,7 +250,7 @@ def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, 
     runtime.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
     )
-    # With shell managed, its gated command asks for approval as its job.
+    # With jobs on, the gated shell command asks for approval as its job.
     runtime.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=jobs, exclude_toolkits=[])
     set_api_server_address("127.0.0.1", 8765)
     try:

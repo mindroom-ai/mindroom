@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from agno.tools.function import FunctionCall, ToolResult  # noqa: TC002 - Agno injected annotations
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agno_compat_prepared_tools import BashPresentationFunction
-from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
@@ -44,33 +43,19 @@ class MinimalBashTools(Toolkit):
 
     async def bash(
         self,
-        operation: Literal["run", "poll", "stop"] = "run",
         command: str | None = None,
-        handle: str | None = None,
-        timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS,  # noqa: ASYNC109
+        timeout: int | None = None,  # noqa: ASYNC109
         tail: int = 100,
         fc: FunctionCall | None = None,
     ) -> str | ToolResult:
-        """Run Bash, poll its background handle, or stop an owned command."""
-        arguments: dict[str, object]
-        if operation == "run":
-            if not isinstance(command, str) or not command.strip() or handle is not None:
-                msg = "run requires command and forbids handle"
-                raise ValueError(msg)
-            name = "run_shell_command"
-            arguments = {"args": command, "timeout": timeout, "tail": tail}
-        elif operation in {"poll", "stop"}:
-            if not isinstance(handle, str) or not handle or command is not None:
-                msg = "poll/stop require handle and forbid command"
-                raise ValueError(msg)
-            name = "check_shell_command" if operation == "poll" else "kill_shell_command"
-            arguments = {"handle": handle}
-            if operation == "stop":
-                arguments["force"] = False
-        else:
-            msg = "Unsupported Bash operation"
+        """Run a Bash command; past ``timeout`` seconds it is stopped with its output so far, as the shell tool does."""
+        if not isinstance(command, str) or not command.strip():
+            msg = "Bash requires a command"
             raise ValueError(msg)
+        arguments: dict[str, object] = {"args": command, "tail": tail}
+        if timeout is not None:
+            arguments["timeout"] = timeout
         if self._execute is None or fc is None:
             msg = "Bash requires an active response owner"
             raise RuntimeError(msg)
-        return await self._execute(ToolKey("shell", name), arguments, fc)
+        return await self._execute(ToolKey("shell", "run_shell_command"), arguments, fc)

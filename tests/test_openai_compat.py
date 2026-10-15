@@ -464,8 +464,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
-    assert "check_shell_command" in exposed_tool_names
-    assert "kill_shell_command" in exposed_tool_names
+    assert "read_file" in exposed_tool_names
 
 
 def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:

@@ -1,11 +1,12 @@
-"""Worker-local shell supervisor process for background shell handles.
+"""Worker-local shell supervisor process for shell commands and background script runs.
 
 The sandbox runner isolates tool calls in per-request subprocesses (spawn or
-forkserver children), which cannot own background shell handles: the handle
-registry and the ``check``/``kill`` follow-ups arrive in different processes.
-This module keeps one small long-lived *supervisor* process per runner that
-owns the shell child processes and the in-memory handle registry, so shell
-requests get the same subprocess isolation as every other execution tool.
+forkserver children), which can neither own background script handles, whose
+``check``/``kill`` follow-ups arrive in different processes, nor guarantee that
+a command they started dies with them. This module keeps one small long-lived
+*supervisor* process per runner that owns the command processes and the
+in-memory handle registry, so shell requests get the same subprocess isolation
+as every other execution tool.
 
 Flow:
 
@@ -14,7 +15,8 @@ Flow:
   ``MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`` (the ``MINDROOM_SANDBOX_``
   prefix keeps it out of shell env passthrough).
 - The shell toolkit computes argv, env, and cwd exactly as for local
-  execution, then sends the run/check/kill request over the unix socket.
+  execution, then sends a run request that stops the command at its timeout;
+  script runs also send check and kill requests for their handles.
 - The supervisor spawns and monitors the command with the shared
   :mod:`mindroom.shell.execution` core. A client that disconnects mid-run
   cancels the run, mirroring local cancellation semantics.
@@ -144,6 +146,7 @@ async def _handle_run(
             cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
             tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
             timeout=response_timeout,
+            on_timeout=_on_timeout(payload),
             handle=handle_payload,
             handle_reservations=handle_reservations,
             output_destination=output_destination,
@@ -181,8 +184,19 @@ async def _handle_run(
     return result
 
 
-def _run_timings(payload: dict[str, object]) -> tuple[float, float | None]:
-    """Validate an optional process deadline and derive the foreground wait."""
+def _on_timeout(payload: dict[str, object]) -> Literal["background", "kill"]:
+    """Validate what happens to a run at its timeout; script runs keep their handle by default."""
+    on_timeout = payload.get("on_timeout", "background")
+    if on_timeout == "kill":
+        return "kill"
+    if on_timeout == "background":
+        return "background"
+    msg = "run request 'on_timeout' must be 'background' or 'kill'"
+    raise TypeError(msg)
+
+
+def _run_timings(payload: dict[str, object]) -> tuple[float | None, float | None]:
+    """Validate an optional process deadline and derive the foreground wait, which None leaves unlimited."""
     max_runtime_payload = payload.get("max_runtime_seconds")
     if max_runtime_payload is not None and (
         isinstance(max_runtime_payload, bool)
@@ -193,9 +207,12 @@ def _run_timings(payload: dict[str, object]) -> tuple[float, float | None]:
         raise TypeError(msg)
     max_runtime_seconds = float(max_runtime_payload) if max_runtime_payload is not None else None
     deadline_at = time.monotonic() + max_runtime_seconds if max_runtime_seconds is not None else None
-    response_timeout = float(payload["timeout"])  # ty: ignore[invalid-argument-type]
+    timeout_payload = payload["timeout"]
+    response_timeout = None if timeout_payload is None else float(timeout_payload)  # ty: ignore[invalid-argument-type]
     if max_runtime_seconds is not None:
-        response_timeout = min(response_timeout, max_runtime_seconds)
+        response_timeout = (
+            max_runtime_seconds if response_timeout is None else min(response_timeout, max_runtime_seconds)
+        )
     return response_timeout, deadline_at
 
 
@@ -318,12 +335,13 @@ async def run_command_via_supervisor(
     env: dict[str, str],
     cwd: str | None,
     tail: int,
-    timeout: float,  # noqa: ASYNC109
+    timeout: float | None,  # noqa: ASYNC109
+    on_timeout: Literal["background", "kill"] = "background",
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
 ) -> ShellRunResult:
-    """Run one shell command and preserve its execution and output-file ownership."""
+    """Run one shell command and preserve its execution and output-file ownership; see ``run_command``."""
     request = {
         "op": "run",
         "namespace": namespace,
@@ -332,6 +350,7 @@ async def run_command_via_supervisor(
         "cwd": cwd,
         "tail": tail,
         "timeout": timeout,
+        "on_timeout": on_timeout,
     }
     if handle is not None:
         request["handle"] = handle
@@ -346,7 +365,10 @@ async def run_command_via_supervisor(
     try:
         writer.write(json.dumps(request).encode("utf-8") + b"\n")
         await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=timeout + _RUN_RESPONSE_GRACE_SECONDS)
+        line = await asyncio.wait_for(
+            reader.readline(),
+            timeout=None if timeout is None else timeout + _RUN_RESPONSE_GRACE_SECONDS,
+        )
     except TimeoutError:
         return ShellRunResult(message="Error: Shell supervisor did not respond in time.")
     except OSError as exc:

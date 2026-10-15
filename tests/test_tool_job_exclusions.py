@@ -1,11 +1,10 @@
-"""Self-managed shell operations keep their native lifetime and control handles."""
+"""Excluded toolkits keep their native lifetime instead of becoming background jobs."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, cast
@@ -19,7 +18,6 @@ from agno.team import Team
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.shell.execution import discard_background_record
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import pending_human_messages_context
@@ -33,7 +31,6 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tools.shell import _process_registry
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_config_lifecycle import _make_lifecycle
@@ -92,7 +89,6 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
     bind_toolkit_authority(toolkit, authored_name=authored_name)
     model = _SchemaRecordingModel(id="test")
     install_tool_job_execution(model)
-    existing_handles = set(_process_registry)
     actor = (
         Team(id="leader", model=model, tools=[toolkit], members=[], telemetry=False)
         if team
@@ -105,11 +101,6 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
     finally:
         (tmp_path / "release").touch()
         await runtime.shutdown()
-        for handle in set(_process_registry) - existing_handles:
-            task = _process_registry[handle]._monitor_task
-            discard_background_record(_process_registry, handle)
-            if task is not None:
-                await asyncio.gather(task, return_exceptions=True)
 
 
 async def _invoke(actor: Agent | Team, model: DelegationModel, name: str, **arguments: object) -> ToolExecution:
@@ -131,47 +122,24 @@ async def _wait_for_file(path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_shell_native_handles_control_the_actual_process(
+async def test_an_excluded_shell_command_stops_at_its_timeout_without_a_job(
     tmp_path: Path,
     shell_runtime: _ShellRuntime,
-    cancel: bool,
 ) -> None:
-    """Native timeouts, polling, and cancellation never create misleading completed jobs."""
+    """An excluded shell keeps its own timeout, stops the command there, and never creates a job."""
     actor, model, runtime, owner, toolkit = shell_runtime
     try:
-        started = await _invoke(
+        stopped = await _invoke(
             actor,
             model,
             "run_shell_command",
-            timeout=0,
+            timeout=1,
             args="echo $$ > started; while [ ! -f release ]; do sleep 0.01; done; printf 'native result'",
         )
-        assert not started.tool_call_error, started.result
-        match = re.search(r"Handle: (shell:[a-f0-9]+)", started.result)
-        assert match is not None, started.result
-        handle = match.group(1)
-        await _wait_for_file(tmp_path / "started")
-        pid = int((tmp_path / "started").read_text())
-        os.kill(pid, 0)
-        assert await runtime.list_jobs(owner=owner, depth=0) == []
-        running = await _invoke(actor, model, "check_shell_command", handle=handle)
-        assert "Status: RUNNING" in running.result
-        if cancel:
-            killed = await _invoke(actor, model, "kill_shell_command", handle=handle, force=True)
-            assert "Force-killed" in killed.result
-        else:
-            (tmp_path / "release").touch()
-        async with asyncio.timeout(5):
-            while True:
-                completed = await _invoke(actor, model, "check_shell_command", handle=handle)
-                if "Status: RUNNING" not in completed.result:
-                    break
-                await asyncio.sleep(0.01)
-        if not cancel:
-            assert "native result" in completed.result
+        assert not stopped.tool_call_error, stopped.result
+        assert stopped.result.endswith("Stopped after 1s.")
         with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+            os.kill(int((tmp_path / "started").read_text()), 0)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
         for name in toolkit.get_async_functions():
             schema = model.schemas[name]

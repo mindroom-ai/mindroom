@@ -141,12 +141,12 @@ async def test_default_foreground_exit_keeps_background_children_and_seam_kills_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kill_group_after_exit", [False, True])
-async def test_seam_kills_term_resistant_group_member_when_foreground_is_cancelled(
+async def test_cancelling_a_running_command_kills_its_term_resistant_group_members(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,
     kill_group_after_exit: bool,
 ) -> None:
-    """Cancelling the foreground removes descendants that ignore the polite stop only with the seam."""
+    """Cancelling a command that still runs stops its whole process group, including members that ignore SIGTERM."""
     script = (
         "import os, pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         "pathlib.Path('child.pid').write_text(str(os.getpid())); time.sleep(30)"
@@ -163,10 +163,7 @@ async def test_seam_kills_term_resistant_group_member_when_foreground_is_cancell
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        if kill_group_after_exit:
-            assert await _wait_until_gone(child)
-        else:
-            os.kill(child, 0)
+        assert await _wait_until_gone(child)
     finally:
         if pid_file.exists() and pid_file.read_text():
             with contextlib.suppress(ProcessLookupError):
@@ -196,12 +193,12 @@ async def test_caller_capture_receives_exit_code_and_full_spool(
 
 
 @pytest.mark.asyncio
-async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the_same(
+async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Callers learn whether a signal reached the group, while kill_command keeps its exact wording."""
+    """Callers learn whether a signal reached the group, and kill_command says which signal it sent."""
     capture = _RecordingCapture(tmp_path)
     try:
         started = await run_command(
@@ -228,7 +225,7 @@ async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the
             )
         assert capture.incomplete is False
         assert kill_command(registry, namespace="test", handle=started.handle) == (
-            f"Terminated process {record.pid} (SIGTERM sent). Use check_shell_command('{started.handle}') to confirm exit."
+            f"Terminated process {record.pid} (SIGTERM sent)."
         )
         assert capture.incomplete is True
         assert await _wait_until_gone(record.pid)
@@ -267,3 +264,79 @@ async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_fini
         assert list(registry) == [result.handle]
     finally:
         capture.release()
+
+
+_TERM_IGNORING_CHILD = (
+    "import os, pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "pathlib.Path('child.pid').write_text(str(os.getpid())); time.sleep(30)"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_command_past_its_timeout_is_stopped_with_its_output_so_far(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """A stopped command returns what it printed on both streams, says it was stopped, and leaves no handle."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo started; echo warming up >&2; sleep 30"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=0.5,
+        on_timeout="kill",
+    )
+
+    assert result.handle is None
+    assert result.message == "Stopped after 0.5s.\nOutput:\nstarted\nStderr:\nwarming up"
+    assert registry == {}
+
+
+@pytest.mark.asyncio
+async def test_stopping_a_command_kills_a_child_that_ignores_sigterm_after_its_leader_exited(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """The leader dies of SIGTERM at the stop; a group member that ignores it is killed anyway."""
+    child_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(_TERM_IGNORING_CHILD)} >/dev/null 2>&1 &"
+    pid_file = tmp_path / "child.pid"
+    try:
+        result = await run_command(
+            registry,
+            namespace="test",
+            argv=["/bin/sh", "-c", f"{child_command} sleep 30"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=1,
+            on_timeout="kill",
+        )
+
+        assert result.message.startswith("Stopped after 1s.")
+        assert await _wait_until_gone(int(pid_file.read_text()))
+    finally:
+        if pid_file.exists() and pid_file.read_text():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_a_command_without_a_timeout_runs_until_it_ends(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """No timeout means no limit, for a command that would be stopped at any short one."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "sleep 0.3; echo done"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=None,
+        on_timeout="kill",
+    )
+
+    assert result.message == "done"

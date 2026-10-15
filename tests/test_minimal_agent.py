@@ -84,8 +84,8 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
     assert [name for tool in tools for name in tool.get_async_functions()] == ["bash"]
 
 
-def test_minimal_mode_with_background_jobs_keeps_its_shell_handles(tmp_path: Path) -> None:
-    """Minimal Bash polls and stops its own commands, so jobs leave its shell's run, check, and kill in place."""
+def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Path) -> None:
+    """Background jobs leave minimal Bash its shell's run function, timeout included."""
     config = Config(
         models={"default": ModelConfig(provider="openai", id="test-model")},
         agents={"helper": AgentConfig(display_name="Helper", tools=["shell"])},
@@ -101,7 +101,7 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_handles(tmp_path: Pat
         if isinstance(toolkit, Toolkit)
         for name, function in toolkit.get_async_functions().items()
     }
-    assert {"run_shell_command", "check_shell_command", "kill_shell_command"} <= set(functions)
+    assert "run_shell_command" in functions
     assert "timeout" in functions["run_shell_command"].parameters["properties"]
 
 
@@ -320,13 +320,11 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
 @pytest.mark.parametrize("rebuild", [False, True])
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize(
-    "include_tools",
+    "shell_settings",
     [
-        None,
-        ["run_shell_command"],
-        ["run_shell_command", "check_shell_command"],
-        ["run_shell_command", "kill_shell_command"],
-        ["check_shell_command", "kill_shell_command"],
+        {},
+        {"include_tools": ["run_shell_command"]},
+        {"exclude_tools": ["run_shell_command"]},
     ],
 )
 async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request(
@@ -334,7 +332,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     monkeypatch: pytest.MonkeyPatch,
     rebuild: bool,
     deferred: bool,
-    include_tools: list[str] | None,
+    shell_settings: dict[str, list[str]],
 ) -> None:
     """A saved choice cannot publish a Bash facade after losing shell operations."""
     runtime = _runtime_context(tmp_path)
@@ -386,19 +384,16 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             previous_owner = lifetime.owner
             previous_shell_env = previous_owner.shell_env if previous_owner is not None else None
             prior_requests = list(provider.requests)
-            settings = {"defer": deferred}
-            if include_tools is not None:
-                settings["include_tools"] = include_tools
-            runtime.config.agents["helper"].tools = [{"shell": settings}]
+            runtime.config.agents["helper"].tools = [{"shell": {"defer": deferred, **shell_settings}}]
             agent = create()
-            if include_tools is not None:
+            if "exclude_tools" in shell_settings:
                 result = await agent.arun(
                     "Restricted request",
                     user_id=runtime.requester_id,
                     session_id=runtime.session_id,
                 )
                 assert result.status == "ERROR"
-                assert "run, check, and kill shell permissions" in result.content
+                assert "`run_shell_command` shell permission" in result.content
                 assert "!mode helper standard" in result.content
                 assert provider.requests == prior_requests
                 assert lifetime.owner is previous_owner
@@ -423,7 +418,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
                     assert lifetime.owner.catalog.agent is agent
             if lifetime.owner is not None:
                 tokens.append(lifetime.owner.shell_env.token)
-    assert len(tokens) == (1 if rebuild or include_tools is None else 0)
+    assert len(tokens) == (1 if rebuild or "exclude_tools" not in shell_settings else 0)
     for token in tokens:
         with pytest.raises(CliAuthenticationError):
             registry.resolve("Bearer " + token, now_ns=0)

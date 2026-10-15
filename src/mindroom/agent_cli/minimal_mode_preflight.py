@@ -69,7 +69,7 @@ def _shell_problems(
     except (ImportError, ValueError):
         return [f"Fix the `shell` tool configuration of `{agent_name}` so it loads."]
     if not set(SHELL_OPERATION_NAMES).issubset(toolkit.get_async_functions()):
-        return [f"Allow the run, check, and kill shell commands for `{agent_name}`."]
+        return [f"Allow the `run_shell_command` shell function for `{agent_name}`."]
     return []
 
 

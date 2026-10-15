@@ -1,9 +1,9 @@
-"""Shell command execution core with timeout-to-handle background support.
+"""Shell command execution core: foreground runs that stop at their timeout, or background handles.
 
 This module owns the process spawning, output buffering, and background
-handle registry shared by the shell toolkit (local execution) and the
-worker-local shell supervisor process. It must stay importable without the
-heavy `mindroom.tools` package so the supervisor process starts fast.
+handle registry shared by the shell toolkit (local execution), the Desktop
+shell, and the worker-local shell supervisor process. It must stay importable
+without the heavy `mindroom.tools` package so the supervisor process starts fast.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.shell.output_capture import (
     CapturedShellStream,
@@ -166,7 +166,8 @@ async def run_command(
     env: dict[str, str],
     cwd: str | None,
     tail: int,
-    timeout: float,  # noqa: ASYNC109
+    timeout: float | None,  # noqa: ASYNC109
+    on_timeout: Literal["background", "kill"] = "background",
     handle: str | None = None,
     handle_reservations: set[str] | None = None,
     output_destination: ShellOutputDestination | None = None,
@@ -179,11 +180,13 @@ async def run_command(
     """Run one shell command; return output, an error message, or a background handle.
 
     When the command completes within ``timeout`` seconds the last ``tail``
-    lines of stdout are returned. On non-zero exit, useful stdout is preserved
-    together with stderr. When the timeout is exceeded, the process keeps
-    running under *registry* and a
-    handle string is returned for ``check_command``/``kill_command``.
-    Cancellation terminates the process group and drops any registered handle.
+    lines of stdout are returned; ``None`` waits however long it runs. On
+    non-zero exit, useful stdout is preserved together with stderr. When the
+    timeout is exceeded, ``on_timeout="kill"`` stops the command's whole
+    process group and returns its output so far; otherwise the process keeps
+    running under *registry* and a handle string is returned for
+    ``check_command``/``kill_command``.
+    Cancellation stops a running command's process group and drops any registered handle.
 
     Callers that manage output themselves pass ``output_capture`` instead of
     ``output_destination``. ``stdin`` and ``stderr`` go to the subprocess as
@@ -212,6 +215,7 @@ async def run_command(
             cwd=cwd,
             tail=tail,
             timeout=timeout,
+            on_timeout=on_timeout,
             handle=handle,
             output_destination=output_destination,
             output_capture=output_capture,
@@ -233,7 +237,8 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
     env: dict[str, str],
     cwd: str | None,
     tail: int,
-    timeout: float,  # noqa: ASYNC109
+    timeout: float | None,  # noqa: ASYNC109
+    on_timeout: Literal["background", "kill"],
     handle: str | None,
     output_destination: ShellOutputDestination | None,
     output_capture: ShellOutputCapture | None,
@@ -275,6 +280,18 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
         try:
             await _await_process_exit(process, timeout_seconds=timeout)
         except TimeoutError:
+            assert timeout is not None
+            if on_timeout == "kill":
+                return await _stop_timed_out_process(
+                    process,
+                    stdout_buf=stdout_buf,
+                    stderr_buf=stderr_buf,
+                    stdout_reader=stdout_reader,
+                    stderr_reader=stderr_reader,
+                    output_capture=capture,
+                    tail=tail,
+                    timeout=timeout,
+                )
             return await _background_process(
                 registry,
                 namespace=namespace,
@@ -349,6 +366,36 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912
     return ShellRunResult(message=stdout_buf.render(tail=tail), handle=finished_handle)
 
 
+async def _stop_timed_out_process(
+    process: asyncio.subprocess.Process,
+    *,
+    stdout_buf: _OutputBuffer,
+    stderr_buf: _OutputBuffer,
+    stdout_reader: asyncio.Task[None],
+    stderr_reader: asyncio.Task[None],
+    output_capture: ShellOutputCapture | None,
+    tail: int,
+    timeout: float,  # noqa: ASYNC109
+) -> ShellRunResult:
+    """Stop a command at its timeout and report its output so far; a stopped command saves no output file."""
+    await _terminate_process_group(process)
+    await _await_reader_tasks_with_grace(stdout_reader, stderr_reader, grace_seconds=_POST_EXIT_READER_GRACE_SECONDS)
+    notice = f"Stopped after {timeout:g}s."
+    if output_capture is not None:
+        output_capture.incomplete = True
+        output_capture.interruption = f"{notice} No output file was saved."
+        try:
+            return ShellRunResult(message=output_capture.publish(process.returncode), output_file_handled=True)
+        finally:
+            output_capture.close()
+    lines = [notice]
+    if output := stdout_buf.render(tail=tail):
+        lines += ["Output:", output]
+    if errors := stderr_buf.render():
+        lines += ["Stderr:", errors]
+    return ShellRunResult(message="\n".join(lines))
+
+
 def _unused_handle(registry: dict[str, ProcessRecord]) -> str:
     while (handle := f"shell:{uuid.uuid4().hex[:8]}") in registry:
         pass
@@ -417,12 +464,7 @@ async def _background_process(
             await monitor_task
         raise
     return ShellRunResult(
-        message=(
-            f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
-            f"Handle: {handle}\n"
-            f"Use check_shell_command('{handle}') to poll or "
-            f"kill_shell_command('{handle}') to stop."
-        ),
+        message=f"Command timed out after {timeout}s. Still running (PID {process.pid}).\nHandle: {handle}",
         handle=handle,
         output_file_handled=output_capture is not None,
     )
@@ -479,7 +521,7 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
         return f"Process {record.pid} already exited"
 
     action = "Force-killed" if force else "Terminated"
-    return f"{action} process {record.pid} ({sig_name} sent). Use check_shell_command('{handle}') to confirm exit."
+    return f"{action} process {record.pid} ({sig_name} sent)."
 
 
 def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:
@@ -632,30 +674,37 @@ def _kill_process_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
 
 
+def _process_group_exists(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 async def _terminate_process_group(
     process: asyncio.subprocess.Process,
     *,
     grace_period: float = 0.5,
 ) -> None:
-    """Terminate a subprocess process group, escalating to SIGKILL if needed."""
+    """Stop a running command's process group: SIGTERM, then SIGKILL every member left after the grace.
+
+    Members that outlive the leader are killed too, so a child that ignores SIGTERM cannot survive the stop.
+    A command whose leader already exited ended on its own, and its detached children keep running.
+    """
     if process.returncode is not None:
         return
 
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGTERM)
 
-    try:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace_period
+    while loop.time() < deadline and _process_group_exists(process.pid):  # noqa: ASYNC110 - a group has no exit event
+        await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
+    _kill_process_group(process.pid)
+    with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(process.wait(), timeout=grace_period)
-    except TimeoutError:
-        pass
-    else:
-        return
-
-    if process.returncode is None:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(process.wait(), timeout=grace_period)
 
 
 async def _monitor_process(

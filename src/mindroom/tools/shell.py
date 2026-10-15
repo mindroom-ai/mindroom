@@ -1,4 +1,4 @@
-"""Shell tool configuration with async subprocess execution and timeout-to-handle support."""
+"""Shell tool configuration with async subprocess execution that stops a command at its timeout."""
 
 from __future__ import annotations
 
@@ -19,20 +19,10 @@ from mindroom.constants import (
     subprocess_path_with_prepends,
     workspace_home_identity_env,
 )
-from mindroom.shell.execution import (
-    DEFAULT_RUN_TIMEOUT_SECONDS,
-    ProcessRecord,
-    check_command,
-    kill_command,
-    run_command,
-)
+from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
-from mindroom.shell.supervisor import (
-    SHELL_SUPERVISOR_SOCKET_ENV,
-    check_command_via_supervisor,
-    kill_command_via_supervisor,
-    run_command_via_supervisor,
-)
+from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -105,10 +95,8 @@ _WORKING_METHOD_NOTE = (
     "available tests, and recheck suspicious results such as a zero count."
 )
 
-# Module-level process registry shared across all MindRoomShellTools instances.
-# This ensures handles survive toolkit re-creation for local execution; when a
-# supervisor socket is advertised, the supervisor owns the registry instead.
-_process_registry: dict[str, ProcessRecord] = {}
+# A stopped command registers no handle, so every call shares one namespace.
+_SHELL_NAMESPACE = "shell"
 
 
 def _normalize_shell_command_line(command: str) -> list[str]:
@@ -260,13 +248,6 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
     return adjusted_args
 
 
-def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> str:
-    """Return the namespace that owns one shell handle registry record."""
-    storage_root = str(runtime_paths.storage_root.resolve())
-    resolved_base_dir = str(base_dir.expanduser().resolve()) if base_dir is not None else ""
-    return f"{storage_root}::{resolved_base_dir}"
-
-
 @register_tool_with_metadata(
     name="shell",
     display_name="Shell Commands",
@@ -348,13 +329,13 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=[],
     docs_url="https://docs.agno.com/tools/toolkits/local/shell",
-    function_names=("check_shell_command", "kill_shell_command", "run_shell_command"),
+    function_names=("run_shell_command",),
 )
 def shell_tools() -> type[Toolkit]:  # noqa: C901
     """Return shell tools for command execution."""
 
     class MindRoomShellTools(Toolkit):
-        """MindRoom shell toolkit with async execution and timeout-to-handle support."""
+        """MindRoom shell toolkit with async execution that stops a command at its timeout."""
 
         def __init__(
             self,
@@ -371,7 +352,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             tools: list[object] = []
             if all or enable_run_shell_command:
-                tools.extend([self.run_shell_command, self.check_shell_command, self.kill_shell_command])
+                tools.append(self.run_shell_command)
 
             super().__init__(name="shell_tools", tools=tools, **kwargs)  # ty: ignore[invalid-argument-type]
             run_shell_command_function = self.async_functions.get("run_shell_command")
@@ -398,32 +379,30 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 run_shell_command_function.description = "\n\n".join(
                     (run_shell_command_function.description or "", *notes),
                 ).strip()
-            self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
-            # Sandbox tool subprocesses delegate execution to the runner's
-            # long-lived shell supervisor so background handles survive the
-            # per-request process.
+            # Sandbox tool subprocesses delegate execution to the runner's long-lived shell supervisor,
+            # which stops the command when the per-request process dies.
             self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
 
         async def run_shell_command(
             self,
             args: list[str] | str,
             tail: int = 100,
-            timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS,  # noqa: ASYNC109
+            timeout: int | None = None,  # noqa: ASYNC109
         ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
-            If the command completes within ``timeout`` seconds the last ``tail``
-            lines of stdout are returned. On non-zero exit, useful stdout is
-            preserved together with stderr. When the timeout is exceeded, the
-            process keeps running in the background
-            and a handle string is returned that can be polled with
-            ``check_shell_command`` or stopped with ``kill_shell_command``.
+            The last ``tail`` lines of stdout are returned; on non-zero exit, useful
+            stdout is preserved together with stderr. A command still running after
+            ``timeout`` seconds is stopped with every process it started, and its
+            output so far is returned. Without ``timeout``, a call that runs as a
+            background job has no time limit, and any other call stops after 120
+            seconds. A process started with ``nohup ... &`` keeps running after the
+            command ends on its own.
 
             With ``mindroom_output_path``, capture the complete supported output
-            within the redirect byte limit instead of applying ``tail``. If the
-            command backgrounds, it saves to that destination when it finishes;
-            ``check_shell_command`` then returns the file receipt.
+            within the redirect byte limit instead of applying ``tail``; a stopped
+            command saves no file.
 
             Command strings use non-login Bash with the prepared execution environment.
             Use explicit ``["bash", "-lc", command]`` only when login startup is needed.
@@ -431,10 +410,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             Args:
                 args: The command to run as a shell command string or a list of argv strings.
                 tail: The number of lines to return from the output.
-                timeout: Maximum seconds to wait before backgrounding the command.
+                timeout: Seconds after which the command is stopped; null uses the default limit.
 
             Returns:
-                The command output, an error message, or a background handle.
+                The command output or an error message.
 
             """
             try:
@@ -468,26 +447,31 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 if output_request is not None and output_request.path is not None
                 else None
             )
+            if timeout is None and not job_owns_execution():
+                # Read at call time, so the default covers only calls that hold a reply.
+                timeout = DEFAULT_RUN_TIMEOUT_SECONDS
             if self._supervisor_socket is not None:
                 result = await run_command_via_supervisor(
                     self._supervisor_socket,
-                    namespace=self._handle_namespace,
+                    namespace=_SHELL_NAMESPACE,
                     argv=argv,
                     env=subprocess_env,
                     cwd=cwd,
                     tail=tail,
                     timeout=timeout,
+                    on_timeout="kill",
                     output_destination=output_destination,
                 )
             else:
                 result = await run_command(
-                    _process_registry,
-                    namespace=self._handle_namespace,
+                    {},
+                    namespace=_SHELL_NAMESPACE,
                     argv=argv,
                     env=subprocess_env,
                     cwd=cwd,
                     tail=tail,
                     timeout=timeout,
+                    on_timeout="kill",
                     output_destination=output_destination,
                 )
             message = result.message
@@ -496,47 +480,5 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             if cwd is None:
                 return message
             return f"[cwd: {cwd}]\n{message}"
-
-        def check_shell_command(self, handle: str) -> str:
-            """Poll the status of a backgrounded shell command.
-
-            Safe to call multiple times — the record is kept until automatic
-            cleanup (~10 min after finish). Use ``kill_shell_command`` to stop
-            a running process.
-
-            Args:
-                handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
-
-            Returns:
-                Output if the command finished, or a status summary if still running.
-
-            """
-            if self._supervisor_socket is not None:
-                return check_command_via_supervisor(
-                    self._supervisor_socket,
-                    namespace=self._handle_namespace,
-                    handle=handle,
-                )
-            return check_command(_process_registry, namespace=self._handle_namespace, handle=handle)
-
-        def kill_shell_command(self, handle: str, force: bool = False) -> str:
-            """Kill a backgrounded shell command.
-
-            Args:
-                handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
-                force: If True send SIGKILL immediately instead of SIGTERM.
-
-            Returns:
-                Confirmation message or error.
-
-            """
-            if self._supervisor_socket is not None:
-                return kill_command_via_supervisor(
-                    self._supervisor_socket,
-                    namespace=self._handle_namespace,
-                    handle=handle,
-                    force=force,
-                )
-            return kill_command(_process_registry, namespace=self._handle_namespace, handle=handle, force=force)
 
     return MindRoomShellTools

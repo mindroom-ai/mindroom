@@ -6027,7 +6027,6 @@ def _proxied_shell(
     [
         ("run_shell_command", {"args": "make", "timeout": 600}, 630.0),
         ("run_shell_command", {"args": "make"}, 150.0),
-        ("check_shell_command", {"handle": "shell:abc"}, 120.0),
     ],
 )
 async def test_a_worker_shell_call_waits_as_long_as_its_runner(
