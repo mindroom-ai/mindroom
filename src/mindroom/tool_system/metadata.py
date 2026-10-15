@@ -18,7 +18,7 @@ from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
-from mindroom.shared_directories.tool_roots import shared_directory_roots
+from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -676,7 +676,9 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
-        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: shared_directory_roots(
+        # Shared directories change during a response, so path tools resolve them on each call.
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: functools.partial(
+            shared_directory_roots,
             runtime_paths,
             runtime_config,
             worker_target.routing_agent_name if worker_target is not None else None,

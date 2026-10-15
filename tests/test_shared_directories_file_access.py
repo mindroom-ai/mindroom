@@ -2,22 +2,30 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import UTC, datetime
-from pathlib import Path  # noqa: TC003
-
-import pytest
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.shared_directories import paths as shared_paths
+from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
-from mindroom.shared_directories.tool_roots import SharedDirectoryRoot, shared_directory_roots
+from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.tools.file import file_tools
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
+if TYPE_CHECKING:
+    import pytest
+
 _NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
+_WORKER_KEY = "v1:tenant:shared:bob"
 
 
 def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -32,18 +40,21 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     return workspace, share, other
 
 
+def _root(path: Path, *, writable: bool, spellings: tuple[Path, ...] = ()) -> SharedDirectoryRoot:
+    return SharedDirectoryRoot(path=path, writable=writable, spellings=spellings or (path,))
+
+
 def _file_tool(workspace: Path, *roots: SharedDirectoryRoot) -> object:
-    return file_tools()(base_dir=workspace, file_access="workspace", shared_directory_roots=roots)
+    return file_tools()(base_dir=workspace, file_access="workspace", shared_directory_roots=lambda: roots)
 
 
 def test_file_tool_reads_a_member_share_and_refuses_writes(tmp_path: Path) -> None:
     """A joined share is readable, never writable, and other shares stay out of reach."""
     workspace, share, other = _layout(tmp_path)
-    tool = _file_tool(workspace, SharedDirectoryRoot(path=share, writable=False))
+    tool = _file_tool(workspace, _root(share, writable=False))
 
     assert tool.read_file(str(share / "summary.md")) == "hello\nshared world\n"
     assert tool.read_file_chunk(str(share / "summary.md"), 1, 1) == "shared world"
-    assert tool.list_files(str(share)) == '[\n    "summary.md"\n]'
     assert "only read" in tool.save_file("x", str(share / "new.md"))
     assert "only read" in tool.delete_file(str(share / "summary.md"))
     assert not (share / "new.md").exists()
@@ -51,20 +62,36 @@ def test_file_tool_reads_a_member_share_and_refuses_writes(tmp_path: Path) -> No
     assert tool.read_file(str(other / "secret.md")).startswith("Error")
 
 
-def test_file_tool_writes_an_owned_share(tmp_path: Path) -> None:
-    """The owner writes its own share through the file tool."""
+def test_listed_share_paths_read_back_the_shared_file(tmp_path: Path) -> None:
+    """Listings name share files by absolute path, so reading a listed name never picks up a workspace copy."""
     workspace, share, _other = _layout(tmp_path)
-    tool = _file_tool(workspace, SharedDirectoryRoot(path=share, writable=True))
+    (workspace / "summary.md").write_text("stale workspace copy\n", encoding="utf-8")
+    tool = _file_tool(workspace, _root(share, writable=False))
 
-    tool.save_file("draft", str(share / "notes" / "draft.md"))
+    listed = json.loads(tool.list_files(str(share)))
+    found = json.loads(tool.search_files(f"{share}/*.md"))["files"]
+    matched = json.loads(tool.search_content("shared", str(share)))["files"][0]["file"]
 
+    assert listed == found == [str(share / "summary.md")]
+    assert matched == str(share / "summary.md")
+    assert tool.read_file(listed[0]) == "hello\nshared world\n"
+
+
+def test_file_tool_writes_an_owned_share(tmp_path: Path) -> None:
+    """The owner writes its own share through the file tool and is told the absolute path."""
+    workspace, share, _other = _layout(tmp_path)
+    tool = _file_tool(workspace, _root(share, writable=True))
+
+    written = tool.save_file("draft", str(share / "notes" / "draft.md"))
+
+    assert written == str(share / "notes" / "draft.md")
     assert (share / "notes" / "draft.md").read_text(encoding="utf-8") == "draft"
 
 
 def test_file_tool_resolves_relative_paths_that_lead_into_a_share(tmp_path: Path) -> None:
     """A relative path that walks into a share reaches it like the absolute path."""
     workspace, share, _other = _layout(tmp_path)
-    tool = _file_tool(workspace, SharedDirectoryRoot(path=share, writable=False))
+    tool = _file_tool(workspace, _root(share, writable=False))
 
     assert tool.read_file("../shared_directories/alice/report/summary.md") == "hello\nshared world\n"
 
@@ -74,23 +101,45 @@ def test_file_tool_refuses_links_out_of_a_share(tmp_path: Path) -> None:
     workspace, share, _other = _layout(tmp_path)
     (tmp_path / "outside.md").write_text("outside\n", encoding="utf-8")
     (share / "escape.md").symlink_to(tmp_path / "outside.md")
-    tool = _file_tool(workspace, SharedDirectoryRoot(path=share, writable=False))
+    tool = _file_tool(workspace, _root(share, writable=False))
 
     assert tool.read_file(str(share / "escape.md")).startswith("Error")
 
 
+def test_a_share_named_by_its_worker_path_reaches_the_same_files(tmp_path: Path) -> None:
+    """When a share's worker path is advertised, primary-process tools accept it and answer in that spelling."""
+    workspace, share, _other = _layout(tmp_path)
+    worker_path = Path("/app/worker/shared_directories/alice/report")
+    tool = _file_tool(workspace, _root(share, writable=False, spellings=(share, worker_path)))
+
+    assert tool.read_file(str(worker_path / "summary.md")) == "hello\nshared world\n"
+    assert json.loads(tool.list_files(str(worker_path))) == [str(worker_path / "summary.md")]
+
+
+def test_shares_created_after_the_toolkit_are_reachable(tmp_path: Path) -> None:
+    """Share roots are looked up on each call, so a share created during a response is usable at once."""
+    workspace, share, _other = _layout(tmp_path)
+    roots: list[SharedDirectoryRoot] = []
+    tool = file_tools()(base_dir=workspace, file_access="workspace", shared_directory_roots=lambda: tuple(roots))
+    assert tool.read_file(str(share / "summary.md")).startswith("Error")
+
+    roots.append(_root(share, writable=True))
+
+    assert tool.read_file(str(share / "summary.md")) == "hello\nshared world\n"
+
+
 def test_coding_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
-    """The coding tool reads, searches, and lists a joined share and refuses to edit it."""
+    """The coding tool reads, searches, and lists a joined share by absolute path and refuses to edit it."""
     workspace, share, other = _layout(tmp_path)
     tool = CodingTools(
         base_dir=str(workspace),
         file_access="workspace",
-        shared_directory_roots=(SharedDirectoryRoot(path=share, writable=False),),
+        shared_directory_roots=lambda: (_root(share, writable=False),),
     )
 
     assert "shared world" in tool.read_file(str(share / "summary.md"))
-    assert "shared world" in tool.grep("shared", str(share))
-    assert "summary.md" in tool.find_files("*.md", str(share))
+    assert f"{share / 'summary.md'}:2:" in tool.grep("shared", str(share))
+    assert str(share / "summary.md") in tool.find_files("*.md", str(share))
     assert "summary.md" in tool.ls(str(share))
     assert "only read" in tool.write_file(str(share / "new.md"), "x")
     assert "only read" in tool.edit_file(str(share / "summary.md"), "hello", "bye")
@@ -104,7 +153,7 @@ def test_unrestricted_tools_ignore_share_roots(tmp_path: Path) -> None:
     tool = file_tools()(
         base_dir=workspace,
         file_access="unrestricted",
-        shared_directory_roots=(SharedDirectoryRoot(path=share, writable=False),),
+        shared_directory_roots=lambda: (_root(share, writable=False),),
     )
 
     tool.save_file("x", str(share / "new.md"))
@@ -112,8 +161,7 @@ def test_unrestricted_tools_ignore_share_roots(tmp_path: Path) -> None:
     assert (share / "new.md").read_text(encoding="utf-8") == "x"
 
 
-def test_primary_roots_follow_the_ledger(tmp_path: Path) -> None:
-    """In the primary, an agent reaches what it owns read-write and what it joined read-only."""
+def _ledger_config(runtime_paths: RuntimePaths) -> Config:
     config = bind_runtime_paths(
         Config(
             agents={
@@ -123,49 +171,107 @@ def test_primary_roots_follow_the_ledger(tmp_path: Path) -> None:
                 "carol": AgentConfig(display_name="Carol", private=AgentPrivateConfig(per="user")),
             },
         ),
-        test_runtime_paths(tmp_path),
+        runtime_paths,
     )
-    runtime_paths = test_runtime_paths(tmp_path)
     create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
     add_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
     add_shared_directory_member(runtime_paths, owner="alice", name="report", member="carol")
+    return config
+
+
+def test_primary_roots_follow_the_ledger(tmp_path: Path) -> None:
+    """In the primary, an agent reaches what it owns read-write and what it joined read-only."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _ledger_config(runtime_paths)
     share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
 
-    assert shared_directory_roots(runtime_paths, config, "alice") == (SharedDirectoryRoot(path=share, writable=True),)
-    assert shared_directory_roots(runtime_paths, config, "bob") == (SharedDirectoryRoot(path=share, writable=False),)
+    assert shared_directory_roots(runtime_paths, config, "alice") == (_root(share, writable=True),)
+    assert shared_directory_roots(runtime_paths, config, "bob") == (_root(share, writable=False),)
     assert shared_directory_roots(runtime_paths, config, "dave") == ()
     assert shared_directory_roots(runtime_paths, config, "carol") == ()
     assert shared_directory_roots(runtime_paths, None, "alice") == ()
 
 
-@pytest.mark.parametrize("planted", ["link", "file"])
-def test_worker_roots_are_the_mounted_shares(tmp_path: Path, planted: str) -> None:
-    """In a sandbox runner, the shares below the shared storage root are what the worker mounted."""
-    shared_root = tmp_path / "worker"
-    (shared_root / "shared_directories" / "alice" / "report").mkdir(parents=True)
-    (shared_root / "shared_directories" / "carl" / "notes").mkdir(parents=True)
-    if planted == "link":
-        (shared_root / "shared_directories" / "carl" / "escape").symlink_to(tmp_path)
-    else:
-        (shared_root / "shared_directories" / "carl" / "stray.txt").write_text("x", encoding="utf-8")
+def test_primary_roots_also_accept_the_worker_path(tmp_path: Path) -> None:
+    """With dedicated workers, primary-process tools accept the worker path the prompt may have named."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test"},
+    )
+    config = _ledger_config(runtime_paths)
+    share = runtime_paths.storage_root / "shared_directories" / "alice" / "report"
+
+    assert shared_directory_roots(runtime_paths, config, "bob") == (
+        _root(share, writable=False, spellings=(share, Path("/app/worker/shared_directories/alice/report"))),
+    )
+
+
+def test_primary_tools_never_reach_shares_beside_the_static_runner_sidecar(tmp_path: Path) -> None:
+    """The sidecar writes shared_directories/, so primary-process path tools must not follow anything there."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"]: "http://sandbox:8766"},
+    )
+    config = _ledger_config(runtime_paths)
+
+    assert shared_directory_roots(runtime_paths, config, "alice") == ()
+
+
+def _mount_shares(root: Path) -> tuple[Path, Path]:
+    report = root / "shared_directories" / "alice" / "report"
+    notes = root / "shared_directories" / "carl" / "notes"
+    report.mkdir(parents=True)
+    notes.mkdir(parents=True)
+    (root / "shared_directories" / "carl" / "escape").symlink_to(root)
+    (root / "shared_directories" / "carl" / "stray.txt").write_text("x", encoding="utf-8")
+    return report, notes
+
+
+def test_docker_worker_roots_are_its_mounted_shares(tmp_path: Path) -> None:
+    """A Docker worker finds its shares below the shared storage root it is told, skipping links and files."""
+    report, notes = _mount_shares(tmp_path / "worker")
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "dedicated",
         process_env={
             SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
-            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(shared_root),
+            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(tmp_path / "worker"),
         },
     )
 
     assert shared_directory_roots(runtime_paths, None, None) == (
-        SharedDirectoryRoot(path=shared_root / "shared_directories" / "alice" / "report", writable=True),
-        SharedDirectoryRoot(path=shared_root / "shared_directories" / "carl" / "notes", writable=True),
+        _root(report, writable=True),
+        _root(notes, writable=True),
+    )
+
+
+def test_kubernetes_worker_roots_are_its_mounted_shares(tmp_path: Path) -> None:
+    """A Kubernetes worker has no shared-root variable, so its shares are found above its own worker root."""
+    mount = tmp_path / "mount"
+    report, notes = _mount_shares(mount)
+    dedicated_root = mount / "workers" / worker_dir_name(_WORKER_KEY)
+    dedicated_root.mkdir(parents=True)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=dedicated_root,
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: _WORKER_KEY,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
+        },
+    )
+
+    assert shared_directory_roots(runtime_paths, None, None) == (
+        _root(report, writable=True),
+        _root(notes, writable=True),
     )
 
 
 def test_static_runner_roots_are_below_its_storage_root(tmp_path: Path) -> None:
     """The shared sidecar mounts shared directories below its own storage root and sets no shared root."""
-    (tmp_path / "storage" / "shared_directories" / "alice" / "report").mkdir(parents=True)
+    report, notes = _mount_shares(tmp_path / "storage")
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -173,5 +279,35 @@ def test_static_runner_roots_are_below_its_storage_root(tmp_path: Path) -> None:
     )
 
     assert shared_directory_roots(runtime_paths, None, None) == (
-        SharedDirectoryRoot(path=runtime_paths.storage_root / "shared_directories" / "alice" / "report", writable=True),
+        _root(report, writable=True),
+        _root(notes, writable=True),
+    )
+
+
+def test_worker_roots_mounted_read_only_refuse_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A share a worker mounts read-only is reported as read-only, so writes get the same refusal as elsewhere."""
+    report, notes = _mount_shares(tmp_path / "worker")
+    real_statvfs = os.statvfs
+
+    def statvfs(path: os.PathLike[str] | str) -> os.statvfs_result:
+        result = real_statvfs(path)
+        if Path(path) != notes:
+            return result
+        fields = list(result)
+        fields[8] |= os.ST_RDONLY
+        return os.statvfs_result(fields)
+
+    monkeypatch.setattr(shared_paths.os, "statvfs", statvfs)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "dedicated",
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
+            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(tmp_path / "worker"),
+        },
+    )
+
+    assert shared_directory_roots(runtime_paths, None, None) == (
+        _root(report, writable=True),
+        _root(notes, writable=False),
     )

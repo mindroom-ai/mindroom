@@ -13,7 +13,7 @@ from agno.tools.file.file import TEXT_EXTENSIONS, _extract_snippet, _format_size
 from agno.utils.log import log_debug, log_error
 
 from mindroom.path_confinement import is_git_metadata_path, read_regular_file_within_root
-from mindroom.shared_directories.tool_roots import shared_directory_aware
+from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -38,7 +38,7 @@ from mindroom.tools.path_safety import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
@@ -68,7 +68,7 @@ class _MindRoomFileTools(AgnoFileTools):
         exclude_patterns: list[str] | None = None,
         all: bool = False,  # noqa: A002
         file_access: FileAccess = "workspace",
-        shared_directory_roots: tuple[SharedDirectoryRoot, ...] = (),
+        shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
         **kwargs: object,
     ) -> None:
         self.restrict_to_base_dir = file_access == "workspace"
@@ -343,7 +343,7 @@ class _MindRoomFileTools(AgnoFileTools):
             if lower_query in content.lower():
                 matches.append(
                     {
-                        "file": file_path.relative_to(self.base_dir).as_posix(),
+                        "file": format_path_for_output(file_path, self.base_dir),
                         "size": _format_size(len(payload)),
                         "snippet": _extract_snippet(content, query),
                     },

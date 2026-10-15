@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
+from mindroom.api.sandbox_exec import runner_storage_root
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shared_directories.store import agent_shared_directories, shared_directory_relative_path
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
-from mindroom.workers.runtime import worker_visible_storage_root
+from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
+from mindroom.workers.runtime import primary_worker_backend_name, worker_visible_storage_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,3 +52,47 @@ def describe_agent_shared_directories(config: Config, runtime_paths: RuntimePath
         + ("(yours, read-write)" if directory.owner == agent_name else f"(from {directory.owner}, read-only)")
         for directory in directories
     )
+
+
+def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
+    # A dedicated worker mounts exactly the directories its agents own or joined, read-only where they only joined;
+    # the shared sidecar sees every directory.
+    roots: list[SharedDirectoryRoot] = []
+    try:
+        with os.scandir(root) as owner_entries:
+            owners = sorted(entry.name for entry in owner_entries if entry.is_dir(follow_symlinks=False))
+        for owner in owners:
+            with os.scandir(root / owner) as name_entries:
+                names = sorted(entry.name for entry in name_entries if entry.is_dir(follow_symlinks=False))
+            for name in names:
+                path = root / owner / name
+                writable = not os.statvfs(path).f_flag & os.ST_RDONLY
+                roots.append(SharedDirectoryRoot(path=path, writable=writable, spellings=(path,)))
+    except OSError:
+        return tuple(roots)
+    return tuple(roots)
+
+
+def shared_directory_roots(
+    runtime_paths: RuntimePaths,
+    config: Config | None,
+    agent_name: str | None,
+) -> tuple[SharedDirectoryRoot, ...]:
+    """Return the shared directories one agent's path tools may use in this runtime."""
+    if runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
+        return _mounted_roots(runner_storage_root(runtime_paths) / SHARED_DIRECTORIES_DIRNAME)
+    if config is None or agent_name is None:
+        return ()
+    if primary_worker_backend_name(runtime_paths) == "static_runner" and sandbox_proxy_config(runtime_paths).proxy_url:
+        # The shared sidecar writes shared_directories/, so it could swap an owner directory for a link that a
+        # primary-process path tool would follow into primary-only storage.
+        return ()
+    worker_root = worker_visible_storage_root(runtime_paths)
+    roots: list[SharedDirectoryRoot] = []
+    for directory in agent_shared_directories(runtime_paths, config, agent_name):
+        relative_path = shared_directory_relative_path(directory.owner, directory.name)
+        path = runtime_paths.storage_root / relative_path
+        # Prompts name the worker path when the agent's other tools run in a worker, so both spellings work here.
+        spellings = (path,) if worker_root is None else (path, worker_root / relative_path)
+        roots.append(SharedDirectoryRoot(path=path, writable=directory.owner == agent_name, spellings=spellings))
+    return tuple(roots)

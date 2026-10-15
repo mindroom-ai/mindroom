@@ -28,7 +28,7 @@ from agno.tools import Toolkit
 
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
-from mindroom.shared_directories.tool_roots import shared_directory_aware
+from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
 from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
@@ -41,6 +41,8 @@ from mindroom.tools.path_safety import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 
@@ -500,11 +502,7 @@ def _find_files_in(
     filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
     matches: list[str] = []
     for candidate in filtered:
-        try:
-            rel = candidate.relative_to(base_dir)
-        except ValueError:
-            rel = candidate
-        matches.append(str(rel))
+        matches.append(format_path_for_output(candidate, base_dir))
         if len(matches) > limit:
             break
 
@@ -558,7 +556,7 @@ class CodingTools(Toolkit):
         self,
         base_dir: str | None = None,
         file_access: FileAccess = "workspace",
-        shared_directory_roots: tuple[SharedDirectoryRoot, ...] = (),
+        shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
     ) -> None:
         self.base_dir = resolve_tool_base_dir(base_dir)
         self.restrict_to_base_dir = file_access == "workspace"
@@ -1012,10 +1010,7 @@ def _grep_file(
     except (OSError, UnicodeDecodeError):
         return match_count
 
-    try:
-        rel = filepath.relative_to(base_dir)
-    except ValueError:
-        rel = filepath
+    rel = format_path_for_output(filepath, base_dir)
 
     lines = text.splitlines()
     emitted_lines: set[int] = set()
