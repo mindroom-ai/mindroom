@@ -15,6 +15,12 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
+@pytest.fixture(autouse=True)
+def _single_line_execute_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a quick /execute call to its one result line, however slowly a loaded machine runs it."""
+    monkeypatch.setattr("mindroom.api.sandbox_runner.EXECUTE_KEEPALIVE_SECONDS", 3600.0)
+
+
 def trusted_upstream_headers(
     *,
     user_id: str = "alice",
