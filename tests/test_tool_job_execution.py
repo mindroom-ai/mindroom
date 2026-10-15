@@ -688,7 +688,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             response = await parent_run()
         if not team_parent:
             assert response.tools[0].result == "actual result"
-        jobs = await runtime.list_jobs(owner=owner, depth=0)
+        jobs = runtime.retained_jobs()
         assert len(jobs) == 1
         assert jobs[0].adapter["arguments"] == encode_tool_result({"background_after": None})
         assert jobs[0].source_event_id == "$original-request"
@@ -941,7 +941,7 @@ async def test_saved_result_reread_preserves_later_session_state(
             ),
         )
         assert storage.get_run(first.run_id).session_state["counter"] == 1
-        job = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        (job,) = runtime.retained_jobs()
         assert job.consumed
         if restart:
             await runtime.shutdown()

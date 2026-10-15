@@ -39,6 +39,7 @@ class _Consumption:
     run_id: str
     team: bool
     call_id: str
+    returned_inline: bool
 
     def saved(self, storage: BaseDb) -> bool:
         """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team.
@@ -71,9 +72,10 @@ class ConsumptionOwner:
         run_id: str,
         team: bool,
         call_id: str,
+        returned_inline: bool,
     ) -> None:
         """Keep a claim until the parent run ``run_id`` is saved with its tool call ``call_id`` finished."""
-        self._claims.append(_Consumption(runtime, job_id, claim, run_id, team, call_id))
+        self._claims.append(_Consumption(runtime, job_id, claim, run_id, team, call_id, returned_inline))
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""
@@ -85,7 +87,11 @@ class ConsumptionOwner:
                     consumption.saved,
                 )
                 if saved:
-                    await consumption.runtime.acknowledge_wait(consumption.job_id, consumption.claim)
+                    await consumption.runtime.acknowledge_wait(
+                        consumption.job_id,
+                        consumption.claim,
+                        returned_inline=consumption.returned_inline,
+                    )
             except Exception:
                 logger.warning(
                     "Tool result persistence was not confirmed",
@@ -171,6 +177,8 @@ async def _retain_claim(
     job_id: str,
     claim: JobClaim,
     call: FunctionCall | None,
+    *,
+    returned_inline: bool,
 ) -> None:
     """Keep a claim until the parent run saves the exact tool call, releasing it when no such run will be saved."""
     owner = _OWNER.get()
@@ -189,6 +197,7 @@ async def _retain_claim(
         run_id=context.run_id,
         team=function_agent(call.function) is None,
         call_id=call.call_id,
+        returned_inline=returned_inline,
     )
 
 
@@ -201,12 +210,12 @@ async def retain_parent_call_claim(
     team: bool,
     call_id: str,
 ) -> None:
-    """Keep a claim until the parent run saves its tool call ``call_id``, as a native call's result does."""
+    """Keep a claim until the parent run saves its tool call ``call_id``, the call that started the job."""
     owner = _OWNER.get()
     if owner is None or not run_id or not call_id:
         await runtime.release_wait(job_id, claim)
         return
-    owner.register(runtime, job_id, claim, run_id=run_id, team=team, call_id=call_id)
+    owner.register(runtime, job_id, claim, run_id=run_id, team=team, call_id=call_id, returned_inline=True)
 
 
 async def consume_tool_job(
@@ -215,8 +224,12 @@ async def consume_tool_job(
     claim: JobClaim,
     *,
     function_call: FunctionCall | None = None,
+    returned_inline: bool = False,
 ) -> tuple[Any, ToolResultPayload]:
-    """Read a claimed outcome's value and payload, retaining the claim until the parent run saves this tool call."""
+    """Read a claimed outcome's value and payload, retaining the claim until the parent run saves this tool call.
+
+    ``returned_inline`` says this tool call is the one that started the job.
+    """
     call = function_call or current_tool_call()
     try:
         payload = await read_result_payload(runtime, job)
@@ -226,5 +239,5 @@ async def consume_tool_job(
     except BaseException:
         await runtime.release_wait(job.job_id, claim)
         raise
-    await _retain_claim(runtime, job.job_id, claim, call)
+    await _retain_claim(runtime, job.job_id, claim, call, returned_inline=returned_inline)
     return value, payload

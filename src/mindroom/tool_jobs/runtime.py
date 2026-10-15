@@ -102,6 +102,8 @@ class BackgroundJob:
     has_result_payload: bool = False
     # Whether a parent run saved the outcome as its tool result.
     consumed: bool = False
+    # Whether the call that started it saved the outcome as its own result, so it never became a job to list.
+    returned_inline: bool = False
 
 
 @dataclass(frozen=True)
@@ -596,7 +598,11 @@ class ToolJobRuntime:
             raise ValueError(msg)
         async with self._lock:
             self._ensure_open()
-            entries = [entry for entry in self._entries.values() if self._visible(entry, owner, depth)]
+            entries = [
+                entry
+                for entry in self._entries.values()
+                if not entry.job.returned_inline and self._visible(entry, owner, depth)
+            ]
             entries.sort(key=lambda entry: entry.job.updated_at, reverse=True)
             entries.sort(key=lambda entry: entry.job.status in TERMINAL_STATUSES)
             return [await self._snapshot(entry) for entry in entries[offset : offset + limit]]
@@ -671,15 +677,18 @@ class ToolJobRuntime:
 
         await run_coroutine_until_complete(release())
 
-    async def acknowledge_wait(self, job_id: str, claim: JobClaim | None) -> None:
-        """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved."""
+    async def acknowledge_wait(self, job_id: str, claim: JobClaim | None, *, returned_inline: bool = False) -> None:
+        """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved.
+
+        ``returned_inline`` says that tool result belongs to the call that started the job.
+        """
         async with self._lock:
             self._ensure_open()
             entry = self._entries[job_id]
             if claim is None or entry.claim != claim:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
-            await self._publish(entry, _updated(entry.job, consumed=True))
+            await self._publish(entry, _updated(entry.job, consumed=True, returned_inline=returned_inline))
             entry.claim = None
 
     async def request_cancel(self, job_id: str) -> None:
