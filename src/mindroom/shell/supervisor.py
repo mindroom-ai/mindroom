@@ -238,7 +238,12 @@ async def _handle_connection(
                 return
         elif op == "check":
             result = ShellRunResult(
-                message=check_command(registry, namespace=str(payload["namespace"]), handle=str(payload["handle"])),
+                message=check_command(
+                    registry,
+                    namespace=str(payload["namespace"]),
+                    handle=str(payload["handle"]),
+                    output=payload.get("output", True) is not False,
+                ),
             )
         elif op == "kill":
             result = ShellRunResult(
@@ -358,9 +363,12 @@ async def run_command_via_supervisor(
     return _parse_supervisor_response(line)
 
 
-def check_command_via_supervisor(socket_path: str, *, namespace: str, handle: str) -> str:
-    """Poll a background handle through the supervisor."""
-    return _sync_supervisor_request(socket_path, {"op": "check", "namespace": namespace, "handle": handle})
+def check_command_via_supervisor(socket_path: str, *, namespace: str, handle: str, output: bool = True) -> str:
+    """Poll a background handle through the supervisor; without ``output``, only its status line."""
+    return _sync_supervisor_request(
+        socket_path,
+        {"op": "check", "namespace": namespace, "handle": handle, "output": output},
+    )
 
 
 def kill_command_via_supervisor(socket_path: str, *, namespace: str, handle: str, force: bool = False) -> str:

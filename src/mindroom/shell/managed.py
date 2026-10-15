@@ -7,6 +7,7 @@ through the toolkit's own check and kill functions, so every worker request stay
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import re
 from copy import deepcopy
@@ -91,8 +92,10 @@ def _managed_run(
         cwd = _CWD_RE.match(first)
         try:
             final = await _until_finished(check, kill, handle.group(1), deadline=deadline)
-        except asyncio.CancelledError:
-            await run_coroutine_until_complete(_stop(check, kill, handle.group(1)))
+        except BaseException:
+            # Cancelled or unable to follow the command: stop it rather than leave it running without its job.
+            with contextlib.suppress(Exception):
+                await run_coroutine_until_complete(_stop(check, kill, handle.group(1)))
             raise
         return f"{cwd.group(0)}{final}" if cwd is not None else final
 
@@ -116,21 +119,23 @@ async def _until_finished(
         wait = delay if deadline is None else min(delay, max(0.0, deadline - loop.time()))
         await asyncio.sleep(wait)
         delay = min(delay * 2, _POLL_MAX_SECONDS)
-        reply = str(await _internal_call(check, handle))
-        status = parse_shell_supervisor_status(reply)
+        # The status line alone, which large output can never turn into a saved-file receipt.
+        status = parse_shell_supervisor_status(str(await _internal_call(check, handle, output=False)))
         if status.state == "running":
             continue
         if status.state == "unknown":
             raise RuntimeError(_LOST_MESSAGE)
-        # A finished command, or the saved-file receipt of a redirected one.
-        return reply
+        if status.state == "error":
+            raise RuntimeError(status.output)
+        # The finished output, or the saved-file receipt of a redirected or large one.
+        return str(await _internal_call(check, handle))
 
 
 async def _stop(check: Callable[..., object], kill: Callable[..., object], handle: str) -> None:
     """Terminate the command's process group, then force it if it is still running after a short grace."""
     await _internal_call(kill, handle)
     await asyncio.sleep(_STOP_GRACE_SECONDS)
-    if parse_shell_supervisor_status(str(await _internal_call(check, handle))).state == "running":
+    if parse_shell_supervisor_status(str(await _internal_call(check, handle, output=False))).state == "running":
         await _internal_call(kill, handle, force=True)
 
 

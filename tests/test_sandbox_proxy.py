@@ -6033,12 +6033,14 @@ async def test_a_managed_worker_shell_command_polls_until_it_finishes(monkeypatc
     """A job's worker shell command that outlives its slice is polled with short requests until it finishes."""
     monkeypatch.setattr(managed_shell, "_POLL_START_SECONDS", 0.01)
     monkeypatch.setattr(managed_shell, "_POLL_MAX_SECONDS", 0.01)
-    checks = iter(["Status: RUNNING (PID 7, elapsed 1.0s)", "Status: RUNNING (PID 7, elapsed 2.0s)"])
+    statuses = iter(["Status: RUNNING (PID 7, elapsed 1.0s)", "Status: RUNNING (PID 7, elapsed 2.0s)"])
 
     def responder(_url: str, payload: dict[str, Any]) -> object:
         if payload["function_name"] == "run_shell_command":
             return {"ok": True, "result": "[cwd: /w]\nCommand timed out after 15s.\nHandle: shell:abcd1234\n"}
-        return {"ok": True, "result": next(checks, "Status: FINISHED (exit code 0, ran for 3.0s)\nOutput:\ndone")}
+        if payload["kwargs"].get("output") is False:
+            return {"ok": True, "result": next(statuses, "Status: FINISHED (exit code 0, ran for 3.0s)")}
+        return {"ok": True, "result": "Status: FINISHED (exit code 0, ran for 3.0s)\nOutput:\ndone"}
 
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
@@ -6065,7 +6067,11 @@ async def test_a_managed_worker_shell_command_polls_until_it_finishes(monkeypatc
         result = await entrypoint(args="make")
 
     assert result == "[cwd: /w]\nStatus: FINISHED (exit code 0, ran for 3.0s)\nOutput:\ndone"
-    assert [payload["function_name"] for _url, payload in calls] == ["run_shell_command"] + ["check_shell_command"] * 3
+    assert [(payload["function_name"], payload["kwargs"].get("output")) for _url, payload in calls] == [
+        ("run_shell_command", None),
+        *[("check_shell_command", False)] * 3,
+        ("check_shell_command", None),
+    ]
 
 
 @pytest.mark.asyncio

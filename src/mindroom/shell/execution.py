@@ -438,8 +438,8 @@ async def _discard_unregistered_process(
     await _cancel_pending_tasks(stdout_reader, stderr_reader)
 
 
-def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str) -> str:
-    """Poll the status of a backgrounded shell command in *registry*."""
+def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str, output: bool = True) -> str:
+    """Poll the status of a backgrounded shell command in *registry*; without ``output``, only its status line."""
     record = registry.get(handle)
     if record is None or record.namespace != namespace:
         return f"Error: Unknown handle '{handle}'"
@@ -448,21 +448,24 @@ def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle:
     elapsed = ended_at - record.started_at
 
     if record.finished:
+        status = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)"
+        if not output:
+            return status
         if record.output_receipt is not None:
             return record.output_receipt
-        output = record.stdout_buf.render(tail=record.tail)
+        output_text = record.stdout_buf.render(tail=record.tail)
         errors = record.stderr_buf.render()
-        result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
+        result = f"{status}\n"
         if record.return_code != 0 and errors:
             result += f"Stderr:\n{errors}\n"
-        result += f"Output:\n{output}"
+        result += f"Output:\n{output_text}"
         return result
 
+    status = f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)"
+    if not output:
+        return status
     partial = record.stdout_buf.render(tail=50)
-    return (
-        f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)\n"
-        f"Partial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
-    )
+    return f"{status}\nPartial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
 
 
 def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str, force: bool = False) -> str:

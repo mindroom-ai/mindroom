@@ -35,12 +35,22 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
     monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
     if request.param:
         monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, supervisor.ensure())
+    toolkit = _native_shell(tmp_path)
+    assert managed.install_managed_shell([toolkit])
+    try:
+        yield toolkit
+    finally:
+        kill_all_records(_process_registry)
+        supervisor.shutdown()
+
+
+def _native_shell(tmp_path: Path) -> Toolkit:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    toolkit = get_tool_by_name(
+    return get_tool_by_name(
         "shell",
         runtime_paths,
         disable_sandbox_proxy=True,
@@ -48,12 +58,6 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
         tool_init_overrides={"base_dir": str(tmp_path)},
         tool_output_workspace_root=tmp_path,
     )
-    assert managed.install_managed_shell([toolkit])
-    try:
-        yield toolkit
-    finally:
-        kill_all_records(_process_registry)
-        supervisor.shutdown()
 
 
 async def _run(toolkit: Toolkit, arguments: dict[str, object], *, as_job: bool = True) -> object:
@@ -152,6 +156,51 @@ async def test_a_command_whose_handle_disappears_fails(shell_toolkit: Toolkit, m
         await call.aexecute()
 
     assert "may have partly run" in str(call.error or call.result)
+
+
+@pytest.mark.asyncio
+async def test_large_running_output_does_not_end_the_call_early(shell_toolkit: Toolkit) -> None:
+    """Output big enough to be saved to a file never makes a still-running command look finished."""
+    started = asyncio.get_running_loop().time()
+
+    result = await _run(shell_toolkit, {"args": "printf '%51200s' x; sleep 2.5; echo done"})
+
+    assert asyncio.get_running_loop().time() - started >= 2.5
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_poll_stops_the_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When polling fails, the command is stopped instead of running on without its job."""
+    monkeypatch.setattr(managed, "_SLICE_SECONDS", 1)
+    monkeypatch.setattr(managed, "_POLL_START_SECONDS", 0.05)
+    monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
+    toolkit = _native_shell(tmp_path)
+    check = toolkit.functions["check_shell_command"]
+    native_check = check.entrypoint
+    assert native_check is not None
+
+    def failing_check(handle: str, output: bool = True) -> str:
+        if not output:
+            msg = "worker request failed"
+            raise RuntimeError(msg)
+        return native_check(handle)
+
+    check.entrypoint = failing_check
+    assert managed.install_managed_shell([toolkit])
+    pids = tmp_path / "pids"
+    try:
+        call = FunctionCall(
+            function=toolkit.get_async_functions()["run_shell_command"],
+            arguments={"args": f"sleep 30 & echo $$ $! > {pids}; wait"},
+        )
+        with job_control_context(JobControl()):
+            await call.aexecute()
+
+        assert "worker request failed" in str(call.error)
+        await _until_gone(await _read_pids(pids))
+    finally:
+        kill_all_records(_process_registry)
 
 
 @pytest.mark.asyncio

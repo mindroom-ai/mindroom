@@ -497,7 +497,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 return message
             return f"[cwd: {cwd}]\n{message}"
 
-        def check_shell_command(self, handle: str) -> str:
+        def check_shell_command(self, handle: str, output: bool = True) -> str:
             """Poll the status of a backgrounded shell command.
 
             Safe to call multiple times — the record is kept until automatic
@@ -506,6 +506,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             Args:
                 handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
+                output: Include the command's output; false returns only its status line.
 
             Returns:
                 Output if the command finished, or a status summary if still running.
@@ -516,8 +517,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     self._supervisor_socket,
                     namespace=self._handle_namespace,
                     handle=handle,
+                    output=output,
                 )
-            return check_command(_process_registry, namespace=self._handle_namespace, handle=handle)
+            return check_command(_process_registry, namespace=self._handle_namespace, handle=handle, output=output)
 
         def kill_shell_command(self, handle: str, force: bool = False) -> str:
             """Kill a backgrounded shell command.
