@@ -3867,7 +3867,7 @@
         },
         "description": {
           "default": "",
-          "description": "Dashboard-facing room purpose",
+          "description": "Room purpose shown in the dashboard and used as the topic of a new room or a room without one",
           "title": "Description",
           "type": "string"
         },

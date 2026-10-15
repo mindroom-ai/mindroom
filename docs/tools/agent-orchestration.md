@@ -188,7 +188,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 ## Background jobs
 
-This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
+This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; configs from `mindroom config init` turn it on.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and shell tools keep their own background commands.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
@@ -268,7 +268,7 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 
 | Action | Behavior |
 | --- | --- |
-| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes. |
+| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes, including collected ones. A call that returned its result before its wait ended never became a job and is not listed, unless its reply could not be saved. |
 | `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget. |
 | `cancel` | Ask one job to stop and return at once; the next notice reports how it ended. |
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |

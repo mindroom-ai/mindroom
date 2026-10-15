@@ -936,6 +936,12 @@ class ReplyStore:
 
         return await self._backend.read(read)
 
+    async def open_event_id(self, room_id: str, thread_id: str | None) -> str | None:
+        """Return the event of the newest unfinished reply in one conversation, which a Stop on it reaches."""
+        return await self._backend.read(
+            lambda transaction: reply_messages.open_event_id(transaction, self._principal_id, room_id, thread_id),
+        )
+
     async def event_ids_of_spans(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:
         """Return the events of a room's replies whose current span is one of these."""
         if not span_ids:

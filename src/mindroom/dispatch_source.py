@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
 from mindroom.constants import (
+    HOOK_SOURCE_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
@@ -159,6 +160,17 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     """Return canonical source-kind metadata from Matrix content."""
     source_kind = content.get(SOURCE_KIND_KEY)
     return _source_kind_from_value(source_kind)
+
+
+def hook_source_from_content(content: Mapping[str, Any]) -> str | None:
+    """Return the hook that posted Matrix content, or None when no hook posted it.
+
+    Hooks post through MindRoom's own accounts, so callers must only ask about content from a trusted sender.
+    """
+    if source_kind_from_content(content) not in {HOOK_SOURCE_KIND, HOOK_DISPATCH_SOURCE_KIND}:
+        return None
+    hook_source = content.get(HOOK_SOURCE_KEY)
+    return hook_source if isinstance(hook_source, str) and hook_source else "unknown"
 
 
 def per_fire_thread_root_event_id_from_content(content: Mapping[str, Any]) -> str | None:

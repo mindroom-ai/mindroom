@@ -1,4 +1,4 @@
-"""Tests for AI-generated Matrix room topics."""
+"""Tests for managed Matrix room topics from config descriptions or AI generation."""
 
 from __future__ import annotations
 
@@ -160,3 +160,23 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
     assert topic == "Ops topic"
     assert captured_prompt is not None
     assert "- Configured agents and teams: Research Agent, Ops Team" in captured_prompt
+
+
+@pytest.mark.asyncio
+async def test_missing_topic_is_filled_from_configured_description_without_ai(tmp_path: Path) -> None:
+    """An existing room without a topic gets its configured description and no model call."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"], rooms={"lobby": {"description": "Team lobby"}})
+    client = AsyncMock(spec=nio.AsyncClient)
+    room_id = "!lobby:example.com"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError("missing", "M_NOT_FOUND", room_id)
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$topic", room_id)
+
+    with patch("mindroom.topic_generator.generate_room_topic_ai", new_callable=AsyncMock) as generate:
+        assert await ensure_room_has_topic(client, room_id, "lobby", "Lobby", config, runtime_paths_for(config))
+
+    generate.assert_not_awaited()
+    client.room_put_state.assert_awaited_once_with(
+        room_id=room_id,
+        event_type="m.room.topic",
+        content={"topic": "Team lobby"},
+    )

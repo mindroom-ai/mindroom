@@ -282,6 +282,7 @@ class TestConfigInit:
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
         assert mind["rooms"] == ["personal"]
+        assert config["rooms"]["personal"]["description"]  # becomes the topic, so no model call writes one
         assert mind["access"] == {
             "current_room_members": False,
             "members_of_rooms": ["personal"],
@@ -308,10 +309,23 @@ class TestConfigInit:
             "update_awareness",
             "todo",
             "matrix_message",
+            {"name": "matrix_room", "defer": True},
             {"name": "thread_model", "defer": True},
             "thread_tags",
             "thread_summary",
+            "thread_resolution",
+            "compact_context",
+            "callback_manager",
+            "chat_ui",
+            "script",
+            {"name": "mcp_matrix_mcp", "defer": True},
         ]
+        assert mind["delegate_to"] == ["mind"]
+        assert mind["skill_learning"] == {"enabled": True}
+        assert mind["automations"] == ["prompt_curation", "dreaming"]
+        assert config["mcp_servers"]["matrix_mcp"]["args"] == ["matrix-mcp", "serve"]
+        assert config["tool_approval"]["rules"] == [{"match": "resolve_thread", "action": "require_approval"}]
+        assert config["background_tool_jobs"] == {"enabled": True}
         config_manager_entry = next(
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
         )
@@ -320,7 +334,6 @@ class TestConfigInit:
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "thread_model"
         )
         assert thread_model_entry.defer is True
-        assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
         assert (
             "When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess."
@@ -2970,7 +2983,7 @@ class TestVersionAndHelp:
         """Version command prints the version string."""
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
-        assert "Mindroom version" in result.output
+        assert "MindRoom version" in result.output
 
     def test_help_mentions_config(self) -> None:
         """Top-level help includes key subcommands."""

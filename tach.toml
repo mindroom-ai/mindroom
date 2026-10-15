@@ -2323,6 +2323,18 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.stop_reply"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
+    "mindroom.requester_identity",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.thread_move"
 depends_on = [
     "mindroom.constants",
@@ -3544,6 +3556,7 @@ visibility = [
     "mindroom.custom_tools.chat_ui",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
+    "mindroom.custom_tools.stop_reply",
     "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
     "mindroom.matrix.client",
@@ -4220,6 +4233,7 @@ depends_on = [
     "mindroom.model_defaults",
     "mindroom.response_admission",
     "mindroom.session_ids",
+    "mindroom.tool_system.dependencies",
 ]
 
 [[modules]]
@@ -4319,7 +4333,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix_rtc.voice_agent"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.tool_system.dependencies"]
 
 [[modules]]
 path = "mindroom.matrix_rtc.spoken_turns"
@@ -4473,6 +4487,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
+    "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.owner",
     "mindroom.config.main",
@@ -4505,6 +4520,16 @@ visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
     "mindroom.cli.local_stack",
+    "mindroom.cli.service",
+]
+
+[[modules]]
+path = "mindroom.cli.help_format"
+depends_on = []
+visibility = [
+    "mindroom.cli.config",
+    "mindroom.cli.desktop",
+    "mindroom.cli.main",
     "mindroom.cli.service",
 ]
 
@@ -4558,6 +4583,7 @@ path = "mindroom.cli.desktop"
 depends_on = [
     "mindroom.desktop.transport",
     "mindroom.cli.config",
+    "mindroom.cli.help_format",
     "mindroom.constants",
     "mindroom.desktop.bridge_components",
     "mindroom.desktop.cloudflare_access",
@@ -4607,6 +4633,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.cli.config",
     "mindroom.cli.env_file",
+    "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.constants",
     "mindroom.matrix.provisioning_env",
@@ -4641,6 +4668,7 @@ depends_on = [
     "mindroom.cli.connect",
     "mindroom.cli.desktop",
     "mindroom.cli.doctor",
+    "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",

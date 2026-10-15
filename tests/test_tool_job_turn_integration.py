@@ -104,9 +104,12 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         assert not any(run.session_state for run in session.runs)
         assert executions == topics
         assert [run.tools[0].result for run in runs if run.tools] == [f"report on {topic}" for topic in topics]
-        jobs = await runtime.list_jobs(owner=owner, depth=0)
+        jobs = runtime.retained_jobs()
         assert len(jobs) == len(topics)
         assert all(job.consumed for job in jobs)
+        # Each call returned its outcome as its own result, so none of them became a job to list.
+        with tool_runtime_context(context):
+            assert json.loads(await JobTools(paths, owner).job("list")) == []
         assert sorted(call.args[0] for call in acknowledge.await_args_list) == sorted(job.job_id for job in jobs)
         assert pending_outcomes(runtime) == []
     finally:

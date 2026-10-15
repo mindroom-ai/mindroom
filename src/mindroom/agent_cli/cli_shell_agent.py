@@ -141,6 +141,15 @@ class CliShellAgent(KnowledgeToolDescribingAgent):
         catalog = PreparedAgentToolCatalog(self, run_context, run_response, session, runtime)
         try:
             await catalog.prepare(tools, include=_cli_callable)
+            owner = lifetime.owner
+            if (
+                owner is not None
+                and owner.catalog.agent is self
+                and owner.catalog.run_context.run_id == run_context.run_id
+            ):
+                # Agno rebuilds the tools with a fresh run context when it continues this paused run, such as
+                # after a subagent returns, so the paused run's catalog retires and CLI calls join the continuation.
+                await owner.retire_binding()
             bind_response_owner(
                 catalog,
                 runtime=runtime,

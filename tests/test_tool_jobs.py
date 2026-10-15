@@ -652,6 +652,67 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_listing_skips_calls_that_returned_their_outcome_to_their_own_call(tmp_path: Path) -> None:
+    """A call whose own tool result saved its outcome never became a job; a collected job stays discoverable."""
+    runtime = await tool_job_runtime(tmp_path)
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    for job_id, returned_inline in (("inline", True), ("collected", False)):
+        await start_job(
+            runtime,
+            job_id,
+            tool_name="search",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=completed,
+        )
+        waiting = await runtime.wait(job_id, owner=job_owner(), depth=0)
+        await runtime.acknowledge_wait(job_id, waiting.claim, returned_inline=returned_inline)
+    assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["collected"]
+    # Reading the inline call's result again through job(action="wait") does not turn it into a job.
+    rereading = await runtime.wait("inline", owner=job_owner(), depth=0)
+    await runtime.acknowledge_wait("inline", rereading.claim)
+    assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["collected"]
+    await runtime.shutdown()
+    restored = await tool_job_runtime(tmp_path)
+    try:
+        await restored.recover()
+        assert [job.job_id for job in await restored.list_jobs(owner=job_owner(), depth=0)] == ["collected"]
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_listing_hides_an_inline_outcome_only_while_its_reply_holds_it(tmp_path: Path) -> None:
+    """An inline call is hidden while its reply holds the outcome, and listed again when that reply is not saved."""
+    runtime = await tool_job_runtime(tmp_path)
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        await start_job(
+            runtime,
+            "inline",
+            tool_name="search",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=completed,
+        )
+        held = await runtime.wait("inline", owner=job_owner(), depth=0)
+        runtime.hold_inline("inline", held.claim)
+        assert await runtime.list_jobs(owner=job_owner(), depth=0) == []
+        await runtime.release_wait("inline", held.claim)
+        assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["inline"]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_scoped_listing_keeps_consumed_outcomes_across_turns_and_restart(tmp_path: Path) -> None:
     """Discovery survives forgotten handles without exposing another caller or consuming results."""
     runtime = await tool_job_runtime(tmp_path)

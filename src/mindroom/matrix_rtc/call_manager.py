@@ -75,6 +75,7 @@ from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url,
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
+    MATRIX_CALLS_MODULES,
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
     LiveVoiceAgentOptions,
@@ -92,6 +93,7 @@ from mindroom.response_admission import (
 )
 from mindroom.session_ids import create_session_id
 from mindroom.token_budget import approximate_o200k_tokens, o200k_encoding
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -255,7 +257,8 @@ async def preload_matrix_call_dependencies(config: Config) -> None:
     try:
         if backends - {"live"}:
             # Realtime and cascaded calls run LiveKit in this process; it registers plugins on the main thread.
-            from livekit.plugins import openai  # noqa: F401, PLC0415
+            with optional_dependency_environment():
+                from livekit.plugins import openai  # noqa: F401, PLC0415
 
         # Call setup counts tokens; building the encoder on the event loop would stall it for about 300 ms.
         await asyncio.to_thread(o200k_encoding)
@@ -266,7 +269,7 @@ async def preload_matrix_call_dependencies(config: Config) -> None:
         logger.warning("calls_dependency_preload_failed", exc_info=True)
 
 
-def maybe_build_call_manager(
+async def maybe_build_call_manager(
     *,
     agent_name: str,
     config: Config,
@@ -279,18 +282,25 @@ def maybe_build_call_manager(
     response_admission_gate: ResponseAdmissionGate,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
 ) -> CallManager | None:
-    """Build a call manager when this agent is configured for voice calls."""
+    """Build a call manager when this agent is configured for voice calls, installing the call extra if needed."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
         return None
     if agent_name not in config.agents:
         return None
-    if not matrix_calls_dependencies_available():
-        logger.warning(
-            "calls_enabled_but_dependencies_missing",
-            agent=agent_name,
-            hint="install mindroom with the [matrix_calls] extra",
+    try:
+        # Installing the extra can take minutes; a worker thread keeps the event loop serving other bots.
+        installed = await asyncio.to_thread(
+            ensure_optional_deps,
+            MATRIX_CALLS_MODULES,
+            "matrix_calls",
+            runtime_paths,
+            missing_message="install mindroom with the [matrix_calls] extra",
         )
+    except ImportError as exc:
+        logger.warning("calls_enabled_but_dependencies_missing", agent=agent_name, hint=str(exc))
         return None
+    if installed:
+        logger.info("calls_optional_dependencies_auto_installed", agent=agent_name)
     return CallManager(
         agent_name=agent_name,
         config=config,

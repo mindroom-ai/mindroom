@@ -417,7 +417,7 @@ async def _consume_result(
     call: FunctionCall,
     timer: Timer,
 ) -> ToolCallResult:
-    value, payload = await consume_tool_job(runtime, job, claim, function_call=call)
+    value, payload = await consume_tool_job(runtime, job, claim, function_call=call, returned_inline=True)
     timer.elapsed_time = payload.elapsed
     call.result = value
     # Every outcome but completion tells the model why, such as the reason an approval was denied.
