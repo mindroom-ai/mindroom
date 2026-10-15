@@ -124,6 +124,7 @@ from mindroom.tools.script import script_tools
 from mindroom.tools.searxng import searxng_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
+from mindroom.tools.shared_directories import shared_directories_tools
 from mindroom.tools.shell import shell_tools
 from mindroom.tools.shopify import shopify_tools
 from mindroom.tools.slack import slack_tools
@@ -263,6 +264,7 @@ __all__ = [
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",
+    "shared_directories_tools",
     "shell_tools",
     "shopify_tools",
     "slack_tools",

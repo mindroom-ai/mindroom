@@ -1,0 +1,224 @@
+"""Tests for the tool that lets an agent share a directory with other agents."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import nio
+import pytest
+
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.custom_tools.shared_directories import SharedDirectoryTools
+from mindroom.message_target import MessageTarget
+from mindroom.shared_directories.store import load_shared_directories
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+from tests.identity_helpers import entity_ids, persist_entity_accounts
+
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
+
+_ROOM = "!room:localhost"
+_USER = "@user:localhost"
+
+
+def _config(tmp_path: Path, **bob_overrides: object) -> Config:
+    allowed = ResponderAccessConfig(users=[_USER])
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "alice": AgentConfig(display_name="Alice", access=allowed),
+                "bob": AgentConfig(**{"display_name": "Bob", "access": allowed, **bob_overrides}),
+                "carol": AgentConfig(display_name="Carol", access=allowed, private=AgentPrivateConfig(per="user")),
+            },
+            teams={"crew": TeamConfig(display_name="Crew", role="Crew", agents=["alice", "bob"])},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+
+def _context(config: Config, agent_name: str = "alice") -> ToolRuntimeContext:
+    runtime_paths = runtime_paths_for(config)
+    persist_entity_accounts(config, runtime_paths)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = entity_ids(config, runtime_paths)[agent_name].full_id
+    return make_test_tool_runtime_context(
+        agent_name=agent_name,
+        target=MessageTarget.resolve(room_id=_ROOM, thread_id=None, reply_to_event_id=None),
+        requester_id=_USER,
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+
+
+def _call(context: ToolRuntimeContext, function: str, *args: str) -> dict[str, object]:
+    with tool_runtime_context(context):
+        return json.loads(getattr(SharedDirectoryTools(), function)(*args))
+
+
+def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
+    """The owner creates a directory, invites an agent, and lists it as read-write."""
+    context = _context(_config(tmp_path))
+    storage_root = context.runtime_paths.storage_root
+
+    created = _call(context, "create_shared_directory", "report")
+    invited = _call(context, "invite_to_shared_directory", "report", "bob")
+    listed = _call(context, "list_shared_directories")
+
+    assert created["status"] == "ok"
+    assert created["path"] == str(storage_root / "shared_directories" / "alice" / "report")
+    assert "alice: worker restarts on the next tool call" in str(created["message"])
+    assert invited["status"] == "ok"
+    assert invited["members"] == ["bob"]
+    assert "bob: worker restarts on the next tool call" in str(invited["message"])
+    assert listed["directories"] == [
+        {
+            "owner": "alice",
+            "name": "report",
+            "members": ["bob"],
+            "access": "read-write",
+            "path": str(storage_root / "shared_directories" / "alice" / "report"),
+        },
+    ]
+
+
+def test_member_sees_the_directory_read_only(tmp_path: Path) -> None:
+    """An invited agent lists the directory it joined as read-only; others see nothing."""
+    config = _config(tmp_path)
+    _call(_context(config), "create_shared_directory", "report")
+    _call(_context(config), "invite_to_shared_directory", "report", "bob")
+
+    bob_listing = _call(_context(config, "bob"), "list_shared_directories")
+
+    assert [(entry["owner"], entry["access"]) for entry in bob_listing["directories"]] == [("alice", "read-only")]
+
+
+@pytest.mark.parametrize(
+    ("target", "fragment"),
+    [
+        ("alice", "cannot invite yourself"),
+        ("carol", "carol is private"),
+        ("crew", "'crew' is not an agent"),
+        ("ghost", "'ghost' is not an agent"),
+    ],
+)
+def test_invite_refuses_invalid_targets(tmp_path: Path, target: str, fragment: str) -> None:
+    """Only other configured, non-private agents can be invited."""
+    context = _context(_config(tmp_path))
+    _call(context, "create_shared_directory", "report")
+
+    payload = _call(context, "invite_to_shared_directory", "report", target)
+
+    assert payload["status"] == "error"
+    assert fragment in str(payload["message"])
+    assert load_shared_directories(context.runtime_paths)[0].members == ()
+
+
+def test_invite_refuses_requester_without_access_to_the_invitee(tmp_path: Path) -> None:
+    """A requester cannot expose a directory to an agent they may not use themselves."""
+    context = _context(_config(tmp_path, access=ResponderAccessConfig(users=["@other:localhost"])))
+    _call(context, "create_shared_directory", "report")
+
+    payload = _call(context, "invite_to_shared_directory", "report", "bob")
+
+    assert payload["status"] == "error"
+    assert "may not use bob" in str(payload["message"])
+    assert load_shared_directories(context.runtime_paths)[0].members == ()
+
+
+def test_invite_refuses_when_no_user_is_acting(tmp_path: Path) -> None:
+    """An agent acting in its own name cannot invite, as for any user-only action."""
+    context = _context(_config(tmp_path))
+    _call(context, "create_shared_directory", "report")
+    context = replace(context, requester_id=context.client.user_id)
+
+    payload = _call(context, "invite_to_shared_directory", "report", "bob")
+
+    assert payload["status"] == "error"
+    assert "on behalf of a user" in str(payload["message"])
+
+
+def test_private_agents_cannot_share(tmp_path: Path) -> None:
+    """A private agent cannot create a shared directory."""
+    context = _context(_config(tmp_path), "carol")
+
+    payload = _call(context, "create_shared_directory", "report")
+
+    assert payload["status"] == "error"
+    assert "Private agents cannot share directories" in str(payload["message"])
+    assert load_shared_directories(context.runtime_paths) == ()
+
+
+@pytest.mark.parametrize(
+    ("function", "args"),
+    [
+        ("invite_to_shared_directory", ("report", "alice")),
+        ("remove_from_shared_directory", ("report", "alice")),
+        ("delete_shared_directory", ("report",)),
+    ],
+)
+def test_only_the_owner_changes_a_directory(tmp_path: Path, function: str, args: tuple[str, ...]) -> None:
+    """Another agent cannot change or delete a directory it does not own."""
+    config = _config(tmp_path)
+    _call(_context(config), "create_shared_directory", "report")
+
+    payload = _call(_context(config, "bob"), function, *args)
+
+    assert payload["status"] == "error"
+    assert "bob has no shared directory named 'report'" in str(payload["message"])
+    assert len(load_shared_directories(runtime_paths_for(config))) == 1
+
+
+def test_invite_and_remove_are_idempotent(tmp_path: Path) -> None:
+    """Repeating an invitation or removal reports the state without restarting anything."""
+    context = _context(_config(tmp_path))
+    _call(context, "create_shared_directory", "report")
+    _call(context, "invite_to_shared_directory", "report", "bob")
+
+    again = _call(context, "invite_to_shared_directory", "report", "bob")
+    removed = _call(context, "remove_from_shared_directory", "report", "bob")
+    removed_again = _call(context, "remove_from_shared_directory", "report", "bob")
+
+    assert again["status"] == "ok"
+    assert "bob is already a member" in str(again["message"])
+    assert "restart" not in str(again["message"])
+    assert "bob: worker restarts" in str(removed["message"])
+    assert removed_again["status"] == "ok"
+    assert "bob is not a member" in str(removed_again["message"])
+    assert "restart" not in str(removed_again["message"])
+
+
+def test_delete_removes_the_directory_and_names_every_restart(tmp_path: Path) -> None:
+    """Deleting forgets the directory, removes its files, and names the owner and members."""
+    context = _context(_config(tmp_path))
+    created = _call(context, "create_shared_directory", "report")
+    _call(context, "invite_to_shared_directory", "report", "bob")
+
+    payload = _call(context, "delete_shared_directory", "report")
+
+    assert payload["status"] == "ok"
+    assert "alice and bob: worker restarts" in str(payload["message"])
+    assert not Path(str(created["path"])).exists()
+    assert load_shared_directories(context.runtime_paths) == ()
+
+
+def test_invalid_name_is_reported_to_the_model(tmp_path: Path) -> None:
+    """A refused name comes back as a tool error, not an exception."""
+    payload = _call(_context(_config(tmp_path)), "create_shared_directory", "../x")
+
+    assert payload["status"] == "error"
+    assert "Shared directory names" in str(payload["message"])
