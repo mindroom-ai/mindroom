@@ -199,12 +199,10 @@ def remove_shared_directory_member(runtime_paths: RuntimePaths, *, owner: str, n
 
 
 def delete_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: str) -> SharedDirectory:
-    """Forget one directory, then remove its tree without following links."""
+    """Remove one directory's tree without following links, then forget it."""
     with _ledger_lock:
         directories = _read_ledger(runtime_paths)
         directory = _existing(directories, owner, name)
-        del directories[f"{owner}/{name}"]
-        _write_ledger(runtime_paths, directories)
         try:
             with open_directory_within_root(
                 runtime_paths.storage_root,
@@ -213,4 +211,9 @@ def delete_shared_directory(runtime_paths: RuntimePaths, *, owner: str, name: st
                 remove_directory_tree_at(owner_fd, name)
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            msg = f"The shared directory '{name}' could not be deleted: {exc.strerror or exc}"
+            raise SharedDirectoryError(msg) from exc
+        del directories[f"{owner}/{name}"]
+        _write_ledger(runtime_paths, directories)
         return directory

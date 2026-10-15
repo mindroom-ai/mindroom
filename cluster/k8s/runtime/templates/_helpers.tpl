@@ -89,7 +89,7 @@ app.kubernetes.io/component: runtime
 
 {{- /*
 First path component below storage.mountPath that holds a file-sourced config, or "" when there is none.
-The static runner sidecar mounts the agents and private_instances directories, so the config must stay outside them.
+The static runner sidecar mounts the agents, private_instances, and shared_directories directories, so the config must stay outside them.
 */ -}}
 {{- define "mindroom-runtime.fileConfigStorageSubpath" -}}
 {{- if eq (include "mindroom-runtime.configSource" .) "file" -}}

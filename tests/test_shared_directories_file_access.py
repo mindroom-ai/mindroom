@@ -161,3 +161,17 @@ def test_worker_roots_are_the_mounted_shares(tmp_path: Path, planted: str) -> No
         SharedDirectoryRoot(path=shared_root / "shared_directories" / "alice" / "report", writable=True),
         SharedDirectoryRoot(path=shared_root / "shared_directories" / "carl" / "notes", writable=True),
     )
+
+
+def test_static_runner_roots_are_below_its_storage_root(tmp_path: Path) -> None:
+    """The shared sidecar mounts shared directories below its own storage root and sets no shared root."""
+    (tmp_path / "storage" / "shared_directories" / "alice" / "report").mkdir(parents=True)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true"},
+    )
+
+    assert shared_directory_roots(runtime_paths, None, None) == (
+        SharedDirectoryRoot(path=runtime_paths.storage_root / "shared_directories" / "alice" / "report", writable=True),
+    )

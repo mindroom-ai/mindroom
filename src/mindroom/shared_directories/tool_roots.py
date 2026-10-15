@@ -44,11 +44,12 @@ class _SharedDirectoryAwareToolkit(Protocol):
 
 
 def _mounted_roots(runtime_paths: RuntimePaths) -> tuple[SharedDirectoryRoot, ...]:
-    # A worker mounts exactly the directories its agents own or joined, read-only where they only joined.
+    # A dedicated worker mounts exactly the directories its agents own or joined, read-only where they only
+    # joined, below its shared storage root; the shared sidecar mounts every directory below its own storage root.
     shared_storage_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"], default="")
-    if not shared_storage_root:
-        return ()
-    root = Path(shared_storage_root) / SHARED_DIRECTORIES_DIRNAME
+    root = (
+        Path(shared_storage_root) if shared_storage_root else runtime_paths.storage_root
+    ) / SHARED_DIRECTORIES_DIRNAME
     roots: list[SharedDirectoryRoot] = []
     try:
         with os.scandir(root) as owner_entries:

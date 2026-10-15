@@ -157,6 +157,7 @@ spec:
             - {{ printf "%s/sandbox-runner" $storageRoot | quote }}
             - {{ printf "%s/agents" $storageRoot | quote }}
             - {{ printf "%s/private_instances" $storageRoot | quote }}
+            - {{ printf "%s/shared_directories" $storageRoot | quote }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
@@ -614,6 +615,9 @@ spec:
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ printf "%s/private_instances" $storageRoot | quote }}
               subPath: private_instances
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ printf "%s/shared_directories" $storageRoot | quote }}
+              subPath: shared_directories
             - name: sandbox-workspace
               mountPath: /app/workspace
         {{- end }}

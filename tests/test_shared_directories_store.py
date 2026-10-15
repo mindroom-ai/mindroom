@@ -179,3 +179,19 @@ def test_concurrent_invites_keep_every_member(tmp_path: Path) -> None:
         thread.join()
 
     assert load_shared_directories(runtime_paths)[0].members == tuple(sorted(members))
+
+
+def test_delete_keeps_the_record_when_the_owner_directory_is_a_link(tmp_path: Path) -> None:
+    """A linked owner directory is never followed, and the record stays so the delete can be retried."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    create_shared_directory(runtime_paths, owner="alice", name="report", now=_NOW)
+    owner_directory = runtime_paths.storage_root / "shared_directories" / "alice"
+    moved = tmp_path / "moved"
+    owner_directory.rename(moved)
+    owner_directory.symlink_to(moved)
+
+    with pytest.raises(SharedDirectoryError, match="could not be deleted"):
+        delete_shared_directory(runtime_paths, owner="alice", name="report")
+
+    assert (moved / "report").is_dir()
+    assert [directory.name for directory in load_shared_directories(runtime_paths)] == ["report"]

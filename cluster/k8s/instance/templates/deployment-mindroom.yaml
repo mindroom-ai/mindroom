@@ -93,6 +93,7 @@ spec:
         - "{{ .Values.storagePath }}/sandbox-runner"
         - "{{ .Values.storagePath }}/agents"
         - "{{ .Values.storagePath }}/private_instances"
+        - "{{ .Values.storagePath }}/shared_directories"
         volumeMounts:
         - name: storage
           mountPath: {{ .Values.storagePath }}
