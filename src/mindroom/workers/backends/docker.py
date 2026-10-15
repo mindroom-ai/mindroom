@@ -1225,6 +1225,7 @@ class DockerWorkerBackend:
                 read_only=True,
                 tmpfs=_WORKER_TMPFS,
                 extra_hosts=_WORKER_EXTRA_HOSTS,
+                runtime=self.config.runtime,
                 **security_kwargs,
             )
 
@@ -1591,6 +1592,8 @@ class DockerWorkerBackend:
         }
         if self.config.security_policy == "computer":
             config_payload["runtime_security"] = docker_worker_security_policy_signature()
+        if self.config.runtime is not None:
+            config_payload["runtime"] = self.config.runtime
         normalized = json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

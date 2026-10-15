@@ -505,6 +505,9 @@ Unsupported resources or oversized results produce a tool error.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and use the pod's `RuntimeDefault` seccomp profile.
   Runtimes that block Chromium's namespace sandbox need the profile described in [Worker Computer](../tools/worker-computer.md#browser-and-container-sandboxing).
 - Dedicated Docker workers can use the hardened `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, which Worker Computer requires; see [Browser and container sandboxing](../tools/worker-computer.md#browser-and-container-sandboxing).
+- Worker containers share the host kernel, so a kernel bug can let worker code escape its container.
+  To keep worker code off the host kernel, register a sandboxed runtime with the Docker daemon and set `MINDROOM_DOCKER_WORKER_RUNTIME` to its name, such as `runsc` for gVisor or `io.containerd.kata.v2` for Kata Containers, which runs each worker in its own virtual machine and needs KVM.
+  On Kubernetes, set [`workers.kubernetes.runtimeClassName`](kubernetes.md#worker-settings) instead.
 
 ## Environment variable reference
 
@@ -534,6 +537,7 @@ To deploy that backend without Helm, see [Worker settings](kubernetes.md#worker-
 |----------|-------------|---------|
 | `MINDROOM_DOCKER_WORKER_IMAGE` | Container image for dedicated Docker workers | _(required for `docker`)_ |
 | `MINDROOM_DOCKER_WORKER_SECURITY_POLICY` | `runtime_default` or `computer`; Worker Computer requires `computer` | `runtime_default` |
+| `MINDROOM_DOCKER_WORKER_RUNTIME` | Docker runtime name for every worker container, as registered in the Docker daemon config; changing it recreates each worker the next time it is used | Docker daemon default |
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the container | `/app/config-host/config.yaml` |

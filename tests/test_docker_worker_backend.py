@@ -675,6 +675,7 @@ def _backend(
     *,
     idle_timeout_seconds: float = 60.0,
     security_policy: Literal["runtime_default", "computer"] = "runtime_default",
+    runtime: str | None = None,
     config_text: str = "agents: {}\n",
     runtime_paths: RuntimePaths | None = None,
     storage_path: Path | None = None,
@@ -689,6 +690,7 @@ def _backend(
         host_config_path=tmp_path / "config.yaml" if host_config_path is None else host_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
         security_policy=security_policy,
+        runtime=runtime,
         ready_timeout_seconds=5.0,
         name_prefix="mindroom-worker",
         publish_host="127.0.0.1",
@@ -1696,6 +1698,65 @@ def test_docker_workers_run_with_read_only_root_filesystem(
     assert writable_container.removed == 1
     assert writable_container.started == 0
     assert fake_client.containers.run_calls[1]["read_only"] is True
+
+
+def test_docker_workers_run_under_the_configured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A sandboxed runtime such as gVisor or Kata keeps worker code off the host kernel."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime="runsc")
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert fake_client.containers.run_calls[0]["runtime"] == "runsc"
+
+
+@pytest.mark.parametrize(("raw_runtime", "expected_runtime"), [(" runsc ", "runsc"), ("", None)])
+def test_docker_worker_runtime_reads_from_env(
+    tmp_path: Path,
+    raw_runtime: str,
+    expected_runtime: str | None,
+) -> None:
+    """A blank runtime keeps the Docker daemon's default runtime."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_RUNTIME": raw_runtime,
+        },
+    )
+
+    assert _DockerWorkerBackendConfig.from_runtime(runtime_paths).runtime == expected_runtime
+
+
+def test_docker_backend_recreates_container_when_runtime_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Workers started under the daemon's default runtime are replaced once a runtime is configured."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    sandboxed_backend = DockerWorkerBackend(
+        config=replace(backend.config, runtime="runsc"),
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+    )
+    monkeypatch.setattr(
+        sandboxed_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{sandboxed_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+    sandboxed_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert [run_call["runtime"] for run_call in fake_client.containers.run_calls] == [None, "runsc"]
 
 
 def test_docker_workers_reach_the_docker_host_by_name(

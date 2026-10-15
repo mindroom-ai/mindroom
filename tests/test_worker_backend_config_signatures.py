@@ -615,6 +615,7 @@ def test_docker_signature_changes_with_daemon_transport(tmp_path: Path) -> None:
         ("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:9.9.9"),
         ("MINDROOM_DOCKER_WORKER_PORT", "9100"),
         ("MINDROOM_DOCKER_WORKER_NAME_PREFIX", "other-prefix"),
+        ("MINDROOM_DOCKER_WORKER_RUNTIME", "runsc"),
         ("MINDROOM_DOCKER_WORKER_ENV_JSON", '{"EXTRA_ONE": "changed"}'),
         ("MINDROOM_DOCKER_WORKER_LABELS_JSON", '{"team": "other"}'),
     ],
