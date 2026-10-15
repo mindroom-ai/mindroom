@@ -226,6 +226,7 @@ if TYPE_CHECKING:
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.event_journal import JournalEvent, PrincipalStore
     from mindroom.history.types import HistoryScope
+    from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.identity import MatrixID
@@ -3818,18 +3819,18 @@ class ResponseRunner:
 
     def _bind_mid_turn_context(self, request: ResponseRequest) -> None:
         """Only successfully refreshed public history may authorize continuing tools."""
-        bind_mid_turn_conversation_context(
-            lambda: (
-                None
-                if request.requires_model_history_refresh
-                else conversation_context_before_sources(
-                    request.thread_history,
-                    source_event_ids=request.sources.logical_source_event_ids,
-                    thread_id=request.thread_id,
-                    config=self.deps.runtime.config,
-                    runtime_paths=self.deps.runtime_paths,
-                )
-            ),
+        bind_mid_turn_conversation_context(lambda: self._judgment_context(request))
+
+    def _judgment_context(self, request: ResponseRequest) -> tuple[JudgmentMessage, ...] | None:
+        """Return the public thread text judges read, or None until the history is refreshed."""
+        if request.requires_model_history_refresh:
+            return None
+        return conversation_context_before_sources(
+            request.thread_history,
+            source_event_ids=request.sources.logical_source_event_ids,
+            thread_id=request.thread_id,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
         )
 
     async def _prepare_request_after_lock(
@@ -5865,17 +5866,6 @@ class ResponseRunner:
                 exception_type=error.__class__.__name__,
             )
             return resolved_model
-        context = (
-            None
-            if request.requires_model_history_refresh
-            else conversation_context_before_sources(
-                request.thread_history,
-                source_event_ids=request.sources.logical_source_event_ids,
-                thread_id=request.thread_id,
-                config=config,
-                runtime_paths=self.deps.runtime_paths,
-            )
-        )
         return await select_cold_cache_model(
             agent.cold_cache,
             config=config,
@@ -5884,7 +5874,7 @@ class ResponseRunner:
             agent_model=resolved_model,
             cheap_model=cheap_model,
             session=session,
-            context=context,
+            context=self._judgment_context(request),
             prompt=request.prompt,
             now=time.time(),
         )
