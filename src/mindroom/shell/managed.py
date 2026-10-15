@@ -14,7 +14,6 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.logging_config import get_logger
 from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS
 from mindroom.shell.supervisor import parse_shell_supervisor_status
 from mindroom.tool_jobs.control import job_owns_execution
@@ -27,11 +26,11 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-logger = get_logger(__name__)
-
 _SLICE_SECONDS = 15
 # A call that cannot continue in the background must not hold its reply forever.
 _NOT_A_JOB_LIMIT_SECONDS = DEFAULT_RUN_TIMEOUT_SECONDS
+# Long enough that a job's foreground command never turns into a handle nothing could follow.
+_FOREGROUND_SECONDS = 7 * 24 * 60 * 60
 _POLL_START_SECONDS = 1.0
 _POLL_MAX_SECONDS = 5.0
 _STOP_GRACE_SECONDS = 0.5
@@ -64,12 +63,11 @@ def install_managed_shell(tools: Sequence[Toolkit]) -> bool:
         kill_function = functions.get("kill_shell_command")
         check = check_function.entrypoint if check_function is not None else None
         kill = kill_function.entrypoint if kill_function is not None else None
-        if check is None or kill is None:
-            # Settings that remove check or kill leave nothing to follow a long command with.
-            logger.warning("managed_shell_needs_check_and_kill", toolkit=toolkit.name)
-            continue
         original = run.entrypoint
-        managed = _managed_run(original, check, kill)
+        # Settings that remove check or kill leave no handle to follow, so such a shell waits in the foreground.
+        managed = (
+            _managed_run(original, check, kill) if check is not None and kill is not None else _foreground_run(original)
+        )
         declare_tool_schema_source(managed, original)
         run.entrypoint = managed
         run.parameters = _without_timeout(run.parameters)
@@ -79,6 +77,15 @@ def install_managed_shell(tools: Sequence[Toolkit]) -> bool:
             toolkit.async_functions.pop(name, None)
         installed = True
     return installed
+
+
+def _foreground_run(run: Callable[..., object]) -> Callable[..., object]:
+    async def run_shell_command(args: list[str] | str, tail: int = 100, **kwargs: Any) -> object:  # noqa: ANN401
+        kwargs.pop("timeout", None)
+        wait = _FOREGROUND_SECONDS if job_owns_execution() else _NOT_A_JOB_LIMIT_SECONDS
+        return await _call(run, args=args, tail=tail, timeout=wait, **kwargs)
+
+    return run_shell_command
 
 
 def _managed_run(

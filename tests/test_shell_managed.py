@@ -172,14 +172,33 @@ async def test_a_timeout_from_an_older_call_is_ignored(shell_toolkit: Toolkit) -
     assert "hi" in str(call.result)
 
 
-def test_a_shell_configured_without_check_and_kill_stays_native(tmp_path: Path) -> None:
-    """A shell whose settings remove its check and kill functions keeps its native run instead of disappearing."""
+@pytest.mark.asyncio
+async def test_a_shell_configured_without_check_and_kill_runs_in_the_foreground(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell whose settings remove check and kill still runs each command to completion, and cancelling stops it."""
+    monkeypatch.setattr(managed, "_SLICE_SECONDS", 1)
+    monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
     toolkit = _native_shell(tmp_path)
-    toolkit.functions.pop("check_shell_command")
-    toolkit.async_functions.pop("check_shell_command", None)
-
-    assert not managed.install_managed_shell([toolkit])
-    assert "timeout" in toolkit.get_async_functions()["run_shell_command"].parameters["properties"]
+    for name in ("check_shell_command", "kill_shell_command"):
+        toolkit.functions.pop(name)
+        toolkit.async_functions.pop(name, None)
+    assert managed.install_managed_shell([toolkit])
+    run = toolkit.get_async_functions()["run_shell_command"]
+    assert "timeout" not in run.parameters["properties"]
+    pids = tmp_path / "pids"
+    try:
+        assert "done" in str(await _run(toolkit, {"args": "sleep 1.6; echo done"}))
+        call = asyncio.create_task(_run(toolkit, {"args": f"sleep 30 & echo $$ $! > {pids}; wait"}))
+        recorded = await _read_pids(pids)
+        await asyncio.sleep(1.3)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        await _until_gone(recorded)
+    finally:
+        kill_all_records(_process_registry)
 
 
 @pytest.mark.asyncio
