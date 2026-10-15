@@ -256,11 +256,13 @@ The owner reads and writes the directory, and invited agents only read it.
 Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories and list them by absolute path.
 Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
 
-An agent can be invited only on behalf of a user who may use that agent, and private agents can neither create nor join shared directories.
+An agent can be invited only on behalf of a user who may use it outside the current room, through `access.users`, administrator rights, `access.members_of_rooms`, or the default access of its configured rooms; `access.current_room_members` does not count.
+Private agents can neither create nor join shared directories.
 Invited agents read the directory with `shell`, `python`, `file`, or `coding` and do not need `shared_directories` themselves.
-Creating, joining, leaving, or deleting a directory restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
+Creating or deleting a directory, and inviting or removing an agent, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
 
-Only [dedicated Docker and Kubernetes workers](../deployment/sandbox-proxy.md#worker-scopes) keep shared directories read-only for invited agents and out of reach for everyone else; with the Kubernetes `static_runner` sidecar or without workers, every agent can read and write every shared directory.
+Only [dedicated Docker and Kubernetes workers](../deployment/sandbox-proxy.md#worker-scopes) keep shared directories read-only for invited agents and out of reach for agents in other workers; a `worker_scope: user` worker serves several agents, which all reach what any of them owns or joined.
+With the Kubernetes `static_runner` sidecar or without workers, every agent can read and write every shared directory.
 
 ```yaml
 agents:

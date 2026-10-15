@@ -40,7 +40,7 @@ Automations likewise run for a private instance only as the requester that recor
 A `user` worker mounts several agents' workspaces, so code working in one of them can read and write the others.
 
 A shared directory lives at `shared_directories/<owner>/<name>/` and mounts read-write into its owner's dedicated workers and read-only into each member's.
-No dedicated worker mounts `shared_directories/` or an owner directory below it, so worker code cannot replace a directory another worker mounts; the primary creates and empties these directories through no-follow descriptors and reads files there only through the path tools' no-follow confinement.
+No dedicated worker mounts `shared_directories/` or an owner directory below it, so worker code cannot replace a directory another worker mounts; the primary creates and empties these directories through no-follow descriptors and reads and writes files there only through the path tools' no-follow confinement and atomic writes.
 The `static_runner` sidecar can write `shared_directories/`, so beside it primary-process `file` and `coding` reach no shared directory, which keeps a replaced owner directory from leading them into primary-only storage.
 A workspace or shared directory is mounted only when it is a real directory reached from the storage root without links.
 Because Docker resolves mount targets again on every container start, a worker whose mount target inside its writable root was replaced with a link by worker code is refused when it is created or restarted.
@@ -134,7 +134,7 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
 - The unconfined non-code tools `composio`, `postgres`, `redshift`, `browserbase`, and `slack` do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 - The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the pinned directory and paths that lead outside it, but then walk and read by path.
-  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`.
+  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace or shared directory, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`, or an owner's dedicated worker writing a shared directory that another agent's primary-process `file` or `coding` lists.
   Code that swaps the workspace, a checked directory, or a file for a link between that check and the walk can make that one call list or return any file the primary process can read, and a planted FIFO can stall a `coding` content search.
   By default these tools run in a worker, where they see only what the worker already mounts.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
