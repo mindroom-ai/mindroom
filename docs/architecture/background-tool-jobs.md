@@ -15,6 +15,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
 - A standard agent's shell command runs to completion as one call, so its job owns the whole command; a short native timeout slice and internal polling keep each worker request well inside the worker's request timeouts.
+  A shell whose settings remove check or kill has no handle to poll, so its command waits in the foreground in one request.
   Minimal mode keeps the native handles because its Bash polls and stops them itself, and never creates jobs.
 - The response's `mindroom-agent` owner closes through the response's execution resources, so a shell job that outlives its reply keeps the CLI until the last job settles; cancelling one shell window stops only that window's calls.
 - Saved custom generator events replay as fixed SDK subclasses, so saved data never chooses the class or methods that run.

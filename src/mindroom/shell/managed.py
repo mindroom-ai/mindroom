@@ -1,7 +1,8 @@
 """Run a standard agent's shell command to completion as one call, so its background job owns the whole run.
 
 The command starts with a short native timeout slice. A command that outlives the slice is polled and stopped
-through the toolkit's own check and kill functions, so every worker request stays short.
+through the toolkit's own check and kill functions, so every worker request stays short. A shell whose settings
+remove check or kill instead waits in the foreground, in one request as long as the command runs.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ _FOREGROUND_SECONDS = 7 * 24 * 60 * 60
 _POLL_START_SECONDS = 1.0
 _POLL_MAX_SECONDS = 5.0
 _STOP_GRACE_SECONDS = 0.5
-_HANDLE_RE = re.compile(r"^Handle: (shell:[0-9a-f]+)$", re.MULTILINE)
+# Only the native reply for a command that outlived its timeout, never a command's own output naming a handle.
+_HANDLE_RE = re.compile(r"\A(?:\[cwd: [^\n]*\]\n)?Command timed out after [^\n]*\nHandle: (shell:[0-9a-f]+)\n")
 _CWD_RE = re.compile(r"^\[cwd: [^\n]*\]\n")
 _LOST_MESSAGE = "The runtime running this command restarted, so its output is lost; it may have partly run."
 _DESCRIPTION = (

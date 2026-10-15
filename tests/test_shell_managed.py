@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 from typing import TYPE_CHECKING
 
 import pytest
@@ -108,6 +109,35 @@ async def test_a_command_longer_than_the_slice_returns_its_final_output(shell_to
     assert "done" in str(result)
     assert "Handle:" not in str(result)
     assert str(result).startswith("[cwd: ")
+
+
+@pytest.mark.asyncio
+async def test_a_detached_child_outlives_a_command_longer_than_the_slice(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+) -> None:
+    """A server started with nohup keeps running after its starting command ends, however long that took."""
+    pid_file = tmp_path / "server.pid"
+    command = f"nohup sleep 30 > /dev/null 2>&1 & echo $! > {pid_file}; sleep 1.6; echo started"
+
+    result = await _run(shell_toolkit, {"args": command})
+
+    pid = int(pid_file.read_text())
+    try:
+        assert "started" in str(result)
+        await asyncio.sleep(0.3)
+        assert _alive(pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_output_that_mentions_a_handle_is_not_a_backgrounded_command(shell_toolkit: Toolkit) -> None:
+    """A quick command printing a handle line, such as an old log, returns its output instead of polling."""
+    result = await _run(shell_toolkit, {"args": "printf 'Handle: shell:deadbeef\\n'"})
+
+    assert "Handle: shell:deadbeef" in str(result)
 
 
 @pytest.mark.asyncio
