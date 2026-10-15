@@ -186,7 +186,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and shell tools keep their own background commands.
+With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
 An approval that needed a job fails when it resumes while the option is off.
 
@@ -214,10 +214,10 @@ The generic runtime adds no `background_after`, creates no job, and does not rel
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-In a Matrix conversation, a standard agent's shell command runs until it finishes, like any other managed call: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command and the processes it started.
-Its shell then has no `timeout`, `check_shell_command`, or `kill_shell_command`, and a shell call that cannot run as a job, such as during a voice call, is stopped after 120 seconds.
+A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command and the processes it started.
+A shell call that cannot run as a job, such as during a voice call, in minimal mode, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
-Listing `shell` in `exclude_toolkits` restores the native `timeout` and `shell:...` handles, which minimal-mode agents always keep.
+Tools that run long in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/) are not limited by the worker's request timeouts while they run as a job.
 
 ### When a call becomes a job
 
@@ -266,12 +266,13 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 
 | Action | Behavior |
 | --- | --- |
-| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes. |
-| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget. |
+| `list` | Discover accessible jobs, active first, with their status, saved summaries, the latest progress of running jobs, bounded pagination, and retained terminal outcomes. |
+| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget; a wait that times out returns the job's latest progress. |
 | `cancel` | Ask one job to stop and return at once; the next notice reports how it ended. |
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.

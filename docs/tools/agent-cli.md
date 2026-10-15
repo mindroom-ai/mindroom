@@ -65,7 +65,7 @@ Use it for self-contained tasks where the child does not need its role, instruct
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
-A minimal [authored subagent](agent-orchestration.md#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
+A minimal [authored subagent](agent-orchestration.md#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or `shell.run_shell_command`.
 Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
 ## Standard mode
@@ -139,6 +139,7 @@ After exit code `4`, check the original call ID before retrying, because submitt
 
 CLI calls follow the agent's existing approval rules and interactive questions, and an approval applies to the exact tool and arguments shown.
 Each Bash command starts a fresh shell: workspace files persist, but shell variables and directory changes do not carry over.
+A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far; start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
 A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.
 `calls wait` on earlier receipts works until the response ends.
@@ -154,7 +155,7 @@ Minimal Bash runs where the agent's ordinary shell runs.
 Every mode that uses `mindroom-agent` needs the `shell` tool on the agent and MindRoom running with its API server, not `--no-api`.
 Minimal mode and minimal subagents also need:
 
-- the shell's run, check, and kill commands allowed;
+- the shell's `run_shell_command` allowed;
 - an agent workspace, which `memory_backend: file` or a `private` agent provides.
 
 `!mode <agent> minimal` lists every missing requirement at once.

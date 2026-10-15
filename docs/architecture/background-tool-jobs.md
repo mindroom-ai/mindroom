@@ -14,9 +14,12 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   A cancellation needs no acknowledgement and gets no follow-up, since the person who cancelled already knows, and a silent schedule's jobs get none, so the schedule stays silent.
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
-- A standard agent's shell command runs to completion as one call, so its job owns the whole command; a short native timeout slice and internal polling keep each worker request well inside the worker's request timeouts.
-  A shell whose settings remove check or kill has no handle to poll, so its command waits in the foreground in one request.
-  Minimal mode keeps the native handles because its Bash polls and stops them itself, and never creates jobs.
+- Jobs are the only way long work runs in the background, so the shell stops a command at its `timeout` instead of handing back a handle of its own.
+  A job's call has no default limit and any other call has 120 seconds, so a call that holds a reply always returns; Desktop shell and script runs keep the handle engine, because their lifecycles are not model calls.
+- A worker `/execute` call streams its progress and a keep-alive every 5 seconds before its result line, so a job's call can run past every request timeout, a silent connection means the runner is gone, and a primary that stops reading stops the call.
+  A call that is not a job keeps its limits, which the primary checks as lines arrive; persistent browser actions keep one response, because cancelling one closes the shared browser.
+- A request says whether it runs as a job, and the runner binds that job in its own process and in per-request children, so a tool sees the same ownership wherever it runs; a `mindroom-agent` call inherits it from its command's window.
+- Progress is the latest report on the runtime entry, never saved and shown only while the job runs, so a report from a thread that outlived its call cannot change a settled job.
 - The response's `mindroom-agent` owner closes through the response's execution resources, so a shell job that outlives its reply keeps the CLI until the last job settles; cancelling one shell window stops only that window's calls.
 - Saved custom generator events replay as fixed SDK subclasses, so saved data never chooses the class or methods that run.
 - Recovery fails on a saved job it cannot read and names that job, instead of dropping it silently.
@@ -61,3 +64,7 @@ A restart interrupts a job that waits for its own call's approval, so that call 
 Job cards offer no timed automatic approvals, and automatic approvals granted on paused-run cards do not apply to them.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
+A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.
+A `mindroom-agent` call whose command was stopped at its `timeout` runs until its own limit or its job's cancellation.
+Unhooked synchronous local tools in a job run on Agno's shared thread pool, because Agno chooses that thread; worker calls and calls that async entrypoints offload get their own threads.
+The jobs bar does not show progress.
