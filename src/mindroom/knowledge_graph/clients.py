@@ -18,7 +18,7 @@ from agno.run.base import RunStatus
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.llm_client.client import LLMClient
-from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
+from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, ModelSize
 from pydantic import BaseModel
 
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_cardinality_mismatch
@@ -45,7 +45,8 @@ class MindRoomLLMClient(LLMClient):
     """Run Graphiti's extraction prompts on the ``knowledge_graph.model`` entry with structured output."""
 
     def __init__(self, config_provider: Callable[[], Config], runtime_paths: RuntimePaths) -> None:
-        super().__init__(LLMConfig(model=config_provider().knowledge_graph.model), cache=False)
+        # The model is read from config on every call; Graphiti uses its own copy only as a cache key, and caching is off.
+        super().__init__(None)
         self._config_provider = config_provider
         self._runtime_paths = runtime_paths
 

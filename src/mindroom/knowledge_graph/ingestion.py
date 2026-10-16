@@ -310,9 +310,9 @@ class KnowledgeGraphIngestionWorker:
             return True
         # A redaction removes a turn from stored history only when the agent next replies there, so it is skipped here.
         finished = [run for run in finished if not run_event_ids(run) & redacted]
-        first_sight = session.session_id not in state["sessions"]
-        entry = state["sessions"].setdefault(session.session_id, _new_session_state())
-        if first_sight:
+        entry = state["sessions"].get(session.session_id)
+        if entry is None:
+            entry = state["sessions"][session.session_id] = _new_session_state()
             _start_after_backfill_window(
                 entry,
                 finished,
@@ -418,14 +418,14 @@ class KnowledgeGraphIngestionWorker:
             )
             dropped = True
         # Every piece records its progress, added or dropped, so a retry never repeats it.
-        if dropped or entry["failing_piece"] == piece:
+        if entry["failing_piece"] == piece:
             entry.update(failures=0, bad_outputs=0, failing_since=0, failing_piece=[])
         entry["markers"][kind] = list(rendered.progress)
         await self._persist(scope.graph_name, state)
         return not dropped
 
     async def _persist(self, graph_name: str, state: _GraphState) -> None:
-        await asyncio.to_thread(self._save_state, graph_name, state)
+        await asyncio.to_thread(write_json_file_durable, self._state_path(graph_name), state)
 
     def _state_path(self, graph_name: str) -> Path:
         return self.runtime_paths.storage_root / "knowledge_graph" / "ingestion" / f"{graph_name}.json"
@@ -440,8 +440,5 @@ class KnowledgeGraphIngestionWorker:
             logger.warning("Knowledge graph ingestion state was unreadable; starting over", graph=graph_name)
         # Saved at once, so the backfill window stays anchored to when the graph started.
         state: _GraphState = {"started_at": now, "sessions": {}}
-        self._save_state(graph_name, state)
-        return state
-
-    def _save_state(self, graph_name: str, state: _GraphState) -> None:
         write_json_file_durable(self._state_path(graph_name), state)
+        return state

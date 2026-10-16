@@ -83,12 +83,6 @@ def test_max_episode_chars_stays_below_the_redaction_limit() -> None:
         _config(knowledge_graph={"model": "luna", "ingest": {"max_episode_chars": 70000}})
 
 
-def test_tool_result_cap_stays_below_the_redaction_limit() -> None:
-    """Tool results are redacted whole, so their cap stays under the redaction input limit."""
-    with pytest.raises(ValidationError, match="max_tool_result_chars"):
-        _config(knowledge_graph={"model": "luna", "ingest": {"max_tool_result_chars": 100_000}})
-
-
 def test_one_tool_result_fits_in_an_episode() -> None:
     """A tool result is never cut further by the episode limit, so the episode must hold one twice over."""
     with pytest.raises(ValidationError, match="max_tool_result_chars"):

@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 
 type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
-type _RunKey = tuple[int, str]
 type Progress = tuple[int, str, int]
 
 # The progress of a run that is fully covered, larger than any count of lines a split covers.
@@ -81,7 +80,7 @@ def is_evidence(execution: ToolExecution) -> bool:
     return not any(name in arguments for name in _GRAPH_FUNCTIONS)
 
 
-def run_key(run: RunOutput) -> _RunKey:
+def run_key(run: RunOutput) -> tuple[int, str]:
     """Return a run's position in its session."""
     return (run.created_at or 0, run.run_id or "")
 

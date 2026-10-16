@@ -89,9 +89,6 @@ class GraphStore(Protocol):
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
         """Return the scope's entity best matching ``name``, or None."""
 
-    async def close(self) -> None:
-        """Release the database connection."""
-
 
 class UnusableExtractionError(ValueError):
     """The extraction model answered with output Graphiti cannot use; repeated ones drop the episode."""
@@ -134,8 +131,8 @@ def _import_graphiti() -> None:
     os.environ[_DOTENV_DISABLED] = "1"
     try:
         with optional_dependency_environment():
-            import graphiti_core.driver.falkordb_driver  # noqa: PLC0415
-            import graphiti_core.graphiti  # noqa: F401, PLC0415
+            # Importing any part of Graphiti runs its package import, which loads `graphiti_core.graphiti` too.
+            import graphiti_core.driver.falkordb_driver  # noqa: F401, PLC0415
 
             import mindroom.knowledge_graph.clients  # noqa: F401, PLC0415
     finally:

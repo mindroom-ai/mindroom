@@ -62,9 +62,6 @@ class _Store:
         self.queries.append((scope.graph_name, name, 0))
         return _GraphEntity(name="Alice", summary="Alice leads Atlas.", facts=[FACT]) if name == "Alice" else None
 
-    async def close(self) -> None:
-        return None
-
 
 @pytest.fixture
 def store() -> Iterator[_Store]:
