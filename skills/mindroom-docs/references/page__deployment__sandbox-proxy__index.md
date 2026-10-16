@@ -503,7 +503,7 @@ Unsupported resources or oversized results produce a tool error.
 - Dedicated Docker workers can use the hardened `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, which Worker Computer requires; see [Browser and container sandboxing](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).
 - Dedicated Docker workers share the host kernel, so a kernel bug can let worker code escape its container.
   To keep worker code off the host kernel, install a sandboxed runtime for the Docker daemon and set `MINDROOM_DOCKER_WORKER_RUNTIME` to its name, such as `runsc` for gVisor or `io.containerd.kata.v2` for Kata Containers, which runs each worker in its own virtual machine and needs KVM.
-  Do not register gVisor's `runsc` with `--oci-seccomp`, because workers then cannot start threads and fail to start.
+  With gVisor 20261005 or earlier, do not register `runsc` with `--oci-seccomp`, because workers then cannot start threads and fail to start.
   On Kubernetes, set [`workers.kubernetes.runtimeClassName`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) instead.
 
 ## Environment variable reference
