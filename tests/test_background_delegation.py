@@ -36,7 +36,6 @@ from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
 from mindroom.delegation.state import DelegationState
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -1105,7 +1104,7 @@ async def _drive_background_child(
     run_child: Callable[..., Awaitable[str]],
     *,
     while_waiting: Callable[[], Awaitable[None]] | None = None,
-    source_kind: str | None = None,
+    unattended: bool = False,
 ) -> RunOutput:
     """Drive one parent delegation whose child runs as a managed job, acting once the child starts."""
     paths = _runtime_paths(tmp_path)
@@ -1137,7 +1136,7 @@ async def _drive_background_child(
     parent = Agent(id="leader", name="leader", model=model, db=storage, tools=[toolkit], telemetry=False)
     try:
         context = _delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)
-        with tool_runtime_context(replace(context, source_kind=source_kind)):
+        with tool_runtime_context(replace(context, unattended=unattended)):
             paused = await parent.arun(
                 "Delegate",
                 session_id=_BACKGROUND_PARENT.session_id,
@@ -1289,18 +1288,18 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_a_scheduled_parent_stops_waiting_for_its_child_while_the_child_works_on(
+async def test_an_unattended_parent_stops_waiting_for_its_child_while_the_child_works_on(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nobody sends the message that would release a scheduled reply's wait, so it returns the child's handle."""
+    """Nobody sends the message that would release an unattended reply's wait, so it returns the child's handle."""
     monkeypatch.setattr(conversation, "_UNATTENDED_WAIT_SECONDS", 0.05)
     child = _BlockingChild()
     response = await _drive_background_child(
         tmp_path,
         await tool_job_runtime(tmp_path),
         child,
-        source_kind=SCHEDULED_SOURCE_KIND,
+        unattended=True,
     )
     assert response.status == RunStatus.completed
     result = next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting")

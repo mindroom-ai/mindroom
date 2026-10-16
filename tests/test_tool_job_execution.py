@@ -31,12 +31,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.dispatch_source import (
-    EXTERNAL_TRIGGER_SOURCE_KIND,
-    HOOK_SOURCE_KIND,
-    MESSAGE_SOURCE_KIND,
-    SCHEDULED_SOURCE_KIND,
-)
 from mindroom.hooks import HookRegistry
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import agno_execution, conversation, results
@@ -355,16 +349,13 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "source_kind",
-    [SCHEDULED_SOURCE_KIND, HOOK_SOURCE_KIND, EXTERNAL_TRIGGER_SOURCE_KIND, MESSAGE_SOURCE_KIND],
-)
-async def test_an_automation_turn_waits_for_its_jobs_only_so_long(
+@pytest.mark.parametrize("unattended", [True, False])
+async def test_an_unattended_turn_waits_for_its_jobs_only_so_long(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    source_kind: str,
+    unattended: bool,
 ) -> None:
-    """Nobody sends the message that would release an automation turn's wait, so its waits end while the work runs on.
+    """Nobody sends the message that would release an unattended turn's wait, so its waits end while the work runs on.
 
     A turn a person started keeps waiting until that person's next message.
     """
@@ -378,7 +369,7 @@ async def test_an_automation_turn_waits_for_its_jobs_only_so_long(
     paths = _runtime_paths(tmp_path)
     context = replace(
         _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths),
-        source_kind=source_kind,
+        unattended=unattended,
     )
     owner = build_execution_identity_from_runtime_context(context)
     runtime = await tool_job_runtime(tmp_path)
@@ -394,18 +385,15 @@ async def test_an_automation_turn_waits_for_its_jobs_only_so_long(
         async with execution_resources():
             with tool_runtime_context(context), pending_human_messages_context(asyncio.Event()):
                 parent = asyncio.create_task(agent.arun("start", session_id=context.session_id))
-                done, _ = await asyncio.wait(
-                    {parent},
-                    timeout=0.5 if source_kind == MESSAGE_SOURCE_KIND else JOB_TEST_TIMEOUT,
-                )
-                if source_kind == MESSAGE_SOURCE_KIND:
+                done, _ = await asyncio.wait({parent}, timeout=JOB_TEST_TIMEOUT if unattended else 0.5)
+                if not unattended:
                     assert not done, "a turn a person started waits for its call until their next message"
                     release.set()
                     response = await asyncio.wait_for(parent, JOB_TEST_TIMEOUT)
                     assert response.tools is not None
                     assert response.tools[0].result == "actual result"
                     return
-                assert parent in done, "an automation turn must stop waiting for a call nobody can release"
+                assert parent in done, "an unattended turn must stop waiting for a call nobody can release"
                 response = parent.result()
                 assert response.tools is not None
                 job_id = json.loads(response.tools[0].result)["job_id"]
@@ -420,12 +408,12 @@ async def test_an_automation_turn_waits_for_its_jobs_only_so_long(
         await runtime.shutdown()
 
 
-def test_an_automation_turn_keeps_a_budget_its_call_sets(tmp_path: Path) -> None:
-    """Only a wait without a budget is bounded in an automation turn, so a model can still wait longer on purpose."""
+def test_an_unattended_turn_keeps_a_budget_its_call_sets(tmp_path: Path) -> None:
+    """Only a wait without a budget is bounded in an unattended turn, so a model can still wait longer on purpose."""
     paths = _runtime_paths(tmp_path)
     context = replace(
         _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths),
-        source_kind=SCHEDULED_SOURCE_KIND,
+        unattended=True,
     )
     with tool_runtime_context(context):
         assert conversation.current_wait_budget(3600) == 3600

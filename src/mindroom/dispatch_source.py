@@ -126,7 +126,7 @@ class _HasSender(Protocol):
     sender: str
 
 
-def is_automation_source_kind(source_kind: str | None) -> bool:
+def is_automation_source_kind(source_kind: str) -> bool:
     """Return whether one source kind is synthetic automation."""
     return source_kind in _AUTOMATION_SOURCE_KINDS
 

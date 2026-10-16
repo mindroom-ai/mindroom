@@ -13,6 +13,7 @@ from mindroom.dispatch_source import (
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    is_automation_source_kind,
 )
 
 
@@ -70,6 +71,11 @@ class TurnOrigin:
             TurnIntent.ROUTER_HANDOFF,
             TurnIntent.SCHEDULED_FIRE,
         }
+
+    @property
+    def unattended(self) -> bool:
+        """Return whether automation, not a person's message, started this turn, so nobody is there to release its waits."""
+        return is_automation_source_kind(self.source_kind) or self.intent == TurnIntent.JOB_FOLLOW_UP
 
     @property
     def acting_sender_id(self) -> str | None:
