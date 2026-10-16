@@ -203,7 +203,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
         return "shell done"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        assert await owner.run_native_shell(command) == "shell done"
+        assert await owner.run_native_shell(command, stop_after=None) == "shell done"
     assert catalog.run_context.session_state["count"] == 1
     assert current_agent_cli_shell_env() is None
     with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
@@ -249,7 +249,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
         return "shell done"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        result = await owner.run_native_shell(command)
+        result = await owner.run_native_shell(command, stop_after=None)
 
     assert isinstance(result, ToolResult)
     assert result.content == "shell done"
@@ -283,9 +283,8 @@ async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
     return receipt
 
 
-@pytest.mark.asyncio
-async def test_a_command_stopped_at_its_timeout_stops_the_cli_calls_it_started(tmp_path: Path) -> None:
-    """A command the shell stopped at its timeout ends the CLI calls it started instead of waiting for them."""
+def _blocking_tool() -> tuple[Callable[[], Awaitable[str]], asyncio.Event, asyncio.Event]:
+    """Return a CLI tool that runs until cancelled, with events for its start and its cancellation."""
     started, cancelled = asyncio.Event(), asyncio.Event()
 
     async def forever() -> str:
@@ -297,46 +296,51 @@ async def test_a_command_stopped_at_its_timeout_stops_the_cli_calls_it_started(t
             raise
         return "unreachable"
 
-    async def authorize(key, arguments) -> None:
-        return None
+    return forever, started, cancelled
 
-    owner = await _native_owner(tmp_path, [forever], authorize)
+
+async def _start_call(owner: LiveTurnTools, function: str) -> None:
+    await owner.operation(
+        window=cli_window(),
+        operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function=function),
+    )
+
+
+async def _allow(key, arguments) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_seconds", [0.0, 0.4], ids=["ended-early", "stopped"])
+async def test_a_commands_cli_calls_end_by_its_timeout(tmp_path: Path, command_seconds: float) -> None:
+    """The CLI calls a command started end by its timeout, whether the command ended early or was stopped then."""
+    forever, started, cancelled = _blocking_tool()
+    owner = await _native_owner(tmp_path, [forever], _allow)
 
     async def command() -> str:
-        await owner.operation(
-            window=cli_window(),
-            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
-        )
+        await _start_call(owner, "forever")
         await started.wait()
-        return f"[cwd: {tmp_path}]\nStopped after 0.2s.\nOutput:\nstarted"
+        await asyncio.sleep(command_seconds)
+        return "output"
 
+    loop = asyncio.get_running_loop()
+    began = loop.time()
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        assert await owner.run_native_shell(command) == f"[cwd: {tmp_path}]\nStopped after 0.2s.\nOutput:\nstarted"
+        assert await owner.run_native_shell(command, stop_after=0.2) == "output"
     assert cancelled.is_set()
+    assert loop.time() - began >= (max(command_seconds, 0.2))
     await owner.close()
 
 
 @pytest.mark.asyncio
-async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls(tmp_path: Path) -> None:
-    """Minimal Bash passes its timeout to the command's window, which stops the calls a stopped command started."""
-    started, cancelled = asyncio.Event(), asyncio.Event()
-
-    async def forever() -> str:
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
-        return "unreachable"
+async def test_a_minimal_bash_commands_cli_calls_end_by_its_timeout(tmp_path: Path) -> None:
+    """Minimal Bash gives the command's window its timeout, which ends the CLI calls the command left running."""
+    forever, started, cancelled = _blocking_tool()
 
     async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
-        await owner.operation(
-            window=cli_window(),
-            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
-        )
+        await _start_call(owner, "forever")
         await started.wait()
-        return f"Stopped after {timeout:g}s."
+        return "output"
 
     catalog = await _catalog(
         tmp_path,
@@ -344,14 +348,10 @@ async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls
     )
     catalog.run_response.agent_id = "helper"
     catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
-
-    async def authorize(key, arguments) -> None:
-        return None
-
     owner = LiveTurnTools(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        authorize=authorize,
+        authorize=_allow,
     )
     owner.shell_env = _SHELL_ENV
 
@@ -374,71 +374,29 @@ async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls
                 {"args": "outer", "timeout": 0.2},
                 calls[0],
             )
-    assert result == "Stopped after 0.2s."
+    assert result == "output"
     assert cancelled.is_set()
     await owner.close()
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_command_whose_long_output_was_saved_still_stops_its_cli_calls(tmp_path: Path) -> None:
-    """Long output becomes a saved-file receipt whose preview still reports the stop, which ends the command's calls."""
-    started, cancelled = asyncio.Event(), asyncio.Event()
-
-    async def forever() -> str:
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
-        return "unreachable"
-
-    async def authorize(key, arguments) -> None:
-        return None
-
-    owner = await _native_owner(tmp_path, [forever], authorize)
-    receipt = {"mindroom_tool_output": {"status": "saved_to_file", "preview": "Stopped after 5s.\nOutput:\nline"}}
-
-    async def command() -> dict[str, object]:
-        await owner.operation(
-            window=cli_window(),
-            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
-        )
-        await started.wait()
-        return receipt
-
-    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        assert await owner.run_native_shell(command) == receipt
-    assert cancelled.is_set()
-    await owner.close()
-
-
-@pytest.mark.asyncio
-async def test_a_command_that_ended_in_time_waits_for_its_cli_calls(tmp_path: Path) -> None:
-    """A command that ended on its own, however long it took, still lets the CLI calls it started finish."""
+async def test_a_command_without_a_deadline_waits_for_its_cli_calls(tmp_path: Path) -> None:
+    """A job's command without a timeout has no deadline, so the CLI calls it left running finish."""
     finished = asyncio.Event()
 
     async def slow() -> str:
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         finished.set()
         return "slow done"
 
-    async def authorize(key, arguments) -> None:
-        return None
-
-    owner = await _native_owner(tmp_path, [slow], authorize)
+    owner = await _native_owner(tmp_path, [slow], _allow)
 
     async def command() -> str:
-        await owner.operation(
-            window=cli_window(),
-            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="slow"),
-        )
-        # Slower than the timeout the call asked for, as after a cold worker start, but not stopped.
-        await asyncio.sleep(0.3)
+        await _start_call(owner, "slow")
         return "returned"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        assert await owner.run_native_shell(command) == "returned"
+        assert await owner.run_native_shell(command, stop_after=None) == "returned"
     assert finished.is_set()
     await owner.close()
 
@@ -465,8 +423,8 @@ async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         with pytest.raises(RuntimeError, match="worker failed"):
-            await owner.run_native_shell(failing)
-        assert await owner.run_native_shell(plain) == "plain"
+            await owner.run_native_shell(failing, stop_after=None)
+        assert await owner.run_native_shell(plain, stop_after=None) == "plain"
     await owner.close()
 
 
@@ -500,10 +458,10 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
         return "second output"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        first_task = asyncio.create_task(owner.run_native_shell(first))
+        first_task = asyncio.create_task(owner.run_native_shell(first, stop_after=None))
         await first_open.wait()
         second_result, first_result = await asyncio.gather(
-            owner.run_native_shell(second),
+            owner.run_native_shell(second, stop_after=None),
             first_task,
             return_exceptions=True,
         )
@@ -546,7 +504,7 @@ async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp
 
     async def run(label: str, command: Callable[[], Awaitable[str]]) -> object:
         _COMMAND_TAG.set(label)
-        return await owner.run_native_shell(command)
+        return await owner.run_native_shell(command, stop_after=None)
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(run("first", first))
@@ -577,9 +535,9 @@ async def test_a_cli_call_from_a_job_command_runs_as_part_of_that_job(tmp_path: 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         if in_job:
             with job_control_context(JobControl()):
-                seen = await owner.run_native_shell(command)
+                seen = await owner.run_native_shell(command, stop_after=None)
         else:
-            seen = await owner.run_native_shell(command)
+            seen = await owner.run_native_shell(command, stop_after=None)
 
     assert seen == str(in_job)
     await owner.close()
@@ -636,9 +594,9 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
         return "second"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        first_task = asyncio.create_task(owner.run_native_shell(first))
+        first_task = asyncio.create_task(owner.run_native_shell(first, stop_after=None))
         await first_open.wait()
-        await owner.run_native_shell(second)
+        await owner.run_native_shell(second, stop_after=None)
         await first_task
 
     assert seen["nested"] == seen["first"] != seen["second"]
@@ -661,11 +619,11 @@ async def test_calls_naming_no_closed_or_unknown_window_are_rejected_while_anoth
     opened = asyncio.Event()
 
     async def hold_open_window() -> None:
-        async with owner._window("open"):
+        async with owner._window("open", stop_after=None):
             opened.set()
             await leave.wait()
 
-    async with owner._window("closed"):
+    async with owner._window("closed", stop_after=None):
         pass
     holder = asyncio.create_task(hold_open_window())
     await opened.wait()
@@ -729,9 +687,9 @@ async def test_overlapping_native_shells_each_keep_their_own_cli_calls(tmp_path:
         return "second output"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        first_task = asyncio.create_task(owner.run_native_shell(first))
+        first_task = asyncio.create_task(owner.run_native_shell(first, stop_after=None))
         await first_open.wait()
-        second_result = await owner.run_native_shell(second)
+        second_result = await owner.run_native_shell(second, stop_after=None)
         first_result = await first_task
 
     assert windows["first call"] == windows["first"] != windows["second"]
@@ -833,7 +791,7 @@ async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Pa
             job = resources.acquire()
             async with response_cli_lifetime() as lifetime:
                 lifetime.register(owner, TurnToolRegistry())
-                shell_job = asyncio.create_task(owner.run_native_shell(command))
+                shell_job = asyncio.create_task(owner.run_native_shell(command, stop_after=None))
                 await running.wait()
                 # Every reply attempt ends by retiring its catalog, as the response driver does.
                 await lifetime.retire_attempt()
@@ -871,7 +829,7 @@ async def test_a_shell_job_approved_after_its_reply_finished_still_calls_its_too
                 lifetime.register(owner, TurnToolRegistry())
                 # The reply ends while the job still waits for its approval, so no shell window is open yet.
                 await lifetime.retire_attempt()
-        assert await owner.run_native_shell(command) == "completed"
+        assert await owner.run_native_shell(command, stop_after=None) == "completed"
         await job.release()
 
 
@@ -902,14 +860,14 @@ async def test_a_second_shell_job_approved_after_the_first_ended_still_calls_its
             first_job, second_job = resources.acquire(), resources.acquire()
             async with response_cli_lifetime() as lifetime:
                 lifetime.register(owner, TurnToolRegistry())
-                first_task = asyncio.create_task(owner.run_native_shell(first))
+                first_task = asyncio.create_task(owner.run_native_shell(first, stop_after=None))
                 await first_running.wait()
                 await lifetime.retire_attempt()
         first_may_end.set()
         assert await first_task == "first done"
         await first_job.release()
         # The second job was waiting for its approval and opens its shell only now.
-        assert await owner.run_native_shell(second) == "completed"
+        assert await owner.run_native_shell(second, stop_after=None) == "completed"
         await second_job.release()
 
 
@@ -934,7 +892,7 @@ async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog
         return str((await _settled_receipt(owner, "ping"))["status"])
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        window = asyncio.create_task(owner.run_native_shell(command))
+        window = asyncio.create_task(owner.run_native_shell(command, stop_after=None))
         await running.wait()
         await owner.retire_binding()
         assert (await owner.operation(window=None, operation=ToolListOperation(operation="tools.list")))["items"]
@@ -983,8 +941,8 @@ async def test_cancelling_one_native_shell_leaves_the_others_their_cli(tmp_path:
         return str(receipt["status"])
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        first_task = asyncio.create_task(owner.run_native_shell(first))
-        second_task = asyncio.create_task(owner.run_native_shell(second))
+        first_task = asyncio.create_task(owner.run_native_shell(first, stop_after=None))
+        second_task = asyncio.create_task(owner.run_native_shell(second, stop_after=None))
         await hanging.wait()
         first_task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1426,7 +1384,7 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
     leave = asyncio.Event()
 
     async def first_window():
-        async with owner._window("old-bash"):
+        async with owner._window("old-bash", stop_after=None):
             await leave.wait()
 
     window = asyncio.create_task(first_window())
@@ -1471,7 +1429,7 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
                 arguments={"value": "after"},
             ),
         )
-    async with owner._window("next-bash"):
+    async with owner._window("next-bash", stop_after=None):
         pass
     assert called == ["old", "later"]
     await owner.close()
@@ -1530,7 +1488,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(window="describe-bash", operation=operation)
     assert loaded == []
-    async with owner._window("describe-bash"):
+    async with owner._window("describe-bash", stop_after=None):
         descriptor = await owner.operation(window="describe-bash", operation=operation)
         assert descriptor["input_schema"]["properties"] == {}
         with pytest.raises(CliOperationError, match=r"^No toolkit 'unassigned'$"):
@@ -1573,7 +1531,7 @@ async def test_refused_describe_is_a_caller_safe_rejection(tmp_path: Path) -> No
         catalog=catalog,
         authorize=authorize,
     )
-    async with owner._window("bash"):
+    async with owner._window("bash", stop_after=None):
         with pytest.raises(CliOperationError, match="Tool is unavailable"):
             await owner.operation(
                 window="bash",
@@ -1609,7 +1567,7 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
     def call() -> ToolCallOperation:
         return ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="slow")
 
-    async with owner._window("bash"):
+    async with owner._window("bash", stop_after=None):
         first = await owner.operation(window="bash", operation=call())
         with pytest.raises(CliOperationError, match="at once"):
             await owner.operation(window="bash", operation=call())
@@ -1713,7 +1671,7 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
         arguments={"value": "original"},
     )
     original = operation.model_copy(deep=True)
-    async with owner._window("bash"):
+    async with owner._window("bash", stop_after=None):
         await owner.operation(window="bash", operation=operation)
         operation.arguments["value"] = "mutated"
     receipt = await owner.operation(window=None, operation=original)
@@ -1864,7 +1822,7 @@ async def test_admitted_describe_waiter_settles_when_its_task_is_cancelled(
         authorize=authorize,
     )
     try:
-        async with owner._window("bash"):
+        async with owner._window("bash", stop_after=None):
             describe = asyncio.create_task(
                 owner.operation(
                     window="bash",

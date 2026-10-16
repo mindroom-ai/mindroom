@@ -20,7 +20,6 @@ from mindroom.shell.execution import (
     kill_all_records,
     kill_command,
     run_command,
-    shell_result_was_stopped,
     signal_record,
 )
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
@@ -407,26 +406,3 @@ async def test_a_running_command_reports_its_latest_output_as_progress(
     assert reports[0] == "one"
     assert reports[-1] == "one\ntwo\nStderr:\nwarn"
     assert all(earlier != later for earlier, later in itertools.pairwise(reports))
-
-
-@pytest.mark.parametrize(
-    ("result", "stopped"),
-    [
-        ("Stopped after 0.5s.\nOutput:\nstarted", True),
-        ("[cwd: /work]\nStopped after 120s.", True),
-        ('{"mindroom_tool_output": {"status": "error", "error": "Stopped after 1s. No output file was saved."}}', True),
-        ("done", False),
-        ("[cwd: /work]\nbuild ok", False),
-        ('{"mindroom_tool_output": {"status": "error", "error": "Redirected shell output exceeds the limit."}}', False),
-        (
-            {"mindroom_tool_output": {"status": "saved_to_file", "preview": "[cwd: /w]\nStopped after 9s.\nOutput:"}},
-            True,
-        ),
-        ('{"mindroom_tool_output": {"status": "saved_to_file", "preview": "Stopped after 9s.\\nOutput:"}}', True),
-        ({"mindroom_tool_output": {"status": "saved_to_file", "preview": "line 1\nline 2"}}, False),
-        (None, False),
-    ],
-)
-def test_a_shell_result_says_whether_its_command_was_stopped(result: object, *, stopped: bool) -> None:
-    """Callers that see only the call's result, as across a worker, can tell a stopped command from one that ended."""
-    assert shell_result_was_stopped(result) is stopped

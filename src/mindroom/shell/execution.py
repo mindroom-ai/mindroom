@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
-import json
 import os
 import re
 import signal
@@ -19,7 +18,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.shell.output_capture import (
     CapturedShellStream,
@@ -47,8 +46,6 @@ _POST_EXIT_READER_GRACE_SECONDS = 0.5
 _PROGRESS_INTERVAL_SECONDS = 2.0
 _PROGRESS_TAIL_LINES = 20
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
-# The first line of a stopped command's report, which callers that see only its text recognize it by.
-_STOPPED_RE = re.compile(r"Stopped after [0-9.e+-]+s\.")
 
 
 @dataclass
@@ -188,6 +185,12 @@ def shell_call_timeout(timeout: float | None) -> float | None:
     return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
 
 
+def requested_shell_timeout(arguments: Mapping[str, Any]) -> float | None:
+    """Return the `timeout` a shell call's arguments set, or None when they set none."""
+    value = arguments.get("timeout")
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
 def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
     """Return how long one worker request outside a job may take for this shell call, or 0 when it has no foreground wait.
 
@@ -195,12 +198,8 @@ def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Map
     """
     if tool_name != "shell" or function_name != "run_shell_command":
         return 0.0
-    raw_timeout = kwargs.get("timeout", _DEFAULT_RUN_TIMEOUT_SECONDS)
-    try:
-        timeout = max(0.0, float(raw_timeout))
-    except (TypeError, ValueError):
-        timeout = float(_DEFAULT_RUN_TIMEOUT_SECONDS)
-    return timeout + _SHELL_REQUEST_GRACE_SECONDS
+    timeout = requested_shell_timeout(kwargs)
+    return max(0.0, _DEFAULT_RUN_TIMEOUT_SECONDS if timeout is None else timeout) + _SHELL_REQUEST_GRACE_SECONDS
 
 
 async def run_command(
@@ -451,30 +450,6 @@ async def _stop_timed_out_process(
 
 def _stopped_notice(timeout: float) -> str:
     return f"Stopped after {timeout:g}s."
-
-
-def shell_result_was_stopped(result: object) -> bool:
-    """Return whether a shell call's result reports a command stopped at its timeout, as a worker's result can only.
-
-    A redirected stopped command reports in its receipt's error, and a saved long result keeps the report's start as
-    its preview.
-    """
-    if isinstance(result, str) and result.startswith('{"mindroom_tool_output"'):
-        try:
-            result = json.loads(result)
-        except ValueError:
-            return False
-    if isinstance(result, dict):
-        receipt = cast("dict[str, object]", result).get("mindroom_tool_output")
-        receipt = cast("dict[str, object]", receipt) if isinstance(receipt, dict) else {}
-        reports = [receipt.get("error"), receipt.get("preview")]
-    else:
-        reports = [result]
-    return any(
-        isinstance(report, str)
-        and _STOPPED_RE.match(report.split("\n", 1)[-1] if report.startswith("[cwd: ") else report) is not None
-        for report in reports
-    )
 
 
 def _unused_handle(registry: dict[str, ProcessRecord]) -> str:

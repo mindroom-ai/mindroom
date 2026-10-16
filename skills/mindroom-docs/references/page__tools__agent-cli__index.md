@@ -139,6 +139,7 @@ A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, w
 In a reply, start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
 A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.
+The calls a command starts end by its `timeout`: a call still running then is cancelled, and a command without a time limit lets its calls finish.
 `calls wait` on earlier receipts works until the response and its background jobs end.
 
 CLI calls are limited by the agent's `max_tool_calls_per_turn`, counted separately from its direct tool calls; calls past the limit return a failed receipt.

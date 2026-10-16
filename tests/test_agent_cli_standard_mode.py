@@ -128,6 +128,30 @@ async def test_standard_shell_command_calls_another_tool_through_mindroom_agent(
     assert not running_api._owners
 
 
+@pytest.mark.asyncio
+async def test_a_standard_shell_calls_cli_calls_end_by_its_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """A CLI call a command left running ends at the command's timeout, so the shell call returns by then."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    leftover = json.dumps({"args": "sleep 60"})
+    command = (
+        f"mindroom-agent tools call shell run_shell_command --timeout 0 --json '{leftover}' > /dev/null; echo left"
+    )
+    provider.steps = [[("run_shell_command", {"args": command, "timeout": 2})], "done"]
+
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    assert "done" in await _respond(runtime)
+
+    assert loop.time() - began < 30
+    assert "left" in _tool_output(provider)
+
+
 def _call_and_wait(call_id: str, toolkit: str, function: str, arguments: dict[str, object]) -> str:
     return (
         f"mindroom-agent tools call {toolkit} {function} --call-id {call_id} --json '{json.dumps(arguments)}'; "

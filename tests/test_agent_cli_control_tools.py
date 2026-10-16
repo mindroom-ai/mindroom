@@ -261,7 +261,7 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         delegation_depth=depth,
     )
     call_id = uuid4()
-    async with owner._window("bash-parent"):
+    async with owner._window("bash-parent", stop_after=None):
         await owner.operation(
             window="bash-parent",
             operation=ToolCallOperation(
@@ -285,7 +285,7 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         assert state.children[0].run_id == child.run_id
         assert catalog.agent.db.get_session("session").runs[0].requirements is None
         followup_id = uuid4()
-        async with owner._window("bash-followup"):
+        async with owner._window("bash-followup", stop_after=None):
             await owner.operation(
                 window="bash-followup",
                 operation=ToolCallOperation(
@@ -394,7 +394,7 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         assert parent == "bash-parent"
 
     monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
-    async with owner._window("bash-parent"):
+    async with owner._window("bash-parent", stop_after=None):
         await owner.operation(
             window="bash-parent",
             operation=ToolCallOperation(
@@ -643,7 +643,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
     else:
 
         async def run_window():
-            async with owner._window("bash-parent"):
+            async with owner._window("bash-parent", stop_after=None):
                 await owner.operation(
                     window="bash-parent",
                     operation=ToolCallOperation(
@@ -760,7 +760,7 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path, flag) ->
         authorize=authorize,
     )
     with pytest.raises(ExceptionGroup) as error:
-        async with owner._window("bash-parent"):
+        async with owner._window("bash-parent", stop_after=None):
             await owner.operation(
                 window="bash-parent",
                 operation=ToolCallOperation(
@@ -897,7 +897,7 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         catalog=catalog,
         authorize=authorize,
     )
-    async with owner._window("bash-parent"):
+    async with owner._window("bash-parent", stop_after=None):
         switch_call = await owner.operation(
             window="bash-parent",
             operation=ToolCallOperation(

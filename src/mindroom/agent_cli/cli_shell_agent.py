@@ -13,6 +13,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.approval.tool_approval import approval_gated
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
+from mindroom.shell.execution import requested_shell_timeout, shell_call_timeout
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -79,7 +80,10 @@ def wrap_native_shell_window(tools: Sequence[Toolkit]) -> bool:
             # Nested CLI shell calls already run inside their parent's window.
             if owner is None or owner.shell_env is None or cli_dispatch_active():
                 return await _original(*args, **kwargs)
-            return await owner.run_native_shell(functools.partial(_original, *args, **kwargs))
+            return await owner.run_native_shell(
+                functools.partial(_original, *args, **kwargs),
+                stop_after=shell_call_timeout(requested_shell_timeout(kwargs)),
+            )
 
         declare_tool_schema_source(windowed, original)
         function.entrypoint = windowed
