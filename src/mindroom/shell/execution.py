@@ -784,9 +784,12 @@ async def _terminate_process_group(
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_period
-    while loop.time() < deadline and _process_group_exists(process.pid):  # noqa: ASYNC110 - a group has no exit event
-        await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
-    _kill_process_group(process.pid)
+    try:
+        while loop.time() < deadline and _process_group_exists(process.pid):  # noqa: ASYNC110 - a group has no exit event
+            await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
+    finally:
+        # A stop cancelled during the grace still kills what ignored SIGTERM.
+        _kill_process_group(process.pid)
     with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(process.wait(), timeout=grace_period)
 

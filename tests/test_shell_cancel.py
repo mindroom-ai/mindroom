@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.shell import execution as shell_execution
 from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
 from mindroom.tool_system.metadata import get_tool_by_name
 
@@ -118,6 +119,32 @@ def registry() -> Iterator[dict[str, ProcessRecord]]:
     records: dict[str, ProcessRecord] = {}
     yield records
     kill_all_records(records)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_cancelled_during_its_grace_still_kills_what_ignored_sigterm(tmp_path: Path) -> None:
+    """A stop that is itself cancelled while waiting out SIGTERM still kills a process that ignored it."""
+    pid_file = tmp_path / "member.pid"
+    process = await asyncio.create_subprocess_exec(
+        "bash",
+        "-c",
+        '(trap "" TERM; echo "$BASHPID" > "$1"; exec tail -f /dev/null) & wait',
+        "bash",
+        str(pid_file),
+        start_new_session=True,
+    )
+    member = await _wait_for_pid(pid_file)
+    try:
+        stopping = asyncio.create_task(shell_execution._terminate_process_group(process, grace_period=30))
+        # The leader dies of SIGTERM while its member ignores it and keeps the group alive.
+        await asyncio.wait_for(process.wait(), timeout=10)
+        stopping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        await _assert_pid_dead(member)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(member, signal.SIGKILL)
 
 
 @pytest.mark.asyncio
