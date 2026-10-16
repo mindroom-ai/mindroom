@@ -15,6 +15,7 @@ import pytest
 from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.run import RunContext  # noqa: TC002 - Agno injects the tool argument by its annotation
+from agno.run.agent import RunContentEvent
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
@@ -74,6 +75,22 @@ async def _respond(runtime: ToolRuntimeContext) -> str:
             execution_identity=build_execution_identity_from_runtime_context(runtime),
             supports_native_tool_approval=True,
         )
+
+
+async def _respond_streaming(runtime: ToolRuntimeContext) -> str:
+    with tool_runtime_context(runtime):
+        chunks = [
+            chunk
+            async for chunk in ai.stream_agent_response(
+                replace(_turn_context(), agent_mode="standard", run_id=None),
+                prompt="Add two and three",
+                runtime_paths=runtime.runtime_paths,
+                config=runtime.config,
+                execution_identity=build_execution_identity_from_runtime_context(runtime),
+                supports_native_tool_approval=True,
+            )
+        ]
+    return "".join(str(chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent))
 
 
 def _tool_output(provider: ScriptedProvider) -> str:
@@ -416,10 +433,13 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True], ids=["blocking", "streaming"])
 async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+    *,
+    streaming: bool,
 ) -> None:
     """A cancelled timer keeps the context it was scheduled from until its deadline, which must not hold the Agent."""
     runtime = _helper_runtime(tmp_path, running_api)
@@ -446,7 +466,7 @@ async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
     provider.install(monkeypatch)
     provider.steps = [[("wait", {})], "done"]
 
-    assert "done" in await _respond(runtime)
+    assert "done" in await (_respond_streaming if streaming else _respond)(runtime)
     gc.collect()
 
     assert _tool_output(provider) == "waited"
