@@ -78,7 +78,7 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 ## [`file`]
 
 `file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access): `workspace` (the default) rejects paths outside the workspace, and `unrestricted` allows any path the tool's process can reach.
+Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access): `workspace` (the default) rejects paths outside the workspace and the agent's [shared directories](#shared_directories), and `unrestricted` allows any path the tool's process can reach.
 `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse paths inside a `.git` directory.
 `read_file()` refuses files over `max_file_length` characters or `max_file_lines` lines and asks for `read_file_chunk()` instead.
 `search_files()` matches glob patterns; use `search_content()` to search inside text files.
