@@ -10,7 +10,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.embeddings.signatures import effective_mem0_embedder_signature
+from mindroom.embeddings.signatures import effective_knowledge_embedder_signature
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
@@ -41,7 +41,8 @@ def _graph_name(scope_key: str, signature: Sequence[str]) -> str:
 def _graph_signature(config: Config) -> tuple[str, ...]:
     """Return the embedder settings its vectors depend on, so another embedder means another graph."""
     embedder = config.memory.embedder
-    return effective_mem0_embedder_signature(
+    # Graph vectors come from MindRoom's own embedder, like knowledge vectors.
+    return effective_knowledge_embedder_signature(
         embedder.provider,
         embedder.config.model,
         host=embedder.config.host,

@@ -27,6 +27,7 @@ from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
 import mindroom.knowledge.collections as knowledge_collections_module
+import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.read_proxy as knowledge_read_proxy
 import mindroom.knowledge.registry as knowledge_registry
@@ -38,6 +39,7 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
     embedder_retry_after_seconds,
 )
+from mindroom.embeddings.signatures import effective_knowledge_embedder_signature, effective_mem0_embedder_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import (
     CandidateCheckpoint,
@@ -74,6 +76,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.model_defaults import SENTENCE_TRANSFORMERS_DEFAULT
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import chroma_get_result, metadata_matches, validate_where_operands
 
@@ -553,13 +556,14 @@ def _config(
     *,
     chunk_size: int = 5000,
     chunk_overlap: int = 0,
+    memory: dict[str, Any] | None = None,
 ) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
             models={},
-            memory={},
+            memory=memory or {},
             knowledge_bases={
                 "docs": KnowledgeBaseConfig(
                     path=str(docs_path),
@@ -4241,6 +4245,41 @@ async def test_forced_reindex_rebuilds_every_vector_instead_of_copying_it(
 
     assert result.index_published is True
     assert result.indexed_count == 3, "a forced rebuild reused the vectors it was asked to replace"
+    for index in range(3):
+        assert embedder.embedded_count(f"content {index}") == 1
+
+
+@pytest.mark.asyncio
+async def test_local_index_built_before_prompted_embedding_is_rebuilt_not_reused(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local-model vectors from before query and document prompts are incompatible, so none survive a refresh."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    local_embedder = {"provider": "sentence_transformers", "config": {"model": SENTENCE_TRANSFORMERS_DEFAULT}}
+    config = _config(tmp_path, docs_path, memory={"embedder": local_embedder})
+    runtime_paths = runtime_paths_for(config)
+    # Publish under the identity local vectors had before the prompts: the plain model, like Mem0's.
+    monkeypatch.setattr(
+        knowledge_indexing_config,
+        "effective_knowledge_embedder_signature",
+        effective_mem0_embedder_signature,
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(
+        knowledge_indexing_config,
+        "effective_knowledge_embedder_signature",
+        effective_knowledge_embedder_signature,
+    )
+    embedder.embedded_texts.clear()
+
+    assert knowledge_registry.get_published_index("docs", config=config, runtime_paths=runtime_paths).index is None
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 3, "the refresh reused vectors embedded without the model's prompts"
     for index in range(3):
         assert embedder.embedded_count(f"content {index}") == 1
 

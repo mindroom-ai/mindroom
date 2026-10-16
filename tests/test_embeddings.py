@@ -447,6 +447,15 @@ def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:
     )
 
 
+def test_local_knowledge_signature_marks_prompted_vectors_and_leaves_mem0_unchanged() -> None:
+    """MindRoom's local vectors use the model's prompts; older indexes and Mem0's own client do not."""
+    mem0 = effective_mem0_embedder_signature("sentence_transformers", SENTENCE_TRANSFORMERS_DEFAULT)
+    knowledge = effective_knowledge_embedder_signature("sentence_transformers", SENTENCE_TRANSFORMERS_DEFAULT)
+
+    assert mem0 == ("sentence_transformers", SENTENCE_TRANSFORMERS_DEFAULT, "", "")
+    assert knowledge == ("sentence_transformers", f"{SENTENCE_TRANSFORMERS_DEFAULT}#query-document-prompts", "", "")
+
+
 def test_mem0_openai_signature_separates_implicit_and_explicit_dimensions() -> None:
     """Implicit OpenAI dimensions and explicit shortened dimensions should not share collections."""
     assert effective_mem0_embedder_signature("openai", OPENAI_EMBEDDING_LARGE) != effective_mem0_embedder_signature(

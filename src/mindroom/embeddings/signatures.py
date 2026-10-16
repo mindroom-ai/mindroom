@@ -44,19 +44,16 @@ def effective_knowledge_embedder_signature(
     host: str | None = None,
     dimensions: int | None = None,
 ) -> tuple[str, str, str, str]:
-    """Return the knowledge embedder settings that affect indexing behavior."""
-    effective_host = host if provider in {"openai", "ollama"} else ""
-    effective_dimensions = dimensions
-    if provider == "openai" and effective_dimensions is None:
-        effective_dimensions = _default_dimensions(model)
-    elif provider in {"ollama", "sentence_transformers"}:
-        effective_dimensions = None
-    return (
-        provider,
-        model,
-        effective_host or "",
-        str(effective_dimensions) if effective_dimensions is not None else "",
-    )
+    """Return the settings that decide whether vectors from MindRoom's own embedder are compatible.
+
+    Knowledge, file-memory, and knowledge-graph vectors come from MindRoom's embedder, which embeds
+    sentence-transformers queries and documents with the model's own prompts. The marked model keeps
+    vectors built before those prompts were applied from being queried or reused. Mem0 embeds through
+    its own client without the prompts, so its signature keeps the plain model.
+    """
+    if provider == "sentence_transformers":
+        model = f"{model}#query-document-prompts"
+    return effective_mem0_embedder_signature(provider, model, host=host, dimensions=dimensions)
 
 
 def effective_mem0_embedder_signature(
