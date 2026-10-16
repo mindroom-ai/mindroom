@@ -8728,24 +8728,29 @@ It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, a
 
 ### Setup
 
-1. Run tools in dedicated workers, so each agent's worker sees only its own workspace and the shared directories it owns or joined.
-   Set `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
-   Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits, but not with a Compose or host-container `static_runner`; see [Access by deployment](#access-by-deployment).
+1. Run tools in dedicated Docker or Kubernetes workers.
+   Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
+   Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
 2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell`, `file`, or `coding`.
 3. Give each reading agent `shell`, `python`, `file`, or `coding`; it does not need `shared_directories`.
+4. Make sure the user who asks for the invitation can use each reading agent outside the current room, as described under [Rules](#rules); in the example below, every member of `lobby` can.
 
 ```yaml
 agents:
   researcher:
+    display_name: Researcher
+    rooms: [lobby]
     tools:
       - shell
       - shared_directories
   writer:
+    display_name: Writer
+    rooms: [lobby]
     tools:
       - file
 ```
 
-Then ask the sharing agent in chat, for example: "Save your notes in a shared directory called report and invite writer."
+Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
 It calls `create_shared_directory("report")` and `invite_to_shared_directory("report", "writer")`, and from then on both agents see the directory's path in their prompts.
 `list_shared_directories()` shows each directory an agent owns or joined, with its path and access.
 
