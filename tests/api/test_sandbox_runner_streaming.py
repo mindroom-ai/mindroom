@@ -14,6 +14,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.tools.toolkit import Toolkit
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
@@ -108,6 +109,42 @@ def test_a_synchronous_call_runs_off_the_event_loop_so_keepalives_keep_flowing(
 
     assert {"keepalive": True} in frames
     assert frames[-1] == _result("done")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_synchronous_call_finishes_before_its_toolkit_closes() -> None:
+    """A thread cannot be stopped, so a cancelled call waits for it instead of closing its toolkit under it."""
+    events: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    class _ConnectedToolkit(Toolkit):
+        _requires_connect = True
+
+        def connect(self) -> None:
+            events.append("connect")
+
+        def close(self) -> None:
+            events.append("close")
+
+    def query() -> str:
+        started.set()
+        release.wait(10)
+        events.append("query finished")
+        return "rows"
+
+    call = asyncio.create_task(
+        sandbox_runner_module._run_toolkit_entrypoint(_ConnectedToolkit(name="connected"), query, [], {}),
+    )
+    assert await asyncio.to_thread(started.wait, 10)
+    call.cancel()
+    done, _pending = await asyncio.wait({call}, timeout=0.5)
+    release.set()
+
+    assert not done
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert events == ["connect", "query finished", "close"]
 
 
 @pytest.mark.parametrize("run_as_job", [False, True])

@@ -745,11 +745,18 @@ async def _call_entrypoint(entrypoint: Callable[..., object], args: list[Any], k
         return await entrypoint(*args, **kwargs)
     # A blocking function on the loop would stop the call's stream from sending keep-alives.
     executor = JOB_CALL_EXECUTOR if job_owns_execution() else None
-    value = await asyncio.get_running_loop().run_in_executor(
+    work = asyncio.get_running_loop().run_in_executor(
         executor,
         copy_context().run,
         partial(entrypoint, *args, **kwargs),
     )
+    try:
+        value = await asyncio.shield(work)
+    except asyncio.CancelledError:
+        # A thread cannot be stopped; wait for it so nothing, such as its toolkit's close, runs under it.
+        with suppress(Exception):
+            await work
+        raise
     return await _maybe_await(value)
 
 
