@@ -285,6 +285,8 @@ jira = [
 ]
 knowledge_graph = [
   "graphiti-core[falkordblite]==0.31.1",
+  # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
+  "hiredis",
   "psutil",
 ]
 linear = [
