@@ -98,6 +98,32 @@ async def test_llm_client_without_usage_target_records_nothing(tmp_path: Path) -
     record.assert_not_awaited()
 
 
+@dataclass
+class _FailingModel(FakeModel):
+    """Fails like a provider that rejects the key."""
+
+    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
+        del args, kwargs
+        msg = "401 invalid api key"
+        raise RuntimeError(msg)
+
+
+@pytest.mark.asyncio
+async def test_llm_client_reports_the_providers_error(tmp_path: Path) -> None:
+    """A rejected request surfaces the provider's reason, which ingestion shows in health."""
+    config = _config()
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    with (
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=_FailingModel(id="luna")),
+        pytest.raises(RuntimeError, match="invalid api key"),
+    ):
+        await MindRoomLLMClient(lambda: config, paths)._generate_response(
+            [GraphitiMessage(role="user", content="x")],
+            _Entities,
+        )
+
+
 class _Embedder:
     async def async_get_embedding(self, text: str) -> list[float]:
         return [float(len(text)), 1.0]

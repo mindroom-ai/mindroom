@@ -127,6 +127,8 @@ _.validate_knowledge_graph  # Pydantic model validator (src/mindroom/config/main
 _.reject_restricted_toolkits  # Pydantic field validator (src/mindroom/config/automations.py)
 _._generate_response  # Graphiti LLMClient hook Graphiti calls (src/mindroom/knowledge_graph/clients.py)
 _.create_batch  # Graphiti EmbedderClient hook Graphiti calls (src/mindroom/knowledge_graph/clients.py)
+_.markers  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
+graphiti_core  # Import run for its side effects inside the dotenv guard (src/mindroom/knowledge_graph/store.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)
 _._normalize_data  # unused method (src/mindroom/thread_tags.py)

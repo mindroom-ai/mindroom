@@ -20,6 +20,8 @@ class UsageTarget:
     agent_name: str
     session_id: str
     execution_identity: ToolExecutionIdentity | None
+    # The person whose conversation it is; for a shared agent, the identity names no requester.
+    requester_id: str | None = None
 
 
 _usage_target: ContextVar[UsageTarget | None] = ContextVar("knowledge_graph_usage_target", default=None)

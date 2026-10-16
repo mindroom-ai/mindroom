@@ -7,6 +7,7 @@ imports them. Each scope's graph is addressed by its ``graph_name``, which Falko
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
@@ -14,13 +15,14 @@ from urllib.parse import urlsplit
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge_graph.usage import usage_target
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import datetime
 
     from graphiti_core import Graphiti
+    from graphiti_core.driver.driver import GraphDriver
     from graphiti_core.edges import EntityEdge
     from graphiti_core.nodes import EpisodicNode
 
@@ -33,8 +35,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 type _EpisodeKind = Literal["conversation", "tool_results"]
-type _SourceKind = Literal["conversation", "tool_results", "unknown"]
 
+_DOTENV_DISABLED = "PYTHON_DOTENV_DISABLED"
 # Facts listed for one entity, current ones first.
 _MAX_ENTITY_FACTS = 30
 
@@ -52,9 +54,8 @@ class EpisodeInput:
 
 @dataclass(frozen=True)
 class _FactSource:
-    """An episode that supports a fact: what kind of evidence it is, where it came from, and when."""
+    """An episode that supports a fact: its description, which starts with its kind, and when it was observed."""
 
-    kind: _SourceKind
     description: str
     observed_at: datetime | None
 
@@ -120,14 +121,48 @@ def record_knowledge_graph_failure(detail: str | None) -> None:
     _failure = detail
 
 
-def _source_kind(source_description: str) -> _SourceKind:
-    """Return the evidence kind an episode description starts with."""
-    prefix = source_description.split(":", 1)[0]
-    if prefix == "conversation":
-        return "conversation"
-    if prefix == "tool_results":
-        return "tool_results"
-    return "unknown"
+def _import_graphiti() -> None:
+    """Import Graphiti and MindRoom's clients for it once, inside the optional-dependency scope.
+
+    Graphiti calls ``load_dotenv()`` at import, which copies the first ``.env`` above its install into ``os.environ``;
+    MindRoom reads ``.env`` files only deliberately, so that load is switched off while Graphiti imports.
+    """
+    previous = os.environ.get(_DOTENV_DISABLED)
+    os.environ[_DOTENV_DISABLED] = "1"
+    try:
+        with optional_dependency_environment():
+            import graphiti_core.driver.falkordb_driver  # noqa: PLC0415
+            import graphiti_core.graphiti  # noqa: F401, PLC0415
+
+            import mindroom.knowledge_graph.clients  # noqa: F401, PLC0415
+    finally:
+        if previous is None:
+            os.environ.pop(_DOTENV_DISABLED, None)
+        else:
+            os.environ[_DOTENV_DISABLED] = previous
+
+
+async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[GraphFact]:
+    """Return edges as facts with the episodes that support them."""
+    from graphiti_core.nodes import EpisodicNode  # noqa: PLC0415
+
+    episode_uuids = sorted({uuid for edge in edges for uuid in edge.episodes})
+    episodes: dict[str, EpisodicNode] = {}
+    if episode_uuids:
+        episodes = {episode.uuid: episode for episode in await EpisodicNode.get_by_uuids(driver, episode_uuids)}
+    return [
+        GraphFact(
+            fact=edge.fact,
+            valid_at=edge.valid_at,
+            invalid_at=edge.invalid_at,
+            sources=[
+                _FactSource(description=episode.source_description, observed_at=episode.valid_at)
+                for uuid in edge.episodes
+                if (episode := episodes.get(uuid)) is not None
+            ],
+        )
+        for edge in edges
+    ]
 
 
 class GraphitiStore:
@@ -155,6 +190,7 @@ class GraphitiStore:
 
     async def _build(self, config: Config) -> Graphiti:
         await asyncio.to_thread(ensure_tool_deps, ["graphiti-core"], "knowledge_graph", self._runtime_paths)
+        await asyncio.to_thread(_import_graphiti)
         # why-lazy: Graphiti, FalkorDB, and the embedded server are optional and load only for graph-enabled runtimes.
         from graphiti_core import Graphiti  # noqa: PLC0415
         from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: PLC0415
@@ -214,7 +250,7 @@ class GraphitiStore:
             config=EDGE_HYBRID_SEARCH_RRF.model_copy(update={"limit": limit}),
             group_ids=[scope.graph_name],
         )
-        return await self._facts(graphiti, scope, results.edges)
+        return await _facts(graphiti.driver.clone(database=scope.graph_name), results.edges)
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
         """Return the scope's entity best matching ``name`` with the facts that touch it."""
@@ -230,40 +266,15 @@ class GraphitiStore:
         if not results.nodes:
             return None
         node = results.nodes[0]
-        edges = await EntityEdge.get_by_node_uuid(graphiti.driver.clone(database=scope.graph_name), node.uuid)
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        edges = await EntityEdge.get_by_node_uuid(driver, node.uuid)
         # Current facts first, then the most recently valid.
         edges.sort(key=lambda edge: (edge.invalid_at is not None, -(edge.valid_at or edge.created_at).timestamp()))
         return _GraphEntity(
             name=node.name,
             summary=node.summary,
-            facts=await self._facts(graphiti, scope, edges[:_MAX_ENTITY_FACTS]),
+            facts=await _facts(driver, edges[:_MAX_ENTITY_FACTS]),
         )
-
-    async def _facts(self, graphiti: Graphiti, scope: GraphScope, edges: Sequence[EntityEdge]) -> list[GraphFact]:
-        from graphiti_core.nodes import EpisodicNode  # noqa: PLC0415
-
-        episode_uuids = sorted({uuid for edge in edges for uuid in edge.episodes})
-        episodes: dict[str, EpisodicNode] = {}
-        if episode_uuids:
-            driver = graphiti.driver.clone(database=scope.graph_name)
-            episodes = {episode.uuid: episode for episode in await EpisodicNode.get_by_uuids(driver, episode_uuids)}
-        return [
-            GraphFact(
-                fact=edge.fact,
-                valid_at=edge.valid_at,
-                invalid_at=edge.invalid_at,
-                sources=[
-                    _FactSource(
-                        kind=_source_kind(episode.source_description),
-                        description=episode.source_description,
-                        observed_at=episode.valid_at,
-                    )
-                    for uuid in edge.episodes
-                    if (episode := episodes.get(uuid)) is not None
-                ],
-            )
-            for edge in edges
-        ]
 
     async def close(self) -> None:
         """Close the client and stop the embedded database server."""

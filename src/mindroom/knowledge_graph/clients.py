@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.agent import Agent
+from agno.run.base import RunStatus
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.llm_client.client import LLMClient
@@ -92,9 +93,13 @@ class MindRoomLLMClient(LLMClient):
                 ),
                 invocation_id=invocation_id,
                 kind="knowledge_graph",
-                requester_id=identity.requester_id if identity is not None else None,
+                requester_id=target.requester_id or (identity.requester_id if identity is not None else None),
             )
         content = response.content
+        if response.status == RunStatus.error:
+            # Agno returns a provider failure as the run's content; report it instead of a JSON parse error.
+            msg = f"Knowledge graph extraction failed: {content}"
+            raise RuntimeError(msg)
         if isinstance(content, BaseModel):
             return content.model_dump()
         # Graphiti retries a call whose answer is not the JSON object it asked for.

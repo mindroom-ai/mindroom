@@ -27,6 +27,7 @@ class KnowledgeGraphIngestConfig(BaseModel):
     max_tool_result_chars: int = Field(
         default=4000,
         ge=100,
+        le=60000,
         description="Characters kept from each tool result",
     )
     backfill_days: int = Field(

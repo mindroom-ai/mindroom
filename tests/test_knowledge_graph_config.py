@@ -103,3 +103,9 @@ def test_knowledge_graph_agents_lists_enabled_agents_only() -> None:
         },
     )
     assert config.knowledge_graph_agents() == ["mind"]
+
+
+def test_tool_result_cap_stays_below_the_redaction_limit() -> None:
+    """Tool results are redacted whole, so their cap stays under the redaction input limit."""
+    with pytest.raises(ValidationError, match="max_tool_result_chars"):
+        _config(knowledge_graph={"model": "luna", "ingest": {"max_tool_result_chars": 100_000}})

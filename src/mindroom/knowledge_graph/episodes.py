@@ -41,10 +41,10 @@ _MAX_LISTED_CALLS = 20
 
 
 @dataclass(frozen=True)
-class _EpisodeChunk:
-    """The episodes of consecutive runs, ingested together, and the last run they cover."""
+class _RenderedEpisode:
+    """One episode and the last run it covers."""
 
-    episodes: tuple[EpisodeInput, ...]
+    episode: EpisodeInput
     last_run: _RunKey
 
 
@@ -64,7 +64,11 @@ def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) 
         return "exploration"
     if isinstance(hook_source, str) and is_automation_hook_source(hook_source):
         return "automation"
-    # Runs stored before hook sources were recorded are known by the threads automations started.
+    # LEGACY_COMPAT: Automation runs stored without their hook source.
+    # Legacy format: Run metadata had no `hook_source` key, so a stored automation run looks like a conversation.
+    # Last legacy release: v2026.10.306; replacement: the next release stores the trusted hook source on every run.
+    # Handling: A thread whose root was recorded in `tracking/automations/threads.json` counts as an automation thread.
+    # Coverage: tests/test_knowledge_graph_episodes.py::test_classify_thread_uses_the_root_hook_source_then_automation_threads.
     if metadata.get("thread_id") in automation_thread_ids:
         return "automation"
     return "conversation"
@@ -73,50 +77,41 @@ def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) 
 def render_episodes(
     runs: Sequence[RunOutput],
     *,
-    kind: _ThreadKind,
+    thread_kind: _ThreadKind,
+    episode_kind: Literal["conversation", "tool_results"],
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
-) -> list[_EpisodeChunk]:
-    """Render runs, oldest first, into chunks of at most ``max_episode_chars`` per episode, split at run boundaries."""
-    if kind == "automation":
+) -> list[_RenderedEpisode]:
+    """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries."""
+    if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind == "exploration"):
         return []
-    chunks: list[_EpisodeChunk] = []
-    conversation: list[str] = []
-    tool_lines: list[str] = []
+    rendered: list[_RenderedEpisode] = []
+    lines: list[str] = []
     calls: list[str] = []
-    chunk_runs: list[RunOutput] = []
+    last: RunOutput | None = None
 
     def flush() -> None:
-        if not chunk_runs:
-            return
-        last = chunk_runs[-1]
-        episodes = []
-        if conversation:
-            episodes.append(_episode("conversation", conversation, last, settings))
-        if tool_lines:
-            episodes.append(_episode("tool_results", tool_lines, last, settings, calls=calls))
-        if episodes:
-            chunks.append(_EpisodeChunk(episodes=tuple(episodes), last_run=run_key(last)))
-        conversation.clear()
-        tool_lines.clear()
+        if lines and last is not None:
+            rendered.append(_RenderedEpisode(_episode(episode_kind, lines, last, settings, calls=calls), run_key(last)))
+        lines.clear()
         calls.clear()
-        chunk_runs.clear()
 
     for run in sorted(runs, key=run_key):
-        run_conversation = _conversation_lines(run, agent_name, settings) if kind == "conversation" else []
-        run_tools = [execution for execution in run.tools or [] if execution.tool_name not in KNOWLEDGE_GRAPH_FUNCTIONS]
-        run_tool_lines = [_tool_line(execution, settings) for execution in run_tools]
-        if chunk_runs and (
-            _size(conversation) + _size(run_conversation) > settings.max_episode_chars
-            or _size(tool_lines) + _size(run_tool_lines) > settings.max_episode_chars
-        ):
+        if episode_kind == "conversation":
+            run_lines, run_calls = _conversation_lines(run, agent_name, settings), []
+        else:
+            executions = [
+                execution for execution in run.tools or [] if execution.tool_name not in KNOWLEDGE_GRAPH_FUNCTIONS
+            ]
+            run_lines = [_tool_line(execution, settings) for execution in executions]
+            run_calls = [f"{execution.tool_name} {_digest(execution)}" for execution in executions]
+        if lines and _size(lines) + _size(run_lines) > settings.max_episode_chars:
             flush()
-        conversation.extend(run_conversation)
-        tool_lines.extend(run_tool_lines)
-        calls.extend(f"{execution.tool_name} {_digest(execution)}" for execution in run_tools)
-        chunk_runs.append(run)
+        lines.extend(run_lines)
+        calls.extend(run_calls)
+        last = run
     flush()
-    return chunks
+    return rendered
 
 
 def _episode(
@@ -186,8 +181,9 @@ def _digest(execution: ToolExecution) -> str:
 
 
 def _clean(text: str, limit: int) -> str:
-    # Clip first, so redaction stays within its input limit and keeps what it can.
-    return redact_sensitive_text(text.strip()[:limit])
+    # Redaction scans a little past the limit, so a credential cut at the edge is still caught, and keeps its input
+    # under the redaction size limit.
+    return redact_sensitive_text(text.strip(), max_length=limit)
 
 
 def _size(lines: Sequence[str]) -> int:

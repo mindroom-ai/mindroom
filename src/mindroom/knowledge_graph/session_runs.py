@@ -8,7 +8,6 @@ from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
-from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.storage import load_archived_runs
 from mindroom.knowledge_graph.episodes import run_key
 from mindroom.session_storage.agent_storage import get_agent_session
@@ -43,17 +42,20 @@ def updated_sessions(storage: BaseDb, agent_name: str, *, since: int) -> list[tu
 
 
 def session_runs(storage: BaseDb, session_id: str) -> list[RunOutput]:
-    """Return the session's finished top-level Matrix turns, live and compacted, oldest first."""
+    """Return the session's top-level Matrix turns that finished or wait for approval, live and compacted, oldest first.
+
+    A turn waiting for approval finishes in place later, so callers stop at it rather than skip it.
+    """
     session = get_agent_session(storage, session_id)
     live = session.runs or [] if session is not None else []
     runs: dict[str, RunOutput] = {}
     # A rollback can return archived runs to the live table, so one run may appear in both; either copy will do.
     for run in [*load_archived_runs(storage, session_id), *live]:
         if (
-            is_model_history_visible_run(run)
-            and isinstance(run, RunOutput)
+            isinstance(run, RunOutput)
+            and run.parent_run_id is None
             and run.run_id
-            and run.status == RunStatus.completed
+            and run.status in (RunStatus.completed, RunStatus.paused)
             and (run.metadata or {}).get("room_id")
         ):
             runs[run.run_id] = run

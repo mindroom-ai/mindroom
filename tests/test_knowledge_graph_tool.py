@@ -35,7 +35,6 @@ FACT = GraphFact(
     invalid_at=MAR,
     sources=[
         _FactSource(
-            kind="tool_results",
             description="tool_results: room !r thread $t; calls: get_repo 1a2b",
             observed_at=JAN,
         ),

@@ -34,11 +34,6 @@ class GraphScope:
     execution_identity: ToolExecutionIdentity | None
     graph_name: str
 
-    @property
-    def requester_id(self) -> str | None:
-        """Return the requester whose private instance this is, or None for a shared agent."""
-        return self.execution_identity.requester_id if self.execution_identity is not None else None
-
 
 def _graph_name(scope_key: str, embedder_signature: Sequence[str]) -> str:
     """Return the graph name for a scope and embedder, which reveals neither."""

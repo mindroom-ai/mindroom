@@ -6,9 +6,11 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from agno.models.message import Message
+from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
@@ -17,6 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge_graph import ingestion
 from mindroom.knowledge_graph.ingestion import KnowledgeGraphIngestionWorker, wake_knowledge_graph_ingestion
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import knowledge_graph_failure, record_knowledge_graph_failure
@@ -38,14 +41,15 @@ T0 = 1_760_000_000
 
 @dataclass
 class _FakeStore:
-    """Records episodes; sessions listed in ``failing`` raise as a failing extraction would."""
+    """Records episodes; sessions in ``failing`` and episode kinds in ``failing_kinds`` raise like failed extraction."""
 
     episodes: list[tuple[str, EpisodeInput, UsageTarget]] = field(default_factory=list)
     failing: set[str] = field(default_factory=set)
+    failing_kinds: set[str] = field(default_factory=set)
     added: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
-        if usage.session_id in self.failing:
+        if usage.session_id in self.failing or episode.kind in self.failing_kinds:
             msg = "structured output did not match"
             raise ValueError(msg)
         self.episodes.append((scope.graph_name, episode, usage))
@@ -63,7 +67,8 @@ class _FakeStore:
         return None
 
     def sessions(self) -> list[str]:
-        return [usage.session_id for _, _, usage in self.episodes]
+        """Return the conversation of each ingested conversation episode, in order."""
+        return [usage.session_id for _, episode, usage in self.episodes if episode.kind == "conversation"]
 
 
 @pytest.fixture(autouse=True)
@@ -85,13 +90,16 @@ def _paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
 
-def _run(run_id: str, session_id: str, created_at: int) -> RunOutput:
+def _run(run_id: str, session_id: str, created_at: int, status: RunStatus = RunStatus.completed) -> RunOutput:
     return RunOutput(
         run_id=run_id,
         session_id=session_id,
         agent_id="mind",
         created_at=created_at,
-        status=RunStatus.completed,
+        status=status,
+        tools=[
+            ToolExecution(tool_call_id=f"call-{run_id}", tool_name="get_issue", tool_args={"n": 1}, result="Issue 1"),
+        ],
         metadata={"room_id": "!room:x", "thread_id": session_id.rsplit(":", 1)[-1], "requester_id": "@alice:x"},
         messages=[
             Message(role="user", content=f"question {run_id}"),
@@ -100,16 +108,28 @@ def _run(run_id: str, session_id: str, created_at: int) -> RunOutput:
     )
 
 
-def _seed(config: Config, paths: RuntimePaths, session_id: str, run_ids: list[str], *, at: int = T0) -> None:
+def _seed(
+    config: Config,
+    paths: RuntimePaths,
+    session_id: str,
+    run_ids: list[str],
+    *,
+    at: int = T0,
+    paused: frozenset[str] = frozenset(),
+    updated_at: int | None = None,
+) -> None:
     """Store a conversation whose runs start at ``at``, one second apart, last updated with its last run."""
     storage = create_session_storage("mind", config, paths, execution_identity=None)
     try:
-        runs = [_run(run_id, session_id, at + index) for index, run_id in enumerate(run_ids)]
+        runs = [
+            _run(run_id, session_id, at + index, RunStatus.paused if run_id in paused else RunStatus.completed)
+            for index, run_id in enumerate(run_ids)
+        ]
         seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=runs))
         with storage.db_engine.begin() as connection:
             connection.exec_driver_sql(
                 f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (at + len(run_ids), session_id),
+                (updated_at if updated_at is not None else at + len(run_ids), session_id),
             )
     finally:
         storage.close()
@@ -243,3 +263,82 @@ async def test_wake_runs_a_pass_before_the_interval(tmp_path: Path) -> None:
         await task
 
     assert store.sessions() == ["!room:x:$t1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_episode_never_re_adds_the_one_beside_it(tmp_path: Path) -> None:
+    """A tool-results episode that keeps failing is retried alone and dropped after five tries."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing_kinds={"tool_results"})
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+
+    for attempt in range(7):
+        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+
+    assert [episode.kind for _, episode, _ in store.episodes] == ["conversation"]
+    store.failing_kinds.clear()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
+    await worker._run_cycle(config, now=T0 + 40_000)
+    assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "conversation", "tool_results"]
+
+
+@pytest.mark.asyncio
+async def test_zero_backfill_ingests_conversations_after_the_graph_started(tmp_path: Path) -> None:
+    """With no backfill, conversations from after the graph was turned on are still ingested."""
+    config, paths, store = _config(backfill_days=0), _paths(tmp_path), _FakeStore()
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0)
+    _seed(config, paths, "!room:x:$t1", ["r1"], at=T0 + 100)
+
+    await worker._run_cycle(config, now=T0 + 200)
+
+    assert store.sessions() == ["!room:x:$t1"]
+
+
+@pytest.mark.asyncio
+async def test_a_paused_turn_holds_back_later_turns_until_it_finishes(tmp_path: Path) -> None:
+    """A turn waiting for approval is ingested when it finishes, even after later turns."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
+    worker = _worker(config, paths, store)
+
+    await worker._run_cycle(config, now=T0 + 10)
+    assert store.episodes == []
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 15)
+    await worker._run_cycle(config, now=T0 + 20)
+
+    assert _answers(store) == ["agent mind: answer r1", "agent mind: answer r2"]
+
+
+@pytest.mark.asyncio
+async def test_one_failing_agent_does_not_stop_the_others(tmp_path: Path) -> None:
+    """An agent whose conversations cannot be read is reported, and other agents are still ingested."""
+    config = _config()
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    real = ingestion.create_session_storage
+
+    def storage(agent_name: str, *args: object, **kwargs: object) -> object:
+        if agent_name == "pal":
+            msg = "unreadable session store"
+            raise OSError(msg)
+        return real(agent_name, *args, **kwargs)
+
+    with patch.object(ingestion, "create_session_storage", storage):
+        await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$t1"]
+    assert "unreadable session store" in (knowledge_graph_failure() or "")
+
+
+@pytest.mark.asyncio
+async def test_usage_is_charged_to_the_conversations_requester(tmp_path: Path) -> None:
+    """A shared agent's extraction cost belongs to the person whose conversation it came from."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+
+    assert {usage.requester_id for _, _, usage in store.episodes} == {"@alice:x"}

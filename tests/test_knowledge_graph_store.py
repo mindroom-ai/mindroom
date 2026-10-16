@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
+import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -18,7 +20,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
 from mindroom.knowledge_graph.scope import GraphScope
-from mindroom.knowledge_graph.store import GraphitiStore, _FactSource, _source_kind
+from mindroom.knowledge_graph.store import GraphitiStore, _FactSource
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -98,13 +100,6 @@ async def _seed_fact(
     await edge.save(driver)
 
 
-def test_source_kind_reads_the_episode_kind_prefix() -> None:
-    """Episode descriptions start with their kind."""
-    assert _source_kind("tool_results: room !r thread $t; calls: github.get_issue 1a2b") == "tool_results"
-    assert _source_kind("conversation: room !r thread $t") == "conversation"
-    assert _source_kind("something else") == "unknown"
-
-
 @pytest.mark.asyncio
 async def test_search_facts_returns_validity_and_sources(store: GraphitiStore) -> None:
     """A fact comes back with when it held and which episode supports it."""
@@ -123,7 +118,7 @@ async def test_search_facts_returns_validity_and_sources(store: GraphitiStore) -
     assert facts[0].valid_at == JAN
     assert facts[0].invalid_at == MAR
     assert facts[0].sources == [
-        _FactSource(kind="conversation", description="conversation: room !r:x thread $t", observed_at=JAN),
+        _FactSource(description="conversation: room !r:x thread $t", observed_at=JAN),
     ]
 
 
@@ -153,4 +148,23 @@ async def test_entity_returns_summary_and_facts(store: GraphitiStore) -> None:
     assert entity.name == "Alice"
     assert entity.summary == "Alice leads Project Atlas."
     assert [fact.fact for fact in entity.facts] == ["Alice leads Project Atlas"]
-    assert entity.facts[0].sources[0].kind == "tool_results"
+    assert entity.facts[0].sources[0].description.startswith("tool_results:")
+
+
+def test_importing_graphiti_leaves_the_environment_alone(tmp_path: Path) -> None:
+    """Graphiti loads a .env at import; MindRoom keeps that from changing its process environment."""
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("KG_IMPORT_PROBE=leaked\n", encoding="utf-8")
+    script = f"""
+import os
+from unittest.mock import patch
+import dotenv.main
+with patch.object(dotenv.main, "find_dotenv", return_value={str(dotenv_file)!r}):
+    from mindroom.knowledge_graph.store import _import_graphiti
+    _import_graphiti()
+assert "KG_IMPORT_PROBE" not in os.environ, "Graphiti's .env reached os.environ"
+assert "PYTHON_DOTENV_DISABLED" not in os.environ
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr

@@ -121,10 +121,8 @@ def _stop_orphaned_server(db_dir: Path, executable: str) -> None:
         pid = int((db_dir / _PIDFILE).read_text(encoding="utf-8").strip())
         process = psutil.Process(pid)
         # A recycled PID belongs to another program or another database; only this database's server is stopped.
-        is_this_server = (
-            Path(process.exe()).resolve() == Path(executable).resolve()
-            and Path(process.cwd()).resolve() == db_dir.resolve()
-        )
+        # The binary path is not compared, because an upgrade moves it while the old server keeps running.
+        is_this_server = process.name() == Path(executable).name and Path(process.cwd()).resolve() == db_dir.resolve()
     except (FileNotFoundError, ValueError, psutil.Error):
         return
     if not is_this_server:

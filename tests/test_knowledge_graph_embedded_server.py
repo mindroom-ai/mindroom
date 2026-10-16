@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import psutil
 import pytest
+import redislite
 from falkordb.asyncio import FalkorDB
 
 from mindroom.knowledge_graph.embedded_server import start_embedded_server
@@ -58,6 +61,26 @@ async def test_server_left_by_a_crashed_runtime_is_stopped_before_the_next_start
         try:
             assert not psutil.pid_exists(orphan.pid) or psutil.Process(orphan.pid).status() == psutil.STATUS_ZOMBIE
             assert await _query(successor.socket_path, "RETURN 1") == [[1]]
+        finally:
+            await successor.stop()
+    finally:
+        await orphan.stop()
+
+
+@pytest.mark.asyncio
+async def test_server_left_before_an_upgrade_is_stopped_too(tmp_path: Path) -> None:
+    """An upgrade moves the server binary, and the server a crash left still runs from the old path."""
+    old_install = tmp_path / "old-install"
+    old_install.mkdir()
+    old_binary = old_install / "redis-server"
+    shutil.copy2(redislite.__redis_executable__, old_binary)
+    db_dir = tmp_path / "db"
+    with patch.object(redislite, "__redis_executable__", str(old_binary)):
+        orphan = await start_embedded_server(db_dir)
+    try:
+        successor = await start_embedded_server(db_dir)
+        try:
+            assert not psutil.pid_exists(orphan.pid) or psutil.Process(orphan.pid).status() == psutil.STATUS_ZOMBIE
         finally:
             await successor.stop()
     finally:

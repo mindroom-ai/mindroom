@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge_graph.ingestion import KnowledgeGraphIngestionWorker
-from mindroom.knowledge_graph.store import GraphitiStore, set_knowledge_graph_store
+from mindroom.knowledge_graph.store import GraphitiStore, record_knowledge_graph_failure, set_knowledge_graph_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,7 +52,10 @@ class KnowledgeGraphRuntime:
         if worker is not None:
             worker.stop()
         if task is not None:
+            # A pass can wait minutes on extraction calls; its marker records progress, so cancelling loses none.
+            task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if store is not None:
             set_knowledge_graph_store(None)
             await store.close()
+            record_knowledge_graph_failure(None)

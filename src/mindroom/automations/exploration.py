@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 
+from agno.run.base import RunStatus
+
 from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
@@ -58,6 +60,8 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_L
             if classify_thread(runs, automation_thread_ids) != "conversation":
                 continue
             for run in runs:
+                if run.status != RunStatus.completed:
+                    continue
                 for execution in run.tools or []:
                     if not execution.tool_name or execution.tool_name in KNOWLEDGE_GRAPH_FUNCTIONS:
                         continue

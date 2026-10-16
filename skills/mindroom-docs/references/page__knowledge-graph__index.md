@@ -36,7 +36,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations added per pass; the rest wait for the next |
 | `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once |
-| `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100) | Characters kept from each tool result |
+| `knowledge_graph.ingest.max_tool_result_chars` | `4000` (100 to 60000) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
@@ -53,6 +53,7 @@ Credential-like values are removed on a best-effort basis before anything is sen
 Each fact keeps its sources: `conversation` means someone said it, `tool_results` means a tool returned it.
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
+Deleting or redacting a message does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`.
 
 ## The `knowledge_graph` Tool
 

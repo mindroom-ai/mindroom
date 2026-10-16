@@ -34,6 +34,7 @@ The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instan
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
+An external FalkorDB server for the `falkordb` backend must be kept off worker networks, because graph names separate agents only for code that MindRoom runs.
 
 ### Workspace mounts by worker scope
 
@@ -163,6 +164,7 @@ Do not report or "fix" these; they are deliberate.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
+- Redacting a message does not remove facts the knowledge graph already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
 - An `exploration` run calls the agent's tools unattended; its authority is the operator's `tools` allowlist, enforced in the agent build together with hiding every approval-gated function and a per-thread call cap, not the prompt, so content it reads can steer it only within that list.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.

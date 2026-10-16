@@ -10,7 +10,10 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from itertools import takewhile
 from typing import TYPE_CHECKING, TypedDict
+
+from agno.run.base import RunStatus
 
 from mindroom.automations.threads import automation_threads
 from mindroom.durable_write import write_json_file_durable
@@ -39,12 +42,16 @@ _DAY_SECONDS = 86_400
 _IDLE_POLL_SECONDS = 30
 _FIRST_RETRY_SECONDS = 60
 _MAX_RETRY_SECONDS = 3600
+# An episode that fails this often is dropped, so one unextractable episode cannot cost model calls forever.
+_MAX_EPISODE_ATTEMPTS = 5
+_EPISODE_KINDS = ("conversation", "tool_results")
 _WAKE_EVENTS: set[asyncio.Event] = set()
 
 
 class _SessionState(TypedDict):
     updated_at: int
-    marker: list[int | str] | None
+    # The last run each episode kind has ingested, so a failing kind never repeats the other.
+    markers: dict[str, list[int | str]]
     failures: int
     retry_at: float
 
@@ -69,6 +76,17 @@ def wake_knowledge_graph_ingestion(*, after_seconds: float = 0) -> None:
             event.set()
 
     asyncio.get_running_loop().call_later(after_seconds, wake)
+
+
+def _marker(entry: _SessionState, kind: str) -> tuple[int, str] | None:
+    marker = entry["markers"].get(kind)
+    return (int(marker[0]), str(marker[1])) if marker is not None else None
+
+
+def _report_failure(message: str, exc: Exception, **context: str) -> None:
+    detail = f"{type(exc).__name__}: {str(exc)[:200]}"
+    logger.warning(message, error=detail, **context)
+    record_knowledge_graph_failure(detail)
 
 
 @dataclass
@@ -101,7 +119,10 @@ class KnowledgeGraphIngestionWorker:
             config = self.config_provider()
             interval = _IDLE_POLL_SECONDS
             if config is not None and config.knowledge_graph_agents():
-                await self._run_cycle(config, now=time.time())
+                try:
+                    await self._run_cycle(config, now=time.time())
+                except Exception as exc:
+                    _report_failure("Knowledge graph ingestion pass failed", exc)
                 interval = config.knowledge_graph.ingest.interval_seconds
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
@@ -116,12 +137,17 @@ class KnowledgeGraphIngestionWorker:
         for scope in graph_scopes(config, self.runtime_paths):
             if budget <= 0:
                 break
-            state = self._load_state(scope.graph_name, now)
-            due = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
-            budget -= len(due)
-            outcomes.extend(
-                [await self._ingest(config, scope, state, session, automation_thread_ids, now) for session in due],
-            )
+            # One agent or private instance whose conversations cannot be read must not stop the others.
+            try:
+                state = self._load_state(scope.graph_name, now)
+                due = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
+                budget -= len(due)
+                outcomes.extend(
+                    [await self._ingest(config, scope, state, session, automation_thread_ids, now) for session in due],
+                )
+            except Exception as exc:
+                _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
+                outcomes.append(False)
         # Health reports a failure until a pass ingests something and nothing in it fails.
         if outcomes and all(outcomes):
             record_knowledge_graph_failure(None)
@@ -166,50 +192,69 @@ class KnowledgeGraphIngestionWorker:
         automation_thread_ids: set[str],
         now: float,
     ) -> bool:
-        """Ingest one conversation's new turns and return whether it succeeded."""
+        """Ingest one conversation's new turns and return whether every episode was added."""
         entry = state["sessions"].setdefault(
             session.session_id,
-            {"updated_at": 0, "marker": None, "failures": 0, "retry_at": 0},
+            {"updated_at": 0, "markers": {}, "failures": 0, "retry_at": 0},
         )
-        marker = (int(entry["marker"][0]), str(entry["marker"][1])) if entry["marker"] is not None else None
-        new_runs = [run for run in session.runs if marker is None or run_key(run) > marker]
-        chunks = render_episodes(
-            new_runs,
-            kind=classify_thread(session.runs, automation_thread_ids),
-            agent_name=scope.agent_name,
-            settings=config.knowledge_graph.ingest,
+        thread_kind = classify_thread(session.runs, automation_thread_ids)
+        # A turn waiting for approval finishes in place later, so nothing from it on is ingested yet.
+        finished = list(takewhile(lambda run: run.status == RunStatus.completed, session.runs))
+        requester_id = next(
+            (requester for run in reversed(session.runs) if (requester := (run.metadata or {}).get("requester_id"))),
+            None,
         )
-        usage = UsageTarget(scope.agent_name, session.session_id, scope.execution_identity)
-        try:
-            for chunk in chunks:
-                for episode in chunk.episodes:
-                    await self.store.add_episode(scope, episode, usage)
-                entry["marker"] = list(chunk.last_run)
+        usage = UsageTarget(scope.agent_name, session.session_id, scope.execution_identity, requester_id)
+        clean = True
+        for kind in _EPISODE_KINDS:
+            marker = _marker(entry, kind)
+            new_runs = [run for run in finished if marker is None or run_key(run) > marker]
+            for rendered in render_episodes(
+                new_runs,
+                thread_kind=thread_kind,
+                episode_kind=kind,
+                agent_name=scope.agent_name,
+                settings=config.knowledge_graph.ingest,
+            ):
+                try:
+                    await self.store.add_episode(scope, rendered.episode, usage)
+                except Exception as exc:
+                    entry["failures"] += 1
+                    _report_failure("Knowledge graph ingestion failed", exc, agent=scope.agent_name)
+                    if entry["failures"] < _MAX_EPISODE_ATTEMPTS:
+                        backoff = _FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1)
+                        entry["retry_at"] = now + min(backoff, _MAX_RETRY_SECONDS)
+                        self._save_state(scope.graph_name, state)
+                        return False
+                    logger.exception(
+                        "Knowledge graph dropped an episode it could not extract",
+                        agent=scope.agent_name,
+                        episode=rendered.episode.name,
+                    )
+                    entry["failures"] = 0
+                    clean = False
+                entry["markers"][kind] = list(rendered.last_run)
                 self._save_state(scope.graph_name, state)
-        except Exception as exc:
-            entry["failures"] += 1
-            entry["retry_at"] = now + min(_FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1), _MAX_RETRY_SECONDS)
-            self._save_state(scope.graph_name, state)
-            detail = f"{type(exc).__name__}: {str(exc)[:200]}"
-            logger.warning("Knowledge graph ingestion failed", agent=scope.agent_name, error=detail)
-            record_knowledge_graph_failure(detail)
-            return False
+            if new_runs:
+                entry["markers"][kind] = list(run_key(new_runs[-1]))
         entry.update(updated_at=session.updated_at, failures=0, retry_at=0)
         self._save_state(scope.graph_name, state)
-        return True
+        return clean
 
     def _state_path(self, graph_name: str) -> Path:
         return self.runtime_paths.storage_root / "knowledge_graph" / "ingestion" / f"{graph_name}.json"
 
     def _load_state(self, graph_name: str, now: float) -> _GraphState:
         try:
-            state = json.loads(self._state_path(graph_name).read_text(encoding="utf-8"))
+            return json.loads(self._state_path(graph_name).read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return {"started_at": now, "sessions": {}}
+            pass
         except ValueError:
             # Starting over re-extracts recent conversations, which Graphiti merges with what it already holds.
             logger.warning("Knowledge graph ingestion state was unreadable; starting over", graph=graph_name)
-            return {"started_at": now, "sessions": {}}
+        # Saved at once, so the backfill window stays anchored to when the graph started.
+        state: _GraphState = {"started_at": now, "sessions": {}}
+        self._save_state(graph_name, state)
         return state
 
     def _save_state(self, graph_name: str, state: _GraphState) -> None:

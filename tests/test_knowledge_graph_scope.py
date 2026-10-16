@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge_graph.scope import GraphScope
 
 ALICE = "@alice:example.test"
 BOB = "@bob:example.test"
@@ -33,6 +34,10 @@ def _config(**embedder: object) -> Config:
         knowledge_graph={"model": "luna"},
         memory={"embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small", **embedder}}},
     )
+
+
+def _requester(scope: GraphScope) -> str | None:
+    return scope.execution_identity.requester_id if scope.execution_identity is not None else None
 
 
 def _paths(tmp_path: Path) -> RuntimePaths:
@@ -70,7 +75,7 @@ def test_private_instances_get_distinct_graphs(tmp_path: Path) -> None:
 
     scopes = graph_scopes(config, paths)
 
-    by_owner = {(scope.agent_name, scope.requester_id): scope.graph_name for scope in scopes}
+    by_owner = {(scope.agent_name, _requester(scope)): scope.graph_name for scope in scopes}
     assert set(by_owner) == {("mind", None), ("pal", ALICE), ("pal", BOB)}
     assert len(set(by_owner.values())) == 3
 
@@ -82,6 +87,6 @@ def test_scope_for_a_requester_matches_the_listed_scope(tmp_path: Path) -> None:
     _create_private_instance(config, paths, ALICE)
     identity = build_requester_execution_identity(agent_name="pal", runtime_paths=paths, requester_id=ALICE)
 
-    listed = next(scope for scope in graph_scopes(config, paths) if scope.requester_id == ALICE)
+    listed = next(scope for scope in graph_scopes(config, paths) if _requester(scope) == ALICE)
 
     assert graph_scope("pal", config, paths, identity).graph_name == listed.graph_name
