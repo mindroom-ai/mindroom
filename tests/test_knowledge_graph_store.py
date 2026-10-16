@@ -231,9 +231,12 @@ async def test_a_crashed_database_server_is_started_again(store: GraphitiStore) 
     server = store._embedded_server
     assert server is not None
     # A kill can lose the last second of writes, which is documented and not what this test checks.
+    # WAITAOF waits only for this connection's own writes; the append-only file is written in order, so one write
+    # here that reaches disk means the seeded fact did too.
     client = Redis(unix_socket_path=server.socket_path)
     try:
-        await client.execute_command("WAITAOF", 1, 0, 5000)
+        await client.set("fsync-barrier", "1")
+        assert await client.execute_command("WAITAOF", 1, 0, 30000) == [1, 0]
     finally:
         await client.aclose()
     server.process.kill()
