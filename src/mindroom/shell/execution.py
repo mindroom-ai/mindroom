@@ -189,7 +189,10 @@ def shell_call_timeout(timeout: float | None) -> float | None:
 
 
 def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
-    """Return how long one worker request may take for this shell call, or 0 when it has no foreground wait."""
+    """Return how long one worker request outside a job may take for this shell call, or 0 when it has no foreground wait.
+
+    Callers give a job's call no budget, as `shell_call_timeout` gives its command no limit.
+    """
     if tool_name != "shell" or function_name != "run_shell_command":
         return 0.0
     raw_timeout = kwargs.get("timeout", _DEFAULT_RUN_TIMEOUT_SECONDS)
