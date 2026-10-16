@@ -1775,6 +1775,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix_openid",
     "mindroom.runtime_env_policy",
+    "mindroom.origins",
 ]
 
 [[modules]]
@@ -1851,7 +1852,6 @@ depends_on = [
     "mindroom.credentials.legacy_tool_credentials",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.api.computers",
-    "mindroom.matrix_openid",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
     "mindroom.api.connections_session",
@@ -5105,6 +5105,7 @@ depends_on = [
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.browser_proxy",
+    "mindroom.origins",
 ]
 # The broker's wiring points: every module outside the feature that may import it.
 visibility = [
@@ -7628,6 +7629,7 @@ depends_on = [
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend",
     "mindroom.workers.runtime",
+    "mindroom.origins",
 ]
 
 [[modules]]

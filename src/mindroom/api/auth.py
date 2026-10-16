@@ -64,6 +64,8 @@ _used_platform_sso_ticket_ids: dict[str, int] = {}
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 # Set only by server code; ASGI scope keys cannot come from the client.
 _CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback"
+# Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
+_CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
 _TRUSTED_UPSTREAM_JWT_MAX_BYTES = 16 * 1024
@@ -982,9 +984,6 @@ def _connections_session_path_honored(request: Request) -> bool:
     if _is_oauth_popup_path(path, frozenset({"callback"})):
         return request.scope.get(_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY) is True
     return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
-
-
-_CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
 
 
 def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:

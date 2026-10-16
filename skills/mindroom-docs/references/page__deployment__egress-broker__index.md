@@ -353,15 +353,15 @@ A connection that everyone using an agent shares never gets a link; connect it a
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
 On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects their own account.
 
-The personal egress page and its API need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) and a verified Matrix identity on the request.
-Without that signed identity gate, such as on a host that has no upstream proxy, the personal page is not served and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
-A `user` or `user_agent` agent, private agents included, then has no page where its keys can be set: until an administrator enables trusted upstream auth with JWT or gives the agent a shared worker scope, its brokered calls to a service without a key are refused, and the refusal names no page.
+The personal egress page and its API need a verified Matrix identity on the request, from [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) or from [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat).
+Without either sign-in, the personal page is not served and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
+A `user` or `user_agent` agent, private agents included, then has no page where its keys can be set: until an administrator enables one of those sign-ins or gives the agent a shared worker scope, its brokered calls to a service without a key are refused, and the refusal names no page.
 When more than one user can sign in through the gateway, set `MINDROOM_CONNECTIONS_AGENT` as well, or every user the gateway admits gets full dashboard access, including configuration edits, shared keys, and every requester's log; with it set, non-administrators who open the dashboard are sent to the Connections portal (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
 
 ## User services
 
 A user service is a service the user defines for their own scope instead of an administrator defining it in `config.yaml`.
-Users manage them on the personal egress page at `/connections/egress`, which needs [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT.
+Users manage them on the personal egress page at `/connections/egress`, which needs one of the [sign-ins above](#connecting-an-account).
 They have the same fields and validators as a config service (a preset or `rules`, `placeholder_env`, `oauth_provider`, `restrict_to_rules`), plus [`restrict_only`](#limiting-in-place), but not `oauth_on_shared_workers`.
 
 On `user` and `user_agent` agents each requester adds their own, which apply only to that requester's workers.
@@ -427,7 +427,7 @@ Another service of the user's own (or, on a shared agent, its credential manager
 ## Connections pages
 
 Users see two pages: the Connections portal at `/connections` (their agents, tools, and account cards) and the personal egress page at `/connections/egress` (titled "Agent Keys").
-Both need [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT, and the portal links each agent to its section on the personal page, where services are added, edited, and deleted.
+Both need trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat, and the portal links each agent to its section on the personal page, where services are added, edited, and deleted.
 
 Each row shows the hosts the service sends to, how it sends the key, and the placeholder variables the agent sees, such as `GH_TOKEN=mindroom-brokered`.
 For a service with no placeholder variables and no account login, the agent is not told the key exists, so mention its host in your request.
@@ -483,8 +483,8 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id.
   It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null`.
   A `true` value says the provider can be connected, not that this user may connect it: for the Google providers on a shared agent, only administrators and credential managers can.
-- `manage_url` is the personal egress page when trusted upstream auth with JWT is enabled and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
-- For a `user` or `user_agent` agent without trusted upstream auth with JWT, `manage_url` is `null`, and the note says that this deployment serves no page for the agent's keys, that an administrator can enable trusted upstream auth or make the agent shared, and that an account can still be connected at the `connect_url` in the broker's refusal.
+- `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
+- For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that this deployment serves no page for the agent's keys, that an administrator can enable Connections sign-in or make the agent shared, and that an account can still be connected at the `connect_url` in the broker's refusal.
 - The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
 
@@ -611,7 +611,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
 4. Add the services you use to `config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
 5. Remove the `agent-vault-bridge` plugin from the config.
 6. Set the keys or connect the accounts of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
-   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which needs trusted upstream auth with JWT; without it, give those agents a shared worker scope, or their brokered calls that need a key are refused.
+   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which needs trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat; without either, give those agents a shared worker scope, or their brokered calls that need a key are refused.
 7. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the request log records it, and the worker environment and workspace contain no trace of the token.
 8. After a grace period, remove the Agent Vault CA from wherever you pinned it for workers, and stop Agent Vault.
 

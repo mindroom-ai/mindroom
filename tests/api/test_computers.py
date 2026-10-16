@@ -27,8 +27,8 @@ from mindroom.api import main as api_main
 from mindroom.api.computers import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.matrix_openid import allowed_client_origins
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
+from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.worker_computer.protocol import BrowserSession, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore

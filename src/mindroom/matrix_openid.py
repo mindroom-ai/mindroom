@@ -1,4 +1,4 @@
-"""Shared Matrix OpenID verification and exact browser origins."""
+"""Matrix OpenID verification at the configured homeserver, shared by Computers and the Connections portal."""
 
 import json
 from time import monotonic
@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
-from mindroom.origins import normalized_origin, parse_browser_origin
+from mindroom.origins import normalized_origin
 from mindroom.requester_identity import runtime_matrix_domain
 
 logger = get_logger(__name__)
@@ -40,23 +40,6 @@ class MatrixOpenIDError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
-
-
-def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...]:
-    """Read exact web and bundled iOS app origins; invalid configuration fails closed."""
-    try:
-        origins = json.loads(paths.env_value(env_name, default="[]") or "[]")
-        if not isinstance(origins, list):
-            return ()
-        # The bundled iOS app has a fixed custom-scheme origin. Accept only
-        # this literal, never arbitrary capacitor origins or opaque "null".
-        if not all(isinstance(origin, str) for origin in origins):
-            return ()
-        return tuple(
-            origin if origin == "capacitor://localhost" else parse_browser_origin(origin) for origin in origins
-        )
-    except (ValueError, TypeError):
-        return ()
 
 
 async def _homeserver_binds_audience(

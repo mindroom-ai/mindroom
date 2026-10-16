@@ -352,6 +352,30 @@ def test_session_refuses_requests_from_a_tab_signed_in_as_another_account(signin
     assert stored(requester_id="@alice:example.org") is None
 
 
+def test_session_reaches_the_agent_keys_api(signin: dict[str, Any]) -> None:
+    """With the broker on, a portal session reads the Agent Keys of its own agents."""
+    services = {"github": {"rules": [{"host": "api.github.com", "auth": {"type": "bearer"}}]}}
+    # The broker runs exactly when its port is set, and a dedicated backend gives each requester its own worker.
+    _serve(
+        signin,
+        {
+            **signin["payload"],
+            "agents": {"personal": {**signin["payload"]["agents"]["personal"], "tools": ["shell"]}},
+            "egress_broker": {"services": services},
+        },
+        MINDROOM_EGRESS_BROKER_PORT="8768",
+        MINDROOM_WORKER_BACKEND="docker",
+    )
+    client = signin["client"]
+    assert client.get("/api/connections/egress").status_code == 401
+    assert sign_in(client, "alice").status_code == 200
+    response = client.get("/api/connections/egress")
+    assert response.status_code == 200, response.text
+    (agent,) = response.json()["agents"]
+    assert agent["agent_name"] == "personal"
+    assert agent["can_manage"] is True
+
+
 def test_session_ignored_on_dashboard_routes(signin: dict[str, Any]) -> None:
     """A portal session is not a dashboard credential; the API key still is."""
     client = signin["client"]

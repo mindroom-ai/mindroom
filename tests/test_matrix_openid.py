@@ -1,4 +1,4 @@
-"""Tests for shared Matrix OpenID verification and client origin parsing."""
+"""Tests for shared Matrix OpenID verification."""
 
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -11,53 +11,8 @@ from structlog.testing import capture_logs
 
 from mindroom import matrix_openid
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.matrix_openid import (
-    MatrixOpenIDError,
-    MatrixOpenIDToken,
-    allowed_client_origins,
-    verify_matrix_openid,
-)
+from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
 from tests.computer_helpers import ComputerPeer
-
-
-def test_allowed_client_origins_reads_named_env(tmp_path: Path) -> None:
-    """Reads exact origins from the named env var."""
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={
-            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://chat.example.org", "capacitor://localhost"]',
-        },
-    )
-    assert allowed_client_origins(paths, "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS") == (
-        "https://chat.example.org",
-        "capacitor://localhost",
-    )
-    # Computer env unset returns empty tuple
-    assert allowed_client_origins(paths, "MINDROOM_COMPUTER_ALLOWED_ORIGINS") == ()
-
-
-def test_allowed_client_origins_fails_closed(tmp_path: Path) -> None:
-    """Invalid configuration fails closed with empty tuple."""
-    # Wildcard rejected
-    wildcard_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={
-            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://ok.example.org", "https://*.example.org"]',
-        },
-    )
-    assert allowed_client_origins(wildcard_paths, "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS") == ()
-    # Non-list rejected
-    non_list_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={
-            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '"https://chat.example.org"',
-        },
-    )
-    assert allowed_client_origins(non_list_paths, "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS") == ()
-
 
 AUDIENCE = "https://portal.example.org"
 TOKEN = MatrixOpenIDToken(

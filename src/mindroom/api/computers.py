@@ -19,12 +19,8 @@ from mindroom.api import config_lifecycle
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
-from mindroom.matrix_openid import (
-    MatrixOpenIDError,
-    MatrixOpenIDToken,
-    allowed_client_origins,
-    verify_matrix_openid,
-)
+from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
+from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget

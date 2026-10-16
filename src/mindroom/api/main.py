@@ -68,8 +68,8 @@ from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
-from mindroom.matrix_openid import allowed_client_origins
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
+from mindroom.origins import allowed_client_origins
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state

@@ -24,12 +24,8 @@ from mindroom.api.connections_sessions import (
     issue_connections_session,
 )
 from mindroom.constants import RuntimePaths
-from mindroom.matrix_openid import (
-    MatrixOpenIDError,
-    MatrixOpenIDToken,
-    allowed_client_origins,
-    verify_matrix_openid,
-)
+from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
+from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV
 
 if TYPE_CHECKING:

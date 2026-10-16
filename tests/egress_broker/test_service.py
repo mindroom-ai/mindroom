@@ -905,7 +905,7 @@ async def test_missing_key_message_names_the_calling_agents_credential_managers(
 _NO_PERSONAL_PAGE_KEY = (
     "No github key: each user sets this agent's keys on the Connections page, "
     "which this deployment does not serve. "
-    "An administrator can enable trusted upstream auth or make the agent shared."
+    "An administrator can enable Connections sign-in or make the agent shared."
 )
 _SIGNED_UPSTREAM = {
     "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
