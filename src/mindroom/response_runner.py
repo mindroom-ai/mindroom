@@ -38,7 +38,6 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.budgets.monitor import budget_model
-from mindroom.cold_cache import select_cold_cache_model
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -68,6 +67,7 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
+from mindroom.judgment.cold_cache import select_cold_cache_model
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,

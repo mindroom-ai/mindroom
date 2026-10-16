@@ -487,7 +487,7 @@ A shared key still needs identical prefixes and tools, and provider routing can 
 
 ## Cold-Cache Model
 
-Claude providers read a cached prompt at a tenth of the normal input price and charge more than the normal price to write a new cache; other providers' cache discounts vary by model.
+Claude providers read a cached prompt for a small fraction of the normal input price and charge more than the normal price to write a new cache; the exact rates vary by model and provider.
 Switching models mid-thread therefore usually costs money, because the new model starts without a cache.
 Once the agent model's cache for a thread has expired, the next turn pays for a full write either way, and a cheaper model can answer a simple request for a fraction of the cost.
 Set `agents.<name>.cheap_model` to the agent's cheaper alternative and `agents.<name>.cold_cache` to let a judge switch to it:
@@ -514,7 +514,7 @@ Set `defaults.cheap_model` to give every agent the same cheap model; an agent's 
 A thread's cache counts as cold when its newest run used a different model, or when its session was last written longer ago than the cache lifetime:
 
 - Claude providers: one hour, or five minutes with `extra_kwargs.extended_cache_time: false`. Anthropic refreshes the lifetime on every cache hit, so the expiry is exact.
-- Other providers: one hour, the upper bound of OpenAI's in-memory retention, so a warm cache is not mistaken for a cold one; 24 hours with `extra_kwargs.request_params.prompt_cache_retention: 24h`.
+- Other providers: 24 hours, OpenAI's extended retention and its default for GPT-5.5 and earlier, so a warm cache is not mistaken for a cold one. The switch therefore mainly helps Claude agents.
 
 On a cold turn, the judge sees the thread and the new request, and decides whether the cheap model can continue the whole conversation as well as the agent model; the question names both by their configured model `id`.
 Tool calls in the thread reach it as `<tool>` tags with the short input and output previews the chat shows.

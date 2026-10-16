@@ -11,11 +11,11 @@ from agno.session.agent import AgentSession
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.cold_cache import _is_thread_cache_warm, _prompt_cache_ttl_seconds, select_cold_cache_model
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.judgment.answers import JudgmentResult
+from mindroom.judgment.cold_cache import _is_thread_cache_warm, _prompt_cache_ttl_seconds, select_cold_cache_model
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from tests.conftest import test_runtime_paths
 
@@ -152,15 +152,9 @@ def test_ttl_claude_without_extended_cache_is_five_minutes() -> None:
     assert _prompt_cache_ttl_seconds(_model(extra_kwargs={"extended_cache_time": False})) == 300
 
 
-def test_ttl_other_providers_is_one_hour() -> None:
-    """Providers without an exact TTL use OpenAI's documented upper bound, erring toward warm."""
-    assert _prompt_cache_ttl_seconds(_model(provider="openai", id="gpt-6.1")) == 3600
-
-
-def test_ttl_openai_extended_retention_is_one_day() -> None:
-    """OpenAI's opt-in extended retention keeps prompts cached for up to 24 hours."""
-    model = _model(provider="openai", id="gpt-6.1", extra_kwargs={"request_params": {"prompt_cache_retention": "24h"}})
-    assert _prompt_cache_ttl_seconds(model) == 86400
+def test_ttl_other_providers_is_one_day() -> None:
+    """Providers without an exact TTL use OpenAI's 24h extended retention, erring toward warm."""
+    assert _prompt_cache_ttl_seconds(_model(provider="openai", id="gpt-5.5")) == 86400
 
 
 @pytest.mark.parametrize(
@@ -224,7 +218,7 @@ async def _select(
     cold_cache: dict[str, Any] | None = None,
 ) -> str:
     config = _config(cold_cache or {})
-    monkeypatch.setattr("mindroom.cold_cache.create_judgment_evaluator", lambda *_args, **_kwargs: judge)
+    monkeypatch.setattr("mindroom.judgment.cold_cache.create_judgment_evaluator", lambda *_args, **_kwargs: judge)
     settings = config.agents["assistant"].cold_cache
     assert settings is not None
     return await select_cold_cache_model(

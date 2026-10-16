@@ -6,7 +6,6 @@ import json
 import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
-from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from agno.models.response import ToolExecution
 
@@ -590,20 +589,29 @@ def message_tool_trace(content: Mapping[str, object]) -> list[ToolTraceEntry] | 
         return []
 
 
+def has_tool_trace(content: Mapping[str, object]) -> bool:
+    """Whether a message carries a tool trace, which proves its marker lines are MindRoom chrome."""
+    return isinstance(content.get(_TOOL_TRACE_KEY), dict)
+
+
 def body_without_tool_markers(body: str, content: Mapping[str, object]) -> str:
     """Remove marker lines a stored tool trace proves are MindRoom chrome; leave other text alone."""
-    if not isinstance(content.get(_TOOL_TRACE_KEY), dict):
+    if not has_tool_trace(content):
         return body
     return strip_visible_tool_markers(body)
 
 
 def render_tool_tag(entry: ToolTraceEntry) -> str:
-    """Render one tool call as an attribute-quoted tag for judges, which read conversations as data."""
-    attrs = [f"name={xml_quoteattr(entry.tool_name)}"]
+    """Render one tool call as a tag for judges, which read conversations as data.
+
+    Values are JSON strings rather than XML attributes: escaping ``&`` would make
+    the judges' redaction check rewrite an already redacted URL query and refuse it.
+    """
+    attrs = [f"name={json.dumps(entry.tool_name, ensure_ascii=False)}"]
     if entry.args_preview:
-        attrs.append(f"input={xml_quoteattr(entry.args_preview)}")
+        attrs.append(f"input={json.dumps(entry.args_preview, ensure_ascii=False)}")
     if entry.result_preview:
-        attrs.append(f"output={xml_quoteattr(entry.result_preview)}")
+        attrs.append(f"output={json.dumps(entry.result_preview, ensure_ascii=False)}")
     if entry.truncated:
         attrs.append('truncated="true"')
     return f"<tool {' '.join(attrs)}/>"
@@ -915,7 +923,8 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
         toolkit_name = event.get("toolkit_name")
         truncated = event.get("truncated")
         if (
-            event_type not in {"tool_call_started", "tool_call_completed"}
+            not isinstance(event_type, str)
+            or event_type not in {"tool_call_started", "tool_call_completed"}
             or not isinstance(tool_name, str)
             or not tool_name
             or (args_preview is not None and not isinstance(args_preview, str))
