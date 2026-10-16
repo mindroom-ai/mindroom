@@ -147,11 +147,11 @@ class MindRoomEmbedder(EmbedderClient):
             return embeddings
         slots = asyncio.Semaphore(_EMBED_CONCURRENCY)
 
-        async def embed(text: str) -> list[float]:
+        async def embed_one(text: str) -> list[float]:
             async with slots:
                 return await self._embedder.async_get_embedding(text)
 
-        return list(await asyncio.gather(*(embed(text) for text in input_data_list)))
+        return list(await asyncio.gather(*(embed_one(text) for text in input_data_list)))
 
 
 class UnusedCrossEncoder(CrossEncoderClient):
