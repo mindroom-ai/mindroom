@@ -125,8 +125,10 @@ from tests.reply_span_helpers import reply_span, response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
+
+    from agno.models.message import Message
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
@@ -3313,7 +3315,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
     )
     @pytest.mark.parametrize("backend", ["model", "typesafe", "llm"])
     @pytest.mark.parametrize("reaction", [None, "👍"])
-    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0915 - full delivery lifecycle assertions
+    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0912, PLR0915 - full delivery lifecycle assertions
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -3386,6 +3388,27 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 "ashould_compress",
                 AsyncMock(side_effect=RuntimeError("Compression failed")),
             )
+        if streaming and action == "respond":
+            # Hold the answer until the approved reply's placeholder reached the room.
+            placeholder_sent = asyncio.Event()
+
+            async def room_send(**kwargs: Any) -> MagicMock:  # noqa: ANN401
+                if kwargs["content"].get("body") == "Thinking...":
+                    placeholder_sent.set()
+                return _room_send_response("$response")
+
+            bot.client.room_send.side_effect = room_send
+            answer_stream = model.ainvoke_stream
+
+            async def stream_after_placeholder(
+                messages: list[Message],
+                **kwargs: object,
+            ) -> AsyncIterator[ModelResponse]:
+                await asyncio.wait_for(placeholder_sent.wait(), timeout=5)
+                async for chunk in answer_stream(messages, **kwargs):
+                    yield chunk
+
+            monkeypatch.setattr(model, "ainvoke_stream", stream_after_placeholder)
         agent = Agent(model=model, name=bot.agent_name, telemetry=False, compression_manager=compression)
         monkeypatch.setattr(
             "mindroom.ai._prepare_agent_and_prompt",
@@ -3456,7 +3479,12 @@ class TestAdaptiveResponse(AgentBotTestBase):
         else:
             assert reactions == []
         bodies = [body for body in bodies if body]
-        assert all("Thinking" not in body and '"action"' not in body for body in bodies)
+        assert all('"action"' not in body for body in bodies)
+        # Only an approved streamed reply shows its placeholder, and only before its answer.
+        if streaming and action == "respond":
+            assert bodies[0] == "Thinking..."
+            bodies = bodies[1:]
+        assert all("Thinking" not in body for body in bodies)
         if action != "respond":
             assert result is None
             assert bodies == []

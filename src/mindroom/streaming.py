@@ -2110,15 +2110,31 @@ async def _handle_auxiliary_task_completion(
     return True
 
 
+async def _show_placeholder_when_ready(
+    streaming: StreamingResponse,
+    placeholder_ready: Callable[[], Awaitable[bool]],
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+) -> None:
+    """Show the progress placeholder once a reply that started hidden may become visible."""
+    if await placeholder_ready() and streaming.event_id is None and not streaming.accumulated_text.strip():
+        _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
+
+
 async def _consume_stream_with_progress_supervision(
     response_stream: AsyncIterator[StreamInputChunk],
     streaming: StreamingResponse,
     progress_task: asyncio.Task[None] | None,
     delivery_task: asyncio.Task[None] | None,
     delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     """Abort chunk consumption as soon as the worker-progress drain fails."""
     stream_task = asyncio.create_task(_consume_streaming_chunks(response_stream, streaming, delivery_queue))
+    placeholder_task = (
+        None
+        if placeholder_ready is None
+        else asyncio.create_task(_show_placeholder_when_ready(streaming, placeholder_ready, delivery_queue))
+    )
     monitored_tasks: set[asyncio.Task[None]] = {stream_task}
     if progress_task is not None:
         monitored_tasks.add(progress_task)
@@ -2152,6 +2168,9 @@ async def _consume_stream_with_progress_supervision(
                 return
     finally:
         await _cancel_stream_consumer(stream_task)
+        if placeholder_task is not None:
+            # Stop before delivery shuts down so a late approval never queues a placeholder.
+            await _cancel_stream_consumer(placeholder_task)
 
 
 async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
@@ -2183,11 +2202,13 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     initial_send: TerminalSend | None = None,
     progress_write_ahead: ProgressWriteAhead | None = None,
     progress_delivered: Callable[[ProgressState, str], None] | None = None,
+    placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome.
 
     ``resumed`` is what a stopped attempt at ``existing_event_id`` showed; the
-    stream continues below it instead of replacing it.
+    stream continues below it instead of replacing it. ``placeholder_ready``
+    resolves ``True`` once a reply that started without a placeholder may show one.
     """
     sc = config.defaults.streaming
     streaming = streaming_cls(
@@ -2246,6 +2267,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 progress_task,
                 delivery_task,
                 delivery_queue,
+                placeholder_ready,
             )
             progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
             if progress_error is None:

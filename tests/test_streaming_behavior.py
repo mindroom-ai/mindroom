@@ -96,7 +96,7 @@ from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.bot import AgentBot
 
@@ -3264,8 +3264,9 @@ class TestStreamingBehavior:
             progress_task: asyncio.Task[None] | None,
             delivery_task: asyncio.Task[None] | None,
             delivery_queue: asyncio.Queue[object | None],
+            placeholder_ready: Callable[[], Awaitable[bool]] | None,
         ) -> None:
-            del response_stream, streaming, progress_task, delivery_task, delivery_queue
+            del response_stream, streaming, progress_task, delivery_task, delivery_queue, placeholder_ready
             msg = "stream blew up"
             raise RuntimeError(msg)
 
@@ -3395,6 +3396,7 @@ class TestStreamingBehavior:
             _progress_task: asyncio.Task[None] | None,
             _delivery_task: asyncio.Task[None] | None,
             _delivery_queue: asyncio.Queue[object | None],
+            _placeholder_ready: Callable[[], Awaitable[bool]] | None,
         ) -> None:
             streaming.accumulated_text = "Before approval."
             await streaming._send_or_edit_message(mock_client)
