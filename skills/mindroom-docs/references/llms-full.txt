@@ -3832,8 +3832,6 @@ Extraction needs a model with reliable structured output; small local models oft
 | Field | Default | Description |
 |---|---|---|
 | `knowledge_graph.model` | none | A key of `models` that extracts entities and facts; required once any agent enables the graph |
-| `knowledge_graph.backend` | `falkordb_lite` | `falkordb_lite` runs an embedded database inside MindRoom's storage; `falkordb` connects to a FalkorDB server |
-| `knowledge_graph.url` | none | The FalkorDB server URL, for example `redis://user:password@graph:6379`; required for `falkordb` and rejected for `falkordb_lite` |
 | `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time between ingestion passes |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations added per pass; the rest wait for the next |
@@ -3842,7 +3840,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
-Changing the embedder, the backend, or the server's host or port starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
+Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
 
 ## What Goes Into the Graph
 
@@ -4511,9 +4509,9 @@ Skills, knowledge base search, and background jobs are off during exploration, a
 It is told to only read, but only `tools` limits what it can do, so leave out tools that change things, or add an [approval rule](https://docs.mindroom.chat/tool-approval/) for their writing functions.
 `tools` cannot name `callback_manager`, `compact_context`, `config_manager`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `external_trigger_manager`, `invite_router`, `matrix_api`, `matrix_message`, `memory`, `scheduler`, `script`, `self_config`, `skill_manage`, `thread_model`, or `todo`, because those start other runs or change agents.
 Allowing a code-executing tool such as `shell` gives exploration everything that tool can reach.
-A person who replies in an exploration thread gets the agent's ordinary tools.
+A person who replies in an exploration thread gets the agent's ordinary tools, but agents named in the exploration reply do not answer it.
 
-The prompt lists recent tool calls with their arguments, credential-like values removed and the `@` before names dropped so it mentions nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+The prompt lists recent tool calls with their arguments, credential-like values removed and every `@` replaced by `＠` so it mentions nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 
 | Field | Default | Description |
 |---|---|---|
@@ -14395,7 +14393,6 @@ The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instan
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
-An external FalkorDB server for the `falkordb` backend must be kept off worker networks, because graph names separate agents only for code that MindRoom runs.
 
 ### Workspace mounts by worker scope
 
@@ -14526,7 +14523,8 @@ Do not report or "fix" these; they are deliberate.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
 - Redacting a message does not remove facts the knowledge graph already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
-- An `exploration` run calls the agent's tools unattended; its authority is the operator's `tools` allowlist, enforced in the agent build together with hiding every approval-gated function, turning off skills, knowledge search, background jobs, and MCP `call_tool` dispatchers, and a per-thread call cap, not the prompt, so content it reads can steer it only within that list.
+- An `exploration` run calls the agent's tools unattended; its authority is the operator's `tools` allowlist, enforced in the agent build together with hiding every approval-gated function, turning off skills, knowledge search, background jobs, and MCP `call_tool` dispatchers, and a per-thread call cap, not the prompt, so content it reads can steer it only within that list; its replies wake no mentioned agent, and any other entity its prompt reaches calls no tool.
+- A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in and upload screenshots another took; they never cross agents or the requesters of a private agent.

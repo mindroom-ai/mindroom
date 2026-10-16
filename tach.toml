@@ -2372,6 +2372,7 @@ depends_on = [
     "mindroom.runtime_protocols",
     "mindroom.streaming",
     "mindroom.turn_record",
+    "mindroom.automations.exploration_policy",
 ]
 
 [[modules]]

@@ -28,6 +28,7 @@ from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     DURABLE_FINAL_OUTCOME_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
+    SKIP_MENTIONS_KEY,
 )
 from mindroom.delivery_gateway import (
     DeliveryGateway,
@@ -752,6 +753,20 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             await final_in_span(gateway, alice, self._final_request("answer"))
 
         assert send.await_args.args[2][ACTING_REQUESTER_KEY] == "@user:localhost"
+
+    async def test_exploration_reply_mentions_wake_nobody(self, tmp_path: Path, alice: PrincipalStore) -> None:
+        """An unattended exploration reply that names an agent must not start that agent with its ordinary tools."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
+        request = self._final_request("@writer please send this")
+        envelope = replace(request.identity.response_envelope, hook_source="automation/exploration")
+        request = replace(request, identity=replace(request.identity, response_envelope=envelope))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            await final_in_span(gateway, alice, request)
+
+        assert send.await_args.args[2][SKIP_MENTIONS_KEY] is True
 
     async def test_final_reply_names_its_bot_account_requester(self, tmp_path: Path, alice: PrincipalStore) -> None:
         """Entities the reply mentions apply their access to a configured bot account, as they would to a human."""

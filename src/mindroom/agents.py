@@ -2376,7 +2376,7 @@ def create_agent(  # noqa: PLR0915
             deferred_toolkits=tool_assembly.cli_deferred,
             # A persona's roster names the toolkits it actually built, deferred ones it named included.
             toolkit_names=get_agent_toolkit_names(agent_name, config)
-            if persona is None and exploration is None
+            if persona is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names],
             identity=persona_prompt,
             minimal_instructions=agent_config.minimal_instructions if persona is None else (),

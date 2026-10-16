@@ -11,7 +11,7 @@ from agno.run.agent import RunOutput
 
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
-from mindroom.knowledge_graph.episodes import _RenderedEpisode, classify_thread, render_episodes
+from mindroom.knowledge_graph.episodes import RenderedEpisode, classify_thread, render_episodes
 from mindroom.prompt_message_tags import render_msg_tag
 
 ROOM = "!room:example.test"
@@ -49,7 +49,7 @@ def _episodes(
     runs: list[RunOutput],
     thread_kind: Literal["conversation", "exploration", "automation"],
     settings: KnowledgeGraphIngestConfig = SETTINGS,
-) -> list[_RenderedEpisode]:
+) -> list[RenderedEpisode]:
     """Render both episode kinds, conversation first, as ingestion does."""
     return [
         rendered
@@ -169,13 +169,14 @@ def test_runs_merge_until_the_cap_and_split_only_at_run_boundaries() -> None:
     assert all(len(item.episode.body) <= 1000 for item in rendered)
 
 
-def test_single_run_over_the_cap_is_clipped() -> None:
-    """One run larger than the cap still produces an episode, clipped to it."""
+def test_a_single_message_over_the_cap_is_clipped() -> None:
+    """A message larger than the cap still produces an episode, clipped to it, and completes its run."""
     settings = KnowledgeGraphIngestConfig(max_episode_chars=1000)
 
-    [rendered] = _episodes([_run("r1", answer="b" * 5000)], "conversation", settings)
+    rendered = _episodes([_run("r1", answer="b" * 5000)], "conversation", settings)
 
-    assert len(rendered.episode.body) <= 1000
+    assert all(len(item.episode.body) <= 1000 for item in rendered)
+    assert rendered[-1].last_run == (1_760_000_000, "r1")
 
 
 def test_classify_thread_uses_the_root_hook_source_then_automation_threads() -> None:
@@ -193,3 +194,24 @@ def test_message_text_that_ends_a_cdata_section_survives() -> None:
     conversation = _episodes([_run("r1", prompt=prompt)], "conversation")[0].episode
 
     assert conversation.body.splitlines()[0] == "person @alice:x: Use a[b[0]]> c"
+
+
+def test_a_run_larger_than_the_cap_is_split_without_losing_results() -> None:
+    """Every tool result of a long run reaches an episode; only the run's last piece completes it."""
+    results = [_tool(f"fetch_{index}", f"result {index} " + "x" * 3900) for index in range(10)]
+    run = _run("r1", tools=results)
+
+    rendered = render_episodes(
+        [run],
+        thread_kind="exploration",
+        episode_kind="tool_results",
+        agent_name="mind",
+        settings=SETTINGS,
+    )
+
+    bodies = "\n".join(item.episode.body for item in rendered)
+    assert len(rendered) > 1
+    assert all(f"result {index} " in bodies for index in range(10))
+    assert all(len(item.episode.body) <= SETTINGS.max_episode_chars for item in rendered)
+    assert [item.last_run for item in rendered[:-1]] == [None] * (len(rendered) - 1)
+    assert rendered[-1].last_run == (1_760_000_000, "r1")

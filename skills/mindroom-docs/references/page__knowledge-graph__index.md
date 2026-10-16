@@ -30,8 +30,6 @@ Extraction needs a model with reliable structured output; small local models oft
 | Field | Default | Description |
 |---|---|---|
 | `knowledge_graph.model` | none | A key of `models` that extracts entities and facts; required once any agent enables the graph |
-| `knowledge_graph.backend` | `falkordb_lite` | `falkordb_lite` runs an embedded database inside MindRoom's storage; `falkordb` connects to a FalkorDB server |
-| `knowledge_graph.url` | none | The FalkorDB server URL, for example `redis://user:password@graph:6379`; required for `falkordb` and rejected for `falkordb_lite` |
 | `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time between ingestion passes |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations added per pass; the rest wait for the next |
@@ -40,7 +38,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
-Changing the embedder, the backend, or the server's host or port starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
+Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
 
 ## What Goes Into the Graph
 

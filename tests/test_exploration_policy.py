@@ -97,6 +97,21 @@ def test_policy_applies_only_to_the_exploration_prompt(tmp_path: Path) -> None:
     assert exploration_policy_for_turn(config, "helper", "automation/dreaming") is None
 
 
+def test_an_exploration_turn_without_its_settings_may_call_nothing(tmp_path: Path) -> None:
+    """A trusted exploration prompt reaching an agent without exploration settings fails closed."""
+    config = _runtime(tmp_path).config
+    config.agents["other"] = AgentConfig(display_name="Other", tools=["shell"])
+
+    assert exploration_policy_for_turn(config, "other", "automation/exploration") == ExplorationPolicy(
+        tools=("knowledge_graph",),
+        max_tool_calls=0,
+    )
+    assert exploration_policy_for_turn(config, "no_such_entity", "automation/exploration") == ExplorationPolicy(
+        tools=("knowledge_graph",),
+        max_tool_calls=0,
+    )
+
+
 @pytest.mark.asyncio
 async def test_exploration_build_keeps_only_allowlisted_functions(tmp_path: Path) -> None:
     """Only the listed function and the graph lookups are offered; other toolkits are not built."""
@@ -205,10 +220,17 @@ async def test_exploration_runs_with_the_tools_that_built(tmp_path: Path) -> Non
     assert await _function_names(_agent(runtime, policy)) == ["graph_entity", "read_file", "search_graph"]
 
 
-def test_minimal_exploration_lists_only_the_toolkits_it_can_call(tmp_path: Path) -> None:
-    """A minimal-mode exploration agent is told only about its allowlisted toolkits."""
-    agent = _agent(_runtime(tmp_path), POLICY, agent_mode="minimal")
+@pytest.mark.asyncio
+async def test_bridge_declines_every_call_of_an_agent_the_prompt_reached_by_mistake(tmp_path: Path) -> None:
+    """An agent without exploration settings, such as an ad-hoc team member, calls nothing on an exploration turn."""
+    runtime = _runtime(tmp_path)
+    runtime.config.agents["other"] = AgentConfig(display_name="Other", tools=["shell"])
+    runtime = replace(runtime, agent_name="other", hook_source="automation/exploration")
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="other")
+    tool = AsyncMock(return_value="ok")
 
-    [roster] = [line for line in str(agent.system_message).splitlines() if line.startswith("Toolkits callable")]
-    assert "file" in roster
-    assert "shell" not in roster
+    with tool_runtime_context(runtime):
+        result = await bridge("run_shell_command", tool, {"command": "true"})
+
+    assert "at most 0 tool calls" in str(result)
+    tool.assert_not_awaited()

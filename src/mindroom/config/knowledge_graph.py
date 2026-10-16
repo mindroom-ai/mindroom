@@ -1,6 +1,4 @@
-"""Knowledge graph settings: the graph database, the extraction model, and conversation ingestion."""
-
-from typing import Literal
+"""Knowledge graph settings: the extraction model and conversation ingestion."""
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,14 +40,6 @@ class KnowledgeGraphConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["falkordb_lite", "falkordb"] = Field(
-        default="falkordb_lite",
-        description="falkordb_lite runs an embedded database in MindRoom storage; falkordb connects to a FalkorDB server",
-    )
-    url: str | None = Field(
-        default=None,
-        description="FalkorDB server URL for the falkordb backend, for example redis://user:password@graph:6379",
-    )
     model: str | None = Field(
         default=None,
         description="Model alias that extracts entities and facts; required when any agent enables the graph",

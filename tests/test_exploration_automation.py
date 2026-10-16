@@ -218,15 +218,16 @@ def test_lead_arguments_mention_nobody(tmp_path: Path) -> None:
         config,
         paths,
         "!room:x:$a",
-        [_tool("send_message", text="@research please summarize for bob@example.org")],
+        [_tool("send_message", text="@research then -@ops .@qa +@dev, cc bob@example.org")],
         created_at=int(time.time()),
     )
 
     ask = check_exploration(_context(config, paths, tmp_path))
 
     assert ask is not None
-    assert "@research" not in ask.text
-    assert "research please summarize for bob@example.org" in ask.text
+    lead = next(line for line in ask.text.splitlines() if line.startswith("- send_message("))
+    assert "@" not in lead
+    assert "research then -\uff20ops .\uff20qa +\uff20dev, cc bob\uff20example.org" in lead
 
 
 def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> None:

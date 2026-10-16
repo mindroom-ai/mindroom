@@ -124,6 +124,23 @@ async def test_llm_client_reports_the_providers_error(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["[1, 2]", "null", json.dumps({"other": 1})])
+async def test_llm_client_rejects_output_of_the_wrong_shape(tmp_path: Path, answer: str) -> None:
+    """Output that is not the requested object counts as unusable, so ingestion can drop it after a few tries."""
+    config = _config()
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    with (
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=_JsonModel(id="luna", answer=answer)),
+        pytest.raises(ValueError, match="knowledge graph extraction"),
+    ):
+        await MindRoomLLMClient(lambda: config, paths)._generate_response(
+            [GraphitiMessage(role="user", content="x")],
+            _Entities,
+        )
+
+
 class _Embedder:
     async def async_get_embedding(self, text: str) -> list[float]:
         return [float(len(text)), 1.0]

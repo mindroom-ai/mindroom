@@ -195,3 +195,17 @@ assert "graphiti_core" not in sys.modules, "Graphiti was imported before its cli
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_database_server_is_started_again(store: GraphitiStore) -> None:
+    """A database server that died is replaced on the next lookup instead of failing until MindRoom restarts."""
+    await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
+    server = store._embedded_server
+    assert server is not None
+    server.process.kill()
+    await server.process.wait()
+
+    facts = await store.search_facts(ALPHA, "Alice Project Atlas", limit=5)
+
+    assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]

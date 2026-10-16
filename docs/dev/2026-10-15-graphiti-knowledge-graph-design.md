@@ -26,7 +26,7 @@ A labeled evaluation of extracted facts against their sources measures precision
 
 ### Three units with one store
 
-1. **Graph store**: one Graphiti instance per runtime over an embedded FalkorDB Lite database by default, or an external FalkorDB server.
+1. **Graph store**: one Graphiti instance per runtime over an embedded FalkorDB Lite database.
 2. **Passive ingestion**: a background worker turns new conversation content, including tool calls and their results, into Graphiti episodes in code, without an agent turn.
 3. **Active exploration**: a built-in `exploration` automation asks the agent, on a cron schedule, to call an operator-allowlisted set of its tools; ingestion then records the raw tool results as evidence.
 
@@ -91,9 +91,10 @@ The scope is derived from the agent name, or for a private agent from the reques
 No tool function takes a `group_id`; the model can never name another scope.
 The embedded database file lives in primary-only storage at `<storage_root>/knowledge_graph/`, outside every workspace.
 FalkorDB Lite's server opens no TCP port and listens on a Unix socket in its own `0700` temporary directory, which keeps the socket path under the 108-byte limit that a long storage path could exceed; worker containers cannot reach it.
-An external FalkorDB server is the operator's to keep off worker networks; graph names alone do not isolate a connection that a worker could open.
 The graph name also carries the effective embedder signature that names Mem0 collections, so changing the embedder starts a new graph that ingestion rebuilds from stored sessions, as Mem0 switches collections.
 
+Rejected: an external FalkorDB server.
+Review found that it needs a namespace per installation, because installations sharing a server would read each other's graphs, plus credential and TLS handling in the URL and a separate reset procedure; nothing needs it yet, so the embedded server is the only backend.
 Rejected: one embedded database file per agent or private instance.
 FalkorDB Lite starts one Redis server process per file, and per-scope graphs in one server already isolate data that code addresses.
 
@@ -132,15 +133,20 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 - Episodes are rendered from full messages and tool results, not the skill-learning digest, which shortens older messages and drops older tool results.
 - Each episode kind has its own marker, so a kind that keeps failing never repeats the other kind's episodes.
 - The marker is the only record of completion: Graphiti's `add_episode(uuid=...)` loads an existing episode and extracts again rather than skipping it, so a crash between the write and the marker re-extracts one episode, which Graphiti's entity and fact resolution merges.
-- An episode is dropped only after five unusable model outputs in a row, which Graphiti and the extraction adapter raise as `ValueError`; an outage of the database or the provider never counts, so evidence waits however long the outage lasts.
+- An episode is dropped after five unusable model outputs in a row, which the extraction adapter raises as `ValueError`, or after three days of failing, so a request the provider always refuses stops costing calls while a shorter outage loses nothing.
+- A run larger than `max_episode_chars` is split into several episodes, and only its last piece advances the marker, so no tool result is cut away.
+- A newly seen conversation starts at the backfill cutoff, and one conversation adds at most twenty completed episodes per pass, so a long history spreads over passes instead of holding up every other conversation.
+- A paused turn stops holding back its conversation once every approval it could still get has expired.
+- A database server that died is started again on the next call.
 - A new graph's start is saved when it is first seen, so the backfill window stays anchored even with `backfill_days: 0`.
-- The graph name includes the database destination (backend, host, and port, without credentials) and the embedder signature, so moving to another server or embedder starts a graph that ingestion fills again, while rotating a password does not.
-- Ingestion spend per pass is bounded by `max_sessions_per_cycle` conversations, each split into episodes of at most `max_episode_chars`; a long conversation's backlog spreads over passes rather than being capped.
+- The graph name includes the embedder signature, so another embedder starts a graph that ingestion fills again.
 
 ## Exploration invariants
 
 - Leads come only from completed conversation turns created after the last run, so a reply in an old thread does not bring back that thread's earlier calls.
-- The `@` that starts a name is removed from lead arguments, because the posted prompt is parsed for mentions and a mentioned agent would answer the trusted automation prompt with its ordinary tools.
+- Every `@` in lead arguments becomes `＠`, which no mention parser reads, because the posted prompt is parsed for mentions and a mentioned agent would answer the trusted automation prompt.
+- An exploration reply is marked so that the agents it names do not answer, because its text is steered by content read unattended.
+- A turn started by an exploration prompt fails closed: an entity without exploration settings, such as an ad-hoc team member or an agent whose entry was removed while the prompt waited, may call no tool.
 - The last-run time is saved only when a run ends, so a prompt that never posted offers the same leads again.
 - An exploration build has no skills, no generated knowledge search, no background jobs or job controls, and no MCP `call_tool` dispatcher: skill scripts can run code, a call that became a job would finish in a later turn without the exploration restrictions, and a dispatcher reaches remote tools that approval rules see only by their own names.
 - An allowlisted toolkit that fails to load leaves exploration with the others instead of failing the run.
@@ -158,25 +164,13 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 ## Error handling
 
 - Graphiti calls `load_dotenv()` when it is imported, which would copy the first `.env` above its install into `os.environ`; MindRoom imports it with `PYTHON_DOTENV_DISABLED` set, because it reads `.env` files only deliberately.
-- An extraction call the provider rejects raises with the provider's message, so health shows the cause rather than a JSON parse error.
-- An agent or private instance whose conversations cannot be read is reported and skipped, so it does not stop ingestion for the others, and stopping the runtime cancels a pass in progress instead of waiting for its extraction calls.
-
-- Missing optional dependency: installed on first use, as other extras are; a failed install fails that pass or lookup and is retried on the next one, with the cause in `/api/health`.
-- Extraction failure, timeout, or unavailable database: the conversation keeps its marker and retries later with a growing cooldown; the cause appears in health, not in rooms, and tool lookups return a readable error.
-- Exploration check that cannot read sessions posts the standard automation warning.
-
-## Testing
-
-- Unit: lead collection from a seeded session DB (`knowledge_graph` and exploration-thread exclusion, dedup, caps, cursor, mention removal), episode rendering (episode kinds and speakers, conversation vs exploration threads, archived runs, splitting at run boundaries, redaction), markers, retries, drops, outages, and graph naming.
-- Seam: an exploration build's whole callable surface is the allowlist plus `knowledge_graph`, with no gated functions, skills, knowledge search, jobs, or dispatchers, while ordinary turns of the same agent are unchanged; the per-thread cap holds across a continuation.
-- Integration: a fake store for the worker loop, and real FalkorDB Lite for the store, server lifecycle, and scope isolation, with seeded nodes and edges instead of model extraction.
-- Live: the success scenario above with two real sources, checked for correct facts and source links.
+- A failed install, extraction, or database call is retried on a later pass with its cause in `/api/health`, never in a room; one agent or private instance that fails does not stop the others.
 
 ## Out of scope
 
 - Teams, and team sessions as an ingestion source.
 - Injecting graph facts into every prompt automatically; the agent queries when it needs to.
-- Neo4j and Neptune backends; Graphiti supports them, so adding one is a driver choice later.
+- External FalkorDB, Neo4j, and Neptune backends; see the rejected external server above.
 - A monthly USD cap for exploration; `max_tool_calls`, cron, and model choice bound spend, and `knowledge_graph` usage shows extraction cost.
 - Custom entity and edge types; Graphiti's default extraction first, a prescribed ontology only if evaluation shows it is needed.
 - Cognee, which the user did not ask for and was not evaluated.

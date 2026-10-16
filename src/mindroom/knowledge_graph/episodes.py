@@ -42,11 +42,12 @@ _MAX_LISTED_CALLS = 20
 
 
 @dataclass(frozen=True)
-class _RenderedEpisode:
+class RenderedEpisode:
     """One episode and the last run it covers."""
 
     episode: EpisodeInput
-    last_run: _RunKey
+    # None for a piece that ends inside a run, which completes nothing.
+    last_run: _RunKey | None
 
 
 def run_key(run: RunOutput) -> _RunKey:
@@ -82,37 +83,58 @@ def render_episodes(
     episode_kind: Literal["conversation", "tool_results"],
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
-) -> list[_RenderedEpisode]:
+) -> list[RenderedEpisode]:
     """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries."""
     if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind == "exploration"):
         return []
-    rendered: list[_RenderedEpisode] = []
+    rendered: list[RenderedEpisode] = []
     lines: list[str] = []
     calls: list[str] = []
-    last: RunOutput | None = None
+    # The run of the newest line, which names the episode, and the newest run whose lines are all in it.
+    newest: RunOutput | None = None
+    complete: RunOutput | None = None
 
     def flush() -> None:
-        if lines and last is not None:
-            rendered.append(_RenderedEpisode(_episode(episode_kind, lines, last, settings, calls=calls), run_key(last)))
+        nonlocal complete
+        if lines and newest is not None:
+            last_run = run_key(complete) if complete is not None else None
+            rendered.append(RenderedEpisode(_episode(episode_kind, lines, newest, settings, calls=calls), last_run))
         lines.clear()
         calls.clear()
+        complete = None
 
+    cap = settings.max_episode_chars
     for run in sorted(runs, key=run_key):
-        if episode_kind == "conversation":
-            run_lines, run_calls = _conversation_lines(run, agent_name, settings), []
-        else:
-            executions = [
-                execution for execution in run.tools or [] if execution.tool_name not in KNOWLEDGE_GRAPH_FUNCTIONS
-            ]
-            run_lines = [_tool_line(execution, settings) for execution in executions]
-            run_calls = [f"{execution.tool_name} {_digest(execution)}" for execution in executions]
-        if lines and _size(lines) + _size(run_lines) > settings.max_episode_chars:
+        items = _episode_items(run, episode_kind, agent_name, settings)
+        # Runs stay whole where they fit, so a conversation is split only between turns.
+        if lines and _size(lines) + _size([line for line, _ in items]) > cap:
             flush()
-        lines.extend(run_lines)
-        calls.extend(run_calls)
-        last = run
+        for line, call in items:
+            # Only a run larger than the cap is split; a piece that ends inside it completes no run.
+            if lines and _size(lines) + len(line) + 1 > cap:
+                flush()
+            lines.append(line)
+            if call is not None:
+                calls.append(call)
+            newest = run
+        complete = run
     flush()
     return rendered
+
+
+def _episode_items(
+    run: RunOutput,
+    episode_kind: Literal["conversation", "tool_results"],
+    agent_name: str,
+    settings: KnowledgeGraphIngestConfig,
+) -> list[tuple[str, str | None]]:
+    """Return a run's lines of one kind, each tool result with the call it lists in the episode description."""
+    if episode_kind == "conversation":
+        return [(line, None) for line in _conversation_lines(run, agent_name, settings)]
+    executions = [execution for execution in run.tools or [] if execution.tool_name not in KNOWLEDGE_GRAPH_FUNCTIONS]
+    return [
+        (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}") for execution in executions
+    ]
 
 
 def _episode(

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
@@ -392,3 +393,75 @@ async def test_a_success_resets_the_failure_count(tmp_path: Path) -> None:
     await worker._run_cycle(config, now=T0 + 40_000)
 
     assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_graph_skips_turns_older_than_the_backfill_window(tmp_path: Path) -> None:
+    """A long conversation still active today contributes only its recent turns to a new graph."""
+    config, paths, store = _config(backfill_days=1), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 - 5 * DAY, updated_at=T0)
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
+        assert session is not None
+        session.runs[1].created_at = T0 - 60
+        storage.upsert_run(run=session.runs[1], session_id="!room:x:$t1", user_id=None)
+    finally:
+        storage.close()
+
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+
+    assert _answers(store) == ["agent mind: answer new"]
+
+
+@pytest.mark.asyncio
+async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
+    """One conversation adds a bounded number of episodes per pass and stays due until it is done."""
+    config, paths, store = _config(max_episode_chars=1000), _paths(tmp_path), _FakeStore()
+    run_ids = [f"r{index:02d}" for index in range(30)]
+    _seed(config, paths, "!room:x:$t1", run_ids)
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
+        assert session is not None
+        for run in session.runs:
+            run.messages[1].content = "a" * 600
+            storage.upsert_run(run=run, session_id="!room:x:$t1", user_id=None)
+    finally:
+        storage.close()
+    worker = _worker(config, paths, store)
+
+    await worker._run_cycle(config, now=T0 + 100)
+    first = len(store.sessions())
+    await worker._run_cycle(config, now=T0 + 200)
+
+    assert 0 < first < 30
+    assert len(store.sessions()) == 30
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_approval_stops_holding_back_the_conversation(tmp_path: Path) -> None:
+    """A turn still paused after approvals would have expired no longer blocks the turns after it."""
+    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
+
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 8 * DAY)
+
+    assert _answers(store) == ["agent mind: answer r2"]
+
+
+@pytest.mark.asyncio
+async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
+    """A rejection that never clears, such as a request the provider always refuses, stops costing calls."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(unavailable=True)
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+
+    await worker._run_cycle(config, now=T0 + 10)
+    await worker._run_cycle(config, now=T0 + 10 + 3 * DAY + 1)
+    store.unavailable = False
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
+    await worker._run_cycle(config, now=T0 + 10 + 4 * DAY)
+
+    assert _answers(store) == ["agent mind: answer r2"]

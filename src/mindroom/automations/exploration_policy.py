@@ -29,13 +29,18 @@ class ExplorationPolicy:
     max_tool_calls: int
 
 
+# What a turn started by an exploration prompt may do when its entity has no exploration settings, for example after
+# the entry was removed while the prompt waited, or for another entity the prompt reached: nothing.
+_CLOSED = ExplorationPolicy(tools=("knowledge_graph",), max_tool_calls=0)
+
+
 def exploration_policy_for_turn(config: Config, agent_name: str, hook_source: str | None) -> ExplorationPolicy | None:
     """Return the restrictions for a turn the exploration prompt started, or None for any other turn."""
-    if hook_source != EXPLORATION_HOOK_SOURCE or agent_name not in config.agents:
+    if hook_source != EXPLORATION_HOOK_SOURCE:
         return None
-    entry = config.agent_exploration(agent_name)
+    entry = config.agent_exploration(agent_name) if agent_name in config.agents else None
     if entry is None:
-        return None
+        return _CLOSED
     # The graph lookups let the agent check what it already knows before exploring.
     return ExplorationPolicy(tools=(*entry.tools, "knowledge_graph"), max_tool_calls=entry.max_tool_calls)
 

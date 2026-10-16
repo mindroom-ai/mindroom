@@ -59,18 +59,6 @@ def test_enabled_graph_requires_a_known_model() -> None:
         _config(knowledge_graph={"model": "nope"})
 
 
-def test_falkordb_backend_requires_url() -> None:
-    """An external FalkorDB server needs its URL."""
-    with pytest.raises(ValidationError, match=r"knowledge_graph\.url"):
-        _config(knowledge_graph={"model": "luna", "backend": "falkordb"})
-
-
-def test_falkordb_lite_rejects_url() -> None:
-    """The embedded database has no URL, so one is a mistake."""
-    with pytest.raises(ValidationError, match=r"knowledge_graph\.url"):
-        _config(knowledge_graph={"model": "luna", "url": "redis://graph:6379"})
-
-
 def test_unknown_knowledge_graph_field_rejected() -> None:
     """Typos in the section fail config load."""
     with pytest.raises(ValidationError, match="extra"):

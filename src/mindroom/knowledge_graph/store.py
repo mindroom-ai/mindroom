@@ -10,7 +10,6 @@ import asyncio
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
-from urllib.parse import urlsplit
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge_graph.usage import usage_target
@@ -166,22 +165,23 @@ async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[Graph
 
 
 class GraphitiStore:
-    """Own one Graphiti client, rebuilt when the database or embedder settings change."""
+    """Own one Graphiti client over the embedded database, rebuilt when the embedder settings change."""
 
     def __init__(self, config_provider: Callable[[], Config], runtime_paths: RuntimePaths) -> None:
         self._config_provider = config_provider
         self._runtime_paths = runtime_paths
         self._lock = asyncio.Lock()
         self._graphiti: Graphiti | None = None
-        self._signature: tuple[str, str | None, str] | None = None
+        self._signature: str | None = None
         self._embedded_server: EmbeddedServer | None = None
 
     async def _graphiti_client(self) -> Graphiti:
         config = self._config_provider()
-        settings = config.knowledge_graph
-        signature = (settings.backend, settings.url, embedder_client_signature(config, self._runtime_paths))
+        signature = embedder_client_signature(config, self._runtime_paths)
         async with self._lock:
-            if self._graphiti is not None and self._signature == signature:
+            # A server that died, for example from running out of memory, is replaced rather than failing every call.
+            server_alive = self._embedded_server is not None and self._embedded_server.process.returncode is None
+            if self._graphiti is not None and self._signature == signature and server_alive:
                 return self._graphiti
             await self._close_unlocked()
             self._graphiti = await self._build(config)
@@ -192,6 +192,7 @@ class GraphitiStore:
         await asyncio.to_thread(ensure_tool_deps, ["graphiti-core"], "knowledge_graph", self._runtime_paths)
         await asyncio.to_thread(_import_graphiti)
         # why-lazy: Graphiti, FalkorDB, and the embedded server are optional and load only for graph-enabled runtimes.
+        from falkordb.asyncio import FalkorDB  # noqa: PLC0415
         from graphiti_core import Graphiti  # noqa: PLC0415
         from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: PLC0415
 
@@ -200,24 +201,11 @@ class GraphitiStore:
             MindRoomLLMClient,
             UnusedCrossEncoder,
         )
+        from mindroom.knowledge_graph.embedded_server import start_embedded_server  # noqa: PLC0415
 
-        settings = config.knowledge_graph
-        if settings.backend == "falkordb_lite":
-            from falkordb.asyncio import FalkorDB  # noqa: PLC0415
-
-            from mindroom.knowledge_graph.embedded_server import start_embedded_server  # noqa: PLC0415
-
-            server = await start_embedded_server(self._runtime_paths.storage_root / "knowledge_graph")
-            self._embedded_server = server
-            driver = FalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
-        else:
-            url = urlsplit(settings.url or "")
-            driver = FalkorDriver(
-                host=url.hostname or "localhost",
-                port=url.port or 6379,
-                username=url.username,
-                password=url.password,
-            )
+        server = await start_embedded_server(self._runtime_paths.storage_root / "knowledge_graph")
+        self._embedded_server = server
+        driver = FalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
         return Graphiti(
             graph_driver=driver,
             llm_client=MindRoomLLMClient(self._config_provider, self._runtime_paths),

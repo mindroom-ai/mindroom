@@ -8,7 +8,6 @@ graph through ingestion, never through anything the agent writes.
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,8 +34,6 @@ if TYPE_CHECKING:
 _DAY_SECONDS = 86_400
 _STATE_FILE = "exploration.json"
 _MAX_ARGUMENT_CHARS = 300
-# An `@` that starts a word, as in `@alice:example.org` or `@research`; one inside an email address stays.
-_MENTION_SIGN = re.compile(r"(?<![\w.+-])@")
 
 
 @dataclass(frozen=True)
@@ -92,8 +89,8 @@ def _render_leads(leads: list[_Lead]) -> str:
 
 
 def _without_mentions(text: str) -> str:
-    """Drop the `@` that starts a name, so posting the prompt mentions no person and wakes no other agent."""
-    return _MENTION_SIGN.sub("", text)
+    """Replace every `@` with a lookalike no mention parser reads, so the prompt mentions no person and wakes no agent."""
+    return text.replace("@", "\uff20")
 
 
 def _last_run_at(ctx: AutomationContext) -> float | None:

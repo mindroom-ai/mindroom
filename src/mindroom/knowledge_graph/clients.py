@@ -102,8 +102,18 @@ class MindRoomLLMClient(LLMClient):
             raise RuntimeError(msg)
         if isinstance(content, BaseModel):
             return content.model_dump()
-        # Graphiti retries a call whose answer is not the JSON object it asked for.
-        return json.loads(content if isinstance(content, str) else "")
+        # Output Graphiti cannot use raises ValueError, which ingestion counts toward dropping the episode.
+        try:
+            parsed = json.loads(content if isinstance(content, str) else "")
+            if response_model is not None:
+                return response_model.model_validate(parsed).model_dump()
+        except ValueError as exc:
+            msg = f"The knowledge graph extraction output is unusable: {exc}"
+            raise ValueError(msg) from exc
+        if not isinstance(parsed, dict):
+            msg = "The knowledge graph extraction output is not a JSON object"
+            raise ValueError(msg)  # noqa: TRY004 - ingestion counts ValueError as unusable output
+        return parsed
 
 
 class MindRoomEmbedder(EmbedderClient):

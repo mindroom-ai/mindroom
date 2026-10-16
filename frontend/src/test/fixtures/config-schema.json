@@ -2181,29 +2181,6 @@
       "additionalProperties": false,
       "description": "The Graphiti knowledge graph that graph-enabled agents build from their conversations and exploration.",
       "properties": {
-        "backend": {
-          "default": "falkordb_lite",
-          "description": "falkordb_lite runs an embedded database in MindRoom storage; falkordb connects to a FalkorDB server",
-          "enum": [
-            "falkordb_lite",
-            "falkordb"
-          ],
-          "title": "Backend",
-          "type": "string"
-        },
-        "url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "FalkorDB server URL for the falkordb backend, for example redis://user:password@graph:6379",
-          "title": "Url"
-        },
         "model": {
           "anyOf": [
             {
@@ -5014,8 +4991,6 @@
     "knowledge_graph": {
       "$ref": "#/$defs/KnowledgeGraphConfig",
       "default": {
-        "backend": "falkordb_lite",
-        "url": null,
         "model": null,
         "ingest": {
           "backfill_days": 7,

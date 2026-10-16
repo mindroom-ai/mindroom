@@ -2034,14 +2034,8 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_knowledge_graph(self) -> Config:
-        """Validate the graph's model and database once any agent enables the graph."""
+        """Validate the graph's model once any agent enables the graph."""
         settings = self.knowledge_graph
-        if settings.backend == "falkordb" and not settings.url:
-            msg = "knowledge_graph.url is required for the falkordb backend"
-            raise ValueError(msg)
-        if settings.backend == "falkordb_lite" and settings.url:
-            msg = "knowledge_graph.url is only used by the falkordb backend"
-            raise ValueError(msg)
         if not self.knowledge_graph_agents():
             return self
         if settings.model is None:

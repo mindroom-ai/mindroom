@@ -90,17 +90,3 @@ def test_scope_for_a_requester_matches_the_listed_scope(tmp_path: Path) -> None:
     listed = next(scope for scope in graph_scopes(config, paths) if _requester(scope) == ALICE)
 
     assert graph_scope("pal", config, paths, identity).graph_name == listed.graph_name
-
-
-def test_another_database_means_another_graph(tmp_path: Path) -> None:
-    """Moving to an external server starts a graph there, so ingestion fills it instead of trusting old progress."""
-    paths = _paths(tmp_path)
-    embedded = graph_scope("mind", _config(), paths, None).graph_name
-    external = _config()
-    external.knowledge_graph.backend = "falkordb"
-    external.knowledge_graph.url = "redis://user:secret@graph:6379"
-    rotated = external.model_copy(deep=True)
-    rotated.knowledge_graph.url = "redis://user:rotated@graph:6379"
-
-    assert graph_scope("mind", external, paths, None).graph_name != embedded
-    assert graph_scope("mind", rotated, paths, None).graph_name == graph_scope("mind", external, paths, None).graph_name

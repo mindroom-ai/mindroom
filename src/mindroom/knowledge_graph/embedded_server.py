@@ -1,4 +1,4 @@
-"""The embedded FalkorDB server behind the ``falkordb_lite`` backend.
+"""The embedded FalkorDB server behind the knowledge graph.
 
 MindRoom runs falkordblite's bundled ``redis-server`` with the FalkorDB module as its own child process, because
 falkordblite's clients leave the server running when they close, so it outlived the process and a restart started a
