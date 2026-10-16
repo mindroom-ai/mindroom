@@ -2039,6 +2039,7 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.file_access",
     "mindroom.path_confinement",
     "mindroom.media_delivery",

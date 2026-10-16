@@ -112,8 +112,12 @@ def test_a_synchronous_call_runs_off_the_event_loop_so_keepalives_keep_flowing(
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_synchronous_call_finishes_before_its_toolkit_closes() -> None:
-    """A thread cannot be stopped, so a cancelled call waits for it instead of closing its toolkit under it."""
+@pytest.mark.parametrize("cancels", [1, 2])
+async def test_a_cancelled_synchronous_call_finishes_before_its_toolkit_closes(cancels: int) -> None:
+    """A thread cannot be stopped, so a cancelled call waits for it instead of closing its toolkit under it.
+
+    A stop cancels a call twice: once through its cancel request and again when the primary drops the stream.
+    """
     events: list[str] = []
     started = threading.Event()
     release = threading.Event()
@@ -137,8 +141,9 @@ async def test_a_cancelled_synchronous_call_finishes_before_its_toolkit_closes()
         sandbox_runner_module._run_toolkit_entrypoint(_ConnectedToolkit(name="connected"), query, [], {}),
     )
     assert await asyncio.to_thread(started.wait, 10)
-    call.cancel()
-    done, _pending = await asyncio.wait({call}, timeout=0.5)
+    for _ in range(cancels):
+        call.cancel()
+        done, _pending = await asyncio.wait({call}, timeout=0.25)
     release.set()
 
     assert not done

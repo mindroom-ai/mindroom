@@ -47,6 +47,7 @@ from mindroom.api.worker_responses import (
     serialize_sandbox_worker_response,
 )
 from mindroom.attachments.ids import normalize_attachment_id
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
@@ -750,14 +751,9 @@ async def _call_entrypoint(entrypoint: Callable[..., object], args: list[Any], k
         copy_context().run,
         partial(entrypoint, *args, **kwargs),
     )
-    try:
-        value = await asyncio.shield(work)
-    except asyncio.CancelledError:
-        # A thread cannot be stopped; wait for it so nothing, such as its toolkit's close, runs under it.
-        with suppress(Exception):
-            await work
-        raise
-    return await _maybe_await(value)
+    # A thread cannot be stopped; a cancelled call waits for it, however often cancelled, so nothing such as its
+    # toolkit's close runs under it.
+    return await _maybe_await(await wait_for_future_until_complete(work))
 
 
 async def _run_toolkit_entrypoint(
