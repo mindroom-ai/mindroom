@@ -7957,14 +7957,13 @@ If the sandbox cannot start, the browser call fails instead of running unsandbox
 It applies to every dedicated Docker worker, whether or not Computer is enabled or the agent uses a browser.
 Changing the policy replaces existing workers.
 
-With gVisor as the worker runtime (`MINDROOM_DOCKER_WORKER_RUNTIME=runsc`), Computer needs gVisor 20261005 or later, because gVisor 20260406 crashes Chromium's page loads.
-gVisor keeps worker system calls off the host kernel itself and does not apply the `computer` seccomp profile inside its sandbox.
-Do not register `runsc` with `--oci-seccomp`: workers then cannot start threads and fail to start.
-
 Configuration fails with `MINDROOM_WORKER_COMPUTER_ENABLED=true requires MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer.` when Computer is enabled under `runtime_default`.
 Computer workers must also run as a non-root user.
 `MINDROOM_DOCKER_WORKER_USER=root` or UID 0, including a runtime that itself runs as root and passes its UID to workers, fails configuration, and a worker that starts as root refuses requests.
 An empty `MINDROOM_DOCKER_WORKER_USER` uses the image's default user.
+
+With gVisor as the worker runtime (`MINDROOM_DOCKER_WORKER_RUNTIME=runsc`), Computer needs gVisor 20261005 or later, because gVisor 20260406 crashes Chromium's page loads.
+gVisor handles worker system calls itself and does not apply the `computer` seccomp profile inside its sandbox.
 
 ### Kubernetes
 
@@ -17773,6 +17772,7 @@ Unsupported resources or oversized results produce a tool error.
 - Dedicated Docker workers can use the hardened `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, which Worker Computer requires; see [Browser and container sandboxing](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).
 - Dedicated Docker workers share the host kernel, so a kernel bug can let worker code escape its container.
   To keep worker code off the host kernel, install a sandboxed runtime for the Docker daemon and set `MINDROOM_DOCKER_WORKER_RUNTIME` to its name, such as `runsc` for gVisor or `io.containerd.kata.v2` for Kata Containers, which runs each worker in its own virtual machine and needs KVM.
+  Do not register gVisor's `runsc` with `--oci-seccomp`, because workers then cannot start threads and fail to start.
   On Kubernetes, set [`workers.kubernetes.runtimeClassName`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) instead.
 
 ## Environment variable reference
@@ -17803,7 +17803,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 |----------|-------------|---------|
 | `MINDROOM_DOCKER_WORKER_IMAGE` | Container image for dedicated Docker workers | _(required for `docker`)_ |
 | `MINDROOM_DOCKER_WORKER_SECURITY_POLICY` | `runtime_default` or `computer`; Worker Computer requires `computer` | `runtime_default` |
-| `MINDROOM_DOCKER_WORKER_RUNTIME` | Docker runtime for every worker container: a runtime name from the Docker daemon config or a containerd shim name on the daemon's `PATH`; changing it recreates each worker the next time it is used | Docker daemon default |
+| `MINDROOM_DOCKER_WORKER_RUNTIME` | Docker runtime for every worker container: a runtime name from the Docker daemon config, or a containerd runtime type such as `io.containerd.kata.v2` whose shim binary is on the daemon's `PATH`; changing it recreates each worker the next time it is used | Docker daemon default |
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the container | `/app/config-host/config.yaml` |
