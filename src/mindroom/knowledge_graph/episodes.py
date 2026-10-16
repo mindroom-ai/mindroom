@@ -101,7 +101,7 @@ def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) 
         return "automation"
     # LEGACY_COMPAT: Automation runs stored without their hook source.
     # Legacy format: Run metadata had no `hook_source` key, so a stored automation run looks like a conversation.
-    # Last legacy release: v2026.10.306; replacement: the next release stores the trusted hook source on every run.
+    # Last legacy release: v2026.10.309; replacement: the next release stores the trusted hook source on every run.
     # Handling: A thread whose root was recorded in `tracking/automations/threads.json` counts as an automation thread.
     # Coverage: tests/test_knowledge_graph_episodes.py::test_classify_thread_uses_the_root_hook_source_then_automation_threads.
     if metadata.get("thread_id") in automation_thread_ids:
