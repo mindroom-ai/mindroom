@@ -998,10 +998,6 @@ def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
     matrix_user_id = connections_session_user(token, now=time.time()) if token else None
     if matrix_user_id is None:
         return None
-    portal_user = request.headers.get(_CONNECTIONS_USER_HEADER)
-    if portal_user is not None and portal_user != matrix_user_id:
-        # The session cookie is browser-wide, so a tab signed in as another account must reload.
-        raise HTTPException(status_code=401, detail="Connections session belongs to another account. Reload this page.")
     return {"user_id": matrix_user_id, "email": None, "matrix_user_id": matrix_user_id, "auth_source": "matrix_openid"}
 
 
@@ -1053,15 +1049,20 @@ def _is_browser_page_request(request: Request) -> bool:
 
 async def require_connections_user(request: Request) -> dict[str, Any]:
     """Authenticate a Connections user through a portal session or a signed upstream Matrix identity."""
-    session_user = _connections_session_auth_user(request)
-    if session_user is not None:
-        request.scope["auth_user"] = session_user
-        return session_user
-    settings = _request_auth_state(request).settings.trusted_upstream
-    if not settings.enabled or not settings.jwt.require_jwt:
-        # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
-        raise HTTPException(status_code=401, detail="Connections sign-in required")
-    return await _require_signed_matrix_user(request, label="Connections")
+    auth_user = _connections_session_auth_user(request)
+    if auth_user is not None:
+        request.scope["auth_user"] = auth_user
+    else:
+        settings = _request_auth_state(request).settings.trusted_upstream
+        if not settings.enabled or not settings.jwt.require_jwt:
+            # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
+            raise HTTPException(status_code=401, detail="Connections sign-in required")
+        auth_user = await _require_signed_matrix_user(request, label="Connections")
+    page_user = request.headers.get(_CONNECTIONS_USER_HEADER)
+    if page_user is not None and page_user != auth_user["matrix_user_id"]:
+        # Sessions and upstream identities are browser-wide, so a page showing another account must reload.
+        raise HTTPException(status_code=401, detail="This page shows another account. Reload this page.")
+    return auth_user
 
 
 async def require_personal_user(request: Request) -> dict[str, Any]:

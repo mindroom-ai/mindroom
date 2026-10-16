@@ -157,7 +157,7 @@ Sign-in works as follows:
    When the portal is opened directly rather than from MindRoom Chat, as with trusted upstream sign-in, it uses the existing session or signed upstream identity, or asks the user to open Connections from Chat.
 3. MindRoom accepts only users of its configured homeserver, and only from Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`.
 
-If two portal tabs are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
+If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 The request-by-request exchange is described in [Connections portal sign-in](https://docs.mindroom.chat/architecture/security-posture/#connections-portal-sign-in).
 
 With a binding homeserver, MindRoom requires `MINDROOM_PUBLIC_URL` and binds tokens to its normalized origin (lowercase scheme and host, no path, no default port).
@@ -169,7 +169,7 @@ Older backends verify Computers tokens without an audience and would reject Chat
 Older Chat clients, including iOS app versions that are still in App Store review, send unbound tokens that a new backend rejects with 401 once the homeserver binds.
 
 The session lasts one hour.
-Sessions live in MindRoom's memory, so a restart signs everyone out; opening Connections from Chat again signs the user in again.
+A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
 
 A session authenticates only these paths:

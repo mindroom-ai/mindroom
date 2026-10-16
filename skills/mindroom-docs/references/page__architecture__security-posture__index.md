@@ -172,8 +172,8 @@ When the homeserver advertises `io.mindroom.openid_audience`, MindRoom also send
 MindRoom then sets the `__Host-mindroom_connections_session` cookie.
 The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`.
 The cookie is browser-wide, so a second sign-in in another tab replaces it.
-To keep a stale tab from acting as the new account, the portal sends the Matrix ID it rendered in the `X-MindRoom-Connections-User` header on every `/api/connections` request.
-MindRoom answers 401 when that header names a different account than the session.
+To keep a stale tab from acting as the new account, the Connections pages send the Matrix ID they show in the `X-MindRoom-Connections-User` header on every `/api/connections` request.
+MindRoom answers 401 when that header names a different account than the request authenticates as, whether by a session or by trusted upstream.
 Requests without the header, such as OAuth popup navigations, still work.
 
 ## Known gaps
@@ -231,7 +231,7 @@ Do not report or "fix" these; they are deliberate.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 - The Connections portal signs users in either through trusted upstream strict JWT auth or, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists MindRoom Chat origins, through a Matrix OpenID token that Chat hands to the portal window.
-  The session cookie is bound to the verified Matrix user and a one-hour in-memory lifetime, and it authenticates only the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page; it never grants dashboard or administrator access, even to an administrator.
+  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates only the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page; it never grants dashboard or administrator access, even to an administrator.
   An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust.
   When the homeserver advertises `io.mindroom.openid_audience` (MindRoom's Tuwunel fork), MindRoom requires `MINDROOM_PUBLIC_URL` and binds tokens to its normalized origin, so a backend that Chat opens cannot replay a token to another deployment on the same homeserver.
   MindRoom never takes that audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL` it answers 503.

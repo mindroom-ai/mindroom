@@ -42,7 +42,7 @@ from tests.api.test_oauth_api import (
 from tests.computer_helpers import ComputerPeer
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Iterator
+    from collections.abc import Callable, Coroutine, Iterator
     from pathlib import Path
 
     from httpx import Response
@@ -342,7 +342,7 @@ def test_session_refuses_requests_from_a_tab_signed_in_as_another_account(signin
         client.post(disconnect_url, headers={"Origin": PORTAL_ORIGIN, **stale}, json={}),
     ):
         assert response.status_code == 401
-        assert response.json() == {"detail": "Connections session belongs to another account. Reload this page."}
+        assert response.json() == {"detail": "This page shows another account. Reload this page."}
     assert stored(requester_id="@alice:example.org") is not None
 
     matching = {"X-MindRoom-Connections-User": "@alice:example.org"}
@@ -390,35 +390,70 @@ def test_live_session_ignored_once_portal_is_disabled(signin: dict[str, Any]) ->
     assert client.get("/api/oauth/google_drive/success").status_code == 401
 
 
-def test_session_cookie_ignored_for_admin_on_dashboard_routes(
+def _serve_with_strict_upstream(
     signin: dict[str, Any],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Even an administrator's portal session never opens administrator routes; their signed upstream identity does."""
+    payload: dict[str, Any],
+) -> tuple[TestClient, Callable[[str], dict[str, str]]]:
+    """Serve the portal with strict trusted-upstream JWT next to sessions; return a client and upstream headers per user."""
     key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
     env = {name: value for name, value in signin["paths"].process_env.items() if name != "MINDROOM_API_KEY"}
     env.update(_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"))
     paths = replace(signin["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, {**signin["payload"], "administrators": ["@alice:example.org"]})
+    _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
-    client = TestClient(main.app, base_url=PORTAL_ORIGIN)
+
+    def upstream(name: str) -> dict[str, str]:
+        return {
+            "X-Trusted-User": name,
+            "X-Trusted-Jwt": _trusted_upstream_jwt(
+                key,
+                user_id=name,
+                email=f"{name}@example.org",
+                matrix_user_id=f"@{name}:example.org",
+            ),
+        }
+
+    return TestClient(main.app, base_url=PORTAL_ORIGIN), upstream
+
+
+def test_session_cookie_ignored_for_admin_on_dashboard_routes(
+    signin: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even an administrator's portal session never opens administrator routes; their signed upstream identity does."""
+    payload = {**signin["payload"], "administrators": ["@alice:example.org"]}
+    client, upstream = _serve_with_strict_upstream(signin, tmp_path, monkeypatch, payload)
 
     assert sign_in(client, "alice").status_code == 200
     assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
     assert client.get("/api/config/agents").status_code == 401
-    upstream = {
-        "X-Trusted-User": "alice",
-        "X-Trusted-Jwt": _trusted_upstream_jwt(
-            key,
-            user_id="alice",
-            email="alice@example.org",
-            matrix_user_id="@alice:example.org",
-        ),
-    }
-    assert client.get("/api/config/agents", headers=upstream).status_code == 200
+    assert client.get("/api/config/agents", headers=upstream("alice")).status_code == 200
+
+
+def test_upstream_identity_refuses_a_page_showing_another_account(
+    signin: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a page's session is gone, the browser's upstream identity cannot act for the account the page shows."""
+    client, upstream = _serve_with_strict_upstream(signin, tmp_path, monkeypatch, signin["payload"])
+
+    stale = client.get(
+        "/api/connections/session",
+        headers={**upstream("bob"), "X-MindRoom-Connections-User": "@alice:example.org"},
+    )
+    assert stale.status_code == 401
+    assert stale.json() == {"detail": "This page shows another account. Reload this page."}
+    matching = client.get(
+        "/api/connections/session",
+        headers={**upstream("bob"), "X-MindRoom-Connections-User": "@bob:example.org"},
+    )
+    assert matching.json() == {"matrix_user_id": "@bob:example.org"}
 
 
 def test_expired_session_is_rejected(signin: dict[str, Any]) -> None:

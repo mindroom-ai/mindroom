@@ -14,7 +14,7 @@ const RELOAD = "Could not sign in. Reload this page to try again.";
 
 type Gate =
   | { state: "checking" }
-  | { state: "signed-in" }
+  | { state: "ready" }
   | { state: "blocked"; message: string };
 
 const blocked = (message: string): Gate => ({ state: "blocked", message });
@@ -34,7 +34,7 @@ async function signedIn(response: Response): Promise<Gate> {
   const { matrix_user_id: user } = await readBody(response);
   if (typeof user !== "string" || !user) return blocked(RELOAD);
   setSignedInUser(user);
-  return { state: "signed-in" };
+  return { state: "ready" };
 }
 
 /** Ask the window that opened the portal for a Matrix OpenID token; `null` means no answer in time or aborted. */
@@ -73,6 +73,8 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
     });
     if (response.status === 401) return blocked(OPEN_FROM_CHAT);
     if (response.status === 403) return blocked(NOT_AVAILABLE);
+    // The portal is off, so only the Agent Keys page is served, and it relies on trusted-upstream sign-in.
+    if (response.status === 404) return { state: "ready" };
     return response.ok ? signedIn(response) : blocked(RELOAD);
   }
   const answer = await askOpener(opener, signal);
@@ -95,12 +97,12 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
 }
 
 /**
- * Render the portal for the Matrix user signed in to MindRoom Chat.
+ * Render a Connections page for the Matrix user signed in to MindRoom Chat.
  *
  * When MindRoom Chat opened the portal, it ignores any existing session and only renders after Chat's OpenID handshake
- * succeeds. Without an opener, the portal shows the session the server reports.
+ * succeeds. Without an opener, the page shows the session the server reports, or renders as is when the portal is off.
  *
- * @param children - Portal content shown only after sign-in succeeds.
+ * @param children - Page content shown only after sign-in succeeds.
  */
 export function ConnectionsSignIn({ children }: { children: ReactNode }) {
   const [gate, setGate] = useState<Gate>({ state: "checking" });
@@ -115,7 +117,7 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
     return () => controller.abort();
   }, []);
 
-  if (gate.state === "signed-in") return children;
+  if (gate.state === "ready") return children;
   return (
     <main className="min-h-screen bg-muted/20 px-4 py-8 sm:px-6 sm:py-12">
       <div className="mx-auto max-w-6xl">

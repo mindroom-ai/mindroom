@@ -322,7 +322,6 @@ describe("ConnectionsSignIn without an opener", () => {
   it.each([
     [401, OPEN_FROM_CHAT],
     [403, NOT_AVAILABLE],
-    [404, RELOAD],
     [500, RELOAD],
   ])("shows the copy for a %i probe", async (status, copy) => {
     installBackend({ get: json({}, status) });
@@ -331,6 +330,16 @@ describe("ConnectionsSignIn without an opener", () => {
     expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(sessionCalls("POST")).toHaveLength(0);
+  });
+
+  it("renders the page as is when the portal is off", async () => {
+    installBackend({
+      get: json({ detail: "Connections are not enabled" }, 404),
+    });
+    renderGate();
+    expect(await screen.findByText("Portal content")).toBeInTheDocument();
+    expect(sessionCalls("POST")).toHaveLength(0);
+    expect(await sentUser()).toBeUndefined();
   });
 
   it.each([

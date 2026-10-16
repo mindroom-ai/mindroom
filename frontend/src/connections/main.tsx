@@ -15,13 +15,9 @@ const isEgressPage =
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ThemeProvider>
-      {isEgressPage ? (
-        <EgressCredentials />
-      ) : (
-        <ConnectionsSignIn>
-          <Connections />
-        </ConnectionsSignIn>
-      )}
+      <ConnectionsSignIn>
+        {isEgressPage ? <EgressCredentials /> : <Connections />}
+      </ConnectionsSignIn>
     </ThemeProvider>
   </React.StrictMode>,
 );
