@@ -779,7 +779,10 @@ async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("job_running", [False, True], ids=["no-job", "job-running"])
 async def test_response_lifetime_keeps_its_owner_until_its_background_jobs_settle(*, job_running: bool) -> None:
-    """A shell job that outlives its reply keeps the reply's CLI; the owner closes once the last job settles."""
+    """A shell job that outlives its reply keeps the reply's CLI; the owner closes once the last job settles.
+
+    Only then does the ended lifetime forget its owner, which a context copied during the reply can outlive.
+    """
     events = []
 
     class Owner:
@@ -796,10 +799,12 @@ async def test_response_lifetime_keeps_its_owner_until_its_background_jobs_settl
         async with response_cli_lifetime() as lifetime:
             lifetime.register(owner, registry)
         assert events == ([] if job_running else ["close"])
+        assert (lifetime.owner is owner) is job_running
     assert events == ([] if job_running else ["close"])
     if job is not None:
         await job.release()
     assert events == ["close"]
+    assert lifetime.owner is None
 
 
 @pytest.mark.asyncio
