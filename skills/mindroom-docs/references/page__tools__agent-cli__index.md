@@ -181,7 +181,7 @@ An API that listens only on loopback cannot be reached from workers, and a host 
 Without the gateway-only listener and with the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
 
 The shell receives a grant scoped to its own active response, not provider or administrator credentials, and provider credentials stay where the tools already run.
-The grant cannot select another agent, requester, or conversation, and it stops working when the response and its background jobs end.
+The grant cannot select another agent, requester, or conversation, and it stops working when the response and its background jobs end, or 24 hours after the response started, whichever comes first.
 Other code in the same worker can read the grant while the response runs, and anything that copies it can use the same permissions from any host that reaches MindRoom's API until then; agents and requesters that share a worker already share its trust.
 The external MCP gateway keeps its own authentication and tool restrictions; minimal mode does not widen them.
 
