@@ -177,6 +177,8 @@ class KnowledgeGraphIngestionWorker:
     redacted_event_ids: RedactedEventIds
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _passes: int = field(default=0, init=False)
+    # Graphs with a conversation waiting to retry a failed episode, which keep health failing until it succeeds.
+    _failing_graphs: set[str] = field(default_factory=set, init=False)
 
     async def run(self) -> None:
         """Run ingestion passes until cancelled."""
@@ -206,6 +208,8 @@ class KnowledgeGraphIngestionWorker:
         entity_names = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
         outcomes: list[bool] = []
         scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
+        # A graph no longer maintained, such as one named for a previous embedder, holds no failure.
+        self._failing_graphs &= {scope.graph_name for scope in scopes}
         # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
         start = self._passes % len(scopes) if scopes else 0
         self._passes += 1
@@ -216,28 +220,24 @@ class KnowledgeGraphIngestionWorker:
             try:
                 state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
                 due, readable = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
-                budget -= len(due)
                 if not readable:
                     outcomes.append(False)
-                outcomes.extend(
-                    [
-                        await self._ingest(
-                            config,
-                            scope,
-                            state,
-                            session,
-                            automation_thread_ids,
-                            entity_names.get,
-                            now,
-                        )
-                        for session in due
-                    ],
-                )
+                results = [
+                    await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
+                    for session in due
+                ]
+                # A conversation whose agent is not running is looked at again later and spends none of the budget.
+                budget -= sum(result is not None for result in results)
+                outcomes.extend(result for result in results if result is not None)
+                if any(entry["failing_piece"] for entry in state["sessions"].values()):
+                    self._failing_graphs.add(scope.graph_name)
+                else:
+                    self._failing_graphs.discard(scope.graph_name)
             except Exception as exc:
                 _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
                 outcomes.append(False)
-        # Health reports a failure until a pass ingests something and nothing in it fails.
-        if outcomes and all(outcomes):
+        # Health reports a failure until a pass ingests something, nothing in it fails, and no failed episode waits.
+        if outcomes and all(outcomes) and not self._failing_graphs:
             record_knowledge_graph_failure(None)
 
     def _due_sessions(
@@ -296,14 +296,16 @@ class KnowledgeGraphIngestionWorker:
         automation_thread_ids: set[str],
         agent_for_sender: Callable[[str], str | None],
         now: float,
-    ) -> bool:
-        """Ingest a bounded number of one conversation's new episodes and return whether none failed or was dropped."""
+    ) -> bool | None:
+        """Ingest a bounded number of one conversation's new episodes and return whether none failed or was dropped.
+
+        Return None when its agent cannot say yet what was redacted, which leaves the conversation for a later pass.
+        """
         settings = config.knowledge_graph.ingest
         finished, blocked_until = _finished_runs(session.runs, now, _approval_window_seconds(config))
         redacted = await self._redacted(scope.agent_name, finished)
         if redacted is None:
-            # Its agent cannot say yet what was redacted, so the conversation is looked at again on the next pass.
-            return True
+            return None
         # A redaction removes a turn from stored history only when the agent next replies there, so it is skipped here.
         finished = [run for run in finished if not run_event_ids(run) & redacted]
         entry = state["sessions"].get(session.session_id)

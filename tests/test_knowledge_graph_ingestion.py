@@ -651,6 +651,63 @@ async def test_a_conversation_waits_while_its_agent_cannot_say_what_was_redacted
 
 
 @pytest.mark.asyncio
+async def test_health_keeps_failing_while_a_conversation_waits_to_retry(tmp_path: Path) -> None:
+    """Another conversation added cleanly does not clear the failure of one that is still waiting for its retry."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing={"!room:x:$bad"})
+    _seed(config, paths, "!room:x:$bad", ["b1"])
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+
+    _seed(config, paths, "!room:x:$good", ["g1"], at=T0 + 20)
+    await worker._run_cycle(config, now=T0 + 40)
+
+    assert store.sessions() == ["!room:x:$good"]
+    assert knowledge_graph_failure() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_graph_no_longer_maintained_stops_keeping_health_failing(tmp_path: Path) -> None:
+    """After an embedder change, the old graph's failing episode no longer holds the failure once the new one is fine."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing={"!room:x:$t1"})
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    assert knowledge_graph_failure() is not None
+
+    store.failing.clear()
+    changed = config.model_copy(deep=True)
+    changed.memory.embedder.config.dimensions = 256
+    await worker._run_cycle(changed, now=T0 + 20)
+
+    assert store.sessions() == ["!room:x:$t1"]
+    assert knowledge_graph_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_whose_agent_is_not_running_counts_for_nothing(tmp_path: Path) -> None:
+    """It neither clears an earlier failure nor takes the pass's budget from an agent that is running."""
+    config = _config(max_sessions_per_cycle=1)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$mind", ["m1"])
+    record_knowledge_graph_failure("Knowledge graph ingestion failed: UnusableExtractionError")
+
+    async def only_pal_runs(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del room_id, event_ids
+        return frozenset() if agent_name == "pal" else None
+
+    await _worker(config, paths, store, only_pal_runs)._run_cycle(config, now=T0 + 10)
+    assert knowledge_graph_failure() is not None
+
+    _seed(config, paths, "!room:x:$pal", ["p1"], agent="pal")
+    # A new worker's first pass starts with `mind`, whose conversation is due again.
+    await _worker(config, paths, store, only_pal_runs)._run_cycle(config, now=T0 + 20)
+    assert store.sessions() == ["!room:x:$pal"]
+
+
+@pytest.mark.asyncio
 async def test_a_failing_tool_result_is_dropped_while_the_conversation_keeps_succeeding(tmp_path: Path) -> None:
     """New turns that extract fine do not reset the count of the tool results that keep failing behind them."""
     config, paths = _config(), _paths(tmp_path)
