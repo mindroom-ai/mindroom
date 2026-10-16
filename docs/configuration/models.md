@@ -525,6 +525,8 @@ Warm turns make no judgment call.
 
 An accepted switch is saved as the agent's thread override, like `!model`, so the thread stays on the cheap model without further judgments, even after the cheap model's own cache expires.
 `!model` shows it, and `!model reset` or another `!model` choice ends it.
+`!model reset` returns the thread to automatic selection, so a later idle turn can switch it again; choose the agent's model with `!model` to keep it.
+Removing `cold_cache` or changing `cheap_model` stops new switches, but threads that already switched stay on the old cheap model until their override is reset.
 
 The switch never happens when a scheduled model, a `!model` or `!room_model` override (even one naming the agent's own model), or a `room_models` entry that selects a different model applies, or when the request carries images, audio, video, or files.
 Earlier attachments reach the judge only as placeholders, so pick a cheap model that supports the same media as the agent model.

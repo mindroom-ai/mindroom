@@ -280,7 +280,7 @@ async def test_select_cold_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_select_logs_why_it_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Operators can see why a cold-cache agent kept its model, for example in room mode."""
+    """Operators can see why a cold-cache agent kept its model, for example when the thread history is unavailable."""
     with capture_logs() as logs:
         await _select(tmp_path, monkeypatch, _FakeJudge(), context=None)
     selected = [log for log in logs if log["event"] == "Cold cache model selected"]

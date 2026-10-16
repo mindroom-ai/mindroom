@@ -5880,7 +5880,9 @@ class ResponseRunner:
             context=self._judgment_context(request),
             prompt=request.prompt,
         )
-        if selected != resolved_model:
+        if selected == resolved_model:
+            return selected
+        try:
             # The thread stays on the cheap model, like a `!model` choice, until someone changes it.
             set_thread_model_override(
                 self.deps.runtime_paths,
@@ -5889,6 +5891,10 @@ class ResponseRunner:
                 entity_names=(self.deps.agent_name,),
                 config=config,
             )
+        except OSError:
+            # The switch is an optimization, so a failed save must not fail the reply.
+            self.deps.logger.warning("cold_cache_switch_save_failed", thread_id=thread_id, exc_info=True)
+            return resolved_model
         return selected
 
     async def _generate_response_with_participation_locked(

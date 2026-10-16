@@ -8035,6 +8035,15 @@ async def test_cold_cache_switch_stays_with_the_thread(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cold_cache_failed_switch_save_keeps_agent_model(tmp_path: Path) -> None:
+    """A switch that cannot be saved is skipped, and the reply still runs on the agent model."""
+    with patch("mindroom.response_runner.set_thread_model_override", side_effect=OSError("disk full")):
+        active_models, selector_calls = await _cold_cache_reply_model(tmp_path)
+    assert len(selector_calls) == 1
+    assert active_models == ["default"]
+
+
+@pytest.mark.asyncio
 async def test_cold_cache_uses_default_cheap_model(tmp_path: Path) -> None:
     """An agent without its own cheap_model switches to defaults.cheap_model."""
     active_models, selector_calls = await _cold_cache_reply_model(tmp_path, inherit_cheap_model=True)
