@@ -17,7 +17,6 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from mindroom.api.openai_streaming_protocol import error_response
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.tool_system.events import strip_visible_tool_markers
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -123,12 +122,6 @@ def _find_last_user_message(
     return None
 
 
-def _history_text(msg: ChatMessage) -> str:
-    """Return one turn's text; only MindRoom's own earlier replies carry tool display markers."""
-    text = _extract_content_text(msg.content)
-    return strip_visible_tool_markers(text) if msg.role == "assistant" else text
-
-
 def convert_messages(
     messages: list[ChatMessage],
 ) -> tuple[str, list[ResolvedVisibleMessage] | None]:
@@ -150,7 +143,7 @@ def convert_messages(
         elif msg.role == "tool":
             continue
         elif msg.role in ("user", "assistant"):
-            text = _history_text(msg)
+            text = _extract_content_text(msg.content)
             if text:
                 synthetic_index += 1
                 conversation.append(

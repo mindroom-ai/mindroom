@@ -301,10 +301,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return MindRoomOpenAILike(id=model_id, **zai_kwargs)
 
     if canonical_provider_key in {"codex", "openai_codex"}:
-        from mindroom.providers.codex_model import (  # noqa: PLC0415
-            CodexResponses,
-            normalize_codex_model_id,
-        )
+        from mindroom.providers.codex_model import CodexResponses  # noqa: PLC0415
 
         extra_kwargs.pop("api_key", None)
         _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
@@ -313,14 +310,14 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 execution_identity,
                 storage_root=runtime_paths.storage_root,
             )
-        return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
+        return CodexResponses(id=model_id, **extra_kwargs)
 
     if canonical_provider_key in {"kimi", "kimi_code"}:
-        from mindroom.providers.kimi_model import KimiChat, normalize_kimi_model_id  # noqa: PLC0415
+        from mindroom.providers.kimi_model import KimiChat  # noqa: PLC0415
 
         extra_kwargs.pop("api_key", None)
         _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
-        return KimiChat(id=normalize_kimi_model_id(model_id), **extra_kwargs)
+        return KimiChat(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)
@@ -497,7 +494,7 @@ def get_model_instance(
 
     model_config = config.models[model_name]
     provider = model_config.provider
-    model_id = model_config.id
+    model_id = effective_model_id(model_config)
 
     # Providers may write into authored nested values, such as an Agno Gemini generation_config dict.
     extra_kwargs = deepcopy(model_config.extra_kwargs or {})
@@ -523,7 +520,7 @@ def get_model_instance(
         "Using AI model",
         model=model_name,
         provider=provider,
-        configured_id=model_id,
+        configured_id=model_config.id,
         effective_id=model.id,
     )
     install_llm_request_logging(

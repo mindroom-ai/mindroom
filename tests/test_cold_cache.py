@@ -157,6 +157,12 @@ def test_ttl_other_providers_is_one_hour() -> None:
     assert _prompt_cache_ttl_seconds(_model(provider="openai", id="gpt-6.1")) == 3600
 
 
+def test_ttl_openai_extended_retention_is_one_day() -> None:
+    """OpenAI's opt-in extended retention keeps prompts cached for up to 24 hours."""
+    model = _model(provider="openai", id="gpt-6.1", extra_kwargs={"request_params": {"prompt_cache_retention": "24h"}})
+    assert _prompt_cache_ttl_seconds(model) == 86400
+
+
 @pytest.mark.parametrize(
     ("session", "warm"),
     [

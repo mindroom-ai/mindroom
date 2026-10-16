@@ -1145,6 +1145,7 @@ depends_on = [
 ]
 visibility = ["mindroom.judgment.llm",
     "mindroom.ai",
+    "mindroom.cold_cache",
     "mindroom.api.provider_setup",
     "mindroom.cli.config",
     "mindroom.cli.doctor",
@@ -2881,6 +2882,7 @@ depends_on = [
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
+    "mindroom.cold_cache",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.follow_ups",
@@ -5924,7 +5926,14 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
+expose = [
+    "CLAUDE_CACHE_PROVIDERS",
+    "canonical_provider",
+    "effective_model_id",
+    "get_model_instance",
+    "missing_model_api_key_provider",
+    "model_uses_own_credential",
+]
 from = ["mindroom.providers.model_loading"]
 
 [[interfaces]]
@@ -7389,6 +7398,11 @@ depends_on = ["mindroom.providers.tool_policy"]
 visibility = ["mindroom.providers.model_loading"]
 
 [[modules]]
+path = "mindroom.config.cold_cache"
+depends_on = ["mindroom.config.judgment"]
+visibility = ["mindroom.config.agent", "mindroom.cold_cache"]
+
+[[modules]]
 path = "mindroom.config.participation"
 depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 visibility = ["mindroom.config.agent", "mindroom.turn_policy", "mindroom.response_runner"]
@@ -8547,6 +8561,15 @@ depends_on = ["mindroom.judgment.client"]
 [[modules]]
 path = "mindroom.judgment.openai_decisions"
 depends_on = ["mindroom.judgment.client", "mindroom.model_defaults"]
+
+[[modules]]
+path = "mindroom.cold_cache"
+depends_on = [
+    "mindroom.judgment.evaluator",
+    "mindroom.judgment.state",
+    "mindroom.providers.model_loading",
+]
+visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.participation_judgment"

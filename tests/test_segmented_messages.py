@@ -457,3 +457,25 @@ def test_tool_trace_never_splits_a_short_answer() -> None:
     assert [event["tool_name"] for event in replacement["io.mindroom.tool_trace"]["events"]] == names
     assert _marker_numbers(replacement["body"]) == list(range(1, 41))
     assert calculate_event_size(segmented.first) <= _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES
+
+
+def test_segment_without_room_for_its_trace_drops_its_markers() -> None:
+    """Markers whose trace cannot fit are removed, since readers only strip markers a trace proves."""
+    names = [f"tool_{index}" for index in range(80)]
+    body = "Done.\n\n" + "\n\n".join(f"🔧 `{name}` [{index}]" for index, name in enumerate(names, start=1))
+    events = [
+        {"type": "tool_call_completed", "tool_name": name, "args_preview": "a" * 150, "result_preview": "r" * 500}
+        for name in names
+    ]
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content={"msgtype": "m.text", "body": body, "io.mindroom.tool_trace": {"version": 2, "events": events}},
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=True)
+
+    assert segmented is not None
+    replacement = segmented.first["m.new_content"]
+    assert "io.mindroom.tool_trace" not in replacement
+    assert "🔧" not in replacement["body"]
+    assert replacement["body"].startswith("Done.")

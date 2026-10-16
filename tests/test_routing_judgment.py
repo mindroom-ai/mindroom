@@ -202,6 +202,24 @@ async def test_router_judge_sees_complete_recent_text_and_aliased_speakers(
 
 
 @pytest.mark.asyncio
+async def test_router_judge_clips_long_recent_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long recent reply, such as one with many tool calls, is clipped like other judges' context."""
+    _providers(monkeypatch)
+    posted = _choice_provider(monkeypatch, "candidate_0")
+    history = [ResolvedVisibleMessage.synthetic(sender="@person:example.org", body="word " * 4000, event_id="$long")]
+    result = await routing.suggest_responder(
+        "Current question",
+        ["code", "research"],
+        _config(),
+        _paths(tmp_path),
+        history,
+    )
+    assert result is not None
+    assert result.entity_name == "code"
+    assert "characters omitted" in json.dumps(posted[0]["state"])
+
+
+@pytest.mark.asyncio
 async def test_router_judge_sees_tool_calls_as_tags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An earlier agent reply reaches the router judge with its tool calls, not display markers."""
     _providers(monkeypatch)

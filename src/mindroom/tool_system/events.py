@@ -581,14 +581,18 @@ def message_tool_trace(content: Mapping[str, object]) -> list[ToolTraceEntry] | 
     events = cast("dict[str, object]", payload).get("events")
     if not isinstance(events, list):
         return []
-    return deserialize_tool_trace(
-        cast("list[Mapping[str, object]]", [event for event in events if isinstance(event, dict)]),
-    )
+    try:
+        return deserialize_tool_trace(
+            cast("list[Mapping[str, object]]", [event for event in events if isinstance(event, dict)]),
+        )
+    except RuntimeError:
+        # Any room member can send this key, so a malformed trace reads as one without entries.
+        return []
 
 
 def body_without_tool_markers(body: str, content: Mapping[str, object]) -> str:
     """Remove marker lines a stored tool trace proves are MindRoom chrome; leave other text alone."""
-    if message_tool_trace(content) is None:
+    if not isinstance(content.get(_TOOL_TRACE_KEY), dict):
         return body
     return strip_visible_tool_markers(body)
 

@@ -192,7 +192,7 @@ def clip_is_unredacted(text: str) -> bool:
 
 
 def fit_judgment_request(
-    question: JudgmentQuestion,
+    question: JudgmentQuestion | ChoiceQuestion,
     history: Sequence[JudgmentMessage],
     final: JudgmentMessage,
     *,

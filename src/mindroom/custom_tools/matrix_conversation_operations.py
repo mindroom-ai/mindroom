@@ -14,6 +14,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
+    STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.custom_tools.attachments import (
     resolve_send_attachments,
@@ -55,8 +56,9 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     if message_tool_trace(message.content) is None:
         return payload
     body = strip_visible_tool_markers(message.body)
-    # The rendered HTML repeats the markers, and the plain body already carries the text.
-    content = {key: value for key, value in message.content.items() if key not in {"format", "formatted_body"}}
+    # The rendered HTML and the streaming canonical body repeat the markers, and the plain body carries the text.
+    dropped = {"format", "formatted_body", STREAM_VISIBLE_BODY_KEY}
+    content = {key: value for key, value in message.content.items() if key not in dropped}
     content["body"] = strip_visible_tool_markers(str(content.get("body", "")))
     return {**payload, "body": body, "content": content}
 

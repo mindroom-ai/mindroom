@@ -2317,6 +2317,7 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
                     "body": body,
                     "format": "org.matrix.custom.html",
                     "formatted_body": "<p>Checked.</p><p>🔧 <code>shell</code> [1]</p><p>All good.</p>",
+                    STREAM_VISIBLE_BODY_KEY: body,
                     **trace,
                 },
             ),

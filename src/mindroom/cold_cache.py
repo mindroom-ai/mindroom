@@ -22,6 +22,8 @@ logger = get_logger(__name__)
 # Anthropic's TTLs, refreshed on every cache hit.
 _EXTENDED_CACHE_TTL_SECONDS = 3600
 _DEFAULT_CACHE_TTL_SECONDS = 300
+# OpenAI's opt-in `prompt_cache_retention: 24h`.
+_OPENAI_EXTENDED_RETENTION_SECONDS = 24 * 3600
 # The cheap model takes over the whole thread, so the judge sees as much of it as the request budget fits.
 _MAX_CONTEXT_MESSAGES = 63
 
@@ -52,9 +54,13 @@ def _cold_cache_question(agent_model_id: str, cheap_model_id: str) -> JudgmentQu
 
 def _prompt_cache_ttl_seconds(model_config: ModelConfig) -> int:
     """Return how long an idle thread's prompt cache lives, erring long when the provider is not exact."""
+    extra_kwargs = model_config.extra_kwargs or {}
     claude = canonical_provider(model_config.provider) in CLAUDE_CACHE_PROVIDERS
-    if claude and (model_config.extra_kwargs or {}).get("extended_cache_time") is False:
+    if claude and extra_kwargs.get("extended_cache_time") is False:
         return _DEFAULT_CACHE_TTL_SECONDS
+    request_params = extra_kwargs.get("request_params")
+    if isinstance(request_params, dict) and request_params.get("prompt_cache_retention") == "24h":
+        return _OPENAI_EXTENDED_RETENTION_SECONDS
     # Claude defaults to the 1h TTL, and 1h bounds OpenAI's in-memory retention.
     return _EXTENDED_CACHE_TTL_SECONDS
 

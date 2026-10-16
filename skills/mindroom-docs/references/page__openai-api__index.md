@@ -141,7 +141,7 @@ The API accepts but ignores these OpenAI parameters, because the agent's configu
 
 `stream: true` returns standard OpenAI Server-Sent Events: a role chunk, content chunks, a finish chunk, and `[DONE]`.
 Tool calls appear inline in the content as `<tool id="N" state="start|done">...</tool>` text, not as native OpenAI `tool_calls`.
-Tool-call text is always included on `/v1`, even when the agent sets `show_tool_calls: false`.
+Streaming responses always include this tool-call text, even when the agent sets `show_tool_calls: false`; non-streaming responses carry only the answer text.
 
 ## Authentication
 

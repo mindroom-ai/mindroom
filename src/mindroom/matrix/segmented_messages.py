@@ -21,6 +21,7 @@ from mindroom.tool_system.events import (
     build_tool_trace_content,
     message_tool_trace,
     renumbered_tool_trace,
+    strip_visible_tool_markers,
 )
 
 if TYPE_CHECKING:
@@ -229,7 +230,8 @@ def _with_tool_trace(
         if calculate_event_size(segment) <= target_bytes:
             return segment
         holder.pop(TOOL_TRACE_CONTENT_KEY, None)
-    return segment
+    # Without a trace, readers cannot tell the markers from typed text, so they go too.
+    return build(strip_visible_tool_markers(renumbered))
 
 
 def _segment_target_bytes(*, room_encrypted: bool, is_edit: bool) -> int:

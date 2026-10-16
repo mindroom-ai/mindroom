@@ -5,6 +5,7 @@ from __future__ import annotations
 import nio
 
 from mindroom.dispatch_handoff import dispatch_prompt_for_event
+from mindroom.judgment.conversation import message_judgment_text
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory._prompting import _build_conversation_messages
 from mindroom.tool_system.events import (
@@ -41,6 +42,25 @@ def test_message_tool_trace_reads_the_stored_entries() -> None:
     content = build_tool_trace_content(_TRACE) or {}
     assert message_tool_trace(content) == _TRACE
     assert message_tool_trace({"msgtype": "m.text"}) is None
+
+
+def test_malformed_tool_trace_reads_as_a_trace_without_entries() -> None:
+    """Any room member can attach a broken trace, so readers must not raise on one."""
+    content = {"msgtype": "m.text", "body": _BODY, "io.mindroom.tool_trace": {"events": [{}]}}
+    assert message_tool_trace(content) == []
+    assert "🔧" not in body_without_tool_markers(_BODY, content)
+    message = ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=_BODY, event_id="$m", content=content)
+    assert "<tool" not in (message_judgment_text(message) or "")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$m",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": content,
+        },
+    )
+    assert "Fixing." in dispatch_prompt_for_event(event)
 
 
 def test_render_tool_tag_quotes_previews() -> None:
