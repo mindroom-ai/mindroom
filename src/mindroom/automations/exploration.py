@@ -44,7 +44,12 @@ class _Lead:
 
 def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_Lead]:
     """Return distinct tool calls from conversations updated after ``since``, newest first, at most ``limit``."""
-    storage = create_session_storage(ctx.agent_name, ctx.config, ctx.runtime_paths, ctx.execution_identity)
+    storage = create_session_storage(
+        ctx.agent_name,
+        ctx.config,
+        ctx.runtime_paths,
+        execution_identity=ctx.execution_identity,
+    )
     automation_thread_ids = automation_threads(ctx.runtime_paths)
     seen: dict[tuple[str, str], tuple[int, int]] = {}
     try:
