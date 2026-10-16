@@ -22,7 +22,7 @@ from mindroom.prompt_message_tags import cdata_body_text
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput
@@ -33,7 +33,7 @@ type _ThreadKind = Literal["conversation", "exploration", "delegation", "automat
 type _RunKey = tuple[int, str]
 type Progress = tuple[int, str, int]
 
-# The piece number of a run that is fully covered, larger than any piece a split produces.
+# The progress of a run that is fully covered, larger than any count of lines a split covers.
 RUN_DONE = 1 << 30
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
@@ -54,7 +54,7 @@ class RenderedEpisode:
     """One episode, how far into its conversation it reaches, and whose turns it holds."""
 
     episode: EpisodeInput
-    # `(created_at, run_id, piece)` of the newest piece it covers; RUN_DONE marks a run whose every piece is covered.
+    # `(created_at, run_id, lines)`: how many lines of its newest run it covers, or RUN_DONE once it covers them all.
     progress: Progress
     requester_id: str | None
 
@@ -103,8 +103,12 @@ def render_episodes(
     episode_kind: Literal["conversation", "tool_results"],
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
+    agent_for_sender: Callable[[str], str | None],
 ) -> list[RenderedEpisode]:
-    """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries."""
+    """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries.
+
+    ``agent_for_sender`` names the configured agent behind a Matrix ID, so agents' messages are not labeled as people's.
+    """
     # Exploration and delegated prompts come from an agent, and their answers restate the tool results.
     if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind in ("exploration", "delegation")):
         return []
@@ -123,7 +127,7 @@ def render_episodes(
 
     cap = settings.max_episode_chars
     for run in sorted(runs, key=run_key):
-        items = _episode_items(run, episode_kind, agent_name, settings)
+        items = _episode_items(run, episode_kind, agent_name, settings, agent_for_sender)
         if not items:
             continue
         # Runs stay whole where they fit and share an episode only with the same day and requester, so relative dates
@@ -138,13 +142,12 @@ def render_episodes(
             )
         ):
             flush()
-        piece = 0
-        for line, call in items:
-            # Only a run larger than the cap is split; each piece records how far into the run it reaches.
+        for covered, (line, call) in enumerate(items):
+            # Only a run larger than the cap is split; each piece records how many of the run's lines it reaches, so
+            # pieces cut at another size after a settings change resume where the old ones stopped.
             if lines and _size(lines) + len(line) + 1 > cap:
-                progress = (*run_key(run), piece)
+                progress = (*run_key(run), covered)
                 flush()
-                piece += 1
             lines.append(line)
             if call is not None:
                 calls.append(call)
@@ -168,10 +171,11 @@ def _episode_items(
     episode_kind: Literal["conversation", "tool_results"],
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
+    agent_for_sender: Callable[[str], str | None],
 ) -> list[tuple[str, str | None]]:
     """Return a run's lines of one kind, each tool result with the call it lists in the episode description."""
     if episode_kind == "conversation":
-        return [(line, None) for line in _conversation_lines(run, agent_name, settings)]
+        return [(line, None) for line in _conversation_lines(run, agent_name, settings, agent_for_sender)]
     executions = [execution for execution in run.tools or [] if is_evidence(execution)]
     return [
         (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}") for execution in executions
@@ -201,7 +205,12 @@ def _episode(
     )
 
 
-def _conversation_lines(run: RunOutput, agent_name: str, settings: KnowledgeGraphIngestConfig) -> list[str]:
+def _conversation_lines(
+    run: RunOutput,
+    agent_name: str,
+    settings: KnowledgeGraphIngestConfig,
+    agent_for_sender: Callable[[str], str | None],
+) -> list[str]:
     requester = (run.metadata or {}).get("requester_id") or run.user_id or "unknown"
     lines: list[str] = []
     for message in run.messages or []:
@@ -209,7 +218,7 @@ def _conversation_lines(run: RunOutput, agent_name: str, settings: KnowledgeGrap
             continue
         if message.role == "user":
             lines.extend(
-                f"person {_speaker(sender)}: {_clean(body, settings.max_episode_chars)}"
+                f"{_speaker(sender, agent_for_sender)}: {_clean(body, settings.max_episode_chars)}"
                 for sender, body in _prompt_messages(message.content, str(requester))
             )
         elif message.role == "assistant":
@@ -217,10 +226,12 @@ def _conversation_lines(run: RunOutput, agent_name: str, settings: KnowledgeGrap
     return lines
 
 
-def _speaker(sender: str) -> str:
-    """Return a Matrix ID without its colon, since Graphiti reads a dialogue line's speaker up to the first colon."""
+def _speaker(sender: str, agent_for_sender: Callable[[str], str | None]) -> str:
+    """Label a sender as an agent or a person, with no colon, since Graphiti reads a speaker up to the first colon."""
+    if (agent := agent_for_sender(sender)) is not None:
+        return f"agent {agent}"
     user, separator, server = sender.partition(":")
-    return f"{user} ({server})" if separator else sender
+    return f"person {user} ({server})" if separator else f"person {sender}"
 
 
 def _prompt_messages(content: str, requester: str) -> list[tuple[str, str]]:
@@ -237,7 +248,9 @@ def _prompt_messages(content: str, requester: str) -> list[tuple[str, str]]:
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
     outcome = "error" if execution.tool_call_error else "result"
     output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
-    return f"call {execution.tool_name}({tool_arguments(execution)}) {outcome}: {output}"
+    # Clipped to half a result, so arguments and result together stay within an episode.
+    arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]
+    return f"call {execution.tool_name}({arguments}) {outcome}: {output}"
 
 
 def tool_arguments(execution: ToolExecution) -> str:

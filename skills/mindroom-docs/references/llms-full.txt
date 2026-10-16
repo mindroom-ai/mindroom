@@ -3840,6 +3840,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
+The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
 
 ## What Goes Into the Graph
@@ -3854,7 +3855,8 @@ A turn waiting for tool approval holds back the later turns of its conversation 
 Each fact keeps its sources: `conversation` means someone said it, `tool_results` means a tool returned it.
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
-Deleting or redacting a message does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`.
+A message redacted before its conversation is added stays out of the graph, and so does the turn that read it.
+Redacting a message later does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`, without redacted messages.
 
 ## The `knowledge_graph` Tool
 
@@ -4507,6 +4509,7 @@ agents:
 
 The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+A turn whose message was redacted can still be listed until the agent next replies in that conversation.
 
 | Field | Default | Description |
 |---|---|---|
@@ -14612,7 +14615,7 @@ Do not report or "fix" these; they are deliberate.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
-- Redacting a message does not remove facts the knowledge graph already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
+- Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so deleting the `knowledge_graph/` storage directory rebuilds the graph without them; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.

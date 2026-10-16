@@ -42,6 +42,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
 Facts are embedded with [`memory.embedder`](memory.md#embedder).
+The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
 
 ## What Goes Into the Graph
@@ -56,7 +57,8 @@ A turn waiting for tool approval holds back the later turns of its conversation 
 Each fact keeps its sources: `conversation` means someone said it, `tool_results` means a tool returned it.
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
-Deleting or redacting a message does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`.
+A message redacted before its conversation is added stays out of the graph, and so does the turn that read it.
+Redacting a message later does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`, without redacted messages.
 
 ## The `knowledge_graph` Tool
 

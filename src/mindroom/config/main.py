@@ -1883,7 +1883,8 @@ class Config(BaseModel):
 
         A private agent runs each automation for each requester in that requester's personal room, so it must own
         personal rooms and cannot post in a configured room, which would show one requester's files to everyone in it.
-        The built-ins maintain file memory, which needs the file backend.
+        `prompt_curation` and `dreaming` maintain file memory, which needs the file backend; `exploration` needs the knowledge
+        graph, and a room for a shared agent.
         A plugin automation's own needs are checked when it fires, once its plugin is loaded.
         """
         if self.get_agent(agent_name).private is not None:

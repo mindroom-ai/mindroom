@@ -489,6 +489,7 @@ class _MultiAgentOrchestrator:
         self._knowledge_graph = KnowledgeGraphRuntime(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
+            redacted_event_ids=self.redacted_event_ids,
         )
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
@@ -1533,6 +1534,18 @@ class _MultiAgentOrchestrator:
         if bot is None or not bot.running:
             return None
         return await bot.journal_principal().replies.open_event_id(room_id, thread_id)
+
+    async def redacted_event_ids(
+        self,
+        entity_name: str,
+        room_id: str,
+        event_ids: tuple[str, ...],
+    ) -> frozenset[str] | None:
+        """Return which of a room's events one running managed entity's journal saw redacted, or None when not running."""
+        bot = self.agent_bots.get(entity_name)
+        if bot is None or not bot.running:
+            return None
+        return await bot.journal_principal().redacted_event_ids(room_id, event_ids)
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""

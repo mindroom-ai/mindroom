@@ -9037,6 +9037,8 @@ path = "mindroom.knowledge_graph.ingestion"
 depends_on = [
     "mindroom.automations.threads",
     "mindroom.durable_write",
+    "mindroom.entity_resolution",
+    "mindroom.history.storage",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.scope",
     "mindroom.knowledge_graph.session_runs",

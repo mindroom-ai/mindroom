@@ -19,9 +19,13 @@ from agno.session.agent import AgentSession
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.knowledge_graph import ingestion
-from mindroom.knowledge_graph.ingestion import KnowledgeGraphIngestionWorker, wake_knowledge_graph_ingestion
+from mindroom.knowledge_graph.ingestion import (
+    KnowledgeGraphIngestionWorker,
+    RedactedEventIds,
+    wake_knowledge_graph_ingestion,
+)
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import knowledge_graph_failure, record_knowledge_graph_failure
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -111,7 +115,12 @@ def _run(
         tools=[
             ToolExecution(tool_call_id=f"call-{run_id}", tool_name="get_issue", tool_args={"n": 1}, result="Issue 1"),
         ],
-        metadata={"room_id": "!room:x", "thread_id": session_id.rsplit(":", 1)[-1], "requester_id": "@alice:x"},
+        metadata={
+            "room_id": "!room:x",
+            "thread_id": session_id.rsplit(":", 1)[-1],
+            "requester_id": "@alice:x",
+            MATRIX_EVENT_ID_METADATA_KEY: f"$event-{run_id}",
+        },
         messages=[
             Message(role="user", content=f"question {run_id}", created_at=created_at),
             Message(role="assistant", content=f"answer {run_id}", created_at=created_at),
@@ -147,8 +156,23 @@ def _seed(
         storage.close()
 
 
-def _worker(config: Config, paths: RuntimePaths, store: _FakeStore) -> KnowledgeGraphIngestionWorker:
-    return KnowledgeGraphIngestionWorker(runtime_paths=paths, config_provider=lambda: config, store=store)
+async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+    del agent_name, room_id, event_ids
+    return frozenset()
+
+
+def _worker(
+    config: Config,
+    paths: RuntimePaths,
+    store: _FakeStore,
+    redacted_event_ids: RedactedEventIds = _no_redactions,
+) -> KnowledgeGraphIngestionWorker:
+    return KnowledgeGraphIngestionWorker(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        store=store,
+        redacted_event_ids=redacted_event_ids,
+    )
 
 
 def _answers(store: _FakeStore) -> list[str]:
@@ -634,3 +658,36 @@ async def test_a_busy_agent_does_not_take_every_pass(tmp_path: Path) -> None:
     await worker._run_cycle(config, now=T0 + 11)
 
     assert "!room:x:$p1" in store.sessions()
+
+
+@pytest.mark.asyncio
+async def test_a_redacted_message_is_never_added(tmp_path: Path) -> None:
+    """A turn whose message was redacted before ingestion reached it stays out of the graph, also after a rebuild."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
+    asked: list[tuple[str, str, tuple[str, ...]]] = []
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        asked.append((agent_name, room_id, event_ids))
+        return frozenset({"$event-r1"})
+
+    await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
+
+    assert _answers(store) == ["agent mind: answer r2"]
+    assert asked == [("mind", "!room:x", ("$event-r1", "$event-r2"))]
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_waits_while_its_agent_cannot_say_what_was_redacted(tmp_path: Path) -> None:
+    """Before the agent's bot runs, nothing is added, and the conversation is added once it can tell."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+
+    async def not_running(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, room_id, event_ids
+        return None
+
+    await _worker(config, paths, store, not_running)._run_cycle(config, now=T0 + 10)
+    assert store.episodes == []
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 20)
+    assert _answers(store) == ["agent mind: answer r1"]

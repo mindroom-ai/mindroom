@@ -144,7 +144,9 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 
 - The graph is a primary-side store fed by worker-produced text (tool results); it is data, never executed, and extraction prompt injection can at worst add wrong facts, which carry their source.
 - A shared agent's graph holds what it saw in every requester's conversations, including tool results, and any requester of that agent can query it; this matches shared-agent memory and must be stated on the user page and in `security-posture.md`.
-- Exploration prompts list redacted arguments of recent tool calls from the agent's conversations, so everyone who can read the exploration room sees them; operators choose that room accordingly, and private agents post in the requester's own personal room.
+- Exploration prompts list redacted arguments of recent tool calls from the agent's conversations, so everyone who can read the exploration room sees them; a shared agent's operator must choose that room, and private agents post in the requester's own personal room.
+- Ingestion skips turns derived from events the agent's journal saw redacted, because stored history drops a redacted turn only when the agent next replies there; it waits while the agent's bot is not running, since it cannot tell then.
+  Exploration's lead check runs in a thread without the journal, so a redacted turn's calls can be listed until that reply.
 - Only top-level, completed Matrix runs are ingested: runs with a `room_id`, not OpenAI-compatible API sessions, dynamic-workflow participant sessions, or team-member runs.
 - Private agents get one graph per requester instance and explore as that requester, with that requester's credentials, as automations already do.
 - Exploration has the agent's own tools and approval rules; its prompt's instruction to only read bounds nothing.

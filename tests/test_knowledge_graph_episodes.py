@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from itertools import accumulate
 from typing import Literal
 
 from agno.models.message import Message
@@ -17,6 +18,8 @@ from mindroom.prompt_message_tags import render_msg_tag
 ROOM = "!room:example.test"
 THREAD = "$thread"
 SETTINGS = KnowledgeGraphIngestConfig()
+# Matrix IDs of configured agents, as the entity registry resolves them.
+AGENTS = {"@mindroom_research:example.test": "research", "@mindroom_mind:example.test": "mind"}
 
 
 def _run(
@@ -60,6 +63,7 @@ def _episodes(
             episode_kind=episode_kind,
             agent_name="mind",
             settings=settings,
+            agent_for_sender=AGENTS.get,
         )
     ]
 
@@ -106,6 +110,23 @@ def test_several_people_in_one_prompt_are_each_labeled() -> None:
     assert conversation.body.splitlines()[:2] == [
         "person @alice (x): Bob owns Atlas.",
         "person @bob (x): No, Carol does now.",
+    ]
+
+
+def test_messages_from_agents_are_labeled_as_agents() -> None:
+    """Another agent's reply, or a hook post from this agent's account, is not something a person said."""
+    prompt = (
+        "<messages>"
+        + render_msg_tag(sender="@mindroom_research:example.test", body="I checked: Bob owns Atlas now.")
+        + render_msg_tag(sender="@mindroom_mind:example.test", body="[posted automatically by hook]")
+        + "</messages>"
+    )
+
+    conversation = _episodes([_run("r1", prompt=prompt)], "conversation")[0].episode
+
+    assert conversation.body.splitlines()[:2] == [
+        "agent research: I checked: Bob owns Atlas now.",
+        "agent mind: [posted automatically by hook]",
     ]
 
 
@@ -165,6 +186,16 @@ def test_subagent_answers_are_never_rendered() -> None:
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 
 
+def test_long_tool_arguments_never_cut_off_the_result() -> None:
+    """Arguments are clipped too, so a call with many large fields still fits its whole result in an episode."""
+    fields = {f"field_{index}": "y" * 400 for index in range(80)}
+    run = _run("r1", tools=[_tool("query", "x" * 3900 + " decisive tail", **fields)])
+
+    [rendered] = _episodes([run], "exploration")
+
+    assert "decisive tail" in rendered.episode.body
+
+
 def test_oversized_tool_result_is_clipped_before_redaction() -> None:
     """A huge result keeps its first part rather than failing redaction as a whole."""
     run = _run("r1", tools=[_tool("fetch_page", "Atlas launch notes. " + "x" * 200_000, url="https://example.test")])
@@ -196,6 +227,7 @@ def test_runs_merge_until_the_cap_and_split_only_at_run_boundaries() -> None:
         episode_kind="conversation",
         agent_name="mind",
         settings=settings,
+        agent_for_sender=AGENTS.get,
     )
 
     assert [item.progress for item in rendered] == [(1_760_000_001, "r1", RUN_DONE), (1_760_000_002, "r2", RUN_DONE)]
@@ -241,18 +273,18 @@ def test_a_run_larger_than_the_cap_is_split_without_losing_results() -> None:
         episode_kind="tool_results",
         agent_name="mind",
         settings=SETTINGS,
+        agent_for_sender=AGENTS.get,
     )
 
     bodies = "\n".join(item.episode.body for item in rendered)
     assert len(rendered) > 1
     assert all(f"result {index} " in bodies for index in range(10))
     assert all(len(item.episode.body) <= SETTINGS.max_episode_chars for item in rendered)
-    assert [item.progress[2] for item in rendered[:-1]] == list(range(len(rendered) - 1))
     assert rendered[-1].progress == (1_760_000_000, "r1", RUN_DONE)
 
 
 def test_pieces_of_a_split_run_carry_their_progress() -> None:
-    """Each piece records how far into its run it reaches, so a retry can skip finished pieces."""
+    """Each piece records how many of its run's lines it reaches, so a retry can skip finished pieces."""
     results = [_tool(f"fetch_{index}", f"result {index} " + "x" * 3900) for index in range(10)]
 
     rendered = render_episodes(
@@ -261,12 +293,14 @@ def test_pieces_of_a_split_run_carry_their_progress() -> None:
         episode_kind="tool_results",
         agent_name="mind",
         settings=SETTINGS,
+        agent_for_sender=AGENTS.get,
     )
 
     progress = [item.progress for item in rendered]
     assert all(step[:2] == (1_760_000_000, "r1") for step in progress)
-    assert [step[2] for step in progress[:-1]] == list(range(len(progress) - 1))
-    assert progress[-1][2] > len(progress)
+    lines_per_piece = [len(item.episode.body.splitlines()) for item in rendered[:-1]]
+    assert [step[2] for step in progress[:-1]] == list(accumulate(lines_per_piece))
+    assert progress[-1][2] == RUN_DONE
 
 
 def test_turns_on_different_days_go_to_different_episodes() -> None:
@@ -291,3 +325,25 @@ def test_turns_of_different_requesters_go_to_different_episodes() -> None:
     rendered = _episodes([alice, bob], "conversation")
 
     assert [item.requester_id for item in rendered] == ["@alice:example.test", "@bob:example.test"]
+
+
+def test_a_split_run_resumes_without_loss_after_the_cap_changes() -> None:
+    """Progress counts the run's results covered, so pieces cut at a new size resume where the old ones stopped."""
+    run = _run("r1", tools=[_tool(f"fetch_{index}", "x" * 340 + f" result {index}") for index in range(8)])
+
+    def pieces(cap: int) -> list[RenderedEpisode]:
+        settings = KnowledgeGraphIngestConfig(max_episode_chars=cap, max_tool_result_chars=400)
+        return render_episodes(
+            [run],
+            thread_kind="conversation",
+            episode_kind="tool_results",
+            agent_name="mind",
+            settings=settings,
+            agent_for_sender=AGENTS.get,
+        )
+
+    first = pieces(1000)[0]
+    resumed = [piece for piece in pieces(2000) if piece.progress > first.progress]
+
+    covered = first.episode.body + "".join(piece.episode.body for piece in resumed)
+    assert all(f"result {index}" in covered for index in range(8))

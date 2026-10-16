@@ -20,7 +20,7 @@ from mindroom.knowledge_graph.store import (
     knowledge_graph_store,
     record_knowledge_graph_failure,
 )
-from tests.test_knowledge_graph_ingestion import _FakeStore, _seed
+from tests.test_knowledge_graph_ingestion import _FakeStore, _no_redactions, _seed
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,6 +45,7 @@ async def test_runtime_runs_while_an_agent_enables_the_graph(tmp_path: Path) -> 
     runtime = KnowledgeGraphRuntime(
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         config_provider=lambda: config,
+        redacted_event_ids=_no_redactions,
     )
     try:
         await runtime.sync()
@@ -77,7 +78,11 @@ async def test_stop_cancels_a_pass_in_progress_and_clears_health(tmp_path: Path)
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     _seed(config, paths, "!room:x:$t1", ["r1"], at=int(time.time()) - 60)
     store = _HangingStore()
-    runtime = KnowledgeGraphRuntime(runtime_paths=paths, config_provider=lambda: config)
+    runtime = KnowledgeGraphRuntime(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        redacted_event_ids=_no_redactions,
+    )
     with patch.object(runtime_module, "GraphitiStore", return_value=store):
         await runtime.sync()
     await asyncio.wait_for(store.added.wait(), timeout=10)

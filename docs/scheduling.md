@@ -389,6 +389,7 @@ agents:
 
 The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+A turn whose message was redacted can still be listed until the agent next replies in that conversation.
 
 | Field | Default | Description |
 |---|---|---|

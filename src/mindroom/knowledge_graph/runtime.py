@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge_graph.ingestion import RedactedEventIds
 
 
 @dataclass
@@ -22,6 +23,7 @@ class KnowledgeGraphRuntime:
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
+    redacted_event_ids: RedactedEventIds
     _store: GraphitiStore | None = field(default=None, init=False)
     _worker: KnowledgeGraphIngestionWorker | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -40,6 +42,7 @@ class KnowledgeGraphRuntime:
             runtime_paths=self.runtime_paths,
             config_provider=self.config_provider,
             store=store,
+            redacted_event_ids=self.redacted_event_ids,
         )
         self._store, self._worker = store, worker
         set_knowledge_graph_store(store)

@@ -16,6 +16,8 @@ from agno.run.base import RunStatus
 
 from mindroom.automations.threads import automation_threads
 from mindroom.durable_write import write_json_file_durable
+from mindroom.entity_resolution import prepared_entity_names_by_user_id
+from mindroom.history.storage import run_event_ids
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
     Progress,
@@ -32,7 +34,7 @@ from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_session_storage
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.run.agent import RunOutput
@@ -43,6 +45,9 @@ if TYPE_CHECKING:
     from mindroom.knowledge_graph.store import GraphStore
 
 logger = get_logger(__name__)
+
+# Which of a room's events an agent's journal saw redacted, or None while that agent's bot is not running.
+type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozenset[str] | None]]
 
 _DAY_SECONDS = 86_400
 _IDLE_POLL_SECONDS = 30
@@ -163,6 +168,7 @@ class KnowledgeGraphIngestionWorker:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     store: GraphStore
+    redacted_event_ids: RedactedEventIds
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _passes: int = field(default=0, init=False)
@@ -201,6 +207,7 @@ class KnowledgeGraphIngestionWorker:
         """Ingest up to ``max_sessions_per_cycle`` idle conversations with new turns."""
         budget = config.knowledge_graph.ingest.max_sessions_per_cycle
         automation_thread_ids = automation_threads(self.runtime_paths)
+        entity_names = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
         outcomes: list[bool] = []
         scopes = graph_scopes(config, self.runtime_paths)
         # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
@@ -217,7 +224,18 @@ class KnowledgeGraphIngestionWorker:
                 if not readable:
                     outcomes.append(False)
                 outcomes.extend(
-                    [await self._ingest(config, scope, state, session, automation_thread_ids, now) for session in due],
+                    [
+                        await self._ingest(
+                            config,
+                            scope,
+                            state,
+                            session,
+                            automation_thread_ids,
+                            entity_names.get,
+                            now,
+                        )
+                        for session in due
+                    ],
                 )
             except Exception as exc:
                 _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
@@ -252,7 +270,7 @@ class KnowledgeGraphIngestionWorker:
                 entry = state["sessions"].get(session_id)
                 if entry is not None and (
                     entry["retry_at"] > now
-                    or (updated_at <= entry["updated_at"] and not 0 < entry.get("recheck_at", 0) <= now)
+                    or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
                 ):
                     continue
                 if now - updated_at < settings.idle_seconds:
@@ -280,13 +298,20 @@ class KnowledgeGraphIngestionWorker:
         state: _GraphState,
         session: _DueSession,
         automation_thread_ids: set[str],
+        agent_for_sender: Callable[[str], str | None],
         now: float,
     ) -> bool:
         """Ingest a bounded number of one conversation's new episodes and return whether none failed or was dropped."""
         settings = config.knowledge_graph.ingest
+        finished, blocked_until = _finished_runs(session.runs, now, _approval_window_seconds(config))
+        redacted = await self._redacted(scope.agent_name, finished)
+        if redacted is None:
+            # Its agent cannot say yet what was redacted, so the conversation is looked at again on the next pass.
+            return True
+        # A redaction removes a turn from stored history only when the agent next replies there, so it is skipped here.
+        finished = [run for run in finished if not run_event_ids(run) & redacted]
         first_sight = session.session_id not in state["sessions"]
         entry = state["sessions"].setdefault(session.session_id, _new_session_state())
-        finished, blocked_until = _finished_runs(session.runs, now, _approval_window_seconds(config))
         if first_sight:
             _start_after_backfill_window(
                 entry,
@@ -306,6 +331,7 @@ class KnowledgeGraphIngestionWorker:
                 episode_kind=kind,
                 agent_name=scope.agent_name,
                 settings=settings,
+                agent_for_sender=agent_for_sender,
             ):
                 if marker is not None and rendered.progress <= marker:
                     continue
@@ -336,6 +362,21 @@ class KnowledgeGraphIngestionWorker:
         )
         await self._persist(scope.graph_name, state)
         return clean
+
+    async def _redacted(self, agent_name: str, runs: list[RunOutput]) -> frozenset[str] | None:
+        """Return the events the runs derive from that were redacted, or None while the agent cannot tell."""
+        by_room: dict[str, set[str]] = {}
+        for run in runs:
+            by_room.setdefault(str((run.metadata or {}).get("room_id")), set()).update(run_event_ids(run))
+        redacted: set[str] = set()
+        for room_id, event_ids in by_room.items():
+            if not event_ids:
+                continue
+            found = await self.redacted_event_ids(agent_name, room_id, tuple(sorted(event_ids)))
+            if found is None:
+                return None
+            redacted |= found
+        return frozenset(redacted)
 
     async def _add(
         self,
