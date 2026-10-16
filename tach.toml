@@ -8987,6 +8987,7 @@ visibility = ["mindroom.knowledge_graph.store"]
 [[modules]]
 path = "mindroom.knowledge_graph.clients"
 depends_on = [
+    "mindroom.embeddings.errors",
     "mindroom.helper_usage",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",

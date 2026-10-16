@@ -178,6 +178,32 @@ async def test_embedder_sends_an_openai_batch_as_batch_requests() -> None:
 
 
 @pytest.mark.asyncio
+async def test_embedder_embeds_one_text_per_request_when_a_server_answers_a_batch_with_one_vector() -> None:
+    """Some OpenAI-compatible servers accept an array but return one vector; they still embed one text at a time."""
+
+    async def create(**kwargs: object) -> SimpleNamespace:
+        texts = kwargs["input"]
+        first = texts[0] if isinstance(texts, list) else texts
+        return SimpleNamespace(data=[SimpleNamespace(embedding=[float(len(cast("str", first)))])], usage=None)
+
+    async_client = MagicMock()
+    async_client.embeddings.create = AsyncMock(side_effect=create)
+    embedder = MindRoomEmbedder(
+        MindRoomOpenAIEmbedder(
+            id="local-embed",
+            api_key="sk-test",
+            base_url="http://local/v1",
+            async_client=async_client,
+        ),
+    )
+
+    assert await embedder.create_batch(["a", "abc"]) == [[1.0], [3.0]]
+    assert await embedder.create_batch(["ab", "abcd"]) == [[2.0], [4.0]]
+    # The batch is tried once; later batches go straight to one text per request.
+    assert async_client.embeddings.create.await_count == 1 + 2 + 2
+
+
+@pytest.mark.asyncio
 async def test_embedder_bounds_concurrent_requests_without_batch_support() -> None:
     """An embedder without batch requests embeds one text per request, a few at a time."""
     active = peak = 0
