@@ -2309,6 +2309,7 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
     "mindroom.thread_tags",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -6698,6 +6699,7 @@ expose = [
     "is_visible_tool_marker_line",
     "message_tool_trace",
     "remap_visible_tool_marker_indices",
+    "renumbered_tool_trace",
     "render_tool_tag",
     "render_tool_trace_for_context",
     "serialize_tool_trace",

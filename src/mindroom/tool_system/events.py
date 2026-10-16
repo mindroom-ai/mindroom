@@ -664,6 +664,22 @@ def remap_visible_tool_marker_indices(text: str, index_map: Mapping[int, int]) -
     return "".join(remapped_lines)
 
 
+def renumbered_tool_trace(body: str, trace: Sequence[ToolTraceEntry]) -> tuple[str, list[ToolTraceEntry]]:
+    """Number one body's markers from 1 and return the trace entries they now point at."""
+    index_map: dict[int, int] = {}
+    entries: list[ToolTraceEntry] = []
+    for line in body.splitlines():
+        index_match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line) if is_visible_tool_marker_line(line) else None
+        if index_match is None:
+            continue
+        old_index = int(index_match.group())
+        if old_index in index_map or not 1 <= old_index <= len(trace):
+            continue
+        entries.append(trace[old_index - 1])
+        index_map[old_index] = len(entries)
+    return remap_visible_tool_marker_indices(body, index_map), entries
+
+
 def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
     """Append one delta while preserving explicit and visible-tool boundaries."""
     if not content:

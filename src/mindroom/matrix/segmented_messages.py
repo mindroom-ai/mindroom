@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.tool_system.events import build_tool_trace_content, message_tool_trace, renumbered_tool_trace
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,8 +28,8 @@ _SEGMENT_TARGET_EDIT_BYTES = 22_000
 _SEGMENT_TARGET_ENCRYPTED_PLAINTEXT_BYTES = 30_000
 _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
-# Useful for rebuilding model context, but not part of the visible answer. A
-# long tool trace would otherwise push a segmentable response into a sidecar.
+# Rebuilt per segment (the tool trace) or not part of the visible answer. A
+# whole-message tool trace would otherwise push a segmentable response into a sidecar.
 _INTERNAL_STREAM_KEYS = frozenset({TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY})
 # Rebuilt per segment from the chunk it carries, or dropped as internal.
 _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
@@ -135,8 +136,17 @@ def _rich_text_content(
     *,
     relation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one normal rich-text content payload from one body chunk."""
+    """Build one normal rich-text content payload from one body chunk.
+
+    A chunk carries only its own tool calls: its markers are renumbered from 1
+    and its trace holds just their entries, because clients resolve marker
+    ``[n]`` against the trace of the same event.
+    """
     content = {key: value for key, value in source.items() if key not in _SEGMENT_DROPPED_KEYS}
+    trace = message_tool_trace(source)
+    if trace:
+        body, entries = renumbered_tool_trace(body, trace)
+        content.update(build_tool_trace_content(entries) or {})
     content.setdefault("msgtype", "m.text")
     content["body"] = body
     content["format"] = "org.matrix.custom.html"
@@ -159,7 +169,7 @@ def _edit_content_chunk(content: dict[str, Any], source: dict[str, Any], body: s
     """
     replacement = _rich_text_content(source, body)
     edit = {key: value for key, value in content.items() if key not in _INTERNAL_STREAM_KEYS}
-    edit["body"] = f"* {body}"
+    edit["body"] = f"* {replacement['body']}"
     edit["format"] = "org.matrix.custom.html"
     edit["formatted_body"] = replacement["formatted_body"]
     edit["m.new_content"] = replacement

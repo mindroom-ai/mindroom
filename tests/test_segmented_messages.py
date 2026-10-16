@@ -375,3 +375,54 @@ def test_unclosed_fence_inside_a_block_quote() -> None:
     assert _unclosed_fence_start(indented_open, 0, len(indented_open)) == 0
     indented_closes = indented_open + ">   ```\n"
     assert _unclosed_fence_start(indented_closes, 0, len(indented_closes)) is None
+
+
+def _marker_numbers(body: str) -> list[int]:
+    return [int(line.split("[")[1].split("]")[0]) for line in body.splitlines() if line.startswith("🔧 `")]
+
+
+def test_segments_carry_their_own_renumbered_tool_trace() -> None:
+    """Each split segment shows its own tool calls: markers count from 1 and point into its own trace."""
+    paragraphs = _body().split("\n\n")
+    third = len(paragraphs) // 3
+    body = "\n\n".join(
+        [
+            *paragraphs[:third],
+            "🔧 `alpha` [1]",
+            "🔧 `beta` [2]",
+            *paragraphs[third : 2 * third],
+            "🔧 `gamma` [3]",
+            *paragraphs[2 * third :],
+        ],
+    )
+    events = [
+        {"type": "tool_call_completed", "tool_name": name, "result_preview": f"{name} done"}
+        for name in ("alpha", "beta", "gamma")
+    ]
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+        "io.mindroom.tool_trace": {"version": 2, "events": events},
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    parts = [segmented.first, *segmented.continuations]
+    names: list[str] = []
+    for part in parts:
+        numbers = _marker_numbers(part["body"])
+        trace = part.get("io.mindroom.tool_trace")
+        if not numbers:
+            assert trace is None
+            continue
+        assert numbers == list(range(1, len(numbers) + 1))
+        assert [event["tool_name"] for event in trace["events"]] == [
+            line.split("`")[1] for line in part["body"].splitlines() if line.startswith("🔧 `")
+        ]
+        names.extend(event["tool_name"] for event in trace["events"])
+    assert names == ["alpha", "beta", "gamma"]
+    assert sum(1 for part in parts if _marker_numbers(part["body"])) >= 2
+    assert all(calculate_event_size(part) <= _SEGMENT_TARGET_PLAINTEXT_BYTES for part in parts)
