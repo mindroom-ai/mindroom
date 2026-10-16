@@ -16,6 +16,7 @@ import pytest
 
 from mindroom.shell.execution import (
     ProcessRecord,
+    check_command,
     kill_all_records,
     kill_command,
     run_command,
@@ -69,6 +70,36 @@ async def _run(registry: dict[str, ProcessRecord], argv: list[str], cwd: Path, *
     )
     assert result.handle is None
     return result.message
+
+
+@pytest.mark.asyncio
+async def test_a_finished_handle_is_swept_ten_minutes_after_it_finished_however_long_it_ran(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """Desktop shell and script handles stay readable for ten minutes after their command ends."""
+    finished = await run_command(
+        registry,
+        namespace="test",
+        argv=["echo", "long-output"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=10,
+        register_finished=True,
+    )
+    assert finished.handle is not None
+    record = registry[finished.handle]
+    # It started long ago but finished just now.
+    record.started_at -= 900
+
+    await _run(registry, ["true"], tmp_path)
+    assert "long-output" in check_command(registry, namespace="test", handle=finished.handle)
+
+    assert record.finished_at is not None
+    record.finished_at -= 700
+    await _run(registry, ["true"], tmp_path)
+    assert finished.handle not in registry
 
 
 async def _wait_until_gone(pid: int) -> bool:
