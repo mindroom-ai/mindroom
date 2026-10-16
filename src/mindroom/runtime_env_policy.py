@@ -16,6 +16,7 @@ __all__ = [
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
+    "EGRESS_BROKER_ENV_BY_KEY",
     "ENV_TEMPLATE_PLACEHOLDERS",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES",
@@ -122,6 +123,17 @@ WORKER_EGRESS_PROXY_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "token_file": "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE",
         "vault": "MINDROOM_WORKER_EGRESS_PROXY_VAULT",
         "ca_file": "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE",
+    },
+)
+
+# Deployment-level settings of the credential-injecting egress broker that runs
+# inside the primary; an unset port leaves it disabled.
+EGRESS_BROKER_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "port": "MINDROOM_EGRESS_BROKER_PORT",
+        "host": "MINDROOM_EGRESS_BROKER_HOST",
+        "url": "MINDROOM_EGRESS_BROKER_URL",
+        "token_ttl_seconds": "MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS",
     },
 )
 

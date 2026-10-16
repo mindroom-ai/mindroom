@@ -30,6 +30,7 @@ _WORKER_ID_DIGEST_LENGTH = 24
 _DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH = 10
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
+SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 WORKER_CREDENTIALS_DIRNAME = "credentials"
 WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
@@ -730,7 +731,7 @@ def written_by_other_workers(relative_path: Path, worker_roots: Path = Path("wor
     parts = relative_path.parts
     return (
         relative_path.is_relative_to(worker_roots)
-        or parts[:1] == (_PRIVATE_INSTANCE_ROOT_DIRNAME,)
+        or parts[:1] in {(_PRIVATE_INSTANCE_ROOT_DIRNAME,), (SHARED_DIRECTORIES_DIRNAME,)}
         or (parts[:1] == ("agents",) and parts[2:3] == (_AGENT_WORKSPACE_DIRNAME,))
     )
 

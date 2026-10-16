@@ -17,6 +17,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`shell`] - Shell commands with background handles, environment passthrough, and PATH prepends.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
+- [`shared_directories`] - Directories an agent shares read-only with other agents, each reading it from its own worker.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
 - [`reasoning`] - `think` and `analyze` scratchpad steps.
@@ -77,7 +78,7 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 ## [`file`]
 
 `file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access): `workspace` (the default) rejects paths outside the workspace, and `unrestricted` allows any path the tool's process can reach.
+Paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access): `workspace` (the default) rejects paths outside the workspace and the agent's [shared directories](#shared_directories), and `unrestricted` allows any path the tool's process can reach.
 `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse paths inside a `.git` directory.
 `read_file()` refuses files over `max_file_length` characters or `max_file_lines` lines and asks for `read_file_chunk()` instead.
 `search_files()` matches glob patterns; use `search_content()` to search inside text files.
@@ -241,6 +242,54 @@ find_files("**/*.md", path="docs")
 edit_file("docs/example.md", "old text", "new text")
 write_file("scratch/todo.txt", "first line\nsecond line\n")
 ls("src")
+```
+
+## [`shared_directories`]
+
+`shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
+It is meant for [dedicated Docker and Kubernetes workers](../deployment/sandbox-proxy.md#worker-scopes), where each agent's worker otherwise sees only its own workspace.
+It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, and `list_shared_directories()`, and has no configuration fields.
+Only the agent that created a directory can invite, remove, or delete, and deleting a directory removes every file in it.
+Names use 1 to 64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit.
+
+With dedicated workers, the owner reads and writes the directory and invited agents only read it; the table below shows other deployments.
+Invited agents do not need `shared_directories` themselves: they read the directory with `shell`, `python`, `file`, or `coding`, at the path that `create_shared_directory` and `list_shared_directories` return.
+Every agent that owns or joined a directory sees that path in its prompt.
+Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
+When MindRoom uses workers but an agent's `file` or `coding` runs in the primary process, `workspace` keeps those tools out of shared directories; add them to the agent's `worker_tools`.
+Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
+
+The user who asks for an invitation must be allowed to use the invited agent outside the current room, through `access.users`, administrator rights, `access.members_of_rooms`, or the default access of the agent's configured rooms; `access.current_room_members` does not count.
+Private agents can neither create nor join shared directories.
+Creating or deleting a directory, and inviting or removing an agent, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
+
+Where tools run decides who reaches a shared directory:
+
+| Where tools run | Owner | Invited agents | Other agents |
+|---|---|---|---|
+| Dedicated Docker or Kubernetes workers | Read and write | Read only | No access |
+| Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
+| No workers, through `file` and `coding` under `file_access: workspace` | Read and write | Read only | No access |
+| Compose or host-container `static_runner` with only scratch storage mounted | No access | No access | No access |
+
+`shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
+A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
+
+```yaml
+agents:
+  researcher:
+    tools:
+      - shell
+      - shared_directories
+  writer:
+    tools:
+      - file
+```
+
+```python
+create_shared_directory("report")
+invite_to_shared_directory("report", "writer")
+list_shared_directories()
 ```
 
 ## [`docker`]

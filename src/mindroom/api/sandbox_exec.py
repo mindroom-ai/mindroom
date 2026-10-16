@@ -11,6 +11,7 @@ import signal
 import site
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -18,6 +19,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
+from mindroom.egress_broker.env import (
+    apply_runner_ca_bundle,
+)
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -172,7 +176,11 @@ def request_execution_env(
             # workspace HOME contract replaces it, so only the incoming request env drops it.
             protected_env_names |= {"HOME"}
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
-        env.update(agent_vault_env)
+        # Apply broker CA bundle if present
+        bundle_dir = Path(tempfile.gettempdir()) / "mindroom-egress-broker"
+        # The native broker wins: with its CA active the Agent Vault overlay is skipped.
+        if not apply_runner_ca_bundle(env, bundle_dir):
+            env.update(agent_vault_env)
         return env
     shell_process_env = (
         runtime_paths.process_env

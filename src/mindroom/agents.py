@@ -57,6 +57,7 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
 )
 from mindroom.session_storage import agent_storage
+from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_call_budget import install_model_call_cap
@@ -1007,6 +1008,7 @@ def _render_tool_execution_environment(
     file_access: FileAccess,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
+    shared_directories: tuple[str, ...],
 ) -> str:
     """Describe effective per-tool execution routing and file access to the model."""
 
@@ -1021,6 +1023,8 @@ def _render_tool_execution_environment(
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
+    if shared_directories:
+        file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
     if unconfined_tool_names:
         file_access_lines.append(
             f"- Not confined by file_access (only a worker isolates them): {tool_list(unconfined_tool_names)}.",
@@ -1799,6 +1803,7 @@ def _build_agent_role_context(
                 (*local_tool_names, *worker_routed_tool_names),
                 requires_primary_runtime=True,
             ),
+            shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
         )
     if not include_identity:
         return _AgentRoleContext(model_name=model_name, role=runtime_facts.lstrip(), context_documents=())

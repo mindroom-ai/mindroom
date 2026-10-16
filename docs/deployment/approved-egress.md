@@ -110,8 +110,45 @@ The toolkit reads these environment variables, which the runtime chart sets for 
 | `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH` | Static allowlist file with one entry per line and `#` comments | `/etc/mindroom-egress/allowed-domains.txt` |
 | `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` | Maximum grant TTL | `21600` |
 
+## Egress Broker Chaining
+
+When approved egress and the native [egress broker](egress-broker.md) are used together, the chain is:
+
+```text
+worker -> approved egress (Squid) -> egress broker in the primary -> internet
+```
+
+Squid stays first because temporary grants are matched to the worker by its source IP, so grants and the static allowlist keep working unchanged.
+The broker verifies the worker's token and injects credentials, and it dials the internet directly from the primary pod, so there is nothing else to deploy.
+
+```yaml
+workers:
+  backend: kubernetes
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+
+egressBroker:
+  enabled: true
+
+approvedEgress:
+  enabled: true
+  image:
+    tag: v0.1.10
+```
+
+With both enabled, the chart renders Squid's parent as the broker itself, so you do not set `approvedEgress.parentProxy`; the runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has what it renders in this mode and the values it refuses.
+`approvedEgress.parentProxy.bypassDomains` still skips the broker for destinations such as signed URLs.
+
+Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
+After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
+Chain mode has not yet been run end to end on a live cluster.
+
 ## Agent Vault Chaining
 
+Agent Vault is the legacy credential-injecting path; the native [egress broker](#egress-broker-chaining) replaces it (see [Migrating from Agent Vault](egress-broker.md#migrating-from-agent-vault)), and the chart does not allow both at once.
+Use this section only for deployments that still run Agent Vault.
 When approved egress and [Agent Vault](sandbox-proxy.md) are used together, the chain must be:
 
 ```text

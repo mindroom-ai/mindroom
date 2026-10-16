@@ -342,6 +342,19 @@ curl -sS -X POST 'http://localhost:9876/api/config/agent-policies' \
 
 Always confirm the port belongs to the same MindRoom instance you launched.
 
+## Dedicated Docker Workers
+
+Worker-side changes only reach Docker workers through an image built from this checkout, which takes a few minutes in the background:
+
+```bash
+docker build -t mindroom-branch:dev -f local/instances/deploy/Dockerfile.mindroom . > "$run_root/docker-build.log" 2>&1
+```
+
+Add `MINDROOM_WORKER_BACKEND=docker`, `MINDROOM_DOCKER_WORKER_IMAGE=mindroom-branch:dev`, a unique `MINDROOM_DOCKER_WORKER_NAME_PREFIX`, a random `MINDROOM_SANDBOX_PROXY_TOKEN`, and `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS=120` to the run's `.env`, and set `defaults.worker_tools` and `defaults.worker_scope` in its config.
+Inspect what each worker mounts with `docker inspect <name> --format '{{range .Mounts}}{{.Source}} -> {{.Destination}} rw={{.RW}}{{"\n"}}{{end}}'`, and remove the prefixed containers after stopping the backend.
+Tool-call arguments are not logged at `INFO`; read them from the agent's session database below `mindroom_data/agents/<agent>/sessions/`.
+Explicit `access` blocks with `members_of_rooms: []` and only `current_room_members: true` deny every identity-only authorization check, such as inviting that agent to a shared directory, so omit `access` unless the scenario needs it.
+
 ## Upgrade Test: Old Version Then This Branch On One `mindroom_data`
 
 Use this to prove a storage or persistence change against real history written by the previous release.

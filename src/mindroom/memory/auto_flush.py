@@ -575,6 +575,11 @@ class MemoryAutoFlushWorker:
             next_attempt_at = entry.get("next_attempt_at")
             if isinstance(next_attempt_at, int) and next_attempt_at > now:
                 continue
+            # Readiness needs only the entry, so check it before decoding the stored session.
+            idle_ready = now - entry.get("last_seen_at", now) >= settings.idle_seconds
+            age_ready = now - entry.get("first_dirty_at", now) >= settings.max_dirty_age_seconds
+            if not (idle_ready or age_ready):
+                continue
 
             agent_name = entry.get("agent_name")
             session_id = entry.get("session_id")
@@ -612,11 +617,6 @@ class MemoryAutoFlushWorker:
                     latest_state = _read_state_unlocked(self.storage_path)
                     latest_state["sessions"][key] = entry
                     _write_state_unlocked(self.storage_path, latest_state)
-                continue
-
-            idle_ready = now - entry.get("last_seen_at", now) >= settings.idle_seconds
-            age_ready = now - entry.get("first_dirty_at", now) >= settings.max_dirty_age_seconds
-            if not (idle_ready or age_ready):
                 continue
 
             selected_keys.append(key)

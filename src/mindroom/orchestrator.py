@@ -32,6 +32,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.embeddings.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
@@ -2699,7 +2700,7 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway listener share one lifecycle
+async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-facing listeners share one lifecycle
     host: str,
     port: int,
     log_level: str,
@@ -2721,6 +2722,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     from mindroom.api import main as api_main  # noqa: PLC0415
     from mindroom.api.agent_cli import bind_agent_cli_registry  # noqa: PLC0415
     from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
+    from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
@@ -2760,12 +2762,21 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
         try:
-            async with serve_script_gateway_listener(
-                runtime_paths,
-                host=host,
-                broker=None if script_runtime is None else script_runtime.broker,
-                log_level=log_level,
-                agent_cli_registry=agent_cli_registry,
+            async with (
+                # The broker reads the API's committed config, so service edits apply without a restart.
+                serve_egress_broker(
+                    runtime_paths,
+                    config_provider=lambda: api_main.config_lifecycle.read_app_committed_runtime_config(
+                        api_main.app,
+                    )[0],
+                ),
+                serve_script_gateway_listener(
+                    runtime_paths,
+                    host=host,
+                    broker=None if script_runtime is None else script_runtime.broker,
+                    log_level=log_level,
+                    agent_cli_registry=agent_cli_registry,
+                ),
             ):
                 await server.serve()
         except SystemExit as exc:
@@ -3215,6 +3226,11 @@ async def _run_runtime(  # noqa: PLR0915
                     budget_monitor=orchestrator.budgets,
                 ),
                 name="api_server",
+            )
+        elif egress_broker_enabled(runtime_paths):
+            logger.warning(
+                "egress_broker_not_started",
+                reason="the egress broker runs with the embedded API server, which is disabled",
             )
 
         orchestrator_task = asyncio.create_task(orchestrator.start(), name="orchestrator")

@@ -113,6 +113,7 @@ class ToolManagedInitArg(str, Enum):
     AGENT_NAME = "agent_name"
     FILE_ACCESS = "file_access"
     AGENT_STATE_ROOT = "agent_state_root"
+    SHARED_DIRECTORY_ROOTS = "shared_directory_roots"
 
 
 @dataclass

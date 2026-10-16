@@ -11,6 +11,7 @@ icon: lucide/layout
 - [Agent Orchestration](orchestration.md) - Room setup, session-storage recovery, and runtime replacement rationale
 - [Bot Runtime](bot-runtime.md) - Why the turn runtime is split as it is, the invariants its seams protect, and planned simplifications
 - [Reply Messages](reply-messages.md) - The outcomes the reply design rules out, the decisions behind it, its accepted limitations, and the invariants tests pin
+- [Egress Broker Design](egress-broker-design.md) - Why the credential-injecting egress broker is built the way it is
 - [Code Map](code-map.md) - The inbound turn pipeline at module level, key modules and their purpose, and where persistent state lives
 - [Migration and Compatibility Boundaries](migrations.md) - Why historical formats are handled as they are, and which migrations dependencies own
 - [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it

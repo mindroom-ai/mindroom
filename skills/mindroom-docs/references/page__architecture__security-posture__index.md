@@ -29,20 +29,57 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
-Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
-The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, and the primary's copy of each private-instance owner record, together with their locks.
+Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
+The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
+
+Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
+When the broker is enabled, workers receive a signed proxy token in their environment, and the broker injects the configured secret when the worker's request matches a service rule.
+Worker code can read its own proxy token, but the token only authorizes that worker's scope and expires after `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
+Broker refusals never carry a secret, token, query string, or connect link, but they name a shared agent's credential managers, so worker code can read those Matrix IDs.
+Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
+A service can also take its secret from an OAuth account that a user connected (GitHub, Google, Atlassian) when no API key is stored for the scope, and an explicit key always wins over the account.
+The primary fetches and refreshes those access tokens through the OAuth credential lifecycle and the broker injects them as the matched rule's auth type; workers never receive an OAuth access token or a refresh token, only the proxy token and placeholder values, and the broker's logs and audit records never contain them.
+Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers follow the agent's worker scope.
+The broker uses a requester-scoped account only on `user` and `user_agent` workers that run on a dedicated (Docker or Kubernetes) worker backend by default.
+A `shared` or unscoped worker, and every worker on the static runner, runs every requester's commands in one sandbox, where a later command from another user can read an earlier caller's proxy token (for example from the environment of a process left running) and act with that caller's account until the token expires, so there the broker injects no GitHub or Atlassian account, adds no placeholder for it, and offers no connect link.
+A service's `oauth_on_shared_workers: true` removes that gate: every user of such a shared sandbox can then act with any other user's connected account until that user's proxy token expires.
+The `connect_url` that a 403 response carries goes only to the worker whose proxy token has that scope; it is the same short-lived single-use connect link that conversation OAuth uses, and it starts a connection for that one scope after the recheck of the requester's permission.
+The link also requires the browser to be signed in to MindRoom as that requester.
+A shared-scope link would skip that sign-in, and any process in a shared worker could read it, so the broker never puts one in a response; users of a shared agent connect its account from the egress pages instead.
+A shared Google service account (`GOOGLE_SERVICE_ACCOUNT_FILE`) is never injected, so the broker cannot be used to spend it.
+On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated `user` or `user_agent` workers on `private` agents when requesters must not be able to use each other's brokered credentials (see [Shared workspaces on non-private agents](https://docs.mindroom.chat/deployment/egress-broker/#shared-workspaces-on-non-private-agents)), because a dedicated `shared` or unscoped worker also runs every requester's commands in one sandbox.
+Only administrators and an agent's credential managers can change the keys, services, and account connection of a shared or unscoped agent.
+The credential managers of one key scope, and of all unscoped agents, can change each other's keys and services (see [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#secrets-and-identity)).
+Users can define egress services of their own, which apply only to their own scope, route only that scope's keys and accounts, never widen the administrator's policy, and cannot take a config service's name or set `oauth_on_shared_workers`.
+A user service can use a connected account only in a personal scope, and its placeholder variables are limited to credential-like names and plain values, because a shared agent's services set variables in every requester's sandbox.
+`restrict_to_rules` is not a network boundary: under `passthrough` a worker can reach the same server by IP address through a tunnel the broker does not intercept, which carries no credential, so the real boundary stays the token's own permissions on the upstream side.
+The risks the broker cannot prevent (code in the primary process, write access to the config, hosts that echo requests, wildcard rules on shared hosting domains, keys that can create other keys, and shared workspaces on `user` and `user_agent` agents that are not `private`) are listed in [What the broker cannot protect against](https://docs.mindroom.chat/deployment/egress-broker/#what-the-broker-cannot-protect-against).
+
+The egress broker listener (when `MINDROOM_EGRESS_BROKER_PORT` is set) is a worker-reachable primary runtime surface: workers must reach it to make brokered requests, so it must be accessible from the worker network (Docker `docker0` interface or the Kubernetes broker Service).
+The hosted `static_runner` sidecar shares the primary pod's network instead, so there the broker binds only loopback (`127.0.0.1`) and is reachable from no other pod.
+The broker port must not be published beyond the worker network, because a leaked token could otherwise be used from arbitrary network locations until it expires; expired tokens get 407.
+Firewall rules and network policies confine the broker port to worker-originated connections only.
+
+### Testing and review of the egress broker
+
+The broker's transport around `ssl`, `h11`, and `cryptography`, and its path checks, are hand-written and covered by tests, including a request-smuggling corpus and fuzzing, but have had no independent adversarial review.
+A human penetration test of the proxy core is recommended before the broker is exposed widely.
 
 ### Workspace mounts by worker scope
 
 [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) lists the workspaces each dedicated worker mounts.
 A `user` worker mounts several agents' workspaces, so code working in one of them can read and write the others.
 
-A workspace is mounted only when it is a real directory reached from the storage root without links.
+A shared directory lives at `shared_directories/<owner>/<name>/` and mounts read-write into its owner's dedicated workers and read-only into each member's.
+No dedicated worker mounts `shared_directories/` or an owner directory below it, so worker code cannot replace a directory another worker mounts; the primary creates and empties these directories through no-follow descriptors, reads and writes files there only through the path tools' no-follow confinement and atomic writes, and indexes a knowledge base configured inside one without following links.
+Primary-process `file` and `coding` reach shared directories only when no worker is configured, because worker code writes them and these tools list and search by path after checking it.
+For the same reason the primary never runs Git for a knowledge base inside a shared directory.
+A workspace or shared directory is mounted only when it is a real directory reached from the storage root without links.
 Because Docker resolves mount targets again on every container start, a worker whose mount target inside its writable root was replaced with a link by worker code is refused when it is created or restarted.
-Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write.
+Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write, or inside a shared directory that worker already mounts.
 Kubernetes mounts such knowledge read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
 
 ### Workspace files the primary reads and writes
@@ -104,7 +141,7 @@ The instance chart refuses dedicated Kubernetes workers because RBAC cannot conf
 
 | Value | Path tools may use |
 |---|---|
-| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation |
+| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation; for `file` and `coding`, also the agent's shared directories, read-only where it only joined |
 | `unrestricted` | Any file the tool's process can reach; on a worker that is the worker container |
 
 Every tool, including plugin tools, must declare one of these file access classes when it registers, so no tool silently defaults to taking no paths.
@@ -160,6 +197,9 @@ Do not report or "fix" these; they are deliberate.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
+- Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
+- A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
+- Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
@@ -171,9 +211,12 @@ Do not report or "fix" these; they are deliberate.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in and upload screenshots another took; they never cross agents or the requesters of a private agent.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
 - A proxy environment the primary cannot follow, such as a SOCKS proxy or `auto_proxy`, makes the relay dial directly within the browser's destination policy instead of refusing to start, because no MindRoom egress policy depends on that proxy there; a sandbox runner refuses.
-- A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
+- A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, or inside a shared directory is bound without following links below that directory, so even an operator-made link there is refused; shared knowledge outside every agent workspace and shared directory still follows operator links.
+- The egress broker streams request bodies, so a valid request head can reach the right upstream before a bad or oversized body gets 400 or 413 and the upstream connection is aborted; the head carries the secret only to the host the request was routed to, and [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#where-a-secret-may-go) gives the reason.
+- The egress broker's check for stray bytes on a reused tunnel upstream cannot see bytes that reach the socket just after the check polls it.
+  Such bytes can only come from that tunnel's own upstream, and no other tunnel, host, or requester is affected.
 - A team approval continuation checks only that each approved call keeps the arguments its card showed, not whether the saved team run holds other calls ready to run, because team runs live below `teams/`, which no worker mounts.
-- The Kubernetes `static_runner` sidecar mounts `agents` and `private_instances` read-write as the primary's user, so tool code it runs can read and change every agent's sessions, memory, learning data, and private-instance contents; the shared sidecar is not an isolation boundary between agents or requesters, and dedicated Kubernetes workers are the option that is.
+- The Kubernetes `static_runner` sidecar mounts `agents`, `private_instances`, and `shared_directories` read-write as the primary's user, so tool code it runs can read and change every agent's sessions, memory, learning data, shared directories, and private-instance contents; the shared sidecar is not an isolation boundary between agents or requesters, and dedicated Kubernetes workers are the option that is.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.

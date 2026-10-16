@@ -72,6 +72,9 @@ Its config path matches the primary's only so config-relative snapshot paths res
   - name: storage
     mountPath: {{ $values.storagePath }}/private_instances
     subPath: private_instances
+  - name: storage
+    mountPath: {{ $values.storagePath }}/shared_directories
+    subPath: shared_directories
   - name: sandbox-workspace
     mountPath: /app/workspace
   resources:

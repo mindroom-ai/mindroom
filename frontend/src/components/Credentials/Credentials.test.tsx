@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Credentials } from "./Credentials";
 
@@ -8,7 +14,57 @@ vi.mock("@/components/ui/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
 
+// The egress panel has its own tests and fetches on mount, which would consume
+// the ordered fetch mocks below. Only the tests of the whole page ask for the real one.
+const realPanel = vi.hoisted(() => ({ wanted: false }));
+vi.mock("./EgressBroker", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./EgressBroker")>();
+  return {
+    EgressBroker: () =>
+      realPanel.wanted ? (
+        <actual.EgressBroker />
+      ) : (
+        <div data-testid="egress-broker" />
+      ),
+  };
+});
+
 global.fetch = vi.fn();
+
+/** The raw payloads start collapsed, so open them as a person would. */
+function renderOpen() {
+  render(<Credentials />);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Raw credential payloads (advanced)" }),
+  );
+}
+
+/** The raw editor's list is empty; the panel is mocked, so nothing else fetches. */
+const serveNoServices = () =>
+  (global.fetch as any).mockResolvedValue({ ok: true, json: async () => [] });
+
+/** One service, github_private, holding a token: the list, its status, then its credentials. */
+const serveGithubToken = () =>
+  (global.fetch as any)
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ["github_private"],
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        service: "github_private",
+        has_credentials: true,
+        key_names: ["token"],
+      }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        service: "github_private",
+        credentials: { token: "ghp_test" },
+      }),
+    });
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -23,6 +79,7 @@ describe("Credentials", () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
     (global.fetch as any).mockReset();
+    realPanel.wanted = false;
   });
 
   it("loads services and selected service credentials", async () => {
@@ -47,7 +104,7 @@ describe("Credentials", () => {
         }),
       });
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect(screen.getByText("Configured")).toBeInTheDocument();
@@ -63,29 +120,169 @@ describe("Credentials", () => {
     });
   });
 
-  it("hides credentials by default and reveals them on demand", async () => {
-    (global.fetch as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ["github_private"],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "github_private",
-          has_credentials: true,
-          key_names: ["token"],
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "github_private",
-          credentials: { token: "ghp_test" },
-        }),
-      });
+  it("puts Agent Keys before Raw credential payloads (advanced)", async () => {
+    realPanel.wanted = true;
+    (global.fetch as any).mockImplementation(async (input: string) => {
+      const path = String(input).split("?")[0];
+      const body =
+        path === "/api/egress-broker/services"
+          ? { services: [], shared_agents: [], has_unscoped_agents: false }
+          : path === "/api/egress-broker/logs"
+            ? { records: [] }
+            : [];
+      return { ok: true, status: 200, json: async () => body };
+    });
 
     render(<Credentials />);
+
+    const panel = await screen.findByRole("heading", {
+      name: "Agent Keys",
+    });
+    const raw = screen.getByRole("heading", {
+      name: "Raw credential payloads (advanced)",
+    });
+    expect(
+      panel.compareDocumentPosition(raw) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByText("Credentials Manager")).toBeNull();
+  });
+
+  it("shows no Agent Keys while the broker is off, and the rest of the page as before", async () => {
+    realPanel.wanted = true;
+    (global.fetch as any).mockImplementation(async (input: string) =>
+      String(input).startsWith("/api/egress-broker/")
+        ? {
+            ok: false,
+            status: 404,
+            json: async () => ({ detail: "Agent Keys are not enabled" }),
+          }
+        : { ok: true, status: 200, json: async () => [] },
+    );
+
+    const egressRequests = () =>
+      (global.fetch as any).mock.calls
+        .map(([input]: [string]) => String(input))
+        .filter((path: string) => path.startsWith("/api/egress-broker/"));
+
+    render(<Credentials />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Raw credential payloads (advanced)",
+      }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(egressRequests()).toHaveLength(1));
+    // Give a follow-up request, or the card, the chance to appear.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(egressRequests()).toEqual(["/api/egress-broker/services"]);
+    expect(screen.queryByRole("heading", { name: "Agent Keys" })).toBeNull();
+    expect(screen.queryByText(/not enabled/)).toBeNull();
+  });
+
+  it("keeps the raw editor's error under the raw editor, after the panel", async () => {
+    (global.fetch as any).mockRejectedValue(new Error("Failed to load"));
+
+    render(<Credentials />);
+
+    const error = await screen.findByText("Failed to load");
+    const panel = screen.getByTestId("egress-broker");
+    const raw = screen.getByRole("heading", {
+      name: "Raw credential payloads (advanced)",
+    });
+    expect(
+      panel.compareDocumentPosition(raw) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      raw.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("collapses the raw payloads until the heading is opened", async () => {
+    serveNoServices();
+
+    render(<Credentials />);
+
+    const toggle = screen.getByRole("button", {
+      name: "Raw credential payloads (advanced)",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByPlaceholderText('{"api_key":"..."}')).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save payload" })).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByPlaceholderText('{"api_key":"..."}'),
+    ).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.queryByPlaceholderText('{"api_key":"..."}')).toBeNull();
+  });
+
+  it("hides the credentials again when the raw payloads are collapsed", async () => {
+    serveGithubToken();
+
+    renderOpen();
+    const editor = (await screen.findByPlaceholderText(
+      '{"api_key":"..."}',
+    )) as HTMLTextAreaElement;
+    await waitFor(() => expect(editor.value).toContain("ghp_test"));
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    expect(screen.getByRole("button", { name: "Hide" })).toBeInTheDocument();
+    expect(editor).not.toHaveClass("blur-sm");
+
+    const toggle = screen.getByRole("button", {
+      name: "Raw credential payloads (advanced)",
+    });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    // Opened again, the payload is hidden as it is on first opening.
+    expect(screen.getByRole("button", { name: "Show" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('{"api_key":"..."}')).toHaveClass(
+      "blur-sm",
+    );
+  });
+
+  it("keeps the heading's chevron still for someone who prefers reduced motion", () => {
+    serveNoServices();
+    render(<Credentials />);
+    const chevron = screen
+      .getByRole("button", { name: "Raw credential payloads (advanced)" })
+      .querySelector("svg");
+    expect(chevron).toHaveClass("motion-reduce:transition-none");
+  });
+
+  it("points the heading at the payloads only while they are shown", async () => {
+    serveNoServices();
+    render(<Credentials />);
+    const toggle = screen.getByRole("button", {
+      name: "Raw credential payloads (advanced)",
+    });
+    expect(toggle).not.toHaveAttribute("aria-controls");
+    fireEvent.click(toggle);
+    expect(
+      document.getElementById(toggle.getAttribute("aria-controls") ?? ""),
+    ).not.toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).not.toHaveAttribute("aria-controls");
+  });
+
+  it("names the raw editor's save button Save payload", async () => {
+    serveNoServices();
+
+    renderOpen();
+
+    await screen.findByText(/No services found yet/);
+    expect(
+      screen.getByRole("button", { name: "Save payload" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  });
+
+  it("hides credentials by default and reveals them on demand", async () => {
+    serveGithubToken();
+
+    renderOpen();
 
     const editor = screen.getByPlaceholderText(
       '{"api_key":"..."}',
@@ -149,7 +346,7 @@ describe("Credentials", () => {
         }),
       });
 
-    render(<Credentials />);
+    renderOpen();
 
     await screen.findByText("Empty");
     await waitFor(() => {
@@ -160,7 +357,7 @@ describe("Credentials", () => {
     fireEvent.change(editor, {
       target: { value: '{"username":"x-access-token","token":"ghp_updated"}' },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save payload" }));
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -224,7 +421,7 @@ describe("Credentials", () => {
       },
     );
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect((global.fetch as any).mock.calls).toHaveLength(1);
@@ -236,7 +433,7 @@ describe("Credentials", () => {
     fireEvent.change(screen.getByPlaceholderText('{"api_key":"..."}'), {
       target: { value: '{"api_key":"sk-ant-dashboard"}' },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save payload" }));
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({
@@ -276,7 +473,7 @@ describe("Credentials", () => {
         }),
       });
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect((global.fetch as any).mock.calls).toHaveLength(3);
@@ -285,7 +482,7 @@ describe("Credentials", () => {
     fireEvent.change(screen.getByPlaceholderText('{"api_key":"..."}'), {
       target: { value: '{"broken_json": ' },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save payload" }));
 
     await waitFor(() => {
       expect(
@@ -298,34 +495,14 @@ describe("Credentials", () => {
   it("deletes selected service credentials", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    (global.fetch as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ["github_private"],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "github_private",
-          has_credentials: true,
-          key_names: ["token"],
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "github_private",
-          credentials: { token: "ghp_test" },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          status: "success",
-        }),
-      });
+    serveGithubToken().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "success",
+      }),
+    });
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect((global.fetch as any).mock.calls).toHaveLength(3);
@@ -351,34 +528,14 @@ describe("Credentials", () => {
   });
 
   it("tests credentials for selected service", async () => {
-    (global.fetch as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ["github_private"],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "github_private",
-          has_credentials: true,
-          key_names: ["token"],
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "github_private",
-          credentials: { token: "ghp_test" },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          message: "Credentials exist (validation not implemented)",
-        }),
-      });
+    serveGithubToken().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        message: "Credentials exist (validation not implemented)",
+      }),
+    });
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect((global.fetch as any).mock.calls).toHaveLength(3);
@@ -406,7 +563,7 @@ describe("Credentials", () => {
       json: async () => [],
     });
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect((global.fetch as any).mock.calls).toHaveLength(1);
@@ -449,7 +606,7 @@ describe("Credentials", () => {
         }),
       });
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect(screen.getByText("good_service")).toBeInTheDocument();
@@ -494,7 +651,7 @@ describe("Credentials", () => {
         }),
       });
 
-    render(<Credentials />);
+    renderOpen();
 
     await waitFor(() => {
       expect((global.fetch as any).mock.calls).toHaveLength(4);
@@ -544,7 +701,7 @@ describe("Credentials", () => {
         }),
       });
 
-    render(<Credentials />);
+    renderOpen();
 
     const serviceBButton = await screen.findByRole("button", {
       name: /service_b/i,
