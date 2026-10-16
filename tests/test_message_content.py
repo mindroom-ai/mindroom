@@ -33,6 +33,7 @@ from mindroom.matrix.visible_body import (
     visible_body_from_event_source,
     visible_content_from_content,
 )
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import (
     FakeMediaResponse,
     bind_runtime_paths,
@@ -790,6 +791,29 @@ class TestResolvedMessageExtraction:
             "body": "hello",
             "io.mindroom.visible_body": "hello",
         }
+
+    @pytest.mark.asyncio
+    async def test_thread_root_body_preview_drops_tool_markers(self, tmp_path: Path) -> None:
+        """A thread root that is an agent reply previews its text, not its tool display markers."""
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        body = "Checked.\n\n🔧 `shell` [1]\n\nAll good."
+        trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]) or {}
+        event = _make_message_event(
+            body=body,
+            content={"msgtype": "m.text", "body": body, **trace},
+            event_id="$thread-root",
+            sender="@mindroom_general:localhost",
+        )
+
+        preview = await thread_root_body_preview(
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+        assert "🔧" not in preview
+        assert "All good." in preview
 
     @pytest.mark.asyncio
     async def test_thread_root_body_preview_uses_runtime_sender_ids_for_bundled_edits(

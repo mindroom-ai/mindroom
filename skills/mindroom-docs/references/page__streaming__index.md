@@ -115,5 +115,6 @@ A Matrix event holds at most about 64 KB, so `defaults.large_message_strategy` c
 | `split` | Several complete rich-text messages: the first replaces the streaming placeholder and the rest follow it in the same thread or room. |
 
 The `sidecar` strategy applies to messages over about 55 KB and edits over about 27 KB, and the preview omits inline tool-trace metadata.
-With `split`, each segment renders as standalone Markdown, text is cut at paragraph or line boundaries and never inside a fenced code block, and the segments together reproduce the full response exactly.
+With `split`, each segment renders as standalone Markdown, text is cut at paragraph or line boundaries and never inside a fenced code block, and the segments together reproduce the full response text exactly.
+Each segment carries the tool calls it shows, numbered from 1; a segment with many tool calls may show them without their input and output previews, or, when even their names do not fit, without them.
 Even with `split`, non-text payloads, metadata that alone exceeds the size budget, and a single code block larger than one event use the sidecar.

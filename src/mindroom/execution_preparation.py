@@ -25,7 +25,6 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     THREAD_SUMMARY_CONTENT_KEY,
-    TOOL_TRACE_CONTENT_KEY,
     UI_ACTION_CONTENT_KEY,
     RuntimePaths,
 )
@@ -51,10 +50,10 @@ from mindroom.streaming import (
     TEAM_PROGRESS_PLACEHOLDER,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
-    strip_visible_tool_markers,
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -265,7 +264,7 @@ def _should_strip_visible_tool_markers(
     response_sender_id: str | None,
 ) -> bool:
     """Return whether visible marker lines are known MindRoom display chrome."""
-    if isinstance(message.content.get(TOOL_TRACE_CONTENT_KEY), dict):
+    if has_tool_trace(message.content):
         return True
     return _is_own_reply(message, response_sender_id)
 

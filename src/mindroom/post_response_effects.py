@@ -13,6 +13,7 @@ from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: 
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
+from mindroom.tool_system.events import strip_visible_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -190,6 +191,12 @@ def _notify_response_finished(outcome: ResponseOutcome, deps: PostResponseEffect
         deps.logger.exception("Failed to notify automations of a finished response", session_id=outcome.session_id)
 
 
+def _delivered_body(final_delivery_outcome: FinalDeliveryOutcome) -> str:
+    """Return the delivered text; only a reply with a tool trace has display markers to drop."""
+    body = final_delivery_outcome.final_visible_body or ""
+    return strip_visible_tool_markers(body) if final_delivery_outcome.tool_trace else body
+
+
 async def apply_post_response_effects(
     final_delivery_outcome: FinalDeliveryOutcome,
     outcome: ResponseOutcome,
@@ -289,6 +296,6 @@ async def apply_post_response_effects(
             # handing the fact over is what makes the pass agree with it.
             DeliveredResponse(
                 event_id=response_event_id,
-                body=final_delivery_outcome.final_visible_body or "",
+                body=_delivered_body(final_delivery_outcome),
             ),
         )

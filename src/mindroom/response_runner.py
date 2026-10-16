@@ -65,6 +65,7 @@ from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
+from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     replace_visible_message,
@@ -77,7 +78,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
+from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -142,7 +143,6 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
     clean_partial_reply_text,
-    strip_visible_tool_markers,
 )
 from mindroom.teams import (
     TeamMode,
@@ -159,6 +159,7 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.events import body_without_tool_markers, strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -1678,7 +1679,11 @@ class ResponseRunner:
                 origin=request.response_envelope.origin,
                 memory_prompt=request.prompt,
                 memory_thread_history=tuple(
-                    ApprovalMemoryTurn(sender=message.sender, body=message.body) for message in request.thread_history
+                    ApprovalMemoryTurn(
+                        sender=message.sender,
+                        body=body_without_tool_markers(message.body, message.content),
+                    )
+                    for message in request.thread_history
                 ),
                 thread_summary_message_count_hint=thread_summary_message_count_hint(
                     request.thread_history,
@@ -3809,7 +3814,7 @@ class ResponseRunner:
             lambda: (
                 None
                 if request.requires_model_history_refresh
-                else conversation_context_for_mid_turn(
+                else conversation_context_before_sources(
                     request.thread_history,
                     source_event_ids=request.sources.logical_source_event_ids,
                     thread_id=request.thread_id,

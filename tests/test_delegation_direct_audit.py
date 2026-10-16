@@ -119,7 +119,7 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="child answer",
-        ),
+        ) as child_response,
     ):
         result = await tools.run_subagent(agent_name="child", task="Do the work")
 
@@ -132,6 +132,8 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
     assert "child answer" in result
     assert str(run["delegation_id"]) in result
     assert str(run["record_reference"]) in result
+    # The caller reads the child's text, so no Matrix tool display markers belong in it.
+    assert child_response.call_args.kwargs["show_tool_calls"] is False
 
 
 @pytest.mark.asyncio

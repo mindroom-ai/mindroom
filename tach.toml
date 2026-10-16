@@ -1739,6 +1739,7 @@ depends_on = [
     "mindroom.api.openai_streaming_protocol",
     "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -2304,6 +2305,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.mentions",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.custom_tools.matrix_message",
@@ -2352,6 +2354,7 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
     "mindroom.thread_tags",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -2449,6 +2452,7 @@ depends_on = [
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -2935,6 +2939,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.ai_runtime",
     "mindroom.mid_turn",
+    "mindroom.judgment.conversation",
     "mindroom.mid_turn_judgment",
     "mindroom.participation_judgment",
     "mindroom.config.participation",
@@ -3068,6 +3073,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
     "mindroom.providers.model_loading",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -3380,7 +3386,7 @@ visibility = ["mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._prompting"
-depends_on = ["mindroom.memory._shared", "mindroom.prompt_templates"]
+depends_on = ["mindroom.memory._shared", "mindroom.prompt_templates", "mindroom.tool_system.events"]
 visibility = ["mindroom.memory", "mindroom.memory._mem0_backend", "mindroom.memory.functions"]
 
 [[modules]]
@@ -3949,6 +3955,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.matrix.room_history_reads",
@@ -4095,6 +4102,7 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.path_confinement",
     "mindroom.thread_export.storage",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.thread_export.execution",
@@ -4269,6 +4277,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.conversation_reads",
     "mindroom.thread_summary",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -5282,6 +5291,7 @@ depends_on = [
     "mindroom.providers.model_loading",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -5337,6 +5347,7 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -6769,6 +6780,8 @@ expose = [
     "StructuredStreamChunk",
     "ToolTraceEntry",
     "append_stream_text",
+    "body_with_tool_tags",
+    "body_without_tool_markers",
     "build_tool_trace_content",
     "complete_pending_tool_block",
     "deserialize_tool_trace",
@@ -6776,10 +6789,14 @@ expose = [
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
+    "has_tool_trace",
     "is_visible_tool_marker_line",
+    "message_tool_trace",
     "remap_visible_tool_marker_indices",
+    "renumbered_tool_trace",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
+    "strip_visible_tool_markers",
     "tool_marker_text",
     "tool_markers_match_trace",
 ]
@@ -8658,17 +8675,21 @@ depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.mid_turn"
-depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.hooks", "mindroom.logging_config", "mindroom.redaction"]
+depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.logging_config", "mindroom.tool_system.events"]
 visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.response_lifecycle", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.mid_turn_judgment"
-depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.constants", "mindroom.entity_resolution", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.matrix.sidecar_content", "mindroom.matrix.thread_diagnostics", "mindroom.matrix.thread_history_result", "mindroom.mid_turn"]
+depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.judgment.evaluator", "mindroom.mid_turn"]
 visibility = ["mindroom.response_runner"]
 
 [[modules]]
+path = "mindroom.judgment.conversation"
+depends_on = ["mindroom.constants", "mindroom.entity_resolution", "mindroom.judgment.state", "mindroom.matrix.sidecar_content", "mindroom.matrix.thread_diagnostics", "mindroom.matrix.thread_history_result", "mindroom.requester_identity", "mindroom.tool_system.events"]
+
+[[modules]]
 path = "mindroom.routing_judgment"
-depends_on = ["mindroom.agent_descriptions", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
+depends_on = ["mindroom.agent_descriptions", "mindroom.judgment.conversation", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
 visibility = ["mindroom.routing"]
 
 [[modules]]

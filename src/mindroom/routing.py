@@ -16,6 +16,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, repl
 from mindroom.matrix.identity import MatrixID
 from mindroom.providers import model_loading
 from mindroom.routing_judgment import ResponderSelection, judge_responder
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -85,7 +86,7 @@ async def suggest_responder(
             context = f"{config.get_prompt('ROUTER_THREAD_CONTEXT_HEADER')}\n"
             for msg in thread_context[-3:]:  # Last 3 messages
                 sender = msg.sender
-                body = msg.body[:100]
+                body = body_without_tool_markers(msg.body, msg.content)[:100]
                 context += f"{sender}: {body}\n"
             prompt = context + "\n" + prompt
 

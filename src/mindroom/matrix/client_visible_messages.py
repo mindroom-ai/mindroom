@@ -20,6 +20,7 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
 )
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -334,7 +335,8 @@ async def bundled_replacement_body(
             trusted_sender_ids=trusted_sender_ids,
         )
         if body is not None:
-            return body
+            new_content = resolved_candidate.get("content", {}).get("m.new_content")
+            return body_without_tool_markers(body, new_content) if isinstance(new_content, dict) else body
     return None
 
 
@@ -373,7 +375,7 @@ async def thread_root_body_preview(
     )
     if replacement_body is not None:
         return message_preview(replacement_body)
-    _resolved_event_source, visible_body = await resolve_visible_event_source(
+    resolved_event_source, visible_body = await resolve_visible_event_source(
         event_source,
         client,
         fallback_body=room_message_fallback_body(event),
@@ -381,7 +383,10 @@ async def thread_root_body_preview(
         runtime_paths=runtime_paths,
         trusted_sender_ids=trusted_sender_ids,
     )
-    return message_preview(visible_body)
+    content = resolved_event_source.get("content")
+    return message_preview(
+        body_without_tool_markers(visible_body, content) if isinstance(content, dict) else visible_body,
+    )
 
 
 def replace_visible_message(

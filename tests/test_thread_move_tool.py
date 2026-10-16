@@ -31,6 +31,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
+from mindroom.tool_system.events import ToolTraceEntry, body_without_tool_markers, build_tool_trace_content
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -221,6 +222,16 @@ def test_plan_prefixes_relayed_text() -> None:
 
     assert copy.content["body"] == "Dominic: hi"
     assert copy.content["formatted_body"] == "<strong>Dominic</strong>: <p>hi</p>"
+
+
+def test_plan_prefix_keeps_a_leading_tool_marker_on_its_own_line() -> None:
+    """A relayed reply that opens with a tool call keeps that marker recognizable."""
+    trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]) or {}
+    [copy] = _plan(_message(ABSENT_ID, {"msgtype": "m.text", "body": "🔧 `shell` [1]\n\nfound it", **trace}))
+
+    assert copy.content["body"].splitlines()[0].endswith(":")
+    assert body_without_tool_markers(copy.content["body"], copy.content).splitlines()[-1] == "found it"
+    assert "🔧" not in body_without_tool_markers(copy.content["body"], copy.content)
 
 
 def test_plan_escapes_display_name_in_formatted_prefix() -> None:

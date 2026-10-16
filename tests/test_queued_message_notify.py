@@ -4689,7 +4689,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
         progress = runner._lifecycle_coordinator.visible_progress_callback(envelope.target)
         assert (progress is not None) is enabled
         if progress is not None:
-            progress(text)
+            progress(text, ())
 
     def queue_followup() -> str:
         reservation = runner.reserve_waiting_human_message(

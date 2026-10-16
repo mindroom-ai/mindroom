@@ -20,6 +20,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.providers import model_loading
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -201,6 +202,46 @@ async def test_router_judge_sees_complete_recent_text_and_aliased_speakers(
 
 
 @pytest.mark.asyncio
+async def test_router_judge_clips_long_recent_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long recent reply, such as one with many tool calls, is clipped like other judges' context."""
+    _providers(monkeypatch)
+    posted = _choice_provider(monkeypatch, "candidate_0")
+    history = [ResolvedVisibleMessage.synthetic(sender="@person:example.org", body="word " * 4000, event_id="$long")]
+    result = await routing.suggest_responder(
+        "Current question",
+        ["code", "research"],
+        _config(),
+        _paths(tmp_path),
+        history,
+    )
+    assert result is not None
+    assert result.entity_name == "code"
+    assert "characters omitted" in json.dumps(posted[0]["state"])
+
+
+@pytest.mark.asyncio
+async def test_router_judge_sees_tool_calls_as_tags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An earlier agent reply reaches the router judge with its tool calls, not display markers."""
+    _providers(monkeypatch)
+    posted = _choice_provider(monkeypatch, "candidate_0")
+    trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="cmd=ls", result_preview="a.py"),
+    ]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom_code:localhost",
+            body="Listing.\n\n🔧 `shell` [1]",
+            event_id="$reply",
+            content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+        ),
+    ]
+    await routing.suggest_responder("Current question", ["code", "research"], _config(), _paths(tmp_path), history)
+    state = json.dumps(posted[0]["state"])
+    assert "🔧" not in state
+    assert '<tool name=\\"shell\\"' in state
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message", ["token=sk-secret", "x" * 16000], ids=["secret", "oversized"])
 async def test_unsafe_judgment_context_uses_existing_router_without_judge_call(
     tmp_path: Path,
@@ -322,3 +363,23 @@ async def test_default_and_jev_fallback_use_same_llm_router(tmp_path: Path, monk
     assert len(prompts) == 2
     assert prompts[0] == prompts[1]
     assert aliases == ["cheap_router", "cheap_router"]
+
+
+@pytest.mark.asyncio
+async def test_llm_router_context_drops_tool_markers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The LLM router reads an agent reply's text without its display markers."""
+    prompts = _providers(monkeypatch)
+    config = _config()
+    config.router.judgment = None
+    trace = [ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="cmd=ls")]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom_code:localhost",
+            body="Listing.\n\n🔧 `shell` [1]",
+            event_id="$reply",
+            content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+        ),
+    ]
+    await routing.suggest_responder("Help", ["code", "research"], config, _paths(tmp_path), history)
+    assert "Listing." in prompts[0]
+    assert "🔧" not in prompts[0]

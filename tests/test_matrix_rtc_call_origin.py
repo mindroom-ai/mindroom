@@ -29,6 +29,7 @@ from mindroom.matrix_rtc.call_origin import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.token_budget import approximate_o200k_tokens
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.access_schema_support import membership_config, membership_index
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
@@ -708,3 +709,23 @@ def test_handoff_note_points_at_the_origin_never_the_call_room(
     assert expected_target in note
     assert 'recipient="helper"' in note
     assert note.endswith("Never post in this call room.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_access")
+async def test_resolve_drops_tool_markers_from_agent_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The call brief carries what the agent wrote, not its tool display markers."""
+    trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]) or {}
+    body = "Checked.\n\n🔧 `shell` [1]\n\nAll good."
+    history = _history(
+        _message("$root", CALLER, "Plan the trip"),
+        _message("$2", AGENT, body, {"msgtype": "m.text", "body": body, **trace}),
+    )
+    monkeypatch.setattr(call_origin, "complete_thread_history", AsyncMock(return_value=history))
+    resolved = await resolve_call_origin_context(
+        CallOrigin(room_id=ORIGIN_ROOM, thread_id="$root"),
+        context=_resolve_context(),  # type: ignore[arg-type]
+    )
+    assert resolved is not None
+    assert "🔧" not in resolved.messages[1].body
+    assert "All good." in resolved.messages[1].body

@@ -8721,7 +8721,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     else:
         assert finish
         conversation = payloads[0]["state"]["conversation"]
-        evidence = json.loads(conversation[-1]["text"])
+        evidence = conversation[-1]["text"]
         assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
         root = conversation[0]["text"]
         # Earlier media reaches the judge as a placeholder rather than disabling judgment.
@@ -8730,7 +8730,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
             # A long message reaches the judge as its start and end rather than disabling judgment.
             assert root.endswith("Log every sleep.")
             assert "characters omitted" in root
-        assert evidence["active_request"] == "Continue"
+        assert evidence.startswith("<active_request>\nContinue\n</active_request>\n")
         assert "Stale input" not in str(payloads)
         assert "Future queued text" not in str(payloads)
 

@@ -4,6 +4,7 @@ from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
+    _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES,
     _SEGMENT_TARGET_PLAINTEXT_BYTES,
     _chunk_mentions,
     _render_segment_html,
@@ -375,3 +376,106 @@ def test_unclosed_fence_inside_a_block_quote() -> None:
     assert _unclosed_fence_start(indented_open, 0, len(indented_open)) == 0
     indented_closes = indented_open + ">   ```\n"
     assert _unclosed_fence_start(indented_closes, 0, len(indented_closes)) is None
+
+
+def _marker_numbers(body: str) -> list[int]:
+    return [int(line.split("[")[1].split("]")[0]) for line in body.splitlines() if line.startswith("🔧 `")]
+
+
+def test_segments_carry_their_own_renumbered_tool_trace() -> None:
+    """Each split segment shows its own tool calls: markers count from 1 and point into its own trace."""
+    paragraphs = _body().split("\n\n")
+    third = len(paragraphs) // 3
+    body = "\n\n".join(
+        [
+            *paragraphs[:third],
+            "🔧 `alpha` [1]",
+            "🔧 `beta` [2]",
+            *paragraphs[third : 2 * third],
+            "🔧 `gamma` [3]",
+            *paragraphs[2 * third :],
+        ],
+    )
+    events = [
+        {"type": "tool_call_completed", "tool_name": name, "result_preview": f"{name} done"}
+        for name in ("alpha", "beta", "gamma")
+    ]
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+        "io.mindroom.tool_trace": {"version": 2, "events": events},
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    parts = [segmented.first, *segmented.continuations]
+    names: list[str] = []
+    for part in parts:
+        numbers = _marker_numbers(part["body"])
+        trace = part.get("io.mindroom.tool_trace")
+        if not numbers:
+            assert trace is None
+            continue
+        assert numbers == list(range(1, len(numbers) + 1))
+        assert [event["tool_name"] for event in trace["events"]] == [
+            line.split("`")[1] for line in part["body"].splitlines() if line.startswith("🔧 `")
+        ]
+        names.extend(event["tool_name"] for event in trace["events"])
+    assert names == ["alpha", "beta", "gamma"]
+    assert sum(1 for part in parts if _marker_numbers(part["body"])) >= 2
+    assert all(calculate_event_size(part) <= _SEGMENT_TARGET_PLAINTEXT_BYTES for part in parts)
+
+
+def test_tool_trace_never_splits_a_short_answer() -> None:
+    """A short answer with many tool calls stays one event; its trace sheds previews until it fits."""
+    names = [f"tool_{index}" for index in range(40)]
+    body = "Done.\n\n" + "\n\n".join(f"🔧 `{name}` [{index}]" for index, name in enumerate(names, start=1))
+    events = [
+        {"type": "tool_call_completed", "tool_name": name, "args_preview": "a" * 150, "result_preview": "r" * 500}
+        for name in names
+    ]
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content={
+            "msgtype": "m.text",
+            "body": body,
+            "format": "org.matrix.custom.html",
+            "formatted_body": markdown_to_html(body),
+            "io.mindroom.tool_trace": {"version": 2, "events": events},
+        },
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=True)
+
+    assert segmented is not None
+    assert segmented.continuations == ()
+    replacement = segmented.first["m.new_content"]
+    assert "io.mindroom.tool_trace" not in segmented.first
+    assert [event["tool_name"] for event in replacement["io.mindroom.tool_trace"]["events"]] == names
+    assert _marker_numbers(replacement["body"]) == list(range(1, 41))
+    assert calculate_event_size(segmented.first) <= _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES
+
+
+def test_segment_without_room_for_its_trace_drops_its_markers() -> None:
+    """Markers whose trace cannot fit are removed, since readers only strip markers a trace proves."""
+    names = [f"tool_{index}" for index in range(80)]
+    body = "Done.\n\n" + "\n\n".join(f"🔧 `{name}` [{index}]" for index, name in enumerate(names, start=1))
+    events = [
+        {"type": "tool_call_completed", "tool_name": name, "args_preview": "a" * 150, "result_preview": "r" * 500}
+        for name in names
+    ]
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content={"msgtype": "m.text", "body": body, "io.mindroom.tool_trace": {"version": 2, "events": events}},
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=True)
+
+    assert segmented is not None
+    replacement = segmented.first["m.new_content"]
+    assert "io.mindroom.tool_trace" not in replacement
+    assert "🔧" not in replacement["body"]
+    assert replacement["body"].startswith("Done.")

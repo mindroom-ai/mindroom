@@ -23,6 +23,7 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
     is_video_message_event,
 )
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -162,7 +163,9 @@ def dispatch_prompt_for_event(event: DispatchEvent) -> str:
         return extract_media_caption(event, default="[Attached video]")
     if is_file_message_event(event):
         return extract_media_caption(event, default="[Attached file]")
-    return event.body
+    # A finished MindRoom reply can wake another agent; its tool display markers never reach a prompt.
+    content = event.source.get("content") if isinstance(event.source, dict) else None
+    return body_without_tool_markers(event.body, content) if isinstance(content, dict) else event.body
 
 
 def prepare_media_ingress(event: MediaDispatchEvent) -> PreparedIngress:
