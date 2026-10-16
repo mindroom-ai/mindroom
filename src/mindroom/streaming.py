@@ -1298,7 +1298,9 @@ class StreamingResponse:
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
         if self.visible_progress_callback is not None:
-            self.visible_progress_callback(committed_state.rendered_body, tuple(committed_state.tool_trace))
+            # Hidden tool calls leave no markers, so the text keeps its marker-shaped lines.
+            public_trace = tuple(committed_state.tool_trace) if self.show_tool_calls else ()
+            self.visible_progress_callback(committed_state.rendered_body, public_trace)
 
     def _committed_terminal_snapshot(
         self,

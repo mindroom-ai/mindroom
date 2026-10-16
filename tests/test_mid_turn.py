@@ -29,6 +29,7 @@ from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.providers import model_loading
+from mindroom.redaction import redact_sensitive_text
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
@@ -292,11 +293,11 @@ async def test_a_wait_judges_again_a_queue_that_lost_a_message_during_its_judgme
 @pytest.mark.asyncio
 async def test_queued_message_freezes_visible_progress_at_admission() -> None:
     """Later stream edits must not change the context of an earlier human message."""
-    evidence: list[dict] = []
+    evidence: list[str] = []
 
     async def evaluate(request: JudgmentRequest) -> bool | None:
         assert request.body is not None
-        evidence.append(json.loads(json.loads(request.body)["state"]["conversation"][0]["text"]))
+        evidence.append(json.loads(request.body)["state"]["conversation"][0]["text"])
         return True
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
@@ -312,18 +313,46 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
     first = state.pending_message_snapshot()
     gate.record_visible_response("I found the file. Now editing it.", ())
     assert await gate.defers(first, current=lambda: True)
-    assert evidence[0]["queued_messages"] == [
-        {
-            "text": "Use that file",
-            "visible_response": 'I found the file.\n<tool name="read_file" input="path=a.py" output="ok"/>',
-        },
-    ]
+    assert evidence[0] == (
+        "<active_request>\nDo the task\n</active_request>\n"
+        "<queued_message>\nUse that file\n</queued_message>\n"
+        '<visible_response>\nI found the file.\n<tool name="read_file" input="path=a.py" output="ok"/>\n</visible_response>'
+    )
     assert await gate.defers(first, current=lambda: True)
     assert len(evidence) == 1
     state.add_waiting_human_message("$second", text="Stop editing")
     assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
-    assert evidence[1]["queued_messages"][1]["visible_response"] == "I found the file. Now editing it."
+    assert evidence[1].endswith("<visible_response>\nI found the file. Now editing it.\n</visible_response>")
     assert "completed_tools" not in evidence[0]
+
+
+@pytest.mark.asyncio
+async def test_visible_progress_keeps_untraced_markers_and_multiline_tool_output() -> None:
+    """Untraced marker-shaped lines are the agent's text, and redacted multi-line tool output stays judgeable."""
+    evidence: list[str] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        assert request.body is not None
+        evidence.append(json.loads(request.body)["state"]["conversation"][-1]["text"])
+        return True
+
+    example = "Example:\n\n🔧 `shell` [1]\n\nThe number identifies a tool."
+    output = "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: hunter2\n      POSTGRES_USER: app\n"
+    shell = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="shell",
+        args_preview="command=cat docker-compose.yml",
+        result_preview=redact_sensitive_text(output),
+    )
+    for text, trace in ((example, ()), ("Reading.\n\n🔧 `shell` [1]\n\nDone.", (shell,))):
+        gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, conversation_context=())
+        gate.record_visible_response(text, trace)
+        state = _QueuedMessageState(mid_turn_gate=gate)
+        state.add_waiting_human_message("$queued", text="Thanks")
+        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
+    assert example in evidence[0]
+    assert "POSTGRES_USER: app" in evidence[1]
+    assert "hunter2" not in evidence[1]
 
 
 @pytest.mark.asyncio
@@ -582,11 +611,11 @@ async def test_resumed_tools_do_not_expose_invisible_execution_details() -> None
     """Approval results do not add model-private execution details to visible context."""
     state = _QueuedMessageState()
     state.add_waiting_human_message("$queued", text="Thanks")
-    evidence: list[dict] = []
+    evidence: list[str] = []
 
     async def evaluate(request: JudgmentRequest) -> bool | None:
         assert request.body is not None
-        evidence.append(json.loads(json.loads(request.body)["state"]["conversation"][0]["text"]))
+        evidence.append(json.loads(request.body)["state"]["conversation"][0]["text"])
         return False
 
     messages = _resumed_messages()
@@ -1005,11 +1034,13 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
         assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
     assert _skip_reasons(logs) == []
     conversation = requests[0]["state"]["conversation"]
-    evidence = json.loads(conversation[-1]["text"])
+    evidence = conversation[-1]["text"]
     assert conversation[0]["text"] == "Triage the batch"
-    assert evidence["active_request"] == "Triage the next batch"
-    assert evidence["queued_messages"][0]["text"] == queued
-    clipped = (conversation[1]["text"], evidence["queued_messages"][0]["visible_response"])
+    assert evidence.startswith(
+        f"<active_request>\nTriage the next batch\n</active_request>\n<queued_message>\n{queued}\n",
+    )
+    visible = evidence.split("<visible_response>\n")[1].removesuffix("\n</visible_response>")
+    clipped = (conversation[1]["text"], visible)
     for text, label in zip(clipped, ("Report", "Progress"), strict=True):
         assert text.startswith(f"{label} start.")
         assert text.endswith(f"{label} end.")

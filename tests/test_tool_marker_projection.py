@@ -66,24 +66,50 @@ def test_malformed_tool_trace_reads_as_a_trace_without_entries(event: dict[str, 
     assert "Fixing." in dispatch_prompt_for_event(event)
 
 
-def test_render_tool_tag_quotes_previews() -> None:
-    """Previews are tool output, so they are quoted data, never markup."""
-    assert render_tool_tag(_TRACE[0]) == '<tool name="shell" input="command=pytest -x" output="3 \\"failed\\""/>'
+def test_render_tool_tag_keeps_previews_verbatim() -> None:
+    """Judges are models, not parsers, so previews go in unescaped."""
+    assert render_tool_tag(_TRACE[0]) == '<tool name="shell" input="command=pytest -x" output="3 "failed""/>'
     assert render_tool_tag(_TRACE[1]) == '<tool name="file" input="path=src/auth.py" truncated="true"/>'
 
 
-def test_render_tool_tag_keeps_redacted_previews_unchanged_for_the_redaction_check() -> None:
-    """Judges refuse text the redactor would change, so quoting must not alter an already redacted URL."""
-    preview = redact_sensitive_text("command=curl -s 'https://api.github.com/repos/o/r/issues?state=open&per_page=5'")
-    tag = render_tool_tag(ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview=preview))
-    assert redact_sensitive_text(tag) == tag
+@pytest.mark.parametrize(
+    ("args", "result"),
+    [
+        ("command=curl -s 'https://api.github.com/repos/o/r/issues?state=open&per_page=5'", None),
+        (
+            "command=cat docker-compose.yml",
+            "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: hunter2\n      POSTGRES_USER: app\n",
+        ),
+    ],
+)
+def test_judges_accept_tags_built_from_redacted_previews(args: str, result: str | None) -> None:
+    """Judges refuse text the redactor would change, so a tag must not alter a redacted URL or multi-line output."""
+    trace = [ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview=args, result_preview=result)]
+    message = ResolvedVisibleMessage.synthetic(
+        sender="@mindroom_code:localhost",
+        body="Checking.\n\n🔧 `shell` [1]\n\nDone.",
+        event_id="$reply",
+        content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+    )
+    text = message_judgment_text(message) or ""
+    assert "<tool" in text
+    assert "hunter2" not in text
+    assert redact_sensitive_text(text) == text
+
+
+def test_oversized_marker_index_reads_as_unmatched() -> None:
+    """An index past int()'s digit limit is untrusted text, so it drops like any unmatched marker."""
+    body = "Prior text.\n\n🔧 `shell` [" + "9" * 4301 + "]\n\nDone."
+    content = {"msgtype": "m.text", "body": body, "io.mindroom.tool_trace": {}}
+    message = ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=body, event_id="$m", content=content)
+    assert message_judgment_text(message) == "Prior text.\n\n\nDone."
 
 
 def test_body_with_tool_tags_replaces_markers_in_place() -> None:
     """Each marker becomes its own trace entry's tag, and a marker without an entry disappears."""
     assert body_with_tool_tags(_BODY, _TRACE) == (
         "Running tests.\n\n"
-        '<tool name="shell" input="command=pytest -x" output="3 \\"failed\\""/>\n\n'
+        '<tool name="shell" input="command=pytest -x" output="3 "failed""/>\n\n'
         "Fixing.\n\n"
         '<tool name="file" input="path=src/auth.py" truncated="true"/>'
     )

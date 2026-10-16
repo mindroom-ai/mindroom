@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeGuard
 
@@ -15,9 +14,9 @@ from mindroom.judgment.state import (
     clip_is_unredacted,
     clip_judgment_text,
     fit_judgment_request,
+    is_unredacted,
 )
 from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import body_with_tool_tags
 
 if TYPE_CHECKING:
@@ -48,10 +47,6 @@ MID_TURN_QUESTION = JudgmentQuestion(
 )
 
 
-def _is_unredacted(text: str) -> bool:
-    return redact_sensitive_text(text) == text
-
-
 def _is_plain_text(text: str | None) -> TypeGuard[str]:
     return (
         text is not None
@@ -62,7 +57,7 @@ def _is_plain_text(text: str | None) -> TypeGuard[str]:
 
 
 def _is_whole_text(text: str | None) -> TypeGuard[str]:
-    return _is_plain_text(text) and len(text) <= MAX_REQUEST_BYTES and _is_unredacted(text)
+    return _is_plain_text(text) and len(text) <= MAX_REQUEST_BYTES and is_unredacted(text)
 
 
 def message_text_for_judgment(envelope: MessageEnvelope) -> str | None:
@@ -104,7 +99,8 @@ class MidTurnGate:
 
     def record_visible_response(self, text: str, tool_trace: Sequence[ToolTraceEntry]) -> None:
         """Keep the latest Matrix-acknowledged text, with its tool calls as tags, for later queue snapshots."""
-        self.visible_response_text = body_with_tool_tags(text, tool_trace)
+        # Without a trace, marker-shaped lines are the agent's own text.
+        self.visible_response_text = body_with_tool_tags(text, tool_trace) if tool_trace else text
 
     async def _acknowledge_deferred(self, message: QueuedMessage) -> None:
         """Attempt one acknowledgement per message after the caller accepts the decision."""
@@ -169,8 +165,12 @@ class MidTurnGate:
                 return "queued_message_unjudgeable"
             if message.visible_response is None or not clip_is_unredacted(message.visible_response):
                 return "visible_response_unavailable"
-            queued.append({"text": message.text, "visible_response": clip_judgment_text(message.visible_response)})
-        evidence = json.dumps({"active_request": self.active_text, "queued_messages": queued}, ensure_ascii=False)
+            queued.append(
+                f"<queued_message>\n{message.text}\n</queued_message>\n"
+                f"<visible_response>\n{clip_judgment_text(message.visible_response)}\n</visible_response>",
+            )
+        # Plain tags, not JSON: escaping changes redacted text, and the redaction check would refuse it.
+        evidence = "\n".join([f"<active_request>\n{self.active_text}\n</active_request>", *queued])
         request = fit_judgment_request(
             MID_TURN_QUESTION,
             self.conversation_context,

@@ -179,7 +179,8 @@ def clip_judgment_text(text: str) -> str:
     return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
 
 
-def _is_unredacted(text: str) -> bool:
+def is_unredacted(text: str) -> bool:
+    """Whether the redactor leaves the text unchanged, so a judge may read it."""
     return redact_sensitive_text(text) == text
 
 
@@ -187,8 +188,8 @@ def clip_is_unredacted(text: str) -> bool:
     """Scan what the clip keeps and the margin past each cut, never the omitted middle of a long text."""
     reach = _CLIPPED_TEXT_CHARS // 2 + _CLIP_SCAN_MARGIN_CHARS
     if len(text) <= 2 * reach:
-        return _is_unredacted(text)
-    return _is_unredacted(text[:reach]) and _is_unredacted(text[-reach:])
+        return is_unredacted(text)
+    return is_unredacted(text[:reach]) and is_unredacted(text[-reach:])
 
 
 def fit_judgment_request(

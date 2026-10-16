@@ -408,6 +408,24 @@ async def test_stream_driver_publishes_only_visible_text_to_progress_callback(co
 
 
 @pytest.mark.asyncio
+async def test_hidden_tool_calls_publish_no_trace_to_progress_callback(config: Config) -> None:
+    """Hidden tool calls leave no markers, so marker-shaped agent text must not meet their trace."""
+    traces: list[tuple[ToolTraceEntry, ...]] = []
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        visible_progress_callback=lambda _body, trace: traces.append(tuple(trace)),
+        show_tool_calls=False,
+    )
+    streaming.tool_trace = [ToolTraceEntry("tool_call_started", "shell", args_preview="private")]
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+    with patch("mindroom.streaming.send_message_result", new=_FakeGateway().send):
+        await push_stream_chunk(streaming, "Example:\n\n🔧 `shell` [1]", client)
+    assert traces == [()]
+
+
+@pytest.mark.asyncio
 async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config) -> None:
     """Markdown and mention formatting should not block the stream owner's event loop."""
     streaming = StreamingResponse(

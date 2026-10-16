@@ -7960,6 +7960,7 @@ async def _cold_cache_reply_model(
     room_model: str | None = None,
     media: MediaInputs | None = None,
     inherit_cheap_model: bool = False,
+    reload_cheap_model: str | None = None,
 ) -> tuple[list[str | None], list[dict[str, object]]]:
     """Run one reply for a cold-cache agent and return the model it used and the selector calls."""
     bot = _bot(tmp_path)
@@ -7979,6 +7980,9 @@ async def _cold_cache_reply_model(
 
     async def fake_select(_settings: ColdCacheConfig, *, cheap_model: str, **kwargs: object) -> str:
         selector_calls.append({"cheap_model": cheap_model, **kwargs})
+        if reload_cheap_model is not None:
+            # A config reload lands while the judge runs.
+            config.agents["general"] = config.agents["general"].model_copy(update={"cheap_model": reload_cheap_model})
         return cheap_model
 
     async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
@@ -8029,6 +8033,13 @@ async def test_cold_cache_uses_default_cheap_model(tmp_path: Path) -> None:
     active_models, selector_calls = await _cold_cache_reply_model(tmp_path, inherit_cheap_model=True)
     assert active_models == ["cheap"]
     assert [call["cheap_model"] for call in selector_calls] == ["cheap"]
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_choice_dropped_after_reload_replaces_cheap_model(tmp_path: Path) -> None:
+    """A judgment that finishes after a reload replaced the cheap model keeps the agent model."""
+    active_models, _selector_calls = await _cold_cache_reply_model(tmp_path, reload_cheap_model="cheap2")
+    assert active_models == ["default"]
 
 
 @pytest.mark.asyncio
@@ -8831,7 +8842,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     else:
         assert finish
         conversation = payloads[0]["state"]["conversation"]
-        evidence = json.loads(conversation[-1]["text"])
+        evidence = conversation[-1]["text"]
         assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
         root = conversation[0]["text"]
         # Earlier media reaches the judge as a placeholder rather than disabling judgment.
@@ -8840,7 +8851,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
             # A long message reaches the judge as its start and end rather than disabling judgment.
             assert root.endswith("Log every sleep.")
             assert "characters omitted" in root
-        assert evidence["active_request"] == "Continue"
+        assert evidence.startswith("<active_request>\nContinue\n</active_request>\n")
         assert "Stale input" not in str(payloads)
         assert "Future queued text" not in str(payloads)
 

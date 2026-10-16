@@ -5867,7 +5867,7 @@ class ResponseRunner:
             # The switch is an optimization, so an unreadable session must not fail the reply.
             self.deps.logger.warning("cold_cache_session_read_failed", session_id=session_id, exc_info=True)
             return resolved_model
-        return await select_cold_cache_model(
+        selected = await select_cold_cache_model(
             agent.cold_cache,
             config=config,
             runtime_paths=self.deps.runtime_paths,
@@ -5879,6 +5879,13 @@ class ResponseRunner:
             prompt=request.prompt,
             now=time.time(),
         )
+        # A config reload during the judgment may have removed or replaced the cheap model.
+        live = self.deps.runtime.config
+        if selected == resolved_model or (
+            self.deps.agent_name in live.agents and live.get_agent_cheap_model(self.deps.agent_name) == selected
+        ):
+            return selected
+        return resolved_model
 
     def _read_agent_session(
         self,

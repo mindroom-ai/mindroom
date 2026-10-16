@@ -27,7 +27,8 @@ _MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
-_VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d+(?=\](?: ⏳)?\s*$)")
+# Bounded so an index in untrusted text never reaches int()'s digit limit.
+_VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d{1,9}(?=\](?: ⏳)?\s*$)")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
@@ -604,14 +605,14 @@ def body_without_tool_markers(body: str, content: Mapping[str, object]) -> str:
 def render_tool_tag(entry: ToolTraceEntry) -> str:
     """Render one tool call as a tag for judges, which read conversations as data.
 
-    Values are JSON strings rather than XML attributes: escaping ``&`` would make
-    the judges' redaction check rewrite an already redacted URL query and refuse it.
+    Values stay verbatim: any escaping changes the already redacted previews, and
+    the judges' redaction check would then rewrite them and refuse the request.
     """
-    attrs = [f"name={json.dumps(entry.tool_name, ensure_ascii=False)}"]
+    attrs = [f'name="{entry.tool_name}"']
     if entry.args_preview:
-        attrs.append(f"input={json.dumps(entry.args_preview, ensure_ascii=False)}")
+        attrs.append(f'input="{entry.args_preview}"')
     if entry.result_preview:
-        attrs.append(f"output={json.dumps(entry.result_preview, ensure_ascii=False)}")
+        attrs.append(f'output="{entry.result_preview}"')
     if entry.truncated:
         attrs.append('truncated="true"')
     return f"<tool {' '.join(attrs)}/>"
