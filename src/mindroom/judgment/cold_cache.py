@@ -132,9 +132,9 @@ async def _judge(
     now: float,
 ) -> tuple[bool | None, str]:
     """Return the judgment decision, or None, with why it was or was not made."""
-    model_config = config.models.get(agent_model)
-    cheap_config = config.models.get(cheap_model)
-    if model_config is None or cheap_config is None or _is_thread_cache_warm(session, model_config, now=now):
+    model_config = config.models[agent_model]
+    cheap_config = config.models[cheap_model]
+    if _is_thread_cache_warm(session, model_config, now=now):
         return None, "warm"
     if context is None:
         return None, "history_unavailable"

@@ -520,7 +520,7 @@ Only an accepting decision switches; a decline, abstention, timeout, or missing 
 Warm turns make no judgment call.
 After a switch the agent model's cache stays cold, so each later turn is judged again, and a harder request returns to the agent model.
 
-The switch never happens when a scheduled model, or a `!model`, `!room_model`, or `room_models` override that selects a different model, applies, or when the request carries images, audio, video, or files.
+The switch never happens when a scheduled model, a `!model` or `!room_model` override (even one naming the agent's own model), or a `room_models` entry that selects a different model applies, or when the request carries images, audio, video, or files.
 Earlier attachments reach the judge only as placeholders, so pick a cheap model that supports the same media as the agent model.
 Agents in `thread_mode: room` keep their model, because room mode has no thread history for the judge to read.
 Teams and the router keep their models.

@@ -7960,7 +7960,7 @@ async def _cold_cache_reply_model(
     room_model: str | None = None,
     media: MediaInputs | None = None,
     inherit_cheap_model: bool = False,
-    reload_cheap_model: str | None = None,
+    reload_update: dict[str, object] | None = None,
     thread_id: str | None = "$event",
 ) -> tuple[list[str | None], list[dict[str, object]]]:
     """Run one reply for a cold-cache agent and return the model it used and the selector calls."""
@@ -7981,9 +7981,9 @@ async def _cold_cache_reply_model(
 
     async def fake_select(_settings: ColdCacheConfig, *, cheap_model: str, **kwargs: object) -> str:
         selector_calls.append({"cheap_model": cheap_model, **kwargs})
-        if reload_cheap_model is not None:
+        if reload_update is not None:
             # A config reload lands while the judge runs.
-            config.agents["general"] = config.agents["general"].model_copy(update={"cheap_model": reload_cheap_model})
+            config.agents["general"] = config.agents["general"].model_copy(update=reload_update)
         return cheap_model
 
     async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
@@ -8037,9 +8037,10 @@ async def test_cold_cache_uses_default_cheap_model(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cold_cache_choice_dropped_after_reload_replaces_cheap_model(tmp_path: Path) -> None:
-    """A judgment that finishes after a reload replaced the cheap model keeps the agent model."""
-    active_models, _selector_calls = await _cold_cache_reply_model(tmp_path, reload_cheap_model="cheap2")
+@pytest.mark.parametrize("reload_update", [{"cheap_model": "cheap2"}, {"cold_cache": None}])
+async def test_cold_cache_choice_dropped_after_reload(tmp_path: Path, reload_update: dict[str, object]) -> None:
+    """A judgment that finishes after a reload replaced the cheap model or disabled the switch keeps the agent model."""
+    active_models, _selector_calls = await _cold_cache_reply_model(tmp_path, reload_update=reload_update)
     assert active_models == ["default"]
 
 
@@ -8066,6 +8067,8 @@ async def test_cold_cache_session_read_failure_keeps_agent_model(tmp_path: Path)
     [
         ({"scheduled_model": "cheap2"}, "cheap2"),
         ({"room_model": "cheap2"}, "cheap2"),
+        # An override naming the agent's own model is still an explicit choice.
+        ({"room_model": "default"}, "default"),
         ({"media": MediaInputs(images=[Image(content=b"png")])}, "default"),
     ],
 )

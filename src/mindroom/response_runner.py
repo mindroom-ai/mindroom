@@ -219,7 +219,7 @@ if TYPE_CHECKING:
     from agno.run.requirement import RunRequirement
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -5842,11 +5842,12 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        resolved_model: str,
+        runtime_model: ResolvedRuntimeModel,
         session_id: str,
         execution_identity: ToolExecutionIdentity,
     ) -> str:
         """Let a judge move a turn whose prompt cache expired to the agent's cheap model."""
+        resolved_model = runtime_model.model_name
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
         cheap_model = config.get_agent_cheap_model(self.deps.agent_name) if agent is not None else None
@@ -5854,8 +5855,8 @@ class ResponseRunner:
             agent is None
             or agent.cold_cache is None
             or cheap_model is None
-            or request.scheduled_model is not None
-            # Thread and room overrides are explicit choices.
+            # Scheduled, thread, and room choices are explicit, even when they name the agent's own model.
+            or runtime_model.overridden
             or resolved_model != agent.model
             # The judge cannot see media, and the cheap model may not read it.
             or _request_has_media(request)
@@ -5883,10 +5884,13 @@ class ResponseRunner:
             prompt=request.prompt,
             now=time.time(),
         )
-        # A config reload during the judgment may have removed or replaced the cheap model.
+        # A config reload during the judgment may have disabled the switch or replaced the cheap model.
         live = self.deps.runtime.config
+        live_agent = live.agents.get(self.deps.agent_name)
         if selected == resolved_model or (
-            self.deps.agent_name in live.agents and live.get_agent_cheap_model(self.deps.agent_name) == selected
+            live_agent is not None
+            and live_agent.cold_cache is not None
+            and live.get_agent_cheap_model(self.deps.agent_name) == selected
         ):
             return selected
         return resolved_model
@@ -5937,13 +5941,13 @@ class ResponseRunner:
         request = admitted_request
         _approve_continued_reply(participation, request)
         response_thread_id = _response_thread_id(request, resolved_target)
-        active_model_name = self.deps.runtime.config.resolve_runtime_model(
+        runtime_model = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,
             active_model_name=request.scheduled_model,
             room_id=resolved_target.room_id,
             thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,
-        ).model_name
+        )
         prepared_request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -5985,7 +5989,7 @@ class ResponseRunner:
 
         active_model_name = await self._cold_cache_model(
             request,
-            resolved_model=active_model_name,
+            runtime_model=runtime_model,
             session_id=session_id,
             execution_identity=execution_identity,
         )

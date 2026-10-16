@@ -238,6 +238,8 @@ class ResolvedRuntimeModel:
 
     model_name: str
     context_window: int | None
+    # A scheduled, thread, or persisted room choice rather than the configured model.
+    overridden: bool = False
 
 
 @dataclass(frozen=True)
@@ -2102,6 +2104,7 @@ class Config(BaseModel):
             thread_overrides = resolve_thread_model_override(runtime_paths, thread_id, config=self).active
             if entity_name is not None:
                 resolved_model_name = thread_overrides.get(entity_name)
+        overridden = resolved_model_name is not None
         if resolved_model_name is None:
             if entity_name is None:
                 resolved_model_name = default_model_name
@@ -2116,6 +2119,7 @@ class Config(BaseModel):
                 ).active
                 if room_override is not None:
                     resolved_model_name = room_override
+                    overridden = True
                 else:
                     from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
 
@@ -2127,7 +2131,11 @@ class Config(BaseModel):
         if resolved_context_window is None:
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
-        return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
+        return ResolvedRuntimeModel(
+            model_name=resolved_model_name,
+            context_window=resolved_context_window,
+            overridden=overridden,
+        )
 
 
 def _tag_automation_unions(node: Any) -> None:  # noqa: ANN401 - a JSON schema node
