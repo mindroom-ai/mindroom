@@ -73,6 +73,8 @@ class _SessionState(TypedDict):
     bad_outputs: int
     # When the current episode started failing, so one that never succeeds is dropped after a while.
     failing_since: float
+    # The failing episode, as its kind and where that kind stopped, which stays put while it fails; empty when none.
+    failing_piece: list[int | str]
     retry_at: float
     # When a turn holding the conversation back stops waiting for approval, or 0.
     recheck_at: float
@@ -107,6 +109,7 @@ def _new_session_state() -> _SessionState:
         "failures": 0,
         "bad_outputs": 0,
         "failing_since": 0,
+        "failing_piece": [],
         "retry_at": 0,
         "recheck_at": 0,
     }
@@ -358,6 +361,7 @@ class KnowledgeGraphIngestionWorker:
             failures=0,
             bad_outputs=0,
             failing_since=0,
+            failing_piece=[],
             retry_at=0,
         )
         await self._persist(scope.graph_name, state)
@@ -389,10 +393,14 @@ class KnowledgeGraphIngestionWorker:
         now: float,
     ) -> bool | None:
         """Add one episode; return True when added, False when dropped, and None when it waits for a later pass."""
+        piece = [kind, *entry["markers"].get(kind, [])]
         try:
             await self.store.add_episode(scope, rendered.episode, usage)
             dropped = False
         except Exception as exc:
+            if entry["failing_piece"] != piece:
+                # The counts belong to one episode, so another kind's successes never reset them.
+                entry.update(failures=0, bad_outputs=0, failing_since=0, failing_piece=piece)
             entry["failures"] += 1
             # Unusable model output, such as JSON that does not match the schema, raises ValueError.
             entry["bad_outputs"] = entry["bad_outputs"] + 1 if isinstance(exc, ValueError) else 0
@@ -410,7 +418,8 @@ class KnowledgeGraphIngestionWorker:
             )
             dropped = True
         # Every piece records its progress, added or dropped, so a retry never repeats it.
-        entry.update(failures=0, bad_outputs=0, failing_since=0)
+        if dropped or entry["failing_piece"] == piece:
+            entry.update(failures=0, bad_outputs=0, failing_since=0, failing_piece=[])
         entry["markers"][kind] = list(rendered.progress)
         await self._persist(scope.graph_name, state)
         return not dropped

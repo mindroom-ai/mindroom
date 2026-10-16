@@ -46,11 +46,12 @@ T0 = 1_760_000_000
 
 @dataclass
 class _FakeStore:
-    """Records episodes; sessions in ``failing`` and episode kinds in ``failing_kinds`` raise like failed extraction."""
+    """Records episodes; sessions in ``failing``, kinds in ``failing_kinds``, and bodies containing ``failing_text`` fail."""
 
     episodes: list[tuple[str, EpisodeInput, UsageTarget]] = field(default_factory=list)
     failing: set[str] = field(default_factory=set)
     failing_kinds: set[str] = field(default_factory=set)
+    failing_text: str | None = None
     unavailable: bool = False
     added: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -58,7 +59,11 @@ class _FakeStore:
         if self.unavailable:
             msg = "graph database unavailable"
             raise ConnectionError(msg)
-        if usage.session_id in self.failing or episode.kind in self.failing_kinds:
+        if (
+            usage.session_id in self.failing
+            or episode.kind in self.failing_kinds
+            or (self.failing_text is not None and self.failing_text in episode.body)
+        ):
             msg = "structured output did not match"
             raise ValueError(msg)
         self.episodes.append((scope.graph_name, episode, usage))
@@ -113,7 +118,12 @@ def _run(
         created_at=created_at,
         status=status,
         tools=[
-            ToolExecution(tool_call_id=f"call-{run_id}", tool_name="get_issue", tool_args={"n": 1}, result="Issue 1"),
+            ToolExecution(
+                tool_call_id=f"call-{run_id}",
+                tool_name="get_issue",
+                tool_args={"n": 1},
+                result=f"Issue for {run_id}",
+            ),
         ],
         metadata={
             "room_id": "!room:x",
@@ -138,19 +148,26 @@ def _seed(
     paused: frozenset[str] = frozenset(),
     updated_at: int | None = None,
     agent: str = "mind",
+    spacing: int = 1,
 ) -> None:
-    """Store a conversation whose runs start at ``at``, one second apart, last updated with its last run."""
+    """Store a conversation whose runs start at ``at``, ``spacing`` seconds apart, last updated after its last run."""
     storage = create_session_storage(agent, config, paths, execution_identity=None)
     try:
         runs = [
-            _run(run_id, session_id, at + index, RunStatus.paused if run_id in paused else RunStatus.completed, agent)
+            _run(
+                run_id,
+                session_id,
+                at + index * spacing,
+                RunStatus.paused if run_id in paused else RunStatus.completed,
+                agent,
+            )
             for index, run_id in enumerate(run_ids)
         ]
         seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
         with storage.db_engine.begin() as connection:
             connection.exec_driver_sql(
                 f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (updated_at if updated_at is not None else at + len(run_ids), session_id),
+                (updated_at if updated_at is not None else at + (len(run_ids) - 1) * spacing + 1, session_id),
             )
     finally:
         storage.close()
@@ -691,3 +708,17 @@ async def test_a_conversation_waits_while_its_agent_cannot_say_what_was_redacted
     assert store.episodes == []
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 20)
     assert _answers(store) == ["agent mind: answer r1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_tool_result_is_dropped_while_the_conversation_keeps_succeeding(tmp_path: Path) -> None:
+    """New turns that extract fine do not reset the count of the tool results that keep failing behind them."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing_text="Issue for r0")
+    worker = _worker(config, paths, store)
+
+    for day in range(7):
+        _seed(config, paths, "!room:x:$t1", [f"r{index}" for index in range(day + 1)], spacing=7200)
+        await worker._run_cycle(config, now=T0 + day * 7200 + 100)
+
+    assert [episode.kind for _, episode, _ in store.episodes].count("tool_results") >= 1

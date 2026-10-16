@@ -152,6 +152,7 @@ _.create_batch  # Graphiti EmbedderClient hook Graphiti calls (src/mindroom/know
 _.markers  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.bad_outputs  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.failing_since  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
+_.failing_piece  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.recheck_at  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 graphiti_core  # Import run for its side effects inside the dotenv guard (src/mindroom/knowledge_graph/store.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
