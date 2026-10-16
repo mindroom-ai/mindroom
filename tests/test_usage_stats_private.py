@@ -12,17 +12,20 @@ from agno.metrics import RunMetrics
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom import usage_stats
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.usage_stats import UsageStatsTools
-from mindroom.legacy_private_storage_aliases import historical_private_instance_worker_key
-from mindroom.private_instance_identity_store import ensure_private_instance_identity, load_private_instance_identity
+from mindroom.private_storage.legacy_private_storage_aliases import historical_private_instance_worker_key
+from mindroom.private_storage.private_instance_identity_store import (
+    ensure_private_instance_identity,
+    load_private_instance_identity,
+)
 from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, private_instance_scope_root_path
+from mindroom.usage import stats as usage_stats
 from tests.conftest import seed_session
 from tests.test_usage_stats import _config, _metrics, _model_metrics, _paths, _row, _run, _source, _wire
 from tests.test_usage_stats_tool import _context

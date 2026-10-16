@@ -22,7 +22,7 @@ import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from mindroom import constants, shell_supervisor, yaml_io
+from mindroom import constants, yaml_io
 from mindroom.api import (
     sandbox_env_assembly,
     sandbox_exec,
@@ -37,10 +37,10 @@ from mindroom.api.worker_responses import (
     SandboxWorkerListResponse,
     serialize_sandbox_worker_response,
 )
-from mindroom.attachment_ids import normalize_attachment_id
+from mindroom.attachments.ids import normalize_attachment_id
 from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.media_delivery import view_agent_image
@@ -52,7 +52,8 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS
+from mindroom.shell import supervisor as shell_supervisor
+from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -86,8 +87,8 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
     visible_workspace_roots,
 )
-from mindroom.worker_browser import WorkerBrowserRuntime
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
+from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
 
 if TYPE_CHECKING:

@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embedding_factory import resolve_embedder_settings
-from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
+from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
+from mindroom.embeddings.factory import resolve_embedder_settings
+from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.timing import timed
+from mindroom.tool_system.dependencies import optional_dependency_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -261,12 +263,20 @@ async def create_memory_instance(
     from mem0 import AsyncMemory  # noqa: PLC0415
 
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
-    if config.memory.embedder.provider == "sentence_transformers":
-        ensure_sentence_transformers_dependencies(runtime_paths)
-
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
-    memory = AsyncMemory.from_config(config_dict)
+    if config_dict["embedder"]["provider"] == "huggingface":
+        # Mem0's huggingface embedder builds its own SentenceTransformer, which imports optional local packages.
+        # Install and wait for running installs in a worker thread so the event loop keeps serving other tasks.
+        def from_config_with_local_embedder() -> AsyncMemory:
+            if config.memory.embedder.provider == "sentence_transformers":
+                ensure_sentence_transformers_dependencies(runtime_paths)
+            with optional_dependency_environment():
+                return AsyncMemory.from_config(config_dict)
+
+        memory = await asyncio.to_thread(from_config_with_local_embedder)
+    else:
+        memory = AsyncMemory.from_config(config_dict)
     memory_llm = config.memory.llm
     if memory_llm is not None and memory_llm.provider == "openai":
         from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
@@ -275,7 +285,7 @@ async def create_memory_instance(
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.
-        from mindroom.embedding_factory import create_configured_embedder  # noqa: PLC0415
+        from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
         strict_embedder = cast("_StrictOpenAIEmbedder", create_configured_embedder(config, runtime_paths))
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -18,10 +22,11 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
-from mindroom.embedding_errors import EmbedderRequestError
-from mindroom.embedding_factory import create_configured_embedder, resolve_embedder_settings
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.factory import create_configured_embedder, resolve_embedder_settings
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.memory.config import (
     _get_memory_config,
     _Mem0StrictOpenAIEmbedder,
@@ -37,9 +42,9 @@ from mindroom.model_defaults import (
     OPENROUTER_OPENAI_EMBEDDING_SMALL,
     OPENROUTER_OPENAI_LUNA,
 )
-from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
+from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
 
 
@@ -760,6 +765,53 @@ class TestMemoryConfig:
         mock_from_config.assert_called_once()
 
     @pytest.mark.asyncio
+    @patch("mindroom.tool_system.dependencies.check_deps_installed", return_value=True)
+    @patch.object(AsyncMemory, "from_config")
+    async def test_create_memory_instance_waits_for_installs_off_event_loop(
+        self,
+        mock_from_config: MagicMock,
+        mock_check_deps_installed: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Local-embedder Mem0 checks dependencies and waits for a running install without stalling the event loop."""
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="sentence_transformers",
+                config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
+            ),
+            llm=None,
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        mock_from_config.return_value = SimpleNamespace(vector_store=object())
+        install_running = threading.Event()
+        finish_install = threading.Event()
+
+        def run_install() -> None:
+            with optional_dependency_environment(exclusive=True):
+                install_running.set()
+                finish_install.wait(5)
+
+        installer = threading.Thread(target=run_install)
+        installer.start()
+        try:
+            assert install_running.wait(5)
+            creation = asyncio.create_task(
+                create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path)),
+            )
+            started = time.monotonic()
+            await asyncio.sleep(0.2)
+            # A blocked event loop would only finish this sleep after the install's 5 s timeout.
+            assert time.monotonic() - started < 2
+            assert not creation.done()
+        finally:
+            finish_install.set()
+            installer.join(5)
+        assert await creation is mock_from_config.return_value
+        mock_check_deps_installed.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_create_memory_instance_replaces_mem0_openai_embedder_with_strict_adapter(
         self,
         tmp_path: Path,
@@ -786,7 +838,7 @@ class TestMemoryConfig:
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),
-            patch("mindroom.embedding_factory.create_configured_embedder", return_value=strict_embedder),
+            patch("mindroom.embeddings.factory.create_configured_embedder", return_value=strict_embedder),
         ):
             result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 

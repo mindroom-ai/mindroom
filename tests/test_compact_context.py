@@ -19,7 +19,6 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
@@ -36,6 +35,7 @@ from mindroom.history.types import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import (
@@ -446,7 +446,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -624,7 +624,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     summary_mock = AsyncMock()
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -671,7 +671,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     agent = _agent()
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -744,7 +744,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

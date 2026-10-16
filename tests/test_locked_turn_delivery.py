@@ -71,12 +71,11 @@ class _FakeHomeserver:
         content: dict[str, object],
         *,
         operation: str = "send_message",
-        retry_sync_recovery: bool = False,
         transaction_id: str | None = None,
         content_is_prepared: bool = False,
     ) -> MatrixSendOutcome:
         """Accept one send, deduplicating on transaction ID like a homeserver."""
-        del operation, retry_sync_recovery, content_is_prepared
+        del operation, content_is_prepared
         if content.get("body") == "Thinking...":
             self.placeholder_sends.append((transaction_id, content.get(STREAM_STATUS_KEY)))
         if transaction_id is not None and transaction_id in self._event_id_by_transaction:

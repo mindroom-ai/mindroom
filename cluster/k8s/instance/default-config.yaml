@@ -96,10 +96,23 @@ agents:
     - scheduler
     - todo
     - matrix_message
+    - name: matrix_room
+      defer: true
     - name: thread_model
       defer: true
     - thread_tags
     - thread_summary
+    - thread_resolution
+    - compact_context
+    - callback_manager
+    - chat_ui
+    delegate_to:
+    - mind
+    skill_learning:
+      enabled: true
+    automations:
+    - prompt_curation
+    - dreaming
     skills:
     - mindroom-docs
     instructions:
@@ -113,8 +126,6 @@ agents:
     - When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess.
     - Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell details unless
       they ask.
-    skill_learning:
-      enabled: true
 router:
   model: luna
   accept_invites: true
@@ -130,6 +141,9 @@ room_defaults:
   - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
   admins:
   - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+rooms:
+  personal:
+    description: Your private room with Mind, who remembers across sessions 🧠
 matrix_space:
   enabled: true
   name: MindRoom
@@ -153,6 +167,12 @@ memory:
     enabled: true
 authorization:
   config_command_enabled: false
+tool_approval:
+  rules:
+  - match: resolve_thread
+    action: require_approval
+background_tool_jobs:
+  enabled: true
 defaults:
   tools:
   - scheduler

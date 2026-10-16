@@ -14,10 +14,11 @@ from agno.tools.function import ToolResult
 from mcp import StdioServerParameters
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
-from mindroom.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer import mcp_provider
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 _OUTPUT_FUNCTIONS = [
     "browser_console_messages",
@@ -77,31 +78,33 @@ async def test_inline_screenshot_preparation_does_not_block_browser_loop(
     )
     provider._session = session
     provider._ready = True
+    loop_thread = threading.get_ident()
+    preparation_threads: list[int] = []
     preparation_started = threading.Event()
     release_preparation = threading.Event()
+    released_by_test: list[bool] = []
 
     original_image_result = mcp_provider.image_result
 
-    def slow_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
+    def held_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
+        preparation_threads.append(threading.get_ident())
         preparation_started.set()
-        release_preparation.wait(timeout=1)
+        released_by_test.append(release_preparation.wait(timeout=SETTLE_TIMEOUT_SECONDS))
         return original_image_result(data, metadata=metadata)
 
-    monkeypatch.setattr(mcp_provider, "image_result", slow_image_result)
-    release_timer = threading.Timer(0.2, release_preparation.set)
-    release_timer.start()
-    try:
-        task = asyncio.create_task(provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"}))
-        await asyncio.sleep(0.05)
+    monkeypatch.setattr(mcp_provider, "image_result", held_image_result)
 
-        assert preparation_started.is_set()
-        assert not release_preparation.is_set()
+    task = asyncio.create_task(provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"}))
+    try:
+        # A loop blocked on the held preparation could not resume here until preparation gave up waiting.
+        assert await asyncio.to_thread(preparation_started.wait, SETTLE_TIMEOUT_SECONDS)
         assert not task.done()
-        release_preparation.set()
-        await task
     finally:
         release_preparation.set()
-        release_timer.join(timeout=1)
+        await task
+
+    assert released_by_test == [True]
+    assert loop_thread not in preparation_threads
 
 
 @pytest.mark.asyncio

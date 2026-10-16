@@ -25,11 +25,15 @@ from agno.utils.models.claude import format_messages
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
-import mindroom.bedrock_claude as bedrock_claude_module
-from mindroom.agno_compat_claude import request_kwargs_with_replay_safe_tool_search_results
-from mindroom.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
-from mindroom.bedrock_claude import MindRoomBedrockClaude
-from mindroom.claude_prompt_cache import (
+import mindroom.providers.bedrock_claude as bedrock_claude_module
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.hooks import render_transient_context
+from mindroom.providers.agno_compat_claude import request_kwargs_with_replay_safe_tool_search_results
+from mindroom.providers.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
+from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
+from mindroom.providers.claude_prompt_cache import (
     _DEFERRED_TOOL_NAMES_ATTR,
     MAX_CACHE_MARKERS,
     _count_cache_markers,
@@ -43,13 +47,10 @@ from mindroom.claude_prompt_cache import (
     prewarm_anthropic_async_client,
     prompt_cache_control,
 )
-from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.hooks import render_transient_context
-from mindroom.model_loading import get_model_instance
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 
 def _config_with_runtime_paths(
@@ -280,7 +281,7 @@ def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.Monk
         provider_lookups.append(provider)
         return "unexpected-credential"
 
-    monkeypatch.setattr("mindroom.model_loading.get_api_key_for_provider", get_api_key)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_api_key_for_provider", get_api_key)
 
     model = get_model_instance(config, runtime_paths, "local_model")
 
@@ -687,7 +688,7 @@ def test_bedrock_claude_provider_auto_installs_boto3(
         calls.append((dependencies, extra_name))
         return False
 
-    monkeypatch.setattr("mindroom.model_loading.ensure_optional_deps", ensure)
+    monkeypatch.setattr("mindroom.providers.model_loading.ensure_optional_deps", ensure)
 
     get_model_instance(config, runtime_paths, "bedrock_model")
 
@@ -1862,11 +1863,11 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
 
     def blocking_prepare(_model: object, request_kwargs: dict[str, object]) -> dict[str, object]:
         setup_started.set()
-        assert allow_setup.wait(2.0)
+        assert allow_setup.wait(SETTLE_TIMEOUT_SECONDS)
         setup_finished.set()
         return request_kwargs
 
-    monkeypatch.setattr("mindroom.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
+    monkeypatch.setattr("mindroom.providers.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
     vars(model)["get_async_client"] = lambda: client
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
     vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
@@ -1888,7 +1889,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
 
     setup_task = asyncio.create_task(consume_stream())
     try:
-        assert await asyncio.to_thread(setup_started.wait, 2.0)
+        assert await asyncio.to_thread(setup_started.wait, SETTLE_TIMEOUT_SECONDS)
         if not cancel_before_setup:
             for _ in range(cancel_count):
                 setup_task.cancel()
@@ -1896,8 +1897,8 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         with pytest.raises(asyncio.CancelledError):
             await setup_task
 
-        assert await asyncio.to_thread(setup_finished.wait, 2.0)
-        assert await asyncio.to_thread(request_created.wait, 2.0)
+        assert await asyncio.to_thread(setup_finished.wait, SETTLE_TIMEOUT_SECONDS)
+        assert await asyncio.to_thread(request_created.wait, SETTLE_TIMEOUT_SECONDS)
         assert setup_task.cancelling() == cancel_count
         assert len(request_coroutines) == 1
         assert inspect.getcoroutinestate(request_coroutines[0]) == inspect.CORO_CLOSED
@@ -2031,7 +2032,7 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
             return type("FakeOauthCredentialsModule", (), {"Credentials": FakeAuthorizedUserCredentials})
         return original_import_module(module_name)
 
-    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("mindroom.providers.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
@@ -2160,7 +2161,7 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
             return type("FakeServiceAccountModule", (), {"Credentials": FakeServiceAccountCredentials})
         return original_import_module(module_name)
 
-    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("mindroom.providers.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 

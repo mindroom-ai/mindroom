@@ -53,7 +53,7 @@ from mindroom.constants import (
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     CredentialsManager,
     _reset_credentials_manager_cache,
     get_runtime_credentials_manager,
@@ -61,7 +61,7 @@ from mindroom.credentials import (
     sync_shared_credentials_to_worker,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
@@ -90,6 +90,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
     visible_workspace_roots,
     worker_dir_name,
+    worker_log_id,
     worker_root_path,
 )
 from mindroom.workers.backends import local as local_workers_module
@@ -6100,7 +6101,8 @@ def test_sandbox_runner_records_worker_initialization_failures(
     payload = execute_response.json()
     assert payload["ok"] is False
     assert payload["failure_kind"] == "worker"
-    assert "Failed to initialize worker 'worker-fail'" in payload["error"]
+    assert f"Failed to initialize worker '{worker_log_id('worker-fail')}'" in payload["error"]
+    assert "worker-fail" not in payload["error"]
     assert "boom" in payload["error"]
 
     workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)

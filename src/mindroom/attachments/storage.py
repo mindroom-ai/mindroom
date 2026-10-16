@@ -1,0 +1,1396 @@
+"""Attachment persistence, registration, and context-scoped resolution."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import errno
+import hashlib
+import json
+import mimetypes
+import os
+import time
+from collections import OrderedDict
+from contextvars import Context
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from pathlib import Path
+from threading import Lock
+from typing import TYPE_CHECKING, Any, Literal
+from uuid import uuid4
+
+import nio
+
+from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
+from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.logging_config import get_logger
+from mindroom.matrix.media import (
+    MATRIX_MEDIA_MSGTYPES,
+    AudioMessageEvent,
+    FileOrVideoMessageEvent,
+    ImageMessageEvent,
+    download_media_bytes,
+    is_audio_message_event,
+    is_file_or_video_message_event,
+    is_image_message_event,
+    is_matrix_media_dispatch_event,
+    is_video_message_event,
+    media_mime_type,
+    media_payload_exceeds_limit,
+    media_size_exceeds_limit,
+    parse_matrix_media_dispatch_event_source,
+    resolve_image_mime_type,
+)
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
+from mindroom.timing import emit_elapsed_timing
+
+from .ids import normalize_attachment_id
+from .legacy_attachments import legacy_attachment_source, open_legacy_attachment_source
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mindroom.matrix.client import ResolvedVisibleMessage
+
+logger = get_logger(__name__)
+
+_AttachmentKind = Literal["audio", "file", "image", "video"]
+_ATTACHMENT_RETENTION_DAYS = 30
+_CLEANUP_INTERVAL = timedelta(hours=1)
+_last_cleanup_time_by_storage_path: dict[Path, datetime] = {}
+_attachment_cleanup_lock = Lock()
+_attachment_cleanup_claim_tokens_by_storage_path: dict[Path, object] = {}
+_attachment_cleanup_scheduled_tokens_by_storage_path: dict[Path, object] = {}
+_ATTACHMENT_CLEANUP_TASK_OWNER = object()
+# Thread-history media that failed to register, by storage root and event, with when to try it again.
+# Nothing on disk records a failure, so without this every turn would download it again, and anyone
+# who can post can name media that always fails, such as a file over the size cap or with a wrong hash.
+_FAILED_HISTORY_MEDIA_RETRY_SECONDS = 3600.0
+_MAX_FAILED_HISTORY_MEDIA = 10_000
+_failed_history_media_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
+# Thread-history media one turn downloads at most; the rest waits for a later turn. The failure memory
+# alone cannot bound a turn, because anyone who can post can fill a thread with media that fails.
+_MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN = 10
+
+
+@dataclass(frozen=True)
+class AttachmentRecord:
+    """Persistent metadata for an attachment stored on local disk."""
+
+    attachment_id: str
+    local_path: Path
+    kind: _AttachmentKind
+    filename: str | None = None
+    mime_type: str | None = None
+    room_id: str | None = None
+    thread_id: str | None = None
+    source_event_id: str | None = None
+    sender: str | None = None
+    event_timestamp: int | None = None
+    size_bytes: int | None = None
+    content_sha256: str | None = None
+    created_at: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        """Serialize record into a JSON-safe dictionary."""
+        return {
+            "attachment_id": self.attachment_id,
+            "local_path": str(self.local_path),
+            "kind": self.kind,
+            "filename": self.filename,
+            "mime_type": self.mime_type,
+            "room_id": self.room_id,
+            "thread_id": self.thread_id,
+            "source_event_id": self.source_event_id,
+            "sender": self.sender,
+            "event_timestamp": self.event_timestamp,
+            "size_bytes": self.size_bytes,
+            "content_sha256": self.content_sha256,
+            "created_at": self.created_at,
+        }
+
+
+def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) -> list[str]:
+    """Extract attachment IDs from Matrix event content metadata."""
+    if not isinstance(event_source, dict):
+        return []
+    content = event_source.get("content")
+    if not isinstance(content, dict):
+        return []
+    raw_attachment_ids = content.get(ATTACHMENT_IDS_KEY)
+    if not isinstance(raw_attachment_ids, list):
+        return []
+    normalized: list[str] = []
+    seen_attachment_ids: set[str] = set()
+    for raw_attachment_id in raw_attachment_ids:
+        if not isinstance(raw_attachment_id, str):
+            continue
+        attachment_id = normalize_attachment_id(raw_attachment_id)
+        if attachment_id and attachment_id not in seen_attachment_ids:
+            seen_attachment_ids.add(attachment_id)
+            normalized.append(attachment_id)
+    return normalized
+
+
+def parse_attachment_ids_from_thread_history(thread_history: Sequence[ResolvedVisibleMessage]) -> list[str]:
+    """Extract attachment IDs referenced by message metadata in thread history."""
+    attachment_ids: list[str] = []
+    seen_attachment_ids: set[str] = set()
+    for message in thread_history:
+        message_attachment_ids = parse_attachment_ids_from_event_source({"content": message.content})
+        for attachment_id in message_attachment_ids:
+            if attachment_id not in seen_attachment_ids:
+                seen_attachment_ids.add(attachment_id)
+                attachment_ids.append(attachment_id)
+    return attachment_ids
+
+
+def _thread_history_message_in_scope(message: ResolvedVisibleMessage, thread_id: str | None) -> bool:
+    if thread_id is None:
+        return message.thread_id is None
+    return thread_id in (message.thread_id, message.event_id)
+
+
+def _attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list[str]:
+    """Return attachment IDs carried by one visible message.
+
+    MindRoom-sent messages reference attachments via content metadata; raw
+    media events map to the deterministic per-event attachment ID used at
+    registration time.
+    """
+    attachment_ids = parse_attachment_ids_from_event_source({"content": message.content})
+    if attachment_ids:
+        return attachment_ids
+    msgtype = message.content.get("msgtype")
+    if msgtype not in MATRIX_MEDIA_MSGTYPES:
+        return []
+    # Voice handling registers audio under its original event; thread history registers other media per revision.
+    event_id = message.event_id if msgtype == "m.audio" else message.visible_event_id
+    return [_attachment_id_for_event(event_id)] if event_id else []
+
+
+def _attachment_record_in_message_scope(
+    record: AttachmentRecord,
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None,
+) -> bool:
+    if room_id is not None and record.room_id != room_id:
+        return False
+    # A record belongs to the thread of the message that references it:
+    # thread members match by thread ID, thread roots by their own event ID,
+    # and room-level messages only see room-level (thread-less) records.
+    return record.thread_id in (message.thread_id, message.event_id)
+
+
+def attachment_records_for_visible_message(
+    storage_path: Path,
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None,
+) -> list[AttachmentRecord]:
+    """Resolve attachment records carried by one visible message, scoped to its room and thread."""
+    attachment_ids = _attachment_ids_for_visible_message(message)
+    if not attachment_ids:
+        return []
+    records = resolve_attachments(storage_path, attachment_ids)
+    return [record for record in records if _attachment_record_in_message_scope(record, message, room_id=room_id)]
+
+
+_MAX_RENDERED_FILENAME_LENGTH = 80
+
+
+def _sanitize_rendered_filename(filename: str) -> str:
+    """Neutralize newline/quote injection from attacker-controlled filenames."""
+    sanitized = "".join(char for char in filename if char.isprintable()).replace('"', "'").strip()
+    if len(sanitized) > _MAX_RENDERED_FILENAME_LENGTH:
+        sanitized = f"{sanitized[: _MAX_RENDERED_FILENAME_LENGTH - 1]}…"
+    return sanitized
+
+
+def _attachment_provenance_line(record: AttachmentRecord) -> str:
+    details: list[str] = [record.kind]
+    if record.filename:
+        details.append(f'"{_sanitize_rendered_filename(record.filename)}"')
+    if record.sender:
+        details.append(f"from {record.sender}")
+    if record.event_timestamp is not None:
+        timestamp = datetime.fromtimestamp(record.event_timestamp / 1000, UTC)
+        details.append(f"sent {timestamp.strftime('%Y-%m-%d %H:%M UTC')}")
+    if record.source_event_id:
+        details.append(f"event {record.source_event_id}")
+    return f"- {record.attachment_id} ({', '.join(details)})"
+
+
+def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | None:
+    """Render provenance for attachments sent with the current message.
+
+    Earlier attachments are not listed here; they are annotated in place on
+    the thread-history messages that carried them.
+    """
+    if not current_records:
+        return None
+    lines = ["Attachments sent with the current message (use tool calls to inspect or process them by ID):"]
+    lines.extend(_attachment_provenance_line(record) for record in current_records)
+    return "\n".join(lines)
+
+
+def format_voice_transcript_attachment_guidance(current_records: list[AttachmentRecord]) -> str | None:
+    """Render model-only guidance for raw audio that already has a transcript."""
+    audio_attachment_ids = [record.attachment_id for record in current_records if record.kind == "audio"]
+    if not audio_attachment_ids:
+        return None
+    rendered_ids = ", ".join(audio_attachment_ids)
+    message_label = "message" if len(audio_attachment_ids) == 1 else "messages"
+    id_label = "ID" if len(audio_attachment_ids) == 1 else "IDs"
+    verb = "is" if len(audio_attachment_ids) == 1 else "are"
+    return (
+        f"MindRoom already transcribed the current voice {message_label}. "
+        f"The raw audio attachment {id_label} {verb} available for verification or deeper audio work: "
+        f"{rendered_ids}. "
+        "Only inspect or re-transcribe the raw audio if the user asks, the transcript seems wrong, "
+        "or the task specifically requires audio-level analysis."
+    )
+
+
+def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> str | None:
+    """Render a compact inline annotation for attachments carried by one message."""
+    if not attachment_records:
+        return None
+    parts = [
+        f'{record.attachment_id} ({record.kind}, "{_sanitize_rendered_filename(record.filename)}")'
+        if record.filename
+        else f"{record.attachment_id} ({record.kind})"
+        for record in attachment_records
+    ]
+    return f"[attachments: {', '.join(parts)}]"
+
+
+def _attachments_dir(storage_path: Path) -> Path:
+    return storage_path / "attachments"
+
+
+def _incoming_media_dir(storage_path: Path) -> Path:
+    return storage_path / "incoming_media"
+
+
+def _attachment_record_path(storage_path: Path, attachment_id: str) -> Path:
+    return _attachments_dir(storage_path) / f"{attachment_id}.json"
+
+
+def _extension_from_mime_type(mime_type: str | None) -> str:
+    """Map MIME type to a stable file extension."""
+    if not mime_type:
+        return ".bin"
+    normalized_mime_type = mime_type.split(";", 1)[0].strip().lower()
+    extension = mimetypes.guess_extension(normalized_mime_type)
+    if extension:
+        return extension
+    return ".bin"
+
+
+def _store_media_bytes_locally(
+    storage_path: Path,
+    media_bytes: bytes | None,
+    mime_type: str | None,
+) -> Path | None:
+    """Persist media bytes to storage so agents can access them as files.
+
+    The file is named by its content, so any number of events naming one
+    upload keep one copy rather than one each. Reusing it refreshes its
+    modification time, which cleanup reads before deleting media whose records
+    expired, so a cleanup that saw only an old record keeps it for the new one.
+    """
+    if media_bytes is None:
+        return None
+    media_name = f"sha256_{hashlib.sha256(media_bytes).hexdigest()}{_extension_from_mime_type(mime_type)}"
+    try:
+        media_dir = _prepare_retained_media_dir(storage_path)
+        with open_directory_within_root(media_dir) as media_fd:
+            try:
+                os.utime(media_name, dir_fd=media_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                atomic_write_bytes_at(media_fd, media_name, media_bytes, file_mode=0o600)
+    except OSError:
+        logger.exception("Failed to persist media payload")
+        return None
+    return media_dir / media_name
+
+
+async def _store_media_bytes_locally_async(
+    storage_path: Path,
+    media_bytes: bytes | None,
+    mime_type: str | None,
+) -> Path | None:
+    """Persist media bytes without blocking the event loop."""
+    return await asyncio.to_thread(
+        _store_media_bytes_locally,
+        storage_path,
+        media_bytes,
+        mime_type,
+    )
+
+
+def _attachment_id_for_event(event_id: str) -> str:
+    """Create a stable low-collision attachment ID from a Matrix event ID."""
+    digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
+    return f"att_{digest[:24]}"
+
+
+def _record_mtime(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    except OSError:
+        return None
+
+
+def _record_created_at(record: AttachmentRecord, record_path: Path) -> datetime | None:
+    if isinstance(record.created_at, str) and record.created_at:
+        with contextlib.suppress(ValueError):
+            parsed = datetime.fromisoformat(record.created_at)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+    return _record_mtime(record_path)
+
+
+def _is_managed_media_path(storage_path: Path, local_path: Path) -> bool:
+    """Return whether *local_path* lives under this storage's incoming media dir."""
+    incoming_media_dir = _incoming_media_dir(storage_path).resolve()
+    with contextlib.suppress(OSError):
+        return local_path.resolve().is_relative_to(incoming_media_dir)
+    return False
+
+
+def _collect_attachment_cleanup_state(
+    storage_path: Path,
+    *,
+    cutoff: datetime,
+) -> tuple[
+    int,
+    set[Path],
+    dict[Path, int],
+    list[tuple[AttachmentRecord, Path]],
+    list[Path],
+]:
+    """Collect active/expired attachment metadata needed for cleanup."""
+    active_media_paths: set[Path] = set()
+    active_media_ref_counts: dict[Path, int] = {}
+    expired_records: list[tuple[AttachmentRecord, Path]] = []
+    stale_record_paths: list[Path] = []
+    metadata_files_scanned = 0
+
+    for record_path in _attachments_dir(storage_path).glob("*.json"):
+        metadata_files_scanned += 1
+        record = load_attachment(storage_path, record_path.stem)
+        if record is None:
+            record_mtime = _record_mtime(record_path)
+            if record_mtime is not None and record_mtime < cutoff:
+                stale_record_paths.append(record_path)
+            continue
+
+        created_at = _record_created_at(record, record_path)
+        if created_at is not None and created_at < cutoff:
+            expired_records.append((record, record_path))
+            continue
+
+        resolved_media_path = record.local_path.resolve()
+        active_media_paths.add(resolved_media_path)
+        active_media_ref_counts[resolved_media_path] = active_media_ref_counts.get(resolved_media_path, 0) + 1
+
+    return metadata_files_scanned, active_media_paths, active_media_ref_counts, expired_records, stale_record_paths
+
+
+def _remove_paths(paths: list[Path]) -> int:
+    """Delete filesystem paths, ignoring filesystem errors."""
+    removed = 0
+    for path in paths:
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def _prune_expired_records_and_collect_removable_media_paths(
+    storage_path: Path,
+    *,
+    cutoff: datetime,
+    expired_records: list[tuple[AttachmentRecord, Path]],
+    active_media_ref_counts: dict[Path, int],
+) -> tuple[set[Path], int]:
+    """Delete expired metadata records and collect removable managed media files.
+
+    Media modified since the cutoff is kept, as the orphan pass keeps it,
+    because a record registered after this cleanup counted references may
+    already be reusing it.
+    """
+    removable_media_paths: set[Path] = set()
+    expired_records_deleted = _remove_paths([record_path for _record, record_path in expired_records])
+    for record, _record_path in expired_records:
+        resolved_media_path = record.local_path.resolve()
+        if not _is_managed_media_path(storage_path, resolved_media_path):
+            continue
+        if active_media_ref_counts.get(resolved_media_path, 0) != 0:
+            continue
+        media_mtime = _record_mtime(resolved_media_path)
+        if media_mtime is None or media_mtime >= cutoff:
+            continue
+        removable_media_paths.add(resolved_media_path)
+    return removable_media_paths, expired_records_deleted
+
+
+def _prune_orphan_incoming_media(
+    storage_path: Path,
+    *,
+    cutoff: datetime,
+    active_media_paths: set[Path],
+) -> tuple[int, int]:
+    """Delete old incoming-media files that are no longer referenced."""
+    incoming_media_dir = _incoming_media_dir(storage_path)
+    if not incoming_media_dir.is_dir():
+        return 0, 0
+
+    removed = 0
+    incoming_media_files_scanned = 0
+    for media_path in incoming_media_dir.iterdir():
+        if not media_path.is_file():
+            continue
+        incoming_media_files_scanned += 1
+        resolved_media_path = media_path.resolve()
+        if resolved_media_path in active_media_paths:
+            continue
+        media_mtime = _record_mtime(media_path)
+        if media_mtime is None or media_mtime >= cutoff:
+            continue
+        try:
+            media_path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed, incoming_media_files_scanned
+
+
+def _cleanup_attachment_storage(storage_path: Path) -> None:
+    """Prune expired attachment metadata and managed media files."""
+    started = time.monotonic()
+    attachments_dir = _attachments_dir(storage_path)
+    if not attachments_dir.is_dir():
+        return
+
+    cutoff = datetime.now(UTC) - timedelta(days=_ATTACHMENT_RETENTION_DAYS)
+    metadata_files_scanned, active_media_paths, active_media_ref_counts, expired_records, stale_record_paths = (
+        _collect_attachment_cleanup_state(
+            storage_path,
+            cutoff=cutoff,
+        )
+    )
+    stale_records_removed = _remove_paths(stale_record_paths)
+
+    removable_media_paths, expired_records_deleted = _prune_expired_records_and_collect_removable_media_paths(
+        storage_path,
+        cutoff=cutoff,
+        expired_records=expired_records,
+        active_media_ref_counts=active_media_ref_counts,
+    )
+    expired_media_removed = _remove_paths(list(removable_media_paths))
+    orphan_media_removed, incoming_media_files_scanned = _prune_orphan_incoming_media(
+        storage_path,
+        cutoff=cutoff,
+        active_media_paths=active_media_paths,
+    )
+    logger.debug(
+        "Attachment cleanup completed",
+        stale_records_removed=stale_records_removed,
+        expired_records_removed=len(expired_records),
+        expired_records_deleted=expired_records_deleted,
+        expired_media_removed=expired_media_removed,
+        orphan_media_removed=orphan_media_removed,
+        active_media_paths=len(active_media_paths),
+        metadata_files_scanned=metadata_files_scanned,
+        incoming_media_files_scanned=incoming_media_files_scanned,
+        files_scanned=metadata_files_scanned + incoming_media_files_scanned,
+        files_deleted=(stale_records_removed + expired_records_deleted + expired_media_removed + orphan_media_removed),
+        total_cleanup_duration_ms=(time.monotonic() - started) * 1000,
+    )
+
+
+def _claim_due_attachment_cleanup(storage_path: Path) -> tuple[Path, object, datetime] | None:
+    """Atomically claim one due storage path for attachment cleanup."""
+    resolved_storage_path = storage_path.resolve()
+    cleanup_started_at = datetime.now(UTC)
+    with _attachment_cleanup_lock:
+        if resolved_storage_path in _attachment_cleanup_claim_tokens_by_storage_path:
+            return None
+        last_cleanup_time = _last_cleanup_time_by_storage_path.get(resolved_storage_path)
+        if last_cleanup_time is not None and cleanup_started_at - last_cleanup_time < _CLEANUP_INTERVAL:
+            return None
+        claim_token = object()
+        _attachment_cleanup_claim_tokens_by_storage_path[resolved_storage_path] = claim_token
+    return resolved_storage_path, claim_token, cleanup_started_at
+
+
+def _release_attachment_cleanup_claim(storage_path: Path, claim_token: object) -> None:
+    """Release a cleanup claim only when it still belongs to this cleanup."""
+    with _attachment_cleanup_lock:
+        if _attachment_cleanup_claim_tokens_by_storage_path.get(storage_path) is claim_token:
+            del _attachment_cleanup_claim_tokens_by_storage_path[storage_path]
+
+
+def _claim_attachment_cleanup_schedule(storage_path: Path) -> object | None:
+    """Claim the cheap pre-worker scheduling slot for one storage path."""
+    now = datetime.now(UTC)
+    with _attachment_cleanup_lock:
+        if storage_path in _attachment_cleanup_scheduled_tokens_by_storage_path:
+            return None
+        if storage_path in _attachment_cleanup_claim_tokens_by_storage_path:
+            return None
+        last_cleanup_time = _last_cleanup_time_by_storage_path.get(storage_path)
+        if last_cleanup_time is not None and now - last_cleanup_time < _CLEANUP_INTERVAL:
+            return None
+        schedule_token = object()
+        _attachment_cleanup_scheduled_tokens_by_storage_path[storage_path] = schedule_token
+    return schedule_token
+
+
+def _release_attachment_cleanup_schedule(storage_path: Path, schedule_token: object) -> None:
+    """Release a pre-worker scheduling slot owned by this cleanup task."""
+    with _attachment_cleanup_lock:
+        if _attachment_cleanup_scheduled_tokens_by_storage_path.get(storage_path) is schedule_token:
+            del _attachment_cleanup_scheduled_tokens_by_storage_path[storage_path]
+
+
+def _claim_and_cleanup_attachment_storage(storage_path: Path) -> None:
+    """Resolve, claim, and clean one storage path in the calling worker."""
+    try:
+        cleanup_claim = _claim_due_attachment_cleanup(storage_path)
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+        return
+
+    if cleanup_claim is None:
+        return
+
+    resolved_storage_path, claim_token, cleanup_started_at = cleanup_claim
+    try:
+        _cleanup_attachment_storage(resolved_storage_path)
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+    else:
+        with _attachment_cleanup_lock:
+            if _attachment_cleanup_claim_tokens_by_storage_path.get(resolved_storage_path) is claim_token:
+                _last_cleanup_time_by_storage_path[resolved_storage_path] = cleanup_started_at
+    finally:
+        _release_attachment_cleanup_claim(resolved_storage_path, claim_token)
+
+
+async def _run_scheduled_attachment_cleanup(storage_path: Path, schedule_token: object) -> None:
+    """Run one claimed cleanup job and release its scheduling slot."""
+    try:
+        await run_blocking_until_complete(_claim_and_cleanup_attachment_storage, storage_path)
+    finally:
+        _release_attachment_cleanup_schedule(storage_path, schedule_token)
+
+
+def _finish_attachment_cleanup_task(task: asyncio.Task[object]) -> None:
+    """Log an unexpected scheduling failure after worker cleanup completes."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Attachment cleanup background task failed")
+
+
+def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
+    """Run cleanup at most once per ``_CLEANUP_INTERVAL``."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _claim_and_cleanup_attachment_storage(storage_path)
+        return
+
+    scheduling_started = time.monotonic()
+    schedule_token = _claim_attachment_cleanup_schedule(storage_path)
+    if schedule_token is None:
+        return
+    cleanup_task = create_background_task(
+        _run_scheduled_attachment_cleanup(storage_path, schedule_token),
+        name="attachment_cleanup",
+        owner=_ATTACHMENT_CLEANUP_TASK_OWNER,
+        log_exceptions=False,
+        # The sweep covers every room's records, so it must not log under the turn that scheduled it.
+        context=Context(),
+    )
+    cleanup_task.add_done_callback(_finish_attachment_cleanup_task)
+    logger.debug(
+        "Attachment cleanup scheduled",
+        event_loop_scheduling_duration_ms=(time.monotonic() - scheduling_started) * 1000,
+    )
+
+
+async def wait_for_attachment_cleanup_tasks() -> bool:
+    """Drain attachment cleanup tasks during orderly process shutdown."""
+    return await wait_for_background_tasks(owner=_ATTACHMENT_CLEANUP_TASK_OWNER)
+
+
+def _retain_media_copy(
+    source_fd: int,
+    media_fd: int,
+    media_name: str,
+    *,
+    expected_sha256: str | None = None,
+) -> tuple[int, str]:
+    """Hash an open regular file and publish it as managed media unless it already is that file.
+
+    With ``expected_sha256``, a copy whose bytes differ is discarded before publication.
+    """
+    try:
+        already_retained = os.path.samestat(
+            os.fstat(source_fd),
+            os.stat(media_name, dir_fd=media_fd, follow_symlinks=False),
+        )
+    except FileNotFoundError:
+        already_retained = False
+    hasher = hashlib.sha256()
+    size_bytes = 0
+    output_context = (
+        contextlib.nullcontext() if already_retained else atomic_write_file_at(media_fd, media_name, file_mode=0o600)
+    )
+    with os.fdopen(source_fd, "rb", closefd=False) as source, output_context as output:
+        for chunk in iter(partial(source.read, 65536), b""):
+            size_bytes += len(chunk)
+            if media_size_exceeds_limit(size_bytes):
+                message = "Attachment file exceeds the retained media size limit."
+                raise ValueError(message)
+            hasher.update(chunk)
+            if output is not None:
+                output.write(chunk)
+        if expected_sha256 is not None and hasher.hexdigest() != expected_sha256:
+            message = "Attachment file no longer matches its recorded content."
+            raise ValueError(message)
+    return size_bytes, hasher.hexdigest()
+
+
+def _retained_media_name(attachment_id: str, mime_type: str | None) -> str:
+    return f"{attachment_id}{_extension_from_mime_type(mime_type)}"
+
+
+def _prepare_retained_media_dir(storage_path: Path) -> Path:
+    media_dir = _incoming_media_dir(storage_path)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    return media_dir.resolve()
+
+
+def _persist_attachment_record(storage_path: Path, attachment_id: str, payload: dict[str, Any]) -> bool:
+    """Atomically publish one attachment metadata record."""
+    record_path = _attachment_record_path(storage_path, attachment_id)
+    tmp_path = record_path.with_suffix(f".{uuid4().hex[:8]}.tmp")
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(record_path)
+    except OSError:
+        logger.exception("Failed to persist attachment metadata", attachment_id=attachment_id)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def register_local_attachment(
+    storage_path: Path,
+    local_path: Path,
+    *,
+    kind: _AttachmentKind,
+    source_root: Path | None = None,
+    attachment_id: str | None = None,
+    filename: str | None = None,
+    mime_type: str | None = None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+    source_event_id: str | None = None,
+    sender: str | None = None,
+    event_timestamp: int | None = None,
+    cleanup_loop: asyncio.AbstractEventLoop | None = None,
+    retained_name: str | None = None,
+) -> AttachmentRecord | None:
+    """Retain a local file in primary-owned media storage and persist its metadata.
+
+    The file is opened below ``source_root`` (default: its parent) without following
+    links. The record references only the retained copy, so later reads and sends
+    never reopen a caller path that sandboxed code may be able to replace.
+    ``retained_name`` names that copy instead of the attachment ID.
+    """
+    resolved_attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
+    normalized_attachment_id = normalize_attachment_id(resolved_attachment_id)
+    if normalized_attachment_id is None:
+        logger.warning("Invalid attachment ID", attachment_id=resolved_attachment_id)
+        return None
+
+    source_directory = local_path.parent if source_root is None else source_root
+    media_name = retained_name or _retained_media_name(normalized_attachment_id, mime_type)
+    try:
+        media_dir = _prepare_retained_media_dir(storage_path)
+        with (
+            open_regular_file_within_root(source_directory, local_path.relative_to(source_directory)) as source_fd,
+            open_directory_within_root(media_dir) as media_fd,
+        ):
+            size_bytes, content_sha256 = _retain_media_copy(source_fd, media_fd, media_name)
+    except (OSError, ValueError) as exc:
+        logger.warning("Attachment file cannot be retained", path=str(local_path), kind=kind, error=str(exc))
+        return None
+
+    record = AttachmentRecord(
+        attachment_id=normalized_attachment_id,
+        local_path=media_dir / media_name,
+        kind=kind,
+        # The retained copy has an opaque name, so keep the source name for display.
+        filename=filename or local_path.name,
+        mime_type=mime_type,
+        room_id=room_id,
+        thread_id=thread_id,
+        source_event_id=source_event_id,
+        sender=sender,
+        event_timestamp=event_timestamp,
+        size_bytes=size_bytes,
+        content_sha256=content_sha256,
+        created_at=datetime.now(UTC).isoformat(),
+    )
+
+    if not _persist_attachment_record(storage_path, normalized_attachment_id, record.to_payload()):
+        return None
+
+    if cleanup_loop is None:
+        _maybe_cleanup_attachment_storage(storage_path)
+    else:
+        # Hand off inside the worker, even when its awaiting caller was cancelled.
+        cleanup_loop.call_soon_threadsafe(_maybe_cleanup_attachment_storage, storage_path)
+
+    return record
+
+
+def _validate_attachment_directories(root: Path, root_fd: int, directories: dict[str, int]) -> None:
+    """Reject a replaced storage directory before handing out a retained path."""
+    if not os.path.samestat(os.fstat(root_fd), root.stat(follow_symlinks=False)) or any(
+        not os.path.samestat(os.fstat(descriptor), os.stat(name, dir_fd=root_fd, follow_symlinks=False))
+        for name, descriptor in directories.items()
+    ):
+        message = "Attachment storage directory changed during retention."
+        raise OSError(message)
+
+
+def register_bytes_attachment(
+    storage_path: Path,
+    payload: bytes,
+    *,
+    kind: _AttachmentKind,
+    mime_type: str,
+    attachment_id: str,
+    filename: str,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+) -> AttachmentRecord | None:
+    """Retain tool-produced bytes without reopening paths that can change during registration.
+
+    The retained file name derives from the attachment ID, so ``filename`` is display metadata only.
+    """
+    normalized_id = normalize_attachment_id(attachment_id)
+    if normalized_id is None or media_payload_exceeds_limit(payload):
+        return None
+    try:
+        root = storage_path.resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        with contextlib.ExitStack() as descriptors:
+            root_fd = descriptors.enter_context(open_directory_within_root(root))
+            directories: dict[str, int] = {}
+            media_directory = _incoming_media_dir(root).name
+            metadata_directory = _attachments_dir(root).name
+            for name in (media_directory, metadata_directory):
+                directories[name] = descriptors.enter_context(
+                    open_directory_within_root(root_fd, name, create=True, mode=0o700),
+                )
+            media_fd, metadata_fd = directories[media_directory], directories[metadata_directory]
+            local_path = _incoming_media_dir(root) / _retained_media_name(normalized_id, mime_type)
+            record_path = _attachment_record_path(root, normalized_id)
+            record = AttachmentRecord(
+                attachment_id=normalized_id,
+                local_path=local_path,
+                kind=kind,
+                filename=filename,
+                mime_type=mime_type,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=sender,
+                size_bytes=len(payload),
+                content_sha256=hashlib.sha256(payload).hexdigest(),
+                created_at=datetime.now(UTC).isoformat(),
+            )
+            try:
+                _validate_attachment_directories(root, root_fd, directories)
+                atomic_write_bytes_at(media_fd, local_path.name, payload, file_mode=0o600)
+                _validate_attachment_directories(root, root_fd, directories)
+                atomic_write_bytes_at(
+                    metadata_fd,
+                    record_path.name,
+                    json.dumps(record.to_payload(), sort_keys=True).encode("utf-8"),
+                    file_mode=0o600,
+                )
+                _validate_attachment_directories(root, root_fd, directories)
+            except OSError:
+                for name, descriptor in ((local_path.name, media_fd), (record_path.name, metadata_fd)):
+                    with contextlib.suppress(OSError):
+                        os.unlink(name, dir_fd=descriptor)
+                raise
+    except OSError:
+        logger.exception("Failed to retain attachment bytes", attachment_id=normalized_id)
+        return None
+    # Normal attachment registration also prunes these managed records.
+    # Do not start path-based cleanup after releasing the pinned directories.
+    return record
+
+
+def _filename_for_media_event(event: FileOrVideoMessageEvent | ImageMessageEvent | AudioMessageEvent) -> str | None:
+    """Extract best-effort filename from Matrix media event content."""
+    content = event.source.get("content", {})
+    filename = content.get("filename")
+    if isinstance(filename, str) and filename:
+        return filename
+    return event.body if isinstance(event.body, str) and event.body else None
+
+
+async def _register_media_attachment(
+    *,
+    storage_path: Path,
+    event_id: str,
+    media_bytes: bytes | None,
+    mime_type: str | None,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    event_timestamp: int | None,
+    filename: str | None,
+    kind: _AttachmentKind,
+) -> AttachmentRecord | None:
+    """Persist media bytes and register a scoped attachment record."""
+    if media_payload_exceeds_limit(media_bytes):
+        logger.warning(
+            "Matrix media attachment exceeds byte limit",
+            event_id=event_id,
+            kind=kind,
+            size_bytes=len(media_bytes) if media_bytes is not None else None,
+        )
+        return None
+    local_media_path = await _store_media_bytes_locally_async(
+        storage_path,
+        media_bytes,
+        mime_type,
+    )
+    if local_media_path is None:
+        return None
+    return await run_blocking_until_complete(
+        partial(
+            register_local_attachment,
+            storage_path,
+            local_media_path,
+            kind=kind,
+            attachment_id=_attachment_id_for_event(event_id),
+            filename=filename,
+            mime_type=mime_type,
+            room_id=room_id,
+            thread_id=thread_id,
+            source_event_id=event_id,
+            sender=sender,
+            event_timestamp=event_timestamp,
+            cleanup_loop=asyncio.get_running_loop(),
+            retained_name=local_media_path.name,
+        ),
+    )
+
+
+async def _register_file_or_video_attachment(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: FileOrVideoMessageEvent,
+) -> AttachmentRecord | None:
+    """Persist a file/video event and register it as an attachment record."""
+    media_bytes = await download_media_bytes(client, event)
+    kind: _AttachmentKind = "video" if is_video_message_event(event) else "file"
+    return await _register_media_attachment(
+        storage_path=storage_path,
+        event_id=event.event_id,
+        media_bytes=media_bytes,
+        mime_type=media_mime_type(event),
+        room_id=room_id,
+        thread_id=thread_id,
+        sender=event.sender,
+        event_timestamp=event.server_timestamp,
+        filename=_filename_for_media_event(event),
+        kind=kind,
+    )
+
+
+async def _register_image_attachment(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: ImageMessageEvent,
+    image_bytes: bytes | None = None,
+) -> AttachmentRecord | None:
+    """Persist an image event and register it as an attachment record."""
+    media_bytes = image_bytes if image_bytes is not None else await download_media_bytes(client, event)
+    mime_resolution = resolve_image_mime_type(media_bytes, media_mime_type(event))
+    if mime_resolution.is_mismatch:
+        logger.warning(
+            "Image attachment MIME mismatch between Matrix metadata and payload bytes",
+            event_id=event.event_id,
+            declared_mime_type=mime_resolution.declared_mime_type,
+            detected_mime_type=mime_resolution.detected_mime_type,
+        )
+    return await _register_media_attachment(
+        storage_path=storage_path,
+        event_id=event.event_id,
+        media_bytes=media_bytes,
+        mime_type=mime_resolution.effective_mime_type,
+        room_id=room_id,
+        thread_id=thread_id,
+        sender=event.sender,
+        event_timestamp=event.server_timestamp,
+        filename=_filename_for_media_event(event),
+        kind="image",
+    )
+
+
+async def register_audio_attachment(
+    storage_path: Path,
+    *,
+    event_id: str,
+    audio_bytes: bytes | None,
+    mime_type: str | None,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    event_timestamp: int | None = None,
+    filename: str | None = None,
+) -> AttachmentRecord | None:
+    """Persist raw audio bytes and register them as an attachment record."""
+    return await _register_media_attachment(
+        storage_path=storage_path,
+        event_id=event_id,
+        media_bytes=audio_bytes,
+        mime_type=mime_type,
+        room_id=room_id,
+        thread_id=thread_id,
+        sender=sender,
+        event_timestamp=event_timestamp,
+        filename=filename,
+        kind="audio",
+    )
+
+
+def _discard_unadoptable_legacy_record(storage_path: Path, attachment_id: str) -> None:
+    """Remove a legacy record that can never verify, so retention sweeps and later turns stop retrying it."""
+    with contextlib.suppress(OSError):
+        _attachment_record_path(storage_path, attachment_id).unlink(missing_ok=True)
+
+
+def _adopt_legacy_attachment(
+    storage_path: Path,
+    attachment_id: str,
+    raw_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Retain a verified copy of a legacy record's in-place file and point the record at it."""
+    source = legacy_attachment_source(raw_payload)
+    if source is None:
+        logger.warning("Legacy attachment record has no verifiable source", attachment_id=attachment_id)
+        _discard_unadoptable_legacy_record(storage_path, attachment_id)
+        return None
+    source_path, content_sha256 = source
+    mime_type = raw_payload.get("mime_type")
+    media_name = _retained_media_name(attachment_id, mime_type if isinstance(mime_type, str) else None)
+    source_opened = False
+    try:
+        with open_legacy_attachment_source(source_path) as source_fd:
+            source_opened = True
+            media_dir = _prepare_retained_media_dir(storage_path)
+            with open_directory_within_root(media_dir) as media_fd:
+                _retain_media_copy(source_fd, media_fd, media_name, expected_sha256=content_sha256)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Legacy attachment cannot be adopted into retained media",
+            attachment_id=attachment_id,
+            path=str(source_path),
+            error=str(exc),
+        )
+        # Rejected bytes, a missing source, or a link on its path never becomes the registered file again;
+        # retained-media errors, such as a full disk while copying, leave the record for a later load.
+        if isinstance(exc, ValueError) or (
+            not source_opened and exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}
+        ):
+            _discard_unadoptable_legacy_record(storage_path, attachment_id)
+        return None
+    filename = raw_payload.get("filename")
+    adopted_payload = {
+        **raw_payload,
+        "local_path": str(media_dir / media_name),
+        "filename": filename if isinstance(filename, str) and filename else source_path.name,
+    }
+    if not _persist_attachment_record(storage_path, attachment_id, adopted_payload):
+        return None
+    logger.info("Adopted legacy attachment into retained media", attachment_id=attachment_id)
+    return adopted_payload
+
+
+def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord | None:  # noqa: PLR0911
+    """Load attachment metadata by ID."""
+    normalized_attachment_id = normalize_attachment_id(attachment_id)
+    if normalized_attachment_id is None:
+        return None
+    record_path = _attachment_record_path(storage_path, normalized_attachment_id)
+    if not record_path.is_file():
+        return None
+
+    try:
+        raw_payload = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Failed to parse attachment metadata", attachment_id=normalized_attachment_id)
+        return None
+
+    if not isinstance(raw_payload, dict):
+        return None
+
+    kind = raw_payload.get("kind")
+    local_path = raw_payload.get("local_path")
+    if kind not in {"audio", "file", "image", "video"} or not isinstance(local_path, str) or not local_path:
+        return None
+    # Only primary-owned retained media is readable; a path elsewhere may be replaceable by sandboxed code.
+    if Path(local_path).parent != _incoming_media_dir(storage_path.resolve()):
+        adopted_payload = _adopt_legacy_attachment(storage_path, normalized_attachment_id, raw_payload)
+        if adopted_payload is None:
+            return None
+        raw_payload = adopted_payload
+        local_path = adopted_payload["local_path"]
+
+    filename = raw_payload.get("filename")
+    mime_type = raw_payload.get("mime_type")
+    room_id = raw_payload.get("room_id")
+    thread_id = raw_payload.get("thread_id")
+    source_event_id = raw_payload.get("source_event_id")
+    sender = raw_payload.get("sender")
+    event_timestamp = raw_payload.get("event_timestamp")
+    size_bytes = raw_payload.get("size_bytes")
+    content_sha256 = raw_payload.get("content_sha256")
+    created_at = raw_payload.get("created_at")
+
+    return AttachmentRecord(
+        attachment_id=normalized_attachment_id,
+        local_path=Path(local_path),
+        kind=kind,
+        filename=filename if isinstance(filename, str) else None,
+        mime_type=mime_type if isinstance(mime_type, str) else None,
+        room_id=room_id if isinstance(room_id, str) else None,
+        thread_id=thread_id if isinstance(thread_id, str) else None,
+        source_event_id=source_event_id if isinstance(source_event_id, str) else None,
+        sender=sender if isinstance(sender, str) else None,
+        event_timestamp=event_timestamp if isinstance(event_timestamp, int) else None,
+        size_bytes=size_bytes if isinstance(size_bytes, int) else None,
+        content_sha256=content_sha256 if isinstance(content_sha256, str) else None,
+        created_at=created_at if isinstance(created_at, str) else None,
+    )
+
+
+def resolve_attachments(storage_path: Path, attachment_ids: list[str]) -> list[AttachmentRecord]:
+    """Resolve a list of attachment IDs into records, preserving order."""
+    resolved: list[AttachmentRecord] = []
+    seen_ids: set[str] = set()
+    for attachment_id in attachment_ids:
+        normalized_attachment_id = normalize_attachment_id(attachment_id)
+        if normalized_attachment_id is None or normalized_attachment_id in seen_ids:
+            continue
+        seen_ids.add(normalized_attachment_id)
+        record = load_attachment(storage_path, normalized_attachment_id)
+        if record is not None:
+            resolved.append(record)
+    return resolved
+
+
+def filter_attachments_for_context(
+    attachment_records: list[AttachmentRecord],
+    *,
+    room_id: str,
+    thread_id: str | None = None,
+) -> tuple[list[AttachmentRecord], list[str]]:
+    """Keep only attachments registered for the current room/thread context."""
+    allowed_records: list[AttachmentRecord] = []
+    rejected_attachment_ids: list[str] = []
+    for record in attachment_records:
+        if record.room_id != room_id:
+            rejected_attachment_ids.append(record.attachment_id)
+            continue
+
+        if thread_id is None:
+            if record.thread_id is None:
+                allowed_records.append(record)
+            else:
+                rejected_attachment_ids.append(record.attachment_id)
+            continue
+
+        if record.thread_id == thread_id:
+            allowed_records.append(record)
+        else:
+            rejected_attachment_ids.append(record.attachment_id)
+    return allowed_records, rejected_attachment_ids
+
+
+def _load_existing_context_attachment(
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event_id: str,
+) -> AttachmentRecord | None:
+    existing_record = load_attachment(storage_path, _attachment_id_for_event(event_id))
+    if (
+        existing_record is not None
+        and existing_record.room_id == room_id
+        and existing_record.thread_id == thread_id
+        and existing_record.local_path.is_file()
+    ):
+        return existing_record
+    return None
+
+
+def _media_event_from_thread_history_message(
+    room_id: str,
+    message: ResolvedVisibleMessage,
+) -> FileOrVideoMessageEvent | ImageMessageEvent | None:
+    content = {key: value for key, value in message.content.items() if isinstance(key, str)}
+    # An edit can replace the media, so each visible revision is its own attachment.
+    return parse_matrix_media_dispatch_event_source(
+        {
+            "content": content,
+            "event_id": message.visible_event_id,
+            "origin_server_ts": message.timestamp,
+            "room_id": room_id,
+            "sender": message.sender,
+            "type": "m.room.message",
+        },
+    )
+
+
+async def register_matrix_media_attachment(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: FileOrVideoMessageEvent | ImageMessageEvent,
+    image_bytes: bytes | None = None,
+) -> AttachmentRecord | None:
+    """Persist an image/file/video Matrix event and register an attachment record."""
+    if is_image_message_event(event):
+        return await _register_image_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+            image_bytes=image_bytes,
+        )
+    if is_file_or_video_message_event(event):
+        return await _register_file_or_video_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+    msg = f"Expected image, file, or video event, got {type(event).__name__}"
+    raise TypeError(msg)
+
+
+async def _register_thread_history_media_attachment(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: FileOrVideoMessageEvent | ImageMessageEvent,
+    may_download: bool,
+) -> tuple[AttachmentRecord | None, bool]:
+    """Return the event's attachment record, if any, and whether a download was attempted for it."""
+    existing_record = await run_blocking_until_complete(
+        partial(
+            _load_existing_context_attachment,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_id=event.event_id,
+        ),
+    )
+    if existing_record is not None:
+        return existing_record, False
+
+    failure_key = (str(storage_path), event.event_id)
+    retry_at = _failed_history_media_retry_at.get(failure_key)
+    if not may_download or (retry_at is not None and retry_at > time.monotonic()):
+        return None, False
+    record = await register_matrix_media_attachment(
+        client,
+        storage_path,
+        room_id=room_id,
+        thread_id=thread_id,
+        event=event,
+    )
+    if record is None:
+        _failed_history_media_retry_at[failure_key] = time.monotonic() + _FAILED_HISTORY_MEDIA_RETRY_SECONDS
+        _failed_history_media_retry_at.move_to_end(failure_key)
+        while len(_failed_history_media_retry_at) > _MAX_FAILED_HISTORY_MEDIA:
+            _failed_history_media_retry_at.popitem(last=False)
+    else:
+        _failed_history_media_retry_at.pop(failure_key, None)
+    return record, True
+
+
+async def register_thread_history_media_attachments(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> list[str]:
+    """Register unannotated image/file/video events visible in thread history.
+
+    The turn's download budget goes to the newest media first, so older media
+    that keeps failing cannot hold back newer media turn after turn.
+    """
+    attachment_ids: list[str] = []
+    seen_attachment_ids: set[str] = set()
+    downloads = 0
+    for message in reversed(thread_history):
+        if not _thread_history_message_in_scope(message, thread_id):
+            continue
+        event = _media_event_from_thread_history_message(room_id, message)
+        if event is None:
+            continue
+        attachment_record, downloaded = await _register_thread_history_media_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+            may_download=downloads < _MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN,
+        )
+        downloads += downloaded
+        if attachment_record is None or attachment_record.attachment_id in seen_attachment_ids:
+            continue
+        seen_attachment_ids.add(attachment_record.attachment_id)
+        attachment_ids.append(attachment_record.attachment_id)
+    return attachment_ids[::-1]
+
+
+async def resolve_thread_attachment_ids(  # noqa: PLR0911
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str,
+    thread_root_event: nio.Event | None = None,
+    thread_history: Sequence[ResolvedVisibleMessage] = (),
+) -> list[str]:
+    """Resolve attachment IDs from thread root event metadata or media payload.
+
+    When *thread_root_event* is provided, the ``room_get_event`` round-trip
+    is skipped, avoiding duplicate homeserver calls when the caller already
+    fetched the root event for image/audio resolution.
+    A media root edited in *thread_history* is left to thread-history
+    registration, because the root event still holds the original revision.
+    """
+    started = time.monotonic()
+    event_kind = "provided" if thread_root_event is not None else "fetched"
+
+    def finish(attachment_ids: list[str], outcome: str) -> list[str]:
+        emit_elapsed_timing(
+            "response_payload.resolve_thread_attachment_ids",
+            started,
+            room_id=room_id,
+            thread_id=thread_id,
+            outcome=outcome,
+            event_kind=event_kind,
+            attachment_count=len(attachment_ids),
+        )
+        return attachment_ids
+
+    if any(
+        message.event_id == thread_id
+        and message.visible_event_id != thread_id
+        and _media_event_from_thread_history_message(room_id, message) is not None
+        for message in thread_history
+    ):
+        return finish([], "edited_media_root")
+
+    event = thread_root_event
+    if event is None:
+        response = await client.room_get_event(room_id, thread_id)
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return finish([], "event_fetch_miss")
+        event = response.event
+
+    event_attachment_ids = parse_attachment_ids_from_event_source(event.source)
+    if event_attachment_ids:
+        return finish(event_attachment_ids, "event_metadata")
+
+    # Check for an existing attachment record for any media root (file, video,
+    # image, or audio). Audio roots are registered by the voice handler and
+    # can be looked up but not re-downloaded here.
+    if not is_matrix_media_dispatch_event(event) and not is_audio_message_event(event):
+        return finish([], "not_media_root")
+
+    existing_record = await run_blocking_until_complete(
+        partial(
+            _load_existing_context_attachment,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_id=event.event_id,
+        ),
+    )
+    if existing_record is not None:
+        return finish([existing_record.attachment_id], "existing_record")
+
+    # Audio roots cannot be re-registered here (the voice handler owns that
+    # lifecycle), so only existing audio records are returned above.
+    record = (
+        await register_matrix_media_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+        if is_matrix_media_dispatch_event(event)
+        else None
+    )
+    if record is None:
+        return finish([], "no_record")
+    return finish([record.attachment_id], "registered_record")
+
+
+def attachments_for_tool_payload(attachment_records: list[AttachmentRecord]) -> list[dict[str, Any]]:
+    """Render attachment records for tool JSON responses."""
+    payloads: list[dict[str, Any]] = []
+    for record in attachment_records:
+        payload = record.to_payload()
+        payload["available"] = record.local_path.is_file()
+        payloads.append(payload)
+    return payloads

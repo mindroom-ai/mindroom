@@ -97,6 +97,11 @@ def test_saas_default_config_is_generated_from_config_init() -> None:
     assert "worker_tools" not in generated["defaults"]
     # The platform upgrades hosted instances, so tenants must not be told to update themselves.
     assert "update_awareness" not in yaml.dump(generated)
+    # `script` would run in the primary pod, and tenants cannot log in to matrix-mcp.
+    assert "mcp_servers" not in generated
+    assert not {"script", "mcp_matrix_mcp"} & {
+        tool["name"] if isinstance(tool, dict) else tool for tool in generated["agents"]["mind"]["tools"]
+    }
     # Hosted agents learn workspace skills by default.
     assert all(agent["skill_learning"] == {"enabled": True} for agent in generated["agents"].values())
 

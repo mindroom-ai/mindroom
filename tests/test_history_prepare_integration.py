@@ -16,7 +16,6 @@ from agno.run.agent import RunOutput
 from agno.session.summary import SessionSummary
 from defusedxml.ElementTree import fromstring
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
@@ -39,6 +38,7 @@ from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
     FakeModel,
@@ -63,7 +63,10 @@ from tests.identity_helpers import persist_entity_accounts
 def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=2)
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")):
+    with patch(
+        "mindroom.providers.model_loading.get_model_instance",
+        return_value=FakeModel(id="fake-model", provider="fake"),
+    ):
         agent = create_agent(
             "test_agent",
             config,
@@ -132,7 +135,7 @@ def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
         runtime_paths,
     )
     with patch(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         return_value=FakeModel(id="fake-model", provider="fake"),
     ) as mock_get:
         create_agent(

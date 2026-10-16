@@ -43,20 +43,15 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from agno.db.base import SessionType
+from agno.db.sqlite import SqliteDb
+from agno.db.utils import deserialize_session_json_fields
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from sqlalchemy import JSON, column, inspect, select, table
 
-from mindroom.agent_storage import (
-    get_agent_session,
-    get_team_session,
-    replace_runs,
-    runs_without,
-    save_compaction_usage,
-    save_runs,
-)
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -69,10 +64,18 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history import archive
+from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.types import HistoryScope, HistoryScopeState
-from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.agent_storage import (
+    get_agent_session,
+    get_team_session,
+    replace_runs,
+    runs_without,
+    save_compaction_usage,
+    save_runs,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -258,7 +261,44 @@ def consume_pending_force_compaction_scope(
     return True
 
 
-def has_pending_force_compaction_scope(
+def has_queued_force_compaction(storage: BaseDb, session_id: str, scope: HistoryScope) -> bool:
+    """Return whether one scope must compact before its next run.
+
+    Reads only the session row's ``metadata`` and ``session_data``, where both
+    requests live. ``get_session`` would also decode every stored run, which
+    takes seconds on a long session.
+    """
+    if not isinstance(storage, SqliteDb):
+        msg = "Reading queued compaction requires SQLite session storage"
+        raise TypeError(msg)
+    sessions = table(
+        storage.session_table_name,
+        column("session_id"),
+        column("metadata", JSON),
+        column("session_data", JSON),
+    )
+    with storage.db_engine.connect() as connection:
+        if not inspect(connection).has_table(storage.session_table_name):
+            return False
+        row = connection.execute(
+            select(sessions.c.metadata, sessions.c.session_data).where(sessions.c.session_id == session_id),
+        ).first()
+    if row is None:
+        return False
+    fields = deserialize_session_json_fields(dict(row._mapping))
+    # Holds only the two fields the requests are parsed from; it is never saved.
+    session = (TeamSession if scope.kind == "team" else AgentSession)(
+        session_id=session_id,
+        metadata=fields["metadata"],
+        session_data=fields["session_data"],
+    )
+    return read_scope_state(session, scope).force_compact_before_next_run or _has_pending_force_compaction_scope(
+        session,
+        scope,
+    )
+
+
+def _has_pending_force_compaction_scope(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
 ) -> bool:

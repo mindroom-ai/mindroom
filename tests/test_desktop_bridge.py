@@ -47,6 +47,7 @@ from mindroom.desktop.protocol import (
 from mindroom.desktop.reply_fitting import _WIDEST_METRICS
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.desktop_helpers import (
     _LARGE_OUTPUT,
     _LONGEST_SESSION_ID,
@@ -747,13 +748,16 @@ async def _check_until_finished(
 
 
 async def _wait_until_gone(pid: int) -> None:
-    for _ in range(400):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        await asyncio.sleep(0.01)
-    pytest.fail(f"process {pid} survived")
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        pytest.fail(f"process {pid} survived")
 
 
 def _kill_recorded(pid_file: Path) -> None:
@@ -837,7 +841,8 @@ async def test_revoke_and_bridge_stop_kill_running_handles(transport: AsyncMock,
     bridge = _local_bridge(shell=shell)
     pid_file = tmp_path / "leader.pid"
     try:
-        await _handle(bridge, _event(_run_shell(f"echo $$ > {pid_file}; sleep 30", tmp_path)))
+        # The leader outlives any wait below, so only a real kill makes it disappear.
+        await _handle(bridge, _event(_run_shell(f"echo $$ > {pid_file}; sleep 3600", tmp_path)))
         handle = _response(transport).result["handle"]
         assert isinstance(handle, str)
         leader = int(pid_file.read_text())

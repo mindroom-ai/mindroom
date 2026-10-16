@@ -59,10 +59,20 @@ Recipients can be agents or teams.
 An agent can address itself only when a human requested the current turn; otherwise use `run_subagent` for a fresh self-run.
 
 Sending returns immediately with the delivered event IDs; read the conversation later to see the response.
+The recipient's reply wakes the sender only when it mentions the sender.
 
 Thread-mode recipients accept `new_thread=True` or an explicit `thread_id`.
 A task sent to a thread-mode recipient on the room timeline starts the response thread at the task message, and the returned `thread_id` identifies it.
 Room-mode recipients share the room timeline: omit thread options or pass `thread_id="room"`; asking for a separate thread returns an error before anything is sent.
+
+Add the bundled `agent-conversations` skill to agents that talk to each other, so they wake only the agent that should act, say who receives each answer, and finish without extra replies:
+
+```yaml
+agents:
+  lead:
+    tools: [matrix_message]
+    skills: [agent-conversations]
+```
 
 ## Choosing the conversation
 

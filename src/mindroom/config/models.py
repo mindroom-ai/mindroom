@@ -19,8 +19,8 @@ from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
 )
-from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import validate_service_name
+from mindroom.credentials.manager import validate_service_name
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
@@ -81,6 +81,27 @@ class CoalescingConfig(BaseModel):
         description=(
             "Sliding window in milliseconds that a media-tailed live batch waits for more "
             "attachments or a trailing caption; batches ending in text dispatch immediately"
+        ),
+    )
+
+
+class BackgroundToolJobsConfig(BaseModel):
+    """Generic execution policy for registered toolkits; its feature switch and exclusions are pinned at startup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False, description="Enable managed tool waits and durable jobs; requires restart.")
+    exclude_toolkits: list[str] = Field(
+        default_factory=lambda: ["shell"],
+        description="Registered toolkit names that keep their own waiting behavior; requires restart.",
+    )
+    approval_wait_timeout: float | None = Field(
+        default=300,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Seconds a reply waits for the approval of a gated call that runs as a job before continuing while the job "
+            "waits; null waits until the decision or a newer message."
         ),
     )
 
@@ -650,6 +671,41 @@ def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict
     return normalized
 
 
+class ModelPricing(BaseModel):
+    """Provider prices in USD per million tokens."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: float = Field(ge=0, allow_inf_nan=False, description="USD per million uncached input tokens")
+    output: float = Field(
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million output tokens, including reasoning tokens",
+    )
+    cache_read: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million cache-read input tokens; unset uses the input price",
+    )
+    cache_write: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million cache-write input tokens; unset uses the input price",
+    )
+
+    @property
+    def cache_read_price(self) -> float:
+        """Return the cache-read price, charging the input price when none is set."""
+        return self.input if self.cache_read is None else self.cache_read
+
+    @property
+    def cache_write_price(self) -> float:
+        """Return the cache-write price, charging the input price when none is set."""
+        return self.input if self.cache_write is None else self.cache_write
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -694,6 +750,10 @@ class ModelConfig(BaseModel):
             "stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their "
             "built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit"
         ),
+    )
+    pricing: ModelPricing | None = Field(
+        default=None,
+        description="Provider prices in USD per million tokens, used to measure spend against budgets",
     )
 
     @field_validator("display_name")

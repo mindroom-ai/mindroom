@@ -12,13 +12,13 @@ from agno.media import File, Image
 from agno.models.anthropic import Claude
 from agno.models.message import Message
 
-from mindroom import claude_prompt_cache
-from mindroom.attachment_media import attachment_records_to_media
-from mindroom.attachments import AttachmentRecord
+from mindroom.attachments.media import attachment_records_to_media
+from mindroom.attachments.storage import AttachmentRecord
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.model_loading import get_model_instance
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.providers import claude_prompt_cache
+from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -202,3 +202,65 @@ def test_bedrock_uses_a_smaller_inline_media_budget_than_vertex(tmp_path: Path) 
     for blocks in (bedrock_blocks, vertex_blocks):
         [image] = [block for block in blocks if block["type"] == "image"]
         assert base64.b64decode(image["source"]["data"]) == _PNG
+
+
+def test_image_over_the_per_image_limit_becomes_a_text_note_on_bedrock_and_vertex(tmp_path: Path) -> None:
+    """Bedrock and Vertex accept 5 MB base64 images and the direct API 10 MB, so only they describe a larger one."""
+    # 4 MB raw encodes to about 5.3 MB of base64: over the 5 MB limit, under the direct API's 10 MB.
+    large_png = _PNG + b"\0" * 4_000_000
+
+    def turn() -> Message:
+        return Message(
+            role="user",
+            content="Compare the charts.",
+            images=[Image(content=_PNG, mime_type="image/png"), Image(content=large_png, mime_type="image/png")],
+        )
+
+    direct_client, direct_bodies = _capturing_http_client()
+    _loaded_claude(tmp_path, "anthropic", direct_client).response(messages=[turn()], compression_manager=None)
+    bedrock_client, bedrock_bodies = _capturing_http_client()
+    _loaded_claude(tmp_path, "bedrock_claude", bedrock_client).response(messages=[turn()], compression_manager=None)
+    vertex_payload = MindroomVertexAIClaude(
+        id="claude-opus-5",
+        project_id="demo-project",
+        region="us-central1",
+    )._request_input_kwargs([turn()], tools=None, response_format=None, compress_tool_results=False)
+
+    direct_blocks = _user_blocks(direct_bodies[0])
+    assert [base64.b64decode(block["source"]["data"]) for block in direct_blocks if block["type"] == "image"] == [
+        _PNG,
+        large_png,
+    ]
+    for blocks in (_user_blocks(bedrock_bodies[0]), vertex_payload["messages"][0]["content"]):
+        [image] = [block for block in blocks if block["type"] == "image"]
+        assert base64.b64decode(image["source"]["data"]) == _PNG
+        [note] = [block["text"] for block in blocks if block["type"] == "text" and "not sent inline" in block["text"]]
+        assert "per-image limit" in note
+        assert "get_attachment without view" in note
+
+
+def test_text_documents_count_toward_the_request_size_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain-text document whose escaped JSON would push the request past the provider body limit is described."""
+    monkeypatch.setattr(claude_prompt_cache, "MAX_INLINE_MEDIA_BYTES", 2000)
+    http_client, bodies = _capturing_http_client()
+    model = _loaded_claude(tmp_path, "anthropic", http_client)
+    turn = Message(
+        role="user",
+        content="Compare the exports.",
+        files=[
+            File(content=b"Short notes.", mime_type="text/plain", filename="notes.txt"),
+            # 1.8 KB of raw text that escapes to 2.25 KB of JSON on the wire.
+            File(content=b"a,b\n" * 450, mime_type="text/csv", filename="export.csv"),
+        ],
+    )
+
+    model.response(messages=[turn], compression_manager=None)
+
+    blocks = _user_blocks(bodies[0])
+    [document] = [block for block in blocks if block["type"] == "document"]
+    assert document["source"] == {"type": "text", "media_type": "text/plain", "data": "Short notes."}
+    [note] = [block["text"] for block in blocks if block["type"] == "text" and "not sent inline" in block["text"]]
+    assert "size limit" in note

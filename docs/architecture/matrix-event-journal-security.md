@@ -1,260 +1,62 @@
 # Matrix event-journal security and plaintext lifecycle
 
 MindRoom decrypts Matrix conversations to answer them, and answering them takes more than one process lifetime, so some of that plaintext has to be written down.
-
-This document says exactly which plaintext is durable, which principal owns it, and what removes it.
-
-The storage described here is `src/mindroom/event_journal/`: the journal of admitted events, the visible-message projection built from them, and the delivery outbox that answers them.
+This page records which plaintext the event journal (`src/mindroom/event_journal/`) keeps durably, which principal owns it, and what removes it.
+Where the journal is stored is documented in [Event Journal configuration](../deployment/storage.md#event-journal).
 
 ## Principal binding
 
-One database holds every bot in a runtime, and every content row carries a `principal_id` column that separates them.
+One database holds every bot in a runtime, and its content rows are owned by a principal: the agent name joined to the full Matrix user ID.
+The Matrix account alone is not a sufficient owner, because two agents can be configured onto one account and neither should read the other's conversations.
+Room membership is not the boundary either, because two bots joined to the same room can hold different encryption keys and therefore decrypt different subsets of it.
 
-The principal is the agent name joined to the full Matrix user ID, which is narrower than the Matrix account alone.
-
-Two agents can be configured onto one Matrix account, and neither should read the other's conversations, so the account by itself is not a sufficient owner.
-
-Room membership is not the authorization boundary either, because two bots joined to the same room can hold different encryption keys and therefore decrypt different subsets of it.
-
-`EventJournalStore.principal()` hands out a `PrincipalStore` with the principal bound into the object.
-
-Ordinary event, conversation, membership, and delivery operations take their principal from that bound view rather than accepting another bot's principal as an argument.
-
-Internal approval coordination is an explicit exception: the router owns Matrix approval cards, while the responding entity owns the paused continuation.
-Card reservation accepts the continuation's principal and validates its waiting state, generation, publication claim, complete exact-call set, and the card owner's membership epoch.
-A decision follows the persisted card-to-continuation relationship to update that owner's exact call.
-The runtime decision path also checks trusted card identity and transport sender, the expected human approver, and current responder access.
-This is a privileged in-process coordination boundary, not an API for ordinary conversation readers to select another principal.
-
-Turn records use a separate ownership rule, scoped to the agent name alone.
-
-A turn record is the proof that a message was already answered, which stays true across a re-login, and scoping it per principal would make a bot that reauthenticates under a new Matrix ID answer every outstanding message a second time.
-
-That record still holds conversation-derived text in `record_json`, so it is content and not merely bookkeeping.
-
-Both backends run the same schema statements.
-
-PostgreSQL is not partitioned into per-principal namespaces.
-Both backends use principal-bound predicates for ordinary reads and mutations, while approval coordination validates persisted domain relationships that can cross the card and continuation owners.
-The shared database is not a separate database namespace or connection per principal.
+Approval coordination is the one place that deliberately crosses principals, because the router owns approval cards while the responding entity owns the paused continuation.
+It does so only by validating persisted card-to-continuation relationships inside the runtime, and it is not a way for ordinary conversation readers to select another principal.
+Turn records are scoped to the agent name alone, so a re-login under a new Matrix ID does not answer every outstanding message again, and they still hold conversation-derived text.
 
 ## Where durable plaintext lives
 
-`journal_events.source_json` holds the full decrypted Matrix event, and only while that event still owes semantic work.
-
-Settlement overwrites it with the empty string in the same statement that marks the work terminal, because the row's remaining job is to prove the event already produced its one turn.
-
-The row is kept and the payload is dropped, which is the smallest thing that survives a restart without retaining every message the bot has ever seen.
-
-A context-only event never carries a payload at all: it is admitted already settled, so the field it would have used is written empty from the start.
-
-Unreadable historical ciphertext keeps only a settled envelope identity, without its encrypted payload.
-A later decrypted observation may populate conversation context but cannot make that identity actionable.
-Unreadable live and recovered ciphertext remains Nio's recovery responsibility and never owns application journal work; runtime diagnostics issue authorized, best-effort key requests and warnings separately.
-
-`visible_messages.content_json` holds the current visible body of one logical message and is the general long-lived conversation-body projection.
-
-The projection keeps no edit history, so an edit overwrites the body in that projection; other tables can retain the copies described below.
-
-`interactive_questions.question_json` stores immutable per-revision question text and options, including superseded revisions needed for source replay and consumption proof.
-Changing the visible revision can deactivate a prompt without erasing its stored revision.
-Redacting a question revision deletes its row; deleting the logical visible message, including membership cleanup, cascades to all of its question revisions.
-
-`turn_records.record_json` retains durable turn identity, outcome, and regeneration content.
-
-Its optional `prepared_voice_sources` field holds the prepared body, Matrix content, batching scope, and preparation/echo thread needed to retry a voice source without repeating transcription.
-It stores no live ingress timing objects and is not copied into agent run metadata.
-Turn completion or source redaction removes the checkpoint, including redaction through a source's discovery alias.
-Checkpoint-only records remain protected while their journal source is unsettled; after settlement they follow ordinary turn-record age and count cleanup.
-Records with other unfinished turn facts retain the existing recovery protections.
-
-`unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
-Redacting the held edit itself clears its payload immediately but retains its identity and ordering until the target arrives, so the target requests a refetch for any earlier surviving revision.
-
-`matrix_delivery_outbox.payload_json` holds each ordinary response or tool-approval event frozen before it is sent.
-`matrix_delivery_outbox.result_json` stores local completion and recovery facts separately from Matrix wire content.
-Those facts can include final response text and interactive metadata; rows an earlier release wrote can also hold source prompts inside a serialized prepared edit turn record.
-
-Acknowledgement does not clear ordinary delivery payload or result columns, and projection redaction or membership cleanup does not by itself remove those copies.
-Ordinary acknowledged and retired rows currently have no general TTL or payload-pruning path.
-Specialized approval cleanup and withdrawal of a superseded, unattempted `INITIAL` delivery are separate cases; they do not provide general ordinary-response pruning.
-
-`approval_cards` retains only the durable delivery reference, exact continuation and tool-call identity, and membership epoch while a card is actionable.
-
-`approval_continuations.context_json` may contain the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` required to resume an approved call.
-What the paused reply showed lives in its reply record (below).
-The continuation is deleted after terminal delivery or cleanup, and a foreign-key cascade removes its calls.
-
-`reply_messages` keeps each AI reply's presentation in `presentation_json`, and what its latest progress edit may have shown in `possibly_shown_json`: the visible text, the tool trace, and structured team presentation state.
-`reply_tool_calls.entry_json` keeps each tool call a reply's span made, recorded before the tool runs, with its argument preview and, once it returns, its result preview, whether or not the reply shows tool calls.
-These tool traces contain redacted argument and result previews plus internal tool-call and member-scope identities; those internal identities are omitted from Matrix message metadata.
-A finished reply, its spans, and their tool calls are deleted with the handled-turn retention.
-
-The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
-The shared terminal-payload boundary removes full-argument transport fields and pending duration choices before freezing edits, preserving the compact argument preview and grant acknowledgement.
-Trusted model receipts distinguish human authorization, including matching timed windows, from policy-only approval without claiming that every authorized call displayed a card.
-
-`approval_grants` retains timed-grant identity, fixed expiry, revocation state, and scope after the originating card retires.
-Its `resolution_json` contains the terminal card body and redacted argument preview needed to publish a later revocation edit.
-The approval manager's startup and deadline sweeps run journal-owned grant maintenance, which clears that payload when an unrevoked grant expires, either owning principal leaves its room membership, or the revocation edit is acknowledged.
-A revocation accepted before expiry retains its delivery material past expiry until acknowledgement; an expired grant cannot accept a new revocation.
-Unacknowledged outbox payloads remain under the existing delivery-recovery rules, and acknowledged revocation outbox rows are removed once the grant payload is cleared.
-Compact grant identity remains so duplicate actions cannot recreate a window or its retired acknowledgement.
-`approval_grant_cards` retains scope and exact-call identity while eligible cards are pending and keeps the grant reference for automatically decided calls as audit facts.
-Grant maintenance deletes retired scope rows that were never associated with a grant.
-`approval_grant_locks` contains only the principal identity used to serialize grant changes, maintenance, and card reservation.
-`scheduled_call_approvals` retains each scheduled call: task, room, thread, requester, agent, toolkit, tool, the unredacted arguments as canonical JSON, task fingerprint, send time, approver, approved scope, its one claim and outcome, and the receipt it published; Matrix task state and the trigger carry only the task ID.
-Its card and decision live in the detached exact-call ledger shared with background scripts, and a claim spends the approval and reserves its receipt in one commit before the call runs, so an interrupted call has an unknown outcome and is never retried.
-Grant maintenance prunes a binding 30 days after its send time or withdrawal once its card has retired and any receipt is settled.
-
-The [automatic Nio 1.0 migration](../deployment/upgrades.md#upgrading-to-nio-10) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.
-
-## Sidecar previews are never stored as bodies
-
-A message too large for a single Matrix event carries a truncated preview in its content and its real text in an attached file.
-
-The projection refuses to store that shape: it writes no body and a refresh token instead, which is the same row shape a redaction leaves behind.
-
-Storing the preview would hand every reader a body that looks complete and is not, and no reader could tell the difference by inspecting it.
+- `journal_events.source_json` holds the full decrypted event only while that event still owes semantic work.
+  Settlement blanks it and keeps the row as proof the event already had its one turn, and context-only events are admitted settled without a payload.
+  Unreadable history keeps only a settled envelope identity without its ciphertext, so a later decryption can add conversation context but never make the event actionable.
+- `visible_messages.content_json` holds the current visible body of each logical message and keeps no edit history.
+  Redacting a message deletes its row and its held edits, and redacting the revision on screen clears the body in the same transaction, after which no read returns that message until a refetch installs the server's replacement.
+  The truncated preview carried by a message too large for one Matrix event is never stored as its body.
+  A departure deletes the departing principal's projection for that room, including its held edits and redaction tombstones, while other bots in the room keep theirs.
+- `unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
+  Redacting the held edit itself clears its payload but keeps its identity and ordering until the target arrives.
+- `interactive_questions.question_json` holds question text and options for every revision, including superseded revisions needed for source replay and consumption proof.
+  Redacting a revision deletes its row, and deleting the logical message deletes all of its revisions.
+- `turn_records.record_json` holds turn identity, outcome, and regeneration content.
+  Its prepared voice-source checkpoint (prepared body, Matrix content, batching scope, and echo thread) lets a retry skip transcription, is never copied into agent run metadata, and is removed on turn completion or source redaction, including redaction through a source's discovery alias.
+  Records holding a conversation's redaction tombstone are kept indefinitely, because history cleanup derives from them; other records follow age and count retention once no unsettled source or unfinished turn fact protects them.
+- `matrix_delivery_outbox.payload_json` holds each response or tool-approval event frozen before it is sent, `result_json` holds local completion facts, which can include final response text and interactive metadata, and `reply_row_json` can hold the reply text that delivery writes.
+  Rows an earlier release wrote can also hold source prompts inside a serialized prepared edit turn record.
+- `approval_continuations.context_json` can hold the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` needed to resume an approved call, and `approval_continuation_calls.reason` can hold the text of a human's denial reply; both are deleted with the continuation after terminal delivery or cleanup.
+- `reply_messages.presentation_json` and `possibly_shown_json` hold what each AI reply shows and what its latest progress edit may have shown: visible text, tool trace, and team presentation state.
+  `reply_messages.owed_write_json` can hold reply text a Matrix write still owes, and `reply_spans.rollback_json` holds the presentation a claimed span restores if it rolls back.
+  `reply_tool_calls.entry_json` records every tool call before it runs, with its redacted argument preview and, once it returns, its redacted result preview, whether or not the reply shows tool calls.
+  These traces also carry internal tool-call and member-scope identities that Matrix message metadata omits, and a finished reply, its spans, and its tool calls are deleted with handled-turn retention.
+- Approval terminal edits are frozen outbox stages stripped of full-argument transport fields and pending duration choices, keeping the compact argument preview and grant acknowledgement.
+  `approval_cards`, `approval_action_tombstones`, `approval_grant_cards`, and `approval_grant_locks` hold identities, scopes, and references rather than conversation text.
+- `approval_grants.resolution_json` holds the terminal card body and redacted argument preview needed to publish a later revocation edit.
+  Grant maintenance clears it when an unrevoked grant expires, when either owning principal leaves the room, or when the revocation edit is acknowledged, and acknowledged revocation outbox rows are removed once it is cleared.
+  A revocation accepted before expiry keeps its material until acknowledged, and compact grant identity remains so a duplicate action cannot recreate a window.
+- `scheduled_call_approvals.arguments_json` holds each scheduled call's unredacted arguments beside its task, room, thread, requester, and approver, while Matrix task state and the trigger carry only the task ID.
+  Grant maintenance deletes the row 30 days after its send time or withdrawal, once its card has retired and any receipt is settled.
+- `background_approval_calls.reason` can hold the text of a human's denial reply to a scheduled-call or script approval card, and it is deleted with its scheduled-call binding or when retention prunes its script run, never before the shared card retires.
+- `tool_jobs.job_json` keeps each background job's snapshot: its owner and conversation, the tool name, the call's unredacted arguments, a result summary of at most 500 characters, and for a background subagent the child's saved state.
+  `tool_jobs.result_payload_json` keeps the job's full result, including returned media bytes, up to 64 MiB of encoded JSON.
+  An ended job is deleted 30 days after its last change, read or not, once its turn has finished and no approval in its session is pending; redacting the message that started it or the bot leaving the room does not delete it sooner.
+  `tool_job_owner` holds only the runtime generation that owns the jobs.
 
 There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
 
-Resolved content carries no sidecar metadata of its own, so storing the resolution is what clears the debt, and nothing has to remember to clear it separately.
+## Known gaps
 
-The file is downloaded as a stream that stops at 2 MiB, so a reference to a larger file never holds more than that in memory.
-
-A file that cannot be read settles the debt as a plain text message holding the preview and a notice that the rest could not be loaded, with no sidecar or file reference, so neither later reads nor thread attachment collection download it again.
-
-Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
-
-Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 16 MiB of stored content, newest messages first.
-
-Decoding stored JSON can take about 10 times its size in memory for a list of short strings or numbers, and about 45 times for nested empty containers.
-So a page also stops once its estimated decoded size passes 64 MiB, counting its bytes plus 96 bytes per JSON array, 192 per JSON object and 56 per comma or colon.
-
-A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
-Such a thread loses what needs its complete history, as one past the row limit does: untagged continuation in rooms with several responders, thread summaries, and mid-turn judgment.
-
-A page always keeps at least one message, even when that message alone is over the budget.
-
-A message still waiting for its file costs that budget nothing, so a strict read refetches the waiting messages newest first and stops once what it stored passes 16 MiB.
-Without that stop, one read would download and store every file the waiting messages name, even when they all name one large file.
-The page then ends at or before the last message refetched, and the waiting messages behind it are refetched only when a reader asks for that history.
-This stop bounds stored content, not downloads: a file that cannot be read settles its message to the preview and a notice, so each waiting message that names such a file still costs one download.
-
-## Edits
-
-An edit is applied only when its sender matches the sender already recorded on the visible row, compared through that row's inline `sender` column.
-
-An edit from anyone else changes nothing, so a foreign replacement cannot rewrite another account's message.
-
-Held edits are keyed by target and sender together for the same reason.
-
-Without the sender in the key, anyone in the room could send an edit for a message that has not arrived yet and evict the author's real edit before it could apply.
-
-Revisions are ordered by `(origin_server_ts, event_id)` rather than by timestamp alone, because two edits can share a millisecond and clients disagree about clocks.
-
-The tie-break makes every replica of the projection converge on the same visible revision, whether it was built from live events or reconstructed from the server.
-
-## Redaction
-
-A redaction records its tombstone before it projects anything.
-
-That order is what stops an original or an edit arriving later — a real ordering on a server that backfills — from resurrecting content the sender deleted.
-
-Redacting a logical message deletes its visible row and every edit held against it.
-
-Redacting the revision currently on screen instead clears `content_json` in the same transaction and sets a refresh token, so the body stops being readable before the server-authoritative replacement is known.
-
-A conversation read reports such a message as owing a refetch and omits it from the returned messages, and there is no read that returns it, whether or not the caller is willing to wait.
-
-A point refetch is refused if the revision it chose has since been tombstoned, which the refresh token alone cannot cover: redacting a revision that is not the one on screen moves no token but does record a tombstone.
-
-A refetch is also refused if the content it returns still holds a sidecar preview, because installing it would satisfy the debt with the very text the debt was raised about.
-
-A refetch ignores relations it cannot read unless their cleartext relation makes them the original sender's edit of the message, because no other relation can replace what is on screen.
-
-When such an edit cannot be read and is newer than every readable revision, the refetch installs the newest readable revision with a notice that a later edit could not be read.
-
-Keeping the debt instead would let the edit's sender make every strict read of that conversation fail for as long as the edit stays unreadable.
-
-When the screen held an edit and the relation walk stops at its event ceiling before finding any edit by the original sender, the refetch installs the original with the same notice, because other members' relations can push the sender's surviving edits past the ceiling.
-
-Membership fencing deliberately does not sweep up pending redactions along with unanswerable turns, because a redaction still owes real cleanup in durable turn and session state, and settling it silently would let redacted content survive in later context.
-
-Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
-An event for which no turn has recorded a room is tombstoned in the turn ledger only when the journal admitted it in the redaction's room, so a redaction cannot mark another room's event as handled, even before the bot sees it there.
-
-## Membership
-
-Every projected row carries the `membership_epoch` it was written under.
-
-Rejoining a room can expose a different slice of history than the bot saw before, so state built under the old membership is dropped rather than merged with the new view.
-
-A departure advances the epoch and deletes that room's conversation hydration, visible messages, unresolved edits, redaction tombstones, and history-recovery obligation.
-
-It deletes them for the departing principal only, so another bot still joined to the same room keeps everything it holds.
-
-Journal rows survive the fence on purpose, because they are the proof that an event already had its turn, and their payloads were released at settlement.
-
-Turn-backed rows still pending are settled as intentionally ignored, since their answers would be refused by the epoch check forever and leaving them pending would replay the model run on every recovery pass.
-
-Unattempted non-card outbox rows for the room are retired, because they answer a conversation the bot has left and must never be sent after rejoin.
-
-An unattempted approval card is instead deleted with its provably invisible delivery stages, while an attempted visible card follows the approval cleanup policy below.
-
-The retired row remains as the delivery identity tombstone, so a source-less multi-stage turn cannot enqueue `INITIAL` before departure and let `FINAL` adopt the later membership.
-
-An attempted row is kept instead because its outcome is unknown and its immutable payload, transaction, and sending-device facts are required for exact recovery.
-
-Same-device recovery reuses the frozen transaction, while changed-device recovery first reconciles room history and then either replays an ordinary response or retains actionable approval debt.
-
-When a visible approval card deliberately survives a router departure, its card row and both delivery stages atomically transfer to the successor membership so the already-decided terminal edit remains recoverable.
-
-The actionable root card is retained after an inconclusive changed-device scan, while its immutable terminal edit may be replayed because it cannot create another approval action.
-
-Old-membership recovery never sends and retires the row only after exact reconciliation proves its physical event absent.
-
-Every outbox row freezes the membership epoch that authorized it, and acknowledgement projects its Matrix event only while that exact membership remains current.
-
-Nio owns durable recognition of local membership commands and their later sync echoes.
-MindRoom applies the producer's ordered membership transitions once per admitted batch and retains application tenure fencing without a second echo protocol.
-A departure advances that tenure and invalidates work authorized by the ended membership.
-A rejoin retains the advanced tenure, so a late acknowledgement cannot project an older delivery into the new conversation.
-Response shutdown can prove intentional termination from the exact retained sources: each must be settled and belong to an older membership epoch than its own room's current epoch.
-That proof uses one journal recovery snapshot and needs no final delivery; missing sources, current-epoch settlement, and sources spanning ended and current memberships do not qualify.
-
-## Restart
-
-`matrix_sync_consumers` binds each principal's durable consumer generation to one nio stream and records its next batch sequence.
-The owned session reuses that consumer identity on restart and rejects a mismatched stream binding.
-Soft-logout renewal requests the existing Matrix device and preserves its keys, stream, producer positions, and delivery identity.
-Hard logout, missing device storage, or changed account/device identity stops startup; automatic device replacement is unsupported.
-Initial login persists its exact credentials after the local store exists and before journal binding, so interrupted startup can reopen the same device.
-A batch committed before a crash is recognized on redelivery, while its pending semantic work remains recoverable from the journal.
-Nio owns the receive cursor; MindRoom's continuity file contains only pending join/decrypt fences.
-The one-time upgrade resets pre-durable membership tenures and converts v2/v3 continuity files to v4 while preserving pending join/decrypt fences.
-
-## Storage and connections
-
-SQLite stores the journal at `<storage>/tracking/event_journal.db`, which is `mindroom_data/tracking/event_journal.db` with the default storage root.
-PostgreSQL requires `event_journal.backend: postgres` and a connection URL; see [Event Journal configuration](../deployment/storage.md#event-journal) for URL resolution and restart requirements.
-
-That URL carries a password, so it is excluded from the backend's dataclass representation, which would otherwise reach logs and tracebacks without anyone choosing to print it.
-
-SQL structure is authored only from fixed internal constants and controlled fragments, including fixed column selections, cursor clauses, placeholder counts, and PRAGMA values.
-
-Both rewrites are plain string substitution, so both refuse a statement that places their marker adjacent to a string literal rather than trusting that no statement does.
-
-Caller-provided values are bound by the driver in every case and are never formatted into SQL.
-
-### Auxiliary Matrix operations
-
-Dashboard room reads, schedule state operations, and avatar updates use saved access tokens on HTTP-only clients with encryption disabled and no store path.
-They never provision an account, renew credentials, or open the owned crypto store.
-Dashboard departures use the running bot's serialized durable membership gateway.
-CLI thread exports require the running API and borrow the same clients and principal-bound readers used by workspace exports.
-The CLI sends its config and storage paths so the API can reject a request aimed at a different installation before writing files.
-Manual exports hold existing runtime replacement admission; automatic workspace exports are cancelled and drained at every replacement boundary.
-Both paths drain their hydration tasks before borrowed clients or journals close.
-The workspace runner queues a fresh full pass and waits for replacement admission to reopen before borrowing current owners.
+- Principals are separated by principal-bound queries only: neither SQLite nor PostgreSQL gives a principal its own database, schema, or connection.
+- Outbox copies outlive the conversation: acknowledgement does not clear `payload_json` or `result_json`, projection redaction and membership cleanup do not remove them, and ordinary acknowledged or retired rows have no TTL or payload pruning.
+  Only approval cleanup and withdrawal of a superseded, unattempted `INITIAL` delivery delete rows.
+- A conversation read stops at a stored-content and an estimated decoded-size budget, because anyone who can post can make every message in a thread name one large file.
+  A thread past that budget loses what needs its complete history, as one past the row limit does: untagged continuation in rooms with several responders, thread summaries, and mid-turn judgment.
+- For messages still waiting on their file, that budget bounds what a strict read stores, not what it downloads: each waiting message that names an unreadable file still costs one download.

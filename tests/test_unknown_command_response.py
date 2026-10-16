@@ -10,6 +10,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.users import AgentMatrixUser
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -201,10 +202,12 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
 
         # Check if this is trying to create a thread from a thread message incorrectly
         if thread_id == "$test_event":  # Using the event itself as thread root
-            # This would trigger the Matrix error
+            # The homeserver would reject this send.
             error_messages.append("Cannot start threads from an event with a relation")
-            msg = "M_UNKNOWN Cannot start threads from an event with a relation"
-            raise nio.SendRetryError(msg)
+            return MatrixDeliveryFailure(
+                MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE,
+                "M_UNKNOWN Cannot start threads from an event with a relation",
+            )
 
         sent_messages.append(
             {

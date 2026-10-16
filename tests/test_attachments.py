@@ -17,11 +17,11 @@ import nio
 import pytest
 import structlog
 
-import mindroom.attachments as attachments_module
+import mindroom.attachments.storage as attachments_module
 import mindroom.matrix.media as media_module
-from mindroom.attachment_ids import merge_attachment_ids, unique_attachment_ids
-from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
-from mindroom.attachments import (
+from mindroom.attachments.ids import merge_attachment_ids, unique_attachment_ids
+from mindroom.attachments.media import attachment_records_to_media, resolve_scoped_attachments
+from mindroom.attachments.storage import (
     AttachmentRecord,
     _attachment_id_for_event,
     _attachment_ids_for_visible_message,
@@ -217,7 +217,7 @@ async def test_register_media_attachment_offloads_registration_work(tmp_path: Pa
             event_timestamp=event_timestamp,
         )
 
-    with patch("mindroom.attachments.register_local_attachment", side_effect=fake_register_local_attachment):
+    with patch("mindroom.attachments.storage.register_local_attachment", side_effect=fake_register_local_attachment):
         record = await _register_media_attachment(
             storage_path=tmp_path,
             event_id="$media_event",
@@ -786,7 +786,7 @@ def test_attachment_cleanup_does_not_retry_unadoptable_legacy_record(tmp_path: P
     else:
         source.write_bytes(b"edited")
 
-    with patch("mindroom.attachments.logger.warning") as mock_warning:
+    with patch("mindroom.attachments.storage.logger.warning") as mock_warning:
         attachments_module._cleanup_attachment_storage(storage)
         attachments_module._cleanup_attachment_storage(storage)
 
@@ -813,7 +813,7 @@ def test_load_attachment_keeps_legacy_record_after_retained_media_write_failure(
     original_record = record_path.read_text(encoding="utf-8")
 
     with patch(
-        "mindroom.attachments.atomic_write_file_at",
+        "mindroom.attachments.storage.atomic_write_file_at",
         side_effect=OSError(error_number, os.strerror(error_number)),
     ):
         assert load_attachment(storage, "att_legacy") is None
@@ -916,8 +916,8 @@ def test_register_local_attachment_throttles_cleanup_runs(tmp_path: Path) -> Non
     file_path.write_text("payload", encoding="utf-8")
 
     with (
-        patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}),
-        patch("mindroom.attachments._cleanup_attachment_storage") as mock_cleanup,
+        patch("mindroom.attachments.storage._last_cleanup_time_by_storage_path", {}),
+        patch("mindroom.attachments.storage._cleanup_attachment_storage") as mock_cleanup,
     ):
         first = register_local_attachment(
             tmp_path,
@@ -1022,8 +1022,8 @@ async def test_attachment_cleanup_does_not_inherit_triggering_turn_log_context(t
         cleanup_log_contexts.append(structlog.contextvars.get_contextvars())
 
     with (
-        patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}),
-        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=capture_log_context),
+        patch("mindroom.attachments.storage._last_cleanup_time_by_storage_path", {}),
+        patch("mindroom.attachments.storage._cleanup_attachment_storage", side_effect=capture_log_context),
         bound_log_context(requester_id="@alice:example.org", room_id="!room:example.org"),
     ):
         registered = register_local_attachment(
@@ -1059,11 +1059,11 @@ async def test_attachment_cleanup_deduplicates_in_flight_storage_path(tmp_path: 
         assert release_cleanup.wait(timeout=1)
 
     with (
-        patch("mindroom.attachments._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
-        patch("mindroom.attachments._attachment_cleanup_scheduled_tokens_by_storage_path", scheduled_cleanups),
-        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup),
+        patch("mindroom.attachments.storage._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
+        patch("mindroom.attachments.storage._attachment_cleanup_scheduled_tokens_by_storage_path", scheduled_cleanups),
+        patch("mindroom.attachments.storage._cleanup_attachment_storage", side_effect=blocking_cleanup),
         patch(
-            "mindroom.attachments.create_background_task",
+            "mindroom.attachments.storage.create_background_task",
             wraps=attachments_module.create_background_task,
         ) as mock_create_background_task,
     ):
@@ -1104,10 +1104,10 @@ async def test_attachment_cleanup_failure_retries_without_throttle_or_stranded_c
     cleanup_claims: dict[Path, object] = {}
 
     with (
-        patch("mindroom.attachments._last_cleanup_time_by_storage_path", last_cleanup_times),
-        patch("mindroom.attachments._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
+        patch("mindroom.attachments.storage._last_cleanup_time_by_storage_path", last_cleanup_times),
+        patch("mindroom.attachments.storage._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
         patch(
-            "mindroom.attachments._cleanup_attachment_storage",
+            "mindroom.attachments.storage._cleanup_attachment_storage",
             side_effect=[RuntimeError("first cleanup fails"), None],
         ) as mock_cleanup,
     ):
@@ -1161,7 +1161,7 @@ async def test_media_registration_cancellation_hands_cleanup_to_shutdown_owner(t
 
     with (
         patch.object(Path, "replace", new=blocking_replace),
-        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup),
+        patch("mindroom.attachments.storage._cleanup_attachment_storage", side_effect=blocking_cleanup),
     ):
         registration_task = asyncio.create_task(
             _register_media_attachment(
@@ -1232,7 +1232,7 @@ async def test_media_registration_returns_before_cleanup_and_deduplicates_scans(
             kind=kind,
         )
 
-    with patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup):
+    with patch("mindroom.attachments.storage._cleanup_attachment_storage", side_effect=blocking_cleanup):
         registration = asyncio.create_task(register("$first"))
         drain = None
         try:
@@ -1290,7 +1290,7 @@ def test_attachment_cleanup_logs_scan_and_deletion_counts(tmp_path: Path) -> Non
 
     with (
         patch.object(Path, "unlink", new=unlink_after_concurrent_removal),
-        patch("mindroom.attachments.logger.debug") as mock_debug,
+        patch("mindroom.attachments.storage.logger.debug") as mock_debug,
     ):
         attachments_module._cleanup_attachment_storage(tmp_path)
 
@@ -1565,7 +1565,7 @@ def test_resolve_scoped_attachments_emits_payload_timing(tmp_path: Path) -> None
     assert allowed is not None
     assert rejected is not None
 
-    with patch("mindroom.attachment_media.emit_elapsed_timing") as mock_emit:
+    with patch("mindroom.attachments.media.emit_elapsed_timing") as mock_emit:
         resolved_records = resolve_scoped_attachments(
             tmp_path,
             ["att_ok", "att_wrong_thread"],
@@ -1592,7 +1592,7 @@ async def test_resolve_thread_attachment_ids_emits_payload_timing(tmp_path: Path
     event = MagicMock()
     event.source = {"content": {"com.mindroom.attachment_ids": ["att_root"]}}
 
-    with patch("mindroom.attachments.emit_elapsed_timing") as mock_emit:
+    with patch("mindroom.attachments.storage.emit_elapsed_timing") as mock_emit:
         attachment_ids = await resolve_thread_attachment_ids(
             AsyncMock(),
             tmp_path,
@@ -1646,7 +1646,7 @@ def test_register_local_attachment_prunes_expired_managed_media(tmp_path: Path) 
     fresh_media_path = tmp_path / "incoming_media" / "fresh.bin"
     fresh_media_path.write_bytes(b"fresh")
     # Reset the cleanup throttle so the second registration triggers cleanup.
-    with patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}):
+    with patch("mindroom.attachments.storage._last_cleanup_time_by_storage_path", {}):
         fresh_record = register_local_attachment(
             tmp_path,
             fresh_media_path,
@@ -1686,7 +1686,7 @@ def test_register_local_attachment_prunes_expired_metadata_without_deleting_unma
     fresh_media_path.parent.mkdir(parents=True, exist_ok=True)
     fresh_media_path.write_bytes(b"fresh")
     # Reset the cleanup throttle so the second registration triggers cleanup.
-    with patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}):
+    with patch("mindroom.attachments.storage._last_cleanup_time_by_storage_path", {}):
         fresh_record = register_local_attachment(
             tmp_path,
             fresh_media_path,

@@ -21,11 +21,11 @@ from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 from sqlalchemy.exc import IntegrityError
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.history.storage import archive_compaction_chunk
 from mindroom.history.types import HistoryScope
-from mindroom.synthetic_model import SyntheticModel
-from mindroom.usage_stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
+from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

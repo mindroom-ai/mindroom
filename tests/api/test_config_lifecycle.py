@@ -19,7 +19,7 @@ from starlette.requests import Request
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.config.main import Config, load_config
-from mindroom.event_journal_open import record_opened_event_journal
+from mindroom.event_journal.opening import record_opened_event_journal
 
 VALID_CONFIG: dict[str, Any] = {
     "models": {"default": {"provider": "ollama", "id": "test-model"}},

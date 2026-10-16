@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.automations.runner import AutomationRunner
     from mindroom.bot import AgentBot, TeamBot
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -65,6 +66,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def automations(self) -> AutomationRunner: ...  # noqa: D102
 
     @property
+    def budgets(self) -> BudgetMonitor: ...  # noqa: D102
+
+    @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
 
     def hook_message_sender(self) -> HookMessageSender | None: ...  # noqa: D102
@@ -77,6 +81,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""
+        ...
+
+    def open_reply_event_id(self, entity_name: str, room_id: str, thread_id: str | None) -> Awaitable[str | None]:
+        """Return the event of one running managed entity's unfinished reply in one conversation."""
         ...
 
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102

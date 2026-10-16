@@ -13,9 +13,9 @@ from google.genai.types import GenerateContentResponseUsageMetadata
 from groq.types import CompletionUsage
 from groq.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
 
-from mindroom.cerebras_model import MindRoomCerebras
-from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.groq_model import MindRoomGroq
+from mindroom.providers.cerebras_model import MindRoomCerebras
+from mindroom.providers.google_gemini import MindRoomGoogleGemini
+from mindroom.providers.groq_model import MindRoomGroq
 
 
 def test_gemini_output_includes_thinking() -> None:

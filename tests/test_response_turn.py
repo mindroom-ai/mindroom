@@ -21,7 +21,6 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import response_turn as response_turn_module
-from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -52,6 +51,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
 
@@ -1030,7 +1030,6 @@ def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
         "reply_to_event_id": "$reply",
         "requester_id": "@user:hs",
         "correlation_id": "corr-1",
-        "tools_schema": [],
         "model_params": {},
         "matrix_event_id": "$reply",
     }

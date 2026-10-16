@@ -17,12 +17,12 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_execution_scope_override,
 )
 from mindroom.config.main import Config
-from mindroom.credential_policy import credential_service_policy
-from mindroom.credentials import (
+from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
@@ -34,7 +34,7 @@ from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import (
     ensure_tool_registry_loaded,
     export_tools_metadata,
-    resolved_tool_metadata_for_runtime,
+    listable_tool_metadata,
 )
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
@@ -45,7 +45,7 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -445,12 +445,7 @@ async def get_registered_tools(
     based on credentials (including plugin-provided tools).
     """
     config, runtime_paths = _read_tools_runtime_config(request)
-    tool_metadata = resolved_tool_metadata_for_runtime(
-        runtime_paths,
-        config,
-        tolerate_plugin_load_errors=True,
-    )
-    tools = export_tools_metadata(tool_metadata)
+    tools = export_tools_metadata(listable_tool_metadata(runtime_paths, config))
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(
         request,

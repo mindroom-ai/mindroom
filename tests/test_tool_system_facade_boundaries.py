@@ -50,9 +50,11 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
     "deserialize_tool_validation_snapshot",
+    "egress_tool_unavailable",
     "ensure_tool_registry_loaded",
     "export_tools_metadata",
     "get_tool_by_name",
+    "listable_tool_metadata",
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
@@ -405,7 +407,9 @@ def test_tach_breaks_metadata_plugins_cycle_with_private_split_modules() -> None
 
 def test_selected_modules_do_not_hide_tool_system_imports_inside_functions() -> None:
     """Standalone tool-system helpers should be imported at module scope once the cycle is split."""
-    assert "mindroom.tool_system.worker_routing" not in _function_local_imports(SOURCE_ROOT / "credentials.py")
+    assert "mindroom.tool_system.worker_routing" not in _function_local_imports(
+        SOURCE_ROOT / "credentials" / "manager.py",
+    )
     assert "mindroom.tool_system.plugin_identity" not in _function_local_imports(
         SOURCE_ROOT / "hooks" / "context.py",
     )

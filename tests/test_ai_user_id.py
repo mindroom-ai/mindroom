@@ -75,12 +75,12 @@ from mindroom.llm_request_logging import install_llm_request_logging, stream_wit
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
     prepare_memory_and_model_context,
 )
 from mindroom.response_turn import CompletedAttempt, PausedAttempt, ResponsePausedForApproval
-from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -1321,7 +1321,6 @@ class TestUserIdPassthrough:
             },
             "reply_to_event_id": "e1",
             "correlation_id": "e1",
-            "tools_schema": [],
             "model_params": {},
             "matrix_event_id": "e1",
             "matrix_seen_event_ids": ["e1"],
@@ -1877,7 +1876,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.agent_tool_definition_payloads_for_logging", return_value=[]),
         ):
             mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
             chunks = [
@@ -2829,7 +2827,6 @@ class TestUserIdPassthrough:
 
         assert metadata == {
             "reply_to_event_id": "$primary",
-            "tools_schema": [],
             "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$selection", "$unseen"],
@@ -2849,7 +2846,6 @@ class TestUserIdPassthrough:
                 "reply_to_event_id": "$reply",
                 "requester_id": "@alice:localhost",
                 "correlation_id": "corr-existing",
-                "tools_schema": [{"name": "demo"}],
                 "model_params": {"temperature": 0.3},
             },
         )
@@ -2860,7 +2856,6 @@ class TestUserIdPassthrough:
         assert metadata["reply_to_event_id"] == "$reply"
         assert metadata["requester_id"] == "@alice:localhost"
         assert metadata["correlation_id"] == "corr-existing"
-        assert metadata["tools_schema"] == [{"name": "demo"}]
         assert metadata["model_params"] == {"temperature": 0.3}
 
     def test_stream_completed_without_visible_output_accepts_final_body_only_completion(self) -> None:
@@ -2955,17 +2950,21 @@ class TestUserIdPassthrough:
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
-            async for _chunk in stream_agent_response(
-                make_turn_context("general", session_id="session1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-                turn_recorder=recorder,
-            ):
-                pass
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    turn_recorder=recorder,
+                )
+            ]
 
         assert recorder.outcome == "completed"
         assert recorder.assistant_text == "hello from final event"
+
+        assert not any(isinstance(chunk, RunContentEvent) for chunk in chunks)
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_final_event_overwrites_partial_text_in_turn_recorder(

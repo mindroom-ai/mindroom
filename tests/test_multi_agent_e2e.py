@@ -44,7 +44,11 @@ if TYPE_CHECKING:
 def _runtime_paths(storage_path: Path) -> RuntimePaths:
     config_path = storage_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
+    )
 
 
 def _make_config(storage_path: Path) -> Config:
@@ -369,40 +373,37 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         }
         room.members_synced = True
 
-        with (
-            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
+        # Only this agent in the thread
+        thread_history = [
+            _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
+            _visible_message(
+                sender=mock_calculator_agent.user_id,
+                body="10% of 100 is 10",
+                timestamp=124,
+                event_id="msg2",
+            ),
+        ]
+        # Participation is read from the projection, so the thread has to
+        # really contain this agent's earlier reply.
+        await seed_thread_history(
+            bot,
+            room_id=test_room_id,
+            thread_id=thread_root_id,
+            messages=thread_history,
+        )
+
+        mock_ai = AsyncMock(return_value="20% of 300 is 60")
+        with patch_response_runner_module(
+            ai_response=mock_ai,
+            should_use_streaming=AsyncMock(return_value=False),
         ):
-            # Only this agent in the thread
-            thread_history = [
-                _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-                _visible_message(
-                    sender=mock_calculator_agent.user_id,
-                    body="10% of 100 is 10",
-                    timestamp=124,
-                    event_id="msg2",
-                ),
-            ]
-            # Participation is read from the projection, so the thread has to
-            # really contain this agent's earlier reply.
-            await seed_thread_history(
-                bot,
-                room_id=test_room_id,
-                thread_id=thread_root_id,
-                messages=thread_history,
-            )
+            await bot._on_message(room, message_event)
+            await drain_coalescing(bot)
 
-            mock_ai = AsyncMock(return_value="20% of 300 is 60")
-            with patch_response_runner_module(
-                ai_response=mock_ai,
-                should_use_streaming=AsyncMock(return_value=False),
-            ):
-                await bot._on_message(room, message_event)
-                await drain_coalescing(bot)
-
-            # Should process the message as only agent in thread
-            mock_ai.assert_called_once()
-            # With stop button support: placeholder + reaction + final
-            assert bot.client.room_send.call_count >= 2
+        # Should process the message as only agent in thread
+        mock_ai.assert_called_once()
+        # With stop button support: placeholder + reaction + final
+        assert bot.client.room_send.call_count >= 2
 
         # Test 2: Thread with multiple agents - should form team and respond
         bot.client.room_send.reset_mock()
@@ -430,61 +431,58 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         )
         message_event_2.sender = test_user_id
 
-        with (
-            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
+        # Multiple agents in the thread
+        thread_history = [
+            _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
+            _visible_message(
+                sender=mock_calculator_agent.user_id,
+                body="10% of 100 is 10",
+                timestamp=124,
+                event_id="msg2",
+            ),
+            _visible_message(
+                sender=f"@mindroom_general:{domain}",
+                body="I can also help",
+                timestamp=125,
+                event_id="msg3",
+            ),
+        ]
+        # A second agent joins the thread; re-seeding the two already
+        # admitted messages is idempotent.
+        await seed_thread_history(
+            bot,
+            room_id=test_room_id,
+            thread_id=thread_root_id,
+            messages=thread_history,
+        )
+        # A homeserver never reuses an event ID, and each reply is bound to the one it created.
+        bot.client.room_send.side_effect = [
+            nio.RoomSendResponse.from_dict({"event_id": "$placeholder-team"}, test_room_id),
+            nio.RoomSendResponse.from_dict({"event_id": "$edit-team"}, test_room_id),
+        ]
+
+        mock_ai = AsyncMock()
+        mock_team_response = AsyncMock(return_value="Team response")
+        with patch_response_runner_module(
+            ai_response=mock_ai,
+            team_response=mock_team_response,
+            should_use_streaming=AsyncMock(return_value=False),
         ):
-            # Multiple agents in the thread
-            thread_history = [
-                _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-                _visible_message(
-                    sender=mock_calculator_agent.user_id,
-                    body="10% of 100 is 10",
-                    timestamp=124,
-                    event_id="msg2",
-                ),
-                _visible_message(
-                    sender=f"@mindroom_general:{domain}",
-                    body="I can also help",
-                    timestamp=125,
-                    event_id="msg3",
-                ),
-            ]
-            # A second agent joins the thread; re-seeding the two already
-            # admitted messages is idempotent.
-            await seed_thread_history(
-                bot,
-                room_id=test_room_id,
-                thread_id=thread_root_id,
-                messages=thread_history,
-            )
-            # A homeserver never reuses an event ID, and each reply is bound to the one it created.
-            bot.client.room_send.side_effect = [
-                nio.RoomSendResponse.from_dict({"event_id": "$placeholder-team"}, test_room_id),
-                nio.RoomSendResponse.from_dict({"event_id": "$edit-team"}, test_room_id),
-            ]
+            await bot._on_message(room, message_event_2)
+            await drain_coalescing(bot)
 
-            mock_ai = AsyncMock()
-            mock_team_response = AsyncMock(return_value="Team response")
-            with patch_response_runner_module(
-                ai_response=mock_ai,
-                team_response=mock_team_response,
-                should_use_streaming=AsyncMock(return_value=False),
-            ):
-                await bot._on_message(room, message_event_2)
-                await drain_coalescing(bot)
-
-            # Should form team and send team response when multiple agents in thread
-            mock_ai.assert_not_called()
-            mock_team_response.assert_awaited_once()
-            assert bot.client.room_send.call_count == 2
-            placeholder_content = bot.client.room_send.call_args_list[0].kwargs["content"]
-            final_content = bot.client.room_send.call_args_list[1].kwargs["content"]
-            assert placeholder_content[STREAM_STATUS_KEY] == "pending"
-            assert placeholder_content["body"].startswith("🤝 Team Response: Thinking...")
-            assert final_content["m.relates_to"]["rel_type"] == "m.replace"
-            assert final_content["m.relates_to"]["event_id"] == "$placeholder-team"
-            assert final_content["m.new_content"]["body"] != placeholder_content["body"]
-            bot.client.room_send.side_effect = None
+        # Should form team and send team response when multiple agents in thread
+        mock_ai.assert_not_called()
+        mock_team_response.assert_awaited_once()
+        assert bot.client.room_send.call_count == 2
+        placeholder_content = bot.client.room_send.call_args_list[0].kwargs["content"]
+        final_content = bot.client.room_send.call_args_list[1].kwargs["content"]
+        assert placeholder_content[STREAM_STATUS_KEY] == "pending"
+        assert placeholder_content["body"].startswith("🤝 Team Response: Thinking...")
+        assert final_content["m.relates_to"]["rel_type"] == "m.replace"
+        assert final_content["m.relates_to"]["event_id"] == "$placeholder-team"
+        assert final_content["m.new_content"]["body"] != placeholder_content["body"]
+        bot.client.room_send.side_effect = None
 
         # Reset mocks for Test 3
         bot.client.room_send.reset_mock()
@@ -520,7 +518,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
-            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
         ):
             thread_history = [
                 _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),

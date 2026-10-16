@@ -16,16 +16,23 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
-from mindroom import approval_manager, approval_transport, interactive
-from mindroom.agent_storage import create_session_storage
+from mindroom import interactive
 from mindroom.ai import _attach_blocking_pause_presentation
-from mindroom.approval_inbound import maybe_handle_tool_approval_reply
-from mindroom.approval_manager import (
+from mindroom.approval import manager as approval_manager
+from mindroom.approval import transport as approval_transport
+from mindroom.approval.inbound import maybe_handle_tool_approval_reply
+from mindroom.approval.manager import (
     initialize_approval_store,
 )
-from mindroom.approval_tools import toolkit_owners_for_agents
-from mindroom.coalescing import ReadyPendingEvent
-from mindroom.coalescing_batch import PendingEvent, PreparedTurn, requester_coalescing_key
+from mindroom.approval.tool_approval import (
+    POLICY_CONFIRMATION_APPROVAL_TYPE,
+    ApprovalActionResult,
+    MatrixApprovalAction,
+    shutdown_approval_runtime,
+)
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
+from mindroom.coalescing.batch import PendingEvent, PreparedTurn, requester_coalescing_key
+from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
@@ -53,18 +60,13 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
-from mindroom.synthetic_model import SyntheticModel
-from mindroom.tool_approval import (
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
-    ApprovalActionResult,
-    MatrixApprovalAction,
-    shutdown_approval_runtime,
-)
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
@@ -1603,7 +1605,7 @@ class TestAgentBot(AgentBotTestBase):
         first_runner = unwrap_extracted_collaborator(first._response_runner)
         history_scope = first_runner.deps.state_writer.history_scope()
         with patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(requires_human, 60.0)),
         ):
             # The turn's reply span pauses for the approval, as the locked generation does.
@@ -1641,7 +1643,7 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._journal_dispatcher.drain_once()
 
         with patch(
-            "mindroom.approval_execution.create_agent",
+            "mindroom.approval.execution.create_agent",
             side_effect=lambda *_args, **kwargs: new_agent(kwargs["history_storage"]),
         ):
             if requires_human:
@@ -1924,7 +1926,6 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths,
             room_id=room.room_id,
             mode="room",
-            set_by="@admin:localhost",
         )
         resolved_targets: list[MessageTarget] = []
 
@@ -2123,7 +2124,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         )
         with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
+            "mindroom.approval.inbound.handle_matrix_approval_action",
             new=AsyncMock(return_value=ApprovalActionResult(consumed=True, card_event_id="$approval")),
         ) as handle_matrix_approval_action:
             await bot._on_unknown_event(room, event)
@@ -2281,7 +2282,7 @@ class TestAgentBot(AgentBotTestBase):
             return ApprovalActionResult(consumed=False)
 
         with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
+            "mindroom.approval.inbound.handle_matrix_approval_action",
             new=AsyncMock(side_effect=reject_revoked_origin),
         ) as approval_action:
             await restarted._journal_dispatcher.drain_once()
@@ -2362,7 +2363,7 @@ class TestAgentBot(AgentBotTestBase):
             return ApprovalActionResult(consumed=False)
 
         with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
+            "mindroom.approval.inbound.handle_matrix_approval_action",
             new=AsyncMock(side_effect=reject_revoked_origin),
         ) as approval_action:
             await restarted._journal_dispatcher.drain_once()
@@ -2689,7 +2690,7 @@ class TestAgentBot(AgentBotTestBase):
             return ApprovalActionResult(consumed=True)
 
         with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
+            "mindroom.approval.inbound.handle_matrix_approval_action",
             new=AsyncMock(side_effect=consume),
         ) as handle_matrix_approval_action:
             await _dispatch_reaction(bot, room, event)
@@ -2728,7 +2729,7 @@ class TestAgentBot(AgentBotTestBase):
         event = _reaction_event("✅", "$alias-approval", sender=bridge_id)
 
         with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
+            "mindroom.approval.inbound.handle_matrix_approval_action",
             new=AsyncMock(return_value=ApprovalActionResult(consumed=True)),
         ) as handle_matrix_approval_action:
             await _dispatch_reaction(bot, room, event)
@@ -2753,7 +2754,7 @@ class TestAgentBot(AgentBotTestBase):
         event = _approval_reply_event(sender=bridge_id)
 
         with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
+            "mindroom.approval.inbound.handle_matrix_approval_action",
             new=AsyncMock(return_value=ApprovalActionResult(consumed=True)),
         ) as handle_matrix_approval_action:
             handled = await maybe_handle_tool_approval_reply(

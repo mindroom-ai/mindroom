@@ -66,7 +66,7 @@ The option is offered only in Matrix conversations, only for allowed subagents t
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal [authored subagent](agent-orchestration.md#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
-Its `mindroom-agent context` documents hold its own prompt and runtime guidance, not the caller's configured role or instructions.
+Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
 ## Standard mode
 
@@ -75,7 +75,7 @@ It is available automatically when the agent answers a Matrix conversation itsel
 Team members, call agents, `room_agent` workflow participants, and OpenAI-compatible requests do not get it.
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
-The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.
+The CLI is not offered when the agent's shell commands themselves require approval, or when [background jobs](agent-orchestration.md#background-jobs) manage the shell because `shell` was removed from `exclude_toolkits`, and after a response pauses for any approval, the rest of that response continues without it.
 Media returned by CLI calls reaches the model with the shell command's result, and streamed responses show CLI calls as their own tool-trace entries.
 
 ## Discover and call tools

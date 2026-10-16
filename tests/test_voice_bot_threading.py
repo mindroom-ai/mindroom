@@ -14,9 +14,9 @@ import pytest
 from agno.media import Audio
 
 from mindroom import inbound_turn_normalizer
-from mindroom.attachments import _attachment_id_for_event, load_attachment
-from mindroom.coalescing import CoalescingGate
-from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.attachments.storage import _attachment_id_for_event, load_attachment
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -370,10 +370,9 @@ async def test_voice_message_in_main_room_creates_thread(
     voice_event = _make_voice_event(event_id="$voice123", source={"content": {}})
 
     with (
-        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 what is the weather"),
+        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice.handler._handle_voice_message", return_value="🎤 what is the weather"),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -426,10 +425,9 @@ async def test_voice_message_in_thread_continues_thread(
     )
 
     with (
-        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 show me the forecast"),
+        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice.handler._handle_voice_message", return_value="🎤 show me the forecast"),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -480,15 +478,14 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
     )
 
     with (
-        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 continue the same thread"),
+        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice.handler._handle_voice_message", return_value="🎤 continue the same thread"),
         patch.object(
             bot._turn_controller.deps.resolver,
             "coalescing_thread_id",
             new=AsyncMock(return_value="$thread_root"),
         ),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -612,7 +609,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
             queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.parametrize(
@@ -692,7 +689,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -834,8 +831,8 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
     assert dispatch_count == 1
     assert pre_stt_signal.pending_human_messages == 0
     assert alternate_signal.pending_human_messages == 0
-    assert not pre_stt_signal.is_set()
-    assert not alternate_signal.is_set()
+    assert not pre_stt_signal.has_pending_human_messages()
+    assert not alternate_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -931,7 +928,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
 
     assert dispatch_count == 1
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -1526,7 +1523,7 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
             "prepare_voice_event",
             new=AsyncMock(side_effect=RuntimeError("stt failed")),
         ),
-        patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=b"raw audio bytes")),
+        patch("mindroom.voice.handler.download_media_bytes", new=AsyncMock(return_value=b"raw audio bytes")),
         patch(
             "mindroom.turn_controller.dispatch_text_message",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
@@ -1569,7 +1566,7 @@ async def test_raw_voice_download_failure_dispatches_text_only_fallback(mock_hom
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
 
     with (
-        patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)),
+        patch("mindroom.voice.handler.download_media_bytes", new=AsyncMock(return_value=None)),
         patch(
             "mindroom.turn_controller.dispatch_text_message",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
@@ -1719,7 +1716,7 @@ async def test_raw_voice_root_target_failures_do_not_dispatch_guessed_fallbacks(
             "coalescing_thread_id",
             new=AsyncMock(side_effect=RuntimeError("thread lookup failed")),
         ),
-        patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)),
+        patch("mindroom.voice.handler.download_media_bytes", new=AsyncMock(return_value=None)),
         patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=AsyncMock()),
         patch(
             "mindroom.turn_controller.dispatch_text_message",

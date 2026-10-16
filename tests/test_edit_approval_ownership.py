@@ -14,7 +14,8 @@ import pytest_asyncio
 from agno.models.response import ToolExecution
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval_manager import initialize_approval_store
+from mindroom.approval.manager import initialize_approval_store
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
@@ -30,7 +31,6 @@ from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import (
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.approval_manager import ApprovalManager
+    from mindroom.approval.manager import ApprovalManager
     from mindroom.bot import AgentBot
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
@@ -244,8 +244,6 @@ async def _paused_case(  # noqa: PLR0915
     requires_human: bool,
 ) -> AsyncIterator[_ApprovalCase]:
     bot = _bot(tmp_path)
-    # Ownership checks must not start background embedding requests after a resume.
-    bot.config.agents["general"].memory_backend = "none"
     room_id, source_id, edit_id, answer_id = "!room:localhost", "$source", "$edit", "$answer"
     room = nio.MatrixRoom(room_id, bot.matrix_id.full_id)
     room.users["@user:localhost"] = nio.MatrixUser("@user:localhost", "User")
@@ -398,7 +396,7 @@ async def _paused_case(  # noqa: PLR0915
                 should_use_streaming=AsyncMock(return_value=False),
                 ai_response=model,
             ),
-            patch("mindroom.approval_response.evaluate_tool_approval", approval_evaluation),
+            patch("mindroom.approval.response.evaluate_tool_approval", approval_evaluation),
             # Inspect the durable checkpoint before the test claims resumed execution.
             patch.object(ReplyRuntime, "claim_approval_resume", AsyncMock(return_value=(None, None))),
             patch.object(

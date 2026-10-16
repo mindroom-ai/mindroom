@@ -17,13 +17,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import shell_execution as shell_execution_module
-from mindroom import shell_supervisor
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.constants import resolve_runtime_paths
 from mindroom.script_runs import shim as script_run_shim
-from mindroom.shell_execution import run_command
-from mindroom.shell_supervisor import (
+from mindroom.shell import execution as shell_execution_module
+from mindroom.shell import supervisor as shell_supervisor
+from mindroom.shell.execution import run_command
+from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
     _ShellSupervisorManager,
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
-    from mindroom.shell_execution import ProcessRecord
+    from mindroom.shell.execution import ProcessRecord
 
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
@@ -367,12 +367,15 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
         )
         handle = _extract_handle(result)
         try:
+            # The leader creates the pid file before writing it, so wait for its content.
             for _ in range(100):
-                if child_path.exists():
+                if child_path.exists() and child_path.read_text():
                     break
                 await asyncio.sleep(0.01)
-            assert child_path.exists()
-            child_pid = int(child_path.read_text())
+            assert child_path.exists(), "the leader never started its child"
+            child_pid_text = child_path.read_text()
+            assert child_pid_text, "the leader never recorded its child's pid"
+            child_pid = int(child_pid_text)
             release_path.touch()
             for _ in range(100):
                 if registry[handle].process.returncode is not None:
@@ -1019,10 +1022,12 @@ async def test_supervisor_sigkill_terminates_supervised_process_group(
     )
     supervised_pid = int(result.split("PID ")[1].split(")")[0])
     for _ in range(40):
-        if ready_path.exists():
+        if ready_path.exists() and ready_path.read_text(encoding="utf-8"):
             break
         await asyncio.sleep(0.05)
-    script_pid, descendant_pid = map(int, ready_path.read_text(encoding="utf-8").split())
+    ready = ready_path.read_text(encoding="utf-8")
+    assert ready, "the supervised script never recorded its pids"
+    script_pid, descendant_pid = map(int, ready.split())
 
     supervisor = manager._supervisor
     assert supervisor is not None
@@ -1103,10 +1108,12 @@ async def test_finished_script_kills_same_group_descendants(
     child_pid: int | None = None
     try:
         for _ in range(40):
-            if child_pid_path.exists():
+            if child_pid_path.exists() and child_pid_path.read_text(encoding="utf-8"):
                 break
             await asyncio.sleep(0.05)
-        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        child_pid_text = child_pid_path.read_text(encoding="utf-8")
+        assert child_pid_text, "the script never recorded its child's pid"
+        child_pid = int(child_pid_text)
 
         assert "FINISHED" in await _wait_for_finished(socket_path, handle)
         await assert_linux_pid_not_running(child_pid)
@@ -1126,7 +1133,7 @@ async def test_orphaned_supervisor_exits_and_kills_children() -> None:
     # an orphan as soon as that parent exits.
     launcher = (
         "import pathlib, subprocess, sys, time\n"
-        "process = subprocess.Popen([sys.executable, '-m', 'mindroom.shell_supervisor', sys.argv[1]])\n"
+        "process = subprocess.Popen([sys.executable, '-m', 'mindroom.shell.supervisor', sys.argv[1]])\n"
         "pathlib.Path(sys.argv[2]).write_text(str(process.pid), encoding='utf-8')\n"
         "deadline = time.monotonic() + 20\n"
         "while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:\n"

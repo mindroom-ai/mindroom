@@ -20,6 +20,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom import interactive
 from mindroom import reply_lifecycle as rl
 from mindroom import streaming as streaming_mod
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
@@ -99,8 +100,6 @@ class _FakeGateway:
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="send", content=dict(content), display_text=content["body"]))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -112,8 +111,6 @@ class _FakeGateway:
         event_id: str,
         new_content: dict[str, Any],
         new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text, event_id=event_id))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
@@ -330,14 +327,12 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
         client: object,
         room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,
     ) -> DeliveredMatrixEvent | None:
         entered.set()
         await release.wait()
         if not accepted:
             return None
-        return await gateway.send(client, room_id, content, retry_sync_recovery=retry_sync_recovery)
+        return await gateway.send(client, room_id, content)
 
     streaming = StreamingResponse(
         target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
@@ -443,8 +438,6 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_content.update(content)
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -543,8 +536,6 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_bodies.append(content["body"])
         streaming.accumulated_text = "Answer buffered while the placeholder is in flight"
@@ -556,8 +547,6 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         _event_id: str,
         new_content: dict[str, Any],
         _new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_bodies.append(new_content["body"])
         return DeliveredMatrixEvent(event_id="$answer-edit", content_sent=dict(new_content))
@@ -619,8 +608,6 @@ async def test_terminal_failure_note_ack_is_visible_but_not_substantive(
         _event_id: str,
         new_content: dict[str, Any],
         _new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         return DeliveredMatrixEvent(event_id="$terminal-edit", content_sent=dict(new_content))
 
@@ -756,6 +743,63 @@ def test_only_in_progress_edits_hide_an_unfinished_interactive_block(config: Con
     assert in_progress.display_text == "Thinking..."
     assert in_progress.committed_state.visible_body_state == "placeholder_only"
     assert "```interactive" in streaming_mod._prepare_delivery_from_snapshot(final).display_text
+
+
+def test_only_a_final_edit_warns_about_an_unfinished_interactive_block(config: Config) -> None:
+    """A block still arriving is not malformed yet; only a final reply that never closes it logs a warning."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = 'Here is the plan.\n\n```interactive\n{"question": "Which step first?", "options": ['
+    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    final = streaming._delivery_snapshot(
+        is_final=True,
+        allow_empty_progress=False,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    assert progress is not None
+    assert final is not None
+
+    with patch.object(interactive.logger, "warning") as mock_warning:
+        assert streaming_mod._prepare_delivery_from_snapshot(progress).display_text == "Here is the plan."
+    mock_warning.assert_not_called()
+
+    with patch.object(interactive.logger, "warning") as mock_warning:
+        streaming_mod._prepare_delivery_from_snapshot(final)
+    mock_warning.assert_called_once()
+    assert mock_warning.call_args.args == ("Interactive block not parsed",)
+
+
+_PICK_BLOCK_JSON = '{"question": "Pick one", "options": [{"emoji": "✅", "label": "Yes", "value": "yes"}]}'
+
+
+@pytest.mark.parametrize(
+    "streamed",
+    [
+        # An introduction on the opening fence line, then a second block still arriving.
+        f'Please choose: ```interactive\n{_PICK_BLOCK_JSON}\n```\n\n```interactive\n{{"question": "Second',
+        # A four-backtick opener closed by three backticks, which the parser accepts.
+        f"Before.\n````interactive\n{_PICK_BLOCK_JSON}\n```",
+    ],
+)
+def test_in_progress_edits_render_every_complete_interactive_block(config: Config, streamed: str) -> None:
+    """Edits show each block the parser accepts as its question and keep a block still arriving hidden."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = streamed
+    snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    assert snapshot is not None
+
+    shown = streaming_mod._prepare_delivery_from_snapshot(snapshot).display_text
+
+    assert "Pick one" in shown
+    assert "Second" not in shown
+    assert "```" not in shown
 
 
 @pytest.mark.asyncio
@@ -1074,6 +1118,7 @@ async def _run_resumed_stream(
     response_stream: AsyncIterator[object],
     *,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
+    resumed: UnfinishedStreamedReply = _STOPPED_REPLY,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -1084,7 +1129,7 @@ async def _run_resumed_stream(
         streaming_cls=streaming_cls,
         existing_event_id="$reply",
         adopt_existing_placeholder=True,
-        resumed=_STOPPED_REPLY,
+        resumed=resumed,
     )
 
 

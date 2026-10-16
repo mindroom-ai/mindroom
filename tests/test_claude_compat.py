@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 
 
 @pytest.mark.parametrize("model_id", ["claude-sonnet-5-5", "claude-opus-5-5", "claude-sonnet-5"])

@@ -237,7 +237,7 @@ def open_worker_state_root(
                 identity_field_path=identity_field_path,
             )
             if actual_worker_key != expected_worker_key:
-                msg = f"Worker identity metadata does not match retirement key '{expected_worker_key}'."
+                msg = "Worker identity metadata does not match the retirement key."
                 raise ValueError(msg)
         _require_current_directory(worker_parent_fd, worker_name, worker_fd)
         yield _BoundWorkerStateRoot(worker_parent_fd, worker_name, worker_fd)

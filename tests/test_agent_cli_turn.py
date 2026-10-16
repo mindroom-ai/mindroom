@@ -40,13 +40,14 @@ from mindroom.agent_cli.session import (
 )
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import create_state_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
 
@@ -141,7 +142,7 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     async with response_cli_lifetime() as lifetime:
         lifetime.bind_provider(owner.checkpoint, function)
         calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-        async with asyncio.timeout(3):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             assert (
                 await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, calls[0])
                 == "shell done"
@@ -199,7 +200,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
         assert receipt["status"] == "completed", receipt
         return "shell done"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         assert await owner.run_native_shell(command) == "shell done"
     assert catalog.run_context.session_state["count"] == 1
     assert current_agent_cli_shell_env() is None
@@ -245,7 +246,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
         assert receipt["status"] == "completed", receipt
         return "shell done"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         result = await owner.run_native_shell(command)
 
     assert isinstance(result, ToolResult)
@@ -300,7 +301,7 @@ async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path
     async def plain() -> str:
         return "plain"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         with pytest.raises(RuntimeError, match="worker failed"):
             await owner.run_native_shell(failing)
         assert await owner.run_native_shell(plain) == "plain"
@@ -336,7 +337,7 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
             await asyncio.sleep(0.001)
         return "second output"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(owner.run_native_shell(first))
         await first_open.wait()
         second_result, first_result = await asyncio.gather(
@@ -385,7 +386,7 @@ async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp
         _COMMAND_TAG.set(label)
         return await owner.run_native_shell(command)
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(run("first", first))
         await first_open.wait()
         await asyncio.create_task(run("second", second))
@@ -445,7 +446,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
         await nested_done.wait()
         return "second"
 
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(owner.run_native_shell(first))
         await first_open.wait()
         await owner.run_native_shell(second)
@@ -538,7 +539,7 @@ async def test_overlapping_native_shells_each_keep_their_own_cli_calls(tmp_path:
         await first_called.wait()
         return "second output"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(owner.run_native_shell(first))
         await first_open.wait()
         second_result = await owner.run_native_shell(second)
@@ -579,6 +580,11 @@ async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end(
         assert events == ["retire"]
     assert current_cli_lifetime() is None
     assert events == ["retire", "close"]
+    # Contexts copied during the response can still reach the ended lifetime, which keeps no owner and takes none.
+    assert lifetime.owner is None
+    with pytest.raises(RuntimeError, match="CLI lifetime has ended"):
+        lifetime.register(Owner(), registry)
+    assert not registry._owners
 
 
 @pytest.mark.asyncio
@@ -633,7 +639,14 @@ async def test_write_failure_prevents_shell_and_inner_effects(
 
 
 def _run_cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["mindroom-agent", *argv], env=env, capture_output=True, text=True, timeout=5, check=False)
+    return subprocess.run(
+        ["mindroom-agent", *argv],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=SETTLE_TIMEOUT_SECONDS,
+        check=False,
+    )
 
 
 def _cli_call_until_settled(env: dict[str, str], *, separate_wait: bool) -> dict[str, object]:
@@ -715,8 +728,9 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off", ws="none"))
     server_task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
-        while not server.started:
-            await asyncio.sleep(0.01)
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not server.started:
+                await asyncio.sleep(0.01)
 
         async def bash(command: str) -> str:
             return command
@@ -735,7 +749,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         async with response_cli_lifetime() as lifetime:
             lifetime.bind_provider(owner.checkpoint, function)
             calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 bash_task = asyncio.create_task(
                     owner.execute_bash(
                         ToolKey("shell", "run_shell_command"),
@@ -826,7 +840,7 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
             )
 
     try:
-        async with asyncio.timeout(3):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             assert await asyncio.gather(*(drive(owner) for owner in owners)) == [["0", "1"], ["0", "1"]]
         assert maximum == {"one": 1, "two": 1}
         assert [args for name, args in order if name == "one"] == ["0", "1"]
@@ -898,7 +912,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
     async with response_cli_lifetime() as lifetime:
         lifetime.bind_provider(owner.checkpoint, function)
         provider_calls = new.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-        async with asyncio.timeout(3):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             assert (
                 await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "new"}, provider_calls[0])
                 == "drained"
@@ -968,8 +982,9 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
         )
         await started.wait()
         request_task_cancel(task, process_shutdown=True)
-        async with asyncio.timeout(1):
-            with pytest.raises(asyncio.CancelledError):
+        # The deadline sits inside the raises check, or its own cancellation would pass for the task's.
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await task
     assert cleaned.is_set()
     assert shutdown_seen == [True]
@@ -1404,7 +1419,7 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
         async with response_cli_lifetime() as lifetime:
             lifetime.bind_provider(owner.checkpoint, function)
             calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 assert (
                     await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, calls[0])
                     == "outer complete"
@@ -1554,7 +1569,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
             owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, calls[0]),
         )
         try:
-            async with asyncio.timeout(3):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await waiting.wait()
                 assert not task.done()
                 assert effects == []

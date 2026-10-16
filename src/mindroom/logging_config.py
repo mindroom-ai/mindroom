@@ -6,8 +6,10 @@ import logging
 import logging.config
 import os
 import sys
+import traceback
 from datetime import UTC, datetime
 from io import StringIO
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import structlog
@@ -16,7 +18,6 @@ from mindroom.redaction import redact_log_event, redact_sensitive_text
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
-    from pathlib import Path
     from typing import TextIO
 
     from structlog.typing import ExceptionRenderer, ExcInfo, Processor
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
 __all__ = [
     "bound_log_context",
     "configure_default_logging",
+    "current_log_file",
+    "exception_frames",
     "get_logger",
     "setup_logging",
     "setup_subprocess_logging",
@@ -199,6 +202,9 @@ def _build_logger_levels(
     return handler_level, loggers
 
 
+_current_log_file: Path | None = None
+
+
 def setup_logging(
     *,
     level: str = "INFO",
@@ -220,6 +226,8 @@ def setup_logging(
     log_file = logs_dir / f"mindroom_{timestamp}.log"
 
     renderer_name = _configure_logging(level=level, log_file=log_file)
+    global _current_log_file
+    _current_log_file = log_file
 
     # Log startup message
     logger = get_logger(__name__)
@@ -236,12 +244,18 @@ def subprocess_logging_env() -> dict[str, str]:
     }
 
 
-def setup_subprocess_logging() -> None:
+def current_log_file() -> Path | None:
+    """Return the log file `setup_logging` opened in this process, if any."""
+    return _current_log_file
+
+
+def setup_subprocess_logging(log_file: Path | None = None) -> None:
     """Configure a child process to log to stderr like the parent that built its `subprocess_logging_env`.
 
     The child writes no log file of its own, so each run does not leave a new file behind.
+    A long-lived child can pass the parent's `current_log_file()` to append its records there too.
     """
-    _configure_logging(level=os.getenv(_LOG_LEVEL_ENV, "INFO"), log_file=None)
+    _configure_logging(level=os.getenv(_LOG_LEVEL_ENV, "INFO"), log_file=log_file)
 
 
 def _configure_logging(*, level: str, log_file: Path | None) -> str:
@@ -395,6 +409,14 @@ def _route_agno_loggers_to_root(loggers: dict[str, dict[str, object]]) -> None:
         # No Agno logger name has a parent below the root, so only an exact override or the root level applies.
         level = cast("str", loggers.get(agno_logger.name, loggers[""])["level"])
         agno_logger.addFilter(_AgnoLevelFilter(level))
+
+
+def exception_frames(error: BaseException) -> list[str]:
+    """Return an exception's stack locations without its message, source lines, or locals."""
+    return [
+        f"{Path(frame.filename).name}:{frame.lineno} ({frame.name})"
+        for frame in traceback.extract_tb(error.__traceback__)
+    ]
 
 
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:

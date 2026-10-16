@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom import model_loading
 from mindroom.ai_runtime import cached_agent_run
 from mindroom.authorization import (
     ReplyMembershipPendingError,
@@ -33,7 +32,8 @@ from mindroom.model_defaults import (
     GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
 )
-from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.providers import model_loading
+from mindroom.providers.model_instance_checks import isinstance_of_loaded
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
-_GOOGLE_GEMINI_CLASS = ("mindroom.google_gemini", "MindRoomGoogleGemini")
+_GOOGLE_GEMINI_CLASS = ("mindroom.providers.google_gemini", "MindRoomGoogleGemini")
 _THREAD_SUMMARY_MAX_LENGTH = 300
 _MAX_INITIAL_TAGS = 3
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
@@ -1033,6 +1033,28 @@ async def _send_thread_summary_event(
         return delivered.event_id
     logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id)
     return None
+
+
+async def send_welcome_thread_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    welcome_event_id: str,
+    conversation_reader: ConversationReader,
+) -> None:
+    """Title the router welcome without counting it toward automatic summaries.
+
+    A zero count keeps the first reply in the welcome thread due for an
+    automatic summary, which then replaces this unpinned title.
+    """
+    await _send_thread_summary_event(
+        client,
+        room_id,
+        welcome_event_id,
+        "Welcome to MindRoom",
+        0,
+        "manual",
+        conversation_reader,
+    )
 
 
 async def set_manual_thread_summary(

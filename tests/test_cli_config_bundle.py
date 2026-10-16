@@ -15,8 +15,8 @@ from typer.testing import CliRunner
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.config_bundle import initialize_runtime_bundle
 from mindroom.cli.main import app
+from mindroom.config.bundle import install_config_bundle
 from mindroom.config.main import load_config
-from mindroom.config_bundle import install_config_bundle
 
 if TYPE_CHECKING:
     from collections.abc import Callable

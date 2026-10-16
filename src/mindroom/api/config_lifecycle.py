@@ -32,8 +32,9 @@ from mindroom.config.yaml_includes import (
     partial_source_uses_includes,
     source_files_fingerprint,
 )
-from mindroom.event_journal_open import pending_event_journal_restart
+from mindroom.event_journal.opening import pending_event_journal_restart
 from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -43,7 +44,8 @@ if TYPE_CHECKING:
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
-    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.budgets.monitor import BudgetMonitor
+    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -133,6 +135,7 @@ class _MindroomAppState:
     external_trigger_runtime: ExternalTriggerRuntime | None = None
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
+    budget_monitor: BudgetMonitor | None = None
     openai_responses: set[ResponseIdentity] = field(default_factory=set)
     active_calls: Callable[[], list[ResponseIdentity]] | None = None
     active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None
@@ -1021,16 +1024,14 @@ def replace_committed_config(
 
 
 def config_pending_restart(request: Request) -> bool:
-    """Return whether the committed config names an event journal that is not the open one.
-
-    ``event_journal`` is read once, when the store is opened, so an edit to it
-    is saved and then does nothing until a restart. The dashboard shows the
-    saved value either way, and this is what stops that from being a lie.
-    """
+    """Report authored startup-only settings that differ from the running instance."""
     snapshot = _request_or_current_snapshot(request)
     if snapshot.runtime_config is None:
         return False
-    return pending_event_journal_restart(snapshot.runtime_config, snapshot.runtime_paths)
+    return pending_event_journal_restart(
+        snapshot.runtime_config,
+        snapshot.runtime_paths,
+    ) or pending_background_tool_jobs_restart(snapshot.runtime_config, snapshot.runtime_paths)
 
 
 def config_uses_includes(request: Request) -> bool:

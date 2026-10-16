@@ -157,6 +157,7 @@ spec:
             - {{ printf "%s/sandbox-runner" $storageRoot | quote }}
             - {{ printf "%s/agents" $storageRoot | quote }}
             - {{ printf "%s/private_instances" $storageRoot | quote }}
+            - {{ printf "%s/shared_directories" $storageRoot | quote }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
@@ -194,6 +195,11 @@ spec:
             {{- if .Values.scriptGateway.enabled }}
             - name: script-gateway
               containerPort: {{ .Values.scriptGateway.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.egressBroker.enabled }}
+            - name: egress-broker
+              containerPort: {{ .Values.egressBroker.port }}
               protocol: TCP
             {{- end }}
           env:
@@ -347,6 +353,18 @@ spec:
             # Backed by the required worker egress NetworkPolicy, which opens only the gateway port on this pod.
             - name: MINDROOM_SCRIPT_GATEWAY_ISOLATED
               value: "true"
+            {{- end }}
+            {{- if .Values.egressBroker.enabled }}
+            - name: MINDROOM_EGRESS_BROKER_PORT
+              value: {{ .Values.egressBroker.port | quote }}
+            - name: MINDROOM_EGRESS_BROKER_HOST
+              value: "0.0.0.0"
+            - name: MINDROOM_EGRESS_BROKER_URL
+              value: {{ include "mindroom-runtime.egressBrokerWorkerUrl" . | quote }}
+            {{- if .Values.egressBroker.tokenTtlSeconds }}
+            - name: MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS
+              value: {{ .Values.egressBroker.tokenTtlSeconds | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
@@ -614,6 +632,9 @@ spec:
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ printf "%s/private_instances" $storageRoot | quote }}
               subPath: private_instances
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ printf "%s/shared_directories" $storageRoot | quote }}
+              subPath: shared_directories
             - name: sandbox-workspace
               mountPath: /app/workspace
         {{- end }}

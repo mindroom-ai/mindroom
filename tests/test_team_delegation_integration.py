@@ -14,7 +14,8 @@ from agno.run.team import TeamRunOutput
 from agno.team import Team
 from agno.tools.function import Function
 
-from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.tool_approval import evaluate_tool_approval
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -22,19 +23,79 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.response_turn import ResponsePausedForApproval, apply_local_approval_decisions
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _team_approval_events, team_response, team_response_stream
-from mindroom.tool_approval import evaluate_tool_approval
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import make_turn_context, runtime_paths_for
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_disabled_real_team_keeps_canonical_terminal_format(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """The ordinary streaming team keeps main's final member/consensus rendering."""
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", model="leader")},
+        models={name: ModelConfig(provider="test", id=name) for name in ("default", "leader")},
+        defaults=DefaultsConfig(tools=[], learning=False),
+        memory={"backend": "none"},
+    )
+    paths = _runtime_paths(tmp_path)
+    ids = entity_ids(config, paths)
+    identity = _identity()
+    models = {
+        "default": DelegationModel(
+            id="team",
+            responses=[
+                ModelResponse(
+                    tool_calls=[_call("delegate_task_to_member", "member", member_id="leader", task="Report")],
+                ),
+                ModelResponse(content="Consensus answer."),
+            ],
+        ),
+        "leader": DelegationModel(id="leader", responses=[ModelResponse(content="Member answer.")]),
+    }
+    monkeypatch.setattr(
+        "mindroom.providers.model_loading.get_model_instance",
+        lambda _config, _paths, name, **_kwargs: models[name],
+    )
+    orchestrator = MagicMock(config=config, runtime_paths=paths, knowledge_refresh_scheduler=None)
+    recorder = TurnRecorder(user_message="Report")
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[ids["leader"]],
+                message="Report",
+                orchestrator=orchestrator,
+                execution_identity=identity,
+                ctx=make_turn_context(
+                    session_id=identity.session_id,
+                    room_id=identity.room_id,
+                    thread_id=identity.resolved_thread_id,
+                    requester_id=identity.requester_id,
+                ),
+                user_id=identity.requester_id,
+                show_tool_calls=show_tool_calls,
+                turn_recorder=recorder,
+            )
+        ]
+    assert chunks[-1] == (
+        "🤝 **Team Response** (Leader):\n\n**Leader**: Member answer.\n\n\n**Team Consensus**:\n\nConsensus answer."
+    )
+    assert "Member answer." in recorder.assistant_text
+    assert "Consensus answer." in recorder.assistant_text
 
 
 @pytest.mark.asyncio
@@ -83,7 +144,7 @@ async def test_real_streaming_team_preserves_child_approval_identity(
         ),
     }
     monkeypatch.setattr(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         lambda _config, _paths, name, **_kwargs: models[name],
     )
     orchestrator = MagicMock()

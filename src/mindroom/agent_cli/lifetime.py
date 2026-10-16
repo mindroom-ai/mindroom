@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
-from mindroom.agno_compat_cli_checkpoint import checkpoint_resolver
+from mindroom.agent_cli.agno_compat_cli_checkpoint import checkpoint_resolver
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
     from agno.tools.function import Function
 
+    from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_cli.turn import LiveTurnTools
-    from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 
 _CURRENT: ContextVar[CliTurnLifetime | None] = ContextVar("cli_turn_lifetime", default=None)
 
@@ -35,6 +35,7 @@ class CliTurnLifetime:
         self._provider: tuple[ProviderBatchCheckpoint, Function] | None = None
         self._response_task = asyncio.current_task()
         self._registry: TurnToolRegistry | None = None
+        self._closed = False
 
     @contextmanager
     def bind(self) -> Iterator[None]:
@@ -58,6 +59,9 @@ class CliTurnLifetime:
 
     def register(self, owner: LiveTurnTools, registry: TurnToolRegistry) -> None:
         """Accept an explicit orchestrator registry, never an ambient authority."""
+        if self._closed:
+            msg = "The response's CLI lifetime has ended"
+            raise RuntimeError(msg)
         owner.bind_response_task(self._response_task)
         registry.register(owner)
         self.owner = owner
@@ -80,6 +84,11 @@ class CliTurnLifetime:
                         self._registry.unregister(self.owner)
         finally:
             self._clear_provider()
+            # A context copied during the response, such as a cancelled timer's, can outlive it.
+            self._closed = True
+            self.owner = None
+            self._registry = None
+            self._response_task = None
 
 
 def current_cli_lifetime() -> CliTurnLifetime | None:

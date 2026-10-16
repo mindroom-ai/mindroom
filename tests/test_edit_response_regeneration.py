@@ -20,8 +20,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import interactive
-from mindroom.agent_storage import get_agent_session
-from mindroom.coalescing_batch import tagged_coalesced_prompt
+from mindroom.coalescing.batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -47,6 +46,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.teams import TeamMode, TeamOutcome, TeamResolution
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
@@ -3335,10 +3335,9 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     mock_generate_response = AsyncMock(return_value="$response:example.com")
     install_generate_response_mock(bot, mock_generate_response)
     with (
-        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
         bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
@@ -3445,10 +3444,9 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     mock_generate_response = AsyncMock(return_value="$response:example.com")
     install_generate_response_mock(bot, mock_generate_response)
     with (
-        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
         bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
@@ -3637,7 +3635,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     # Mock is_authorized_sender to return False
     with (
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=False) as mock_is_authorized,
-        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
     ):
         # Process the voice event
         await bot._on_media_message(room, voice_event)

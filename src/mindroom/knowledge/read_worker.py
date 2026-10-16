@@ -1,4 +1,4 @@
-"""Execute one native Chroma read, then release all native memory by exiting."""
+"""Wait idle for one native Chroma read, execute it, then release all native memory by exiting."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import math
 import os
 import signal
 import sys
-import traceback
 from contextlib import closing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
@@ -23,10 +22,13 @@ from mindroom.knowledge.read_protocol import (
     request_adapter,
     result_adapter,
 )
-from mindroom.redaction import redact_sensitive_text
+from mindroom.logging_config import get_logger, setup_subprocess_logging
 
 if TYPE_CHECKING:
     from chromadb.api.models.Collection import Collection
+
+# The parent runs this module with `python -m`, so `__name__` is `__main__`.
+logger = get_logger("mindroom.knowledge.read_worker")
 
 
 class _PublishedChromaDb(ChromaDb):
@@ -68,20 +70,25 @@ def _read(request: ReadRequest) -> ReadResult:
         return ReadResult(exists=True, documents=[ReadDocument.from_document(document) for document in documents])
 
 
-def _main(*, timeout: float = 30.0) -> None:
-    """Read one JSON request from stdin and return one JSON result on stdout."""
-    if not math.isfinite(timeout) or timeout <= 0:
-        message = "Knowledge reader deadline must be finite and positive"
-        raise ValueError(message)
-    # The kernel terminates even GIL-blocked native code after the parent dies.
-    signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    signal.setitimer(signal.ITIMER_REAL, timeout)
+def _main() -> None:
+    """Idle until stdin delivers a deadline line and one JSON request, then write one JSON result."""
+    setup_subprocess_logging()
     # Redirect the descriptor too: native code and preconfigured log handlers
     # may retain the original stdout object, bypassing redirect_stdout.
     output = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-    request_payload = sys.stdin.buffer.read(MAX_FRAME_BYTES + 1)
     with output:
+        deadline = sys.stdin.buffer.readline()
+        if not deadline:
+            return  # The parent exited.
+        timeout = float(deadline)
+        if not math.isfinite(timeout) or timeout <= 0:
+            message = "Knowledge reader deadline must be finite and positive"
+            raise ValueError(message)
+        # The kernel terminates even GIL-blocked native code after the parent dies.
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        request_payload = sys.stdin.buffer.read(MAX_FRAME_BYTES + 1)
         try:
             if len(request_payload) > MAX_FRAME_BYTES:
                 message = "Knowledge read request exceeds transport size limit"
@@ -92,10 +99,15 @@ def _main(*, timeout: float = 30.0) -> None:
                 message = "Knowledge read result exceeds transport size limit"
                 raise ValueError(message)  # noqa: TRY301
         except Exception as exc:
-            sys.stderr.write(redact_sensitive_text(traceback.format_exc()))
+            logger.exception("Knowledge read failed")
             payload = result_adapter.dump_json(ReadResult(error_type=type(exc).__name__))
         output.write(payload)
 
 
 if __name__ == "__main__":
-    _main(timeout=float(sys.argv[1]) if len(sys.argv) > 1 else 30.0)
+    _main()
+    # The result is delivered and exit releases all native memory, so skip the
+    # interpreter teardown (about 0.1 s with Chroma loaded) that the parent waits for.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

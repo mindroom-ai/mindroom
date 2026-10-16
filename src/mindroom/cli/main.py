@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import socket
 import sys
@@ -40,6 +41,8 @@ from .config_bundle import (
 from .config_reload import config_check_applied, config_fingerprint
 from .debug_report import debug_report
 from .desktop import desktop_app
+from .help_format import PanelOrderedGroup, apply_help_theme, examples
+from .interactive import confirm, section, terminal_is_interactive
 from .local_stack import local_stack_setup
 from .migrate import config_migrate
 from .plugins import plugins_app
@@ -72,6 +75,7 @@ _CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
 _CONNECT_CANCELLED_EXIT_CODE = 130
 
 app = typer.Typer(
+    cls=PanelOrderedGroup,
     help=_HELP,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -80,81 +84,46 @@ app = typer.Typer(
     # Disable showing locals which can be very large (also see `setup_logging`)
     pretty_exceptions_show_locals=False,
 )
-avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
-threads_app = typer.Typer(help="Export Matrix threads to local files.")
+avatars_app = typer.Typer(help="Generate and sync agent, room, and space avatars.")
+threads_app = typer.Typer(help="Export Matrix threads to searchable files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
-config_app.command("migrate")(config_migrate)
-config_app.command("fingerprint")(config_fingerprint)
-config_app.command("install-bundle")(config_install_bundle)
-config_app.command("classify-change")(config_classify_change)
-config_app.command("apply-bundle")(config_apply_bundle)
-config_app.command("check-applied")(config_check_applied)
-app.add_typer(config_app, name="config")
-app.add_typer(plugins_app, name="plugins")
-app.add_typer(desktop_app, name="desktop")
-app.add_typer(avatars_app, name="avatars")
-app.add_typer(threads_app, name="threads")
-app.add_typer(journal_app, name="journal")
-app.add_typer(service_app, name="service")
-app.add_typer(trigger_app, name="trigger")
-app.command()(check_active_responses)
-app.command("debug-report")(debug_report)
+config_app.command("migrate", rich_help_panel="Create and edit")(config_migrate)
+config_app.command("fingerprint", rich_help_panel="Deployment")(config_fingerprint)
+config_app.command("install-bundle", rich_help_panel="Deployment")(config_install_bundle)
+config_app.command("classify-change", rich_help_panel="Deployment")(config_classify_change)
+config_app.command("apply-bundle", rich_help_panel="Deployment")(config_apply_bundle)
+config_app.command("check-applied", rich_help_panel="Deployment")(config_check_applied)
+app.add_typer(config_app, name="config", rich_help_panel="Configure")
+app.add_typer(plugins_app, name="plugins", rich_help_panel="Configure")
+app.add_typer(avatars_app, name="avatars", rich_help_panel="Configure")
+app.add_typer(service_app, name="service", rich_help_panel="Keep running")
+app.add_typer(desktop_app, name="desktop", rich_help_panel="Desktop")
+app.add_typer(threads_app, name="threads", rich_help_panel="Troubleshoot")
+app.add_typer(journal_app, name="journal", rich_help_panel="Troubleshoot")
+app.add_typer(trigger_app, name="trigger", rich_help_panel="Automation")
+app.command(rich_help_panel="Automation")(check_active_responses)
+app.command("debug-report", rich_help_panel="Troubleshoot")(debug_report)
 
 
-@app.command()
+@app.command(rich_help_panel="Troubleshoot")
 def version() -> None:
-    """Show the current version of Mindroom."""
+    """Show the MindRoom version."""
     from mindroom import __version__  # noqa: PLC0415
 
-    console.print(f"Mindroom version: [bold]{__version__}[/bold]")
+    console.print(f"MindRoom version: [bold]{__version__}[/bold]")
     console.print("AI agents that live in Matrix")
 
 
-@app.command()
+@app.command(
+    rich_help_panel="Get started",
+    epilog=examples(
+        ("mindroom run", "Set up on first run, pair, and start"),
+        ("mindroom run --provider anthropic", "Skip the provider question on first run"),
+        ("mindroom run --service", "Run in the background at login"),
+        ("mindroom run --no-api", "Start without the dashboard"),
+    ),
+)
 def run(
-    log_level: str = typer.Option(
-        "INFO",
-        "--log-level",
-        "-l",
-        help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
-        case_sensitive=False,
-        envvar="LOG_LEVEL",
-    ),
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
-    ),
-    bootstrap_config_bundle: Path | None = typer.Option(  # noqa: B008
-        None,
-        help="Initialize the selected config directory from this bundle only when the directory is absent.",
-    ),
-    bootstrap_config_bundle_revision: str | None = typer.Option(
-        None,
-        help="Install a changed bootstrap revision through native validation; preserve a matching active revision.",
-    ),
-    api: bool = typer.Option(
-        True,
-        "--api/--no-api",
-        help="Start the bundled dashboard/API server alongside the bot",
-    ),
-    api_port: int = typer.Option(
-        DEFAULT_API_PORT,
-        "--api-port",
-        help="Port for the bundled dashboard/API server",
-    ),
-    api_host: str = typer.Option(
-        DEFAULT_API_HOST,
-        "--api-host",
-        help="Host for the bundled dashboard/API server",
-    ),
     provider: str | None = typer.Option(
         None,
         "--provider",
@@ -172,17 +141,62 @@ def run(
             "instead of running it here, or never offer to. A first run in a terminal asks."
         ),
     ),
+    log_level: str = typer.Option(
+        "INFO",
+        "--log-level",
+        "-l",
+        help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
+        case_sensitive=False,
+        envvar="LOG_LEVEL",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+        rich_help_panel="Paths",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
+        rich_help_panel="Paths",
+    ),
+    api: bool = typer.Option(
+        True,
+        "--api/--no-api",
+        help="Start the bundled dashboard/API server alongside the bot",
+        rich_help_panel="Dashboard",
+    ),
+    api_port: int = typer.Option(
+        DEFAULT_API_PORT,
+        "--api-port",
+        help="Port for the bundled dashboard/API server",
+        rich_help_panel="Dashboard",
+    ),
+    api_host: str = typer.Option(
+        DEFAULT_API_HOST,
+        "--api-host",
+        help="Host for the bundled dashboard/API server",
+        rich_help_panel="Dashboard",
+    ),
+    bootstrap_config_bundle: Path | None = typer.Option(  # noqa: B008
+        None,
+        help="Initialize the selected config directory from this bundle only when the directory is absent.",
+        rich_help_panel="Deployment",
+    ),
+    bootstrap_config_bundle_revision: str | None = typer.Option(
+        None,
+        help="Install a changed bootstrap revision through native validation; preserve a matching active revision.",
+        rich_help_panel="Deployment",
+    ),
 ) -> None:
-    """Run the mindroom multi-agent system.
+    """Set up on first run, pair, and start MindRoom.
 
-    This command starts the multi-agent bot system which automatically:
-    - Creates a hosted starter config on first run in a terminal, or with --provider
-    - Pairs hosted installs with your MindRoom Chat account on first run
-    - Offers on first run to keep running as a background service that starts at login (--service/--no-service)
-    - Creates all necessary user and agent accounts
-    - Creates all rooms defined in config.yaml
-    - Manages agent room memberships
-    - Starts the bundled dashboard/API server (disable with --no-api)
+    When no config exists, MindRoom creates a starter config for MindRoom Chat, asking for the model provider in a terminal or taking it from --provider.
+    An install on MindRoom Chat that is not paired yet pairs this machine with your account, and a first run in a terminal offers to keep running in the background at login (see --service).
+    MindRoom then creates the agent accounts and rooms from config.yaml, keeps room memberships in sync, and starts the dashboard and API (disable with --no-api).
     """
     if bootstrap_config_bundle_revision is not None and bootstrap_config_bundle is None:
         typer.echo("--bootstrap-config-bundle-revision requires --bootstrap-config-bundle.", err=True)
@@ -204,13 +218,14 @@ def run(
         raise typer.Exit(2)
     # Fail before setup and pairing ask a person for anything when this machine cannot run the service.
     service_manager = require_login_service() if service else None
+    console.print(make_banner())
     if bootstrap_config_bundle is not None:
         initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
 
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    interactive = _terminal_is_interactive()
+    interactive = terminal_is_interactive()
     first_run = not ensure_writable_config_path(runtime_paths=runtime_paths) and (interactive or provider is not None)
     if first_run:
         try:
@@ -318,9 +333,7 @@ async def _run(
     # Validate again: pairing may have rewritten owner placeholders in the config.
     _load_active_config_or_exit(runtime_paths)
 
-    console.print(make_banner())
-    console.print()
-    console.print(f"Starting Mindroom (log level: {log_level})...")
+    console.print(section(f"Starting MindRoom (log level: {log_level})"))
     if api:
         from mindroom.frontend_assets import ensure_frontend_dist_dir  # noqa: PLC0415
 
@@ -373,31 +386,6 @@ def _warn_if_dashboard_is_open_beyond_loopback(runtime_paths: RuntimePaths, api_
     )
 
 
-@app.command()
-def doctor(
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
-    ),
-) -> None:
-    """Check your environment for common issues.
-
-    Runs connectivity, configuration, and credential checks in a single pass
-    so you can fix everything before running `mindroom run`.
-    """
-    from .doctor import doctor as doctor_command  # noqa: PLC0415
-
-    doctor_command(config_path=config_path, storage_path=storage_path)
-
-
 @avatars_app.command("generate")
 def avatars_generate(
     force: bool = typer.Option(
@@ -429,7 +417,10 @@ def avatars_sync(
         help="Replace existing Matrix room and root-space avatars.",
     ),
 ) -> None:
-    """Sync configured room and root-space avatars to Matrix using the initialized router account."""
+    """Sync room and root-space avatars to Matrix.
+
+    Uses the router account that `mindroom run` initialized.
+    """
     from mindroom.error_handling import AvatarSyncError  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime()
@@ -452,7 +443,14 @@ def avatars_sync(
         raise
 
 
-@threads_app.command("export")
+@threads_app.command(
+    "export",
+    epilog=examples(
+        ("mindroom threads export", "Export every room once"),
+        ("mindroom threads export --room lobby", "Only rooms matching lobby"),
+        ("mindroom threads export --watch --interval 600", "Export again every 10 minutes"),
+    ),
+)
 def _threads_export_command(
     url: str | None = typer.Option(
         None,
@@ -482,29 +480,34 @@ def _threads_export_command(
         "--room",
         "-r",
         help="Filter exported rooms by a substring of the room key, alias, name, or Matrix room ID.",
+        rich_help_panel="Filter",
     ),
     watch: bool = typer.Option(
         False,
         "--watch",
         help="Repeat the export forever on a fixed interval.",
+        rich_help_panel="Watch",
     ),
     interval: int = typer.Option(
         300,
         "--interval",
         help="Watch interval in seconds.",
+        rich_help_panel="Watch",
     ),
     max_thread_roots: int = typer.Option(
         2000,
         "--max-thread-roots",
         help="Maximum thread roots to enumerate per room.",
+        rich_help_panel="Filter",
     ),
     invited_rooms: bool = typer.Option(
         True,
         "--invited-rooms/--no-invited-rooms",
         help="Include rooms joined through authorized invites (user-created rooms).",
+        rich_help_panel="Filter",
     ),
 ) -> None:
-    """Export Matrix threads through a running MindRoom instance to searchable YAML files."""
+    """Export Matrix threads from a running MindRoom to searchable YAML files."""
     asyncio.run(
         _threads_export(
             config_path=config_path,
@@ -528,7 +531,7 @@ async def _journal_adopt(
     force: bool,
 ) -> None:
     """Bind this install to whatever event-journal database is configured right now."""
-    from mindroom.event_journal_open import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
+    from mindroom.event_journal.opening import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
         EventJournalBindingError,
         adopt_event_journal,
         current_binding_description,
@@ -683,22 +686,32 @@ async def _threads_export(
         await asyncio.sleep(interval)
 
 
-@app.command()
+@app.command(
+    rich_help_panel="Get started",
+    epilog=examples(
+        ("mindroom connect", "Pair this machine and save its credentials"),
+        ("mindroom connect --open-browser", "Also open the approval link in the browser"),
+        ("mindroom connect --force", "Pair again, replacing the saved connection"),
+    ),
+)
 def connect(
     provisioning_url: str | None = typer.Option(
         None,
         "--provisioning-url",
         help="Base URL for the MindRoom provisioning API.",
+        rich_help_panel="Advanced",
     ),
     client_name: str = typer.Option(
         socket.gethostname(),
         "--client-name",
         help="Human-readable name for this local machine.",
+        rich_help_panel="Advanced",
     ),
     persist_env: bool = typer.Option(
         True,
         "--persist-env/--no-persist-env",
         help="Persist local provisioning credentials to .env next to config.yaml.",
+        rich_help_panel="Advanced",
     ),
     open_browser: bool = typer.Option(
         False,
@@ -720,9 +733,12 @@ def connect(
         False,
         "--graceful-cancel",
         help="Cancel on SIGTERM while waiting; finish an in-flight approval or save (used by the macOS app).",
+        rich_help_panel="Advanced",
     ),
 ) -> None:
-    """Connect this local MindRoom to your MindRoom Chat account by approving a link.
+    """Pair this machine with your MindRoom Chat account.
+
+    MindRoom prints an approval link and QR code; approve it in MindRoom Chat.
 
     When this machine is already connected, a terminal asks before pairing again.
     Without a terminal it exits with code 3 unless --force is given.
@@ -781,6 +797,31 @@ def connect(
         raise typer.Exit(1) from None
 
 
+@app.command(rich_help_panel="Get started")
+def doctor(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
+    ),
+) -> None:
+    """Check your setup for common problems.
+
+    Runs connectivity, configuration, and credential checks in a single pass
+    so you can fix everything before running `mindroom run`.
+    """
+    from .doctor import doctor as doctor_command  # noqa: PLC0415
+
+    doctor_command(config_path=config_path, storage_path=storage_path)
+
+
 def _confirm_reconnect() -> None:
     """Confirm re-pairing in a terminal, or let the macOS app ask via exit code 3."""
     if not _stdin_is_interactive():
@@ -792,11 +833,6 @@ def _confirm_reconnect() -> None:
 def _stdin_is_interactive() -> bool:
     """Whether a person can answer prompts; the macOS app and services run without a terminal."""
     return sys.stdin.isatty()
-
-
-def _terminal_is_interactive() -> bool:
-    """Whether a person can answer prompts and see their output; services, Docker, and the macOS app cannot."""
-    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _paired_elsewhere(config_path: Path | None, storage_path: Path | None) -> bool:
@@ -815,18 +851,18 @@ def _approver_confirmation() -> Callable[[], bool] | None:
     if not _stdin_is_interactive():
         return None
 
-    def confirm() -> bool:
+    def confirm_account() -> bool:
         try:
-            return typer.confirm("Is this your account?", default=True)
+            return confirm("Is this your account?", default=True)
         except typer.Abort:
             # Ctrl+C or EOF is not a yes: discard the credentials with the revoke hint instead of a bare abort.
             console.print()
             return False
 
-    return confirm
+    return confirm_account
 
 
-app.command("local-stack-setup")(local_stack_setup)
+app.command("local-stack-setup", rich_help_panel="Development")(local_stack_setup)
 
 
 # ---------------------------------------------------------------------------
@@ -872,13 +908,20 @@ def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> 
 
 def main() -> None:
     """Main entry point that shows help by default."""
-    # Print banner for top-level help (no subcommand given)
-    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help")):
-        console.print(
-            make_banner(tagline=("💊 What if I told you... ", "AI agents live in Matrix.")),
-        )
-
+    # Shell completion runs this program without arguments and evaluates what it prints.
+    if "_MINDROOM_COMPLETE" not in os.environ:
+        _prepare_help_output(sys.argv[1:])
     app()
+
+
+def _prepare_help_output(args: list[str]) -> None:
+    """Load the help theme when `args` can show help, and print the banner above the top-level help."""
+    # Help appears for -h/--help and for a bare command or group such as `mindroom config`; deeper calls
+    # such as `mindroom service status`, which the macOS app polls, skip loading Typer's help renderer.
+    if len(args) <= 1 or {"-h", "--help"} & set(args):
+        apply_help_theme()
+    if not args or args in (["-h"], ["--help"]):
+        console.print(make_banner(tagline=("💊 What if I told you... ", "AI agents live in Matrix.")))
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
-from mindroom.legacy_usage_storage import migrate_usage_database
+from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
 
 _ISSUER = "https://issuer.example"

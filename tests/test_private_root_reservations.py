@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import _RESERVED_PRIVATE_ROOT_FIRST_PARTS, AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -14,7 +13,8 @@ from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix_rtc import transcript as transcript_module
 from mindroom.memory._shared import FILE_MEMORY_DEFAULT_DIRNAME
 from mindroom.memory.config import _get_memory_config
-from mindroom.session_storage_preflight import session_storage_preflight
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.preflight import session_storage_preflight
 
 if TYPE_CHECKING:
     from pathlib import Path

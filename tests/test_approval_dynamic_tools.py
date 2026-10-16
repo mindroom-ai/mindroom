@@ -16,19 +16,19 @@ from agno.tools.calculator import CalculatorTools
 from agno.tools.function import ToolResult
 from openai import AsyncOpenAI
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
+from mindroom.history.prompt_tokens import _agent_prompt_tool_surface
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session, save_loaded_tools_for_session
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -121,10 +121,8 @@ class _ScopedCatalogTransport:
 @pytest.fixture(autouse=True)
 def _isolate_dynamic_caches() -> Iterator[None]:
     dynamic_toolkits._loaded_tools.clear()
-    bind_mcp_server_manager(None)
     yield
     dynamic_toolkits._loaded_tools.clear()
-    bind_mcp_server_manager(None)
 
 
 @pytest.mark.asyncio
@@ -324,7 +322,6 @@ def _assert_saved_run(
     identity: ToolExecutionIdentity,
     run_id: str,
     status: RunStatus,
-    original_schema: list[dict[str, object]],
 ) -> None:
     """Observe normalized persistence through a new SQLite handle, not an actor cache."""
     assert identity.session_id is not None
@@ -336,7 +333,7 @@ def _assert_saved_run(
         assert run is not None
         assert run.status == status
         assert run.metadata is not None
-        assert run.metadata["tools_schema"] == original_schema
+        assert run.metadata["approval_probe"] == "saved"
     finally:
         storage.close()
 
@@ -502,8 +499,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             history_storage=storage,
             supports_native_tool_approval=True,
         )
-        original_schema = agent_tool_definition_payloads_for_logging(initial)
-        original_names = {entry["name"] for entry in original_schema}
+        original_names = {payload["name"] for payload in _agent_prompt_tool_surface(initial).payloads}
         if plugin_path is not None:
             assert TOOL_METADATA[unrelated_tool_name or tool_name].function_names == ()
         if tool_name == "mcp_example":
@@ -528,7 +524,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             "Look up the synthetic record",
             session_id=identity.session_id,
             user_id=identity.requester_id,
-            metadata={"tools_schema": original_schema},
+            metadata={"approval_probe": "saved"},
         )
         assert paused.status == RunStatus.paused
         captured = paused_attempt_from_response(
@@ -548,7 +544,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         assert tool_call_id is not None
         close_agent_runtime_state_dbs(actor, shared_scope_storage=storage)
         storage.close()
-        _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.paused, original_schema)
+        _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.paused)
 
         dynamic_toolkits._loaded_tools.clear()
         transport.cached_catalog = None
@@ -607,7 +603,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             "resolve_for_agent_async",
             AsyncMock(return_value=SimpleNamespace(knowledge=None)),
         )
-        monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
+        monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
 
         async def continue_saved_run() -> CompletedApprovalRun | PausedAttempt:
             return await execution.continue_run(
@@ -635,7 +631,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             assert transport.executed == []
             assert len(requests) == 1
             assert dynamic_toolkits._loaded_tools == cache_before
-            _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.paused, original_schema)
+            _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.paused)
             if restriction == "removed":
                 assert transport.discoveries == []
             return
@@ -693,7 +689,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
                 )
                 == selection_before
             )
-        _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.completed, original_schema)
+        _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.completed)
         assert ordinary_calls == ([(2, 3)] if mixed_calls else [])
 
 

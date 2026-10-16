@@ -28,6 +28,7 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
         "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
         "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
         "DATETIME_CONTEXT_TEMPLATE",
+        "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS",
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
         "DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS",
@@ -273,7 +274,8 @@ def _call_manager_signature(config: Config, agent_name: str) -> object | None:
         config.calls.livekit_service_url,
         config.calls.agents[agent_name],
         profile.model_dump(exclude_none=True),
-        model.model_dump(exclude_none=True) if model is not None else None,
+        # Budgets read prices at each spend refresh, so a price edit leaves the call manager as it is.
+        model.model_dump(exclude_none=True, exclude={"pricing"}) if model is not None else None,
     )
 
 

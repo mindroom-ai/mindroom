@@ -14,13 +14,13 @@ from mindroom.cli.api import get_api_response
 from mindroom.cli.config import CONFIG_PATH_OPTION, activate_cli_runtime
 
 if TYPE_CHECKING:
-    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.constants import RuntimePaths
 
 
 def request_reload_status(runtime_paths: RuntimePaths, url: str | None, timeout: float) -> ConfigReloadStatus:
     """Read the latest runtime reload result, rejecting malformed or conflicting responses."""
-    from mindroom.config_reload import ConfigReloadStatus  # noqa: PLC0415
+    from mindroom.config.reload_status import ConfigReloadStatus  # noqa: PLC0415
 
     response = get_api_response(runtime_paths, url, "/api/config/reload-status", timeout, require_key=True)
     if response.status_code not in {200, 503}:
@@ -45,7 +45,7 @@ def wait_for_applied(
     timeout: float,
 ) -> ConfigReloadStatus:
     """Poll until the runtime settles the expected fingerprint; other fingerprints read as pending."""
-    from mindroom.config_reload import ConfigReloadStatus  # noqa: PLC0415
+    from mindroom.config.reload_status import ConfigReloadStatus  # noqa: PLC0415
 
     for name, value in (("wait", wait), ("timeout", timeout)):
         if not math.isfinite(value):
@@ -95,7 +95,7 @@ def _fingerprint(path: Path) -> str:
 
 
 def config_fingerprint(path: Path | None = CONFIG_PATH_OPTION) -> None:
-    """Print the config source SHA-256, including all transitively included files."""
+    """Print the SHA-256 of the config and every file it includes."""
     try:
         typer.echo(_fingerprint(activate_cli_runtime(path).config_path))
     except (ValueError, OSError) as exc:
@@ -111,10 +111,12 @@ def config_check_applied(
     timeout: float = typer.Option(10.0, min=0.001, help="HTTP timeout in seconds."),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """Confirm config application; exit 0 applied, 1 pending/mismatch, 2 failed/restart-required/unavailable.
+    """Confirm that the runtime applied a config.
 
-    The expected fingerprint is captured once, before polling. This reads
-    status only: it does not write config or trigger a reload.
+    Exits 0 when applied, 1 when pending or mismatched, and 2 when failed, restart-required, or unavailable.
+
+    The expected fingerprint is captured once, before polling.
+    This reads status only: it does not write config or trigger a reload.
     """
     try:
         runtime_paths = activate_cli_runtime(path)

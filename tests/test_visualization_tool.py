@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools.visualization import visualization_tools
 from tests.conftest import test_runtime_paths

@@ -18,9 +18,9 @@ from agno.tools.function import FunctionCall
 
 from mindroom.api import sandbox_runner
 from mindroom.constants import resolve_runtime_paths
-from mindroom.shell_execution import kill_all_records, run_command
-from mindroom.shell_output_capture import ShellOutputDestination
-from mindroom.shell_supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
+from mindroom.shell.execution import kill_all_records, run_command
+from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tools import shell as shell_module
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
-    from mindroom.shell_execution import ShellRunResult
+    from mindroom.shell.execution import ShellRunResult
 
 
 @pytest.fixture(params=[False, True], ids=["local", "supervisor"])
@@ -247,10 +247,11 @@ async def test_cancelled_capture_does_not_publish(shell_toolkit: Toolkit, tmp_pa
             mindroom_output_path="cancelled.txt",
         ),
     )
+    pid_file = tmp_path / "process.pid"
     async with asyncio.timeout(10):
-        while not (tmp_path / "process.pid").exists():  # noqa: ASYNC110
+        while not (pid_file.exists() and pid_file.read_text()):  # noqa: ASYNC110
             await asyncio.sleep(0.01)
-    pid = int((tmp_path / "process.pid").read_text())
+    pid = int(pid_file.read_text())
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -307,7 +308,7 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
         streams.append(stream)
         return stream
 
-    monkeypatch.setattr("mindroom.shell_output_capture.tempfile.TemporaryFile", full_device)
+    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", full_device)
     registry = {}
     result = await run_command(
         registry,
@@ -351,8 +352,8 @@ async def test_spawn_cancellation_closes_capture(tmp_path: Path, monkeypatch: py
         spawning.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr("mindroom.shell_output_capture.tempfile.TemporaryFile", observed_file)
-    monkeypatch.setattr("mindroom.shell_execution.asyncio.create_subprocess_exec", blocked_spawn)
+    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", observed_file)
+    monkeypatch.setattr("mindroom.shell.execution.asyncio.create_subprocess_exec", blocked_spawn)
     task = asyncio.create_task(
         run_command(
             {},
@@ -487,7 +488,7 @@ async def test_spool_creation_failure_returns_shell_error(tmp_path: Path, monkey
         message = "Cannot create capture spool"
         raise OSError(message)
 
-    monkeypatch.setattr("mindroom.shell_output_capture.tempfile.TemporaryFile", fail_spool)
+    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", fail_spool)
     result = await run_command(
         {},
         namespace="spool-create",
@@ -589,9 +590,9 @@ async def test_inherited_pipe_cannot_publish_partial_capture(
         assert destination.read_text() == "keep existing"
     finally:
         pid_file = tmp_path / "child.pid"
-        if pid_file.exists():
+        if pid_file.exists() and (pid := pid_file.read_text()):
             with contextlib.suppress(ProcessLookupError):
-                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                os.kill(int(pid), signal.SIGKILL)
 
 
 @pytest.mark.asyncio

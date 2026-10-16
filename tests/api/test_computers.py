@@ -721,23 +721,28 @@ def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "origin",
+    ("configured", "expected"),
     [
-        "https://chat.example.org",
-        "http://localhost:4173",
-        "http://127.0.0.2:4173",
-        "http://[::1]:4173",
-        "capacitor://localhost",
+        ("https://chat.example.org", "https://chat.example.org"),
+        ("http://localhost:4173", "http://localhost:4173"),
+        ("http://127.0.0.2:4173", "http://127.0.0.2:4173"),
+        ("http://[::1]:4173", "http://[::1]:4173"),
+        ("capacitor://localhost", "capacitor://localhost"),
+        ("https://Chat.Example.org", "https://chat.example.org"),
+        ("HTTPS://chat.example.org:443", "https://chat.example.org"),
+        ("https://chat.example.org/", "https://chat.example.org"),
+        ("https://Chat.Example.org:443/", "https://chat.example.org"),
+        ("http://LOCALHOST:80/", "http://localhost"),
     ],
 )
-def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, tmp_path: Path) -> None:
-    """Accepted origins retain exact matching, including the explicit port."""
+def test_secure_and_loopback_computer_origins_are_normalized(configured: str, expected: str, tmp_path: Path) -> None:
+    """Accepted origins are returned in the normalized form a browser sends."""
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
+        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([configured])},
     )
-    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == (origin,)
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == (expected,)
 
 
 def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:

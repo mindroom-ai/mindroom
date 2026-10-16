@@ -16,7 +16,7 @@ from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
-from mindroom.event_journal_open import OpenEventJournal
+from mindroom.event_journal.opening import OpenEventJournal
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
@@ -71,6 +71,8 @@ def _dispatcher(
             source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=lambda _event_id: False,
             replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@bot:localhost"),
     )

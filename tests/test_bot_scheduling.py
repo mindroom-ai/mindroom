@@ -10,9 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import scheduling
 from mindroom.authorization import ResponderCandidatePermissions
-from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -27,6 +26,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.scheduling import tasks as scheduling
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
@@ -175,7 +175,6 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     )
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
-    bot.client.add_event_admission_callback = MagicMock()
     bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
     install_runtime_journal_support(bot)
@@ -505,10 +504,8 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
-                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
-                mock_client.clear_persisted_sync_recovery = MagicMock()
                 mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
@@ -565,10 +562,8 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
-                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
-                mock_client.clear_persisted_sync_recovery = MagicMock()
                 mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
@@ -902,11 +897,8 @@ class TestCommandHandling:
                 },
             )
 
-            with (
-                patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
-            ):
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             send_response.assert_called_once()
             assert send_response.await_args.kwargs["response_text"] == (

@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import runtime_env_path
+from mindroom.constants import (
+    DEFAULT_MATRIX_HOMESERVER,
+    is_hosted_matrix_homeserver,
+    runtime_env_path,
+    runtime_matrix_homeserver,
+)
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -21,9 +26,12 @@ def _permanent_startup_error(message: str) -> ValueError:
 
 
 def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
-    """Get hosted provisioning API base URL from environment if configured."""
+    """Get the configured provisioning URL, defaulting to hosted provisioning for MindRoom Chat."""
     url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip()
-    return url.rstrip("/") or None
+    if url:
+        return url.rstrip("/") or None
+    homeserver = runtime_matrix_homeserver(runtime_paths).strip()
+    return DEFAULT_MATRIX_HOMESERVER if is_hosted_matrix_homeserver(homeserver) else None
 
 
 def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:

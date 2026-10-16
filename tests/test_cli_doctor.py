@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.credentials_sync import get_embedder_api_key
+from mindroom.credentials.sync import get_embedder_api_key
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -247,7 +247,8 @@ _NOT_PAIRED_LINE = "Not paired yet: `mindroom run` will print a link to approve 
 @pytest.mark.parametrize(
     ("env_file", "expected", "line"),
     [
-        ("", (0, 0, 0), None),
+        ("", (1, 0, 0), _NOT_PAIRED_LINE),
+        ("MATRIX_HOMESERVER=http://localhost:8008\n", (0, 0, 0), None),
         ("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", (1, 0, 0), _NOT_PAIRED_LINE),
         (
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"

@@ -13,21 +13,21 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput, ToolCa
 from agno.run.base import RunStatus
 from agno.tools.calculator import CalculatorTools
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
-from mindroom.approval_execution import (
+from mindroom.ai import ai_response
+from mindroom.approval.execution import (
     _collect_agent_continuation,
     _continuation_turn_context,
     _stream_continuation_turn,
 )
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
-from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.message_target import MessageTarget
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -37,7 +37,7 @@ from mindroom.response_turn import (
     ResumedAttempt,
     paused_attempt_from_response,
 )
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StructuredStreamChunk,
@@ -46,25 +46,17 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import bind_runtime_paths, unwrap_extracted_collaborator
+from tests.conftest import bind_runtime_paths, make_turn_context, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
     from pathlib import Path
 
     from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
     from mindroom.response_turn import ResponseTurnContext
-
-
-@pytest.fixture(autouse=True)
-def _isolate_mcp_binding() -> Iterator[None]:
-    """Built-in tool continuations must not inherit another test's MCP configuration."""
-    bind_mcp_server_manager(None)
-    yield
-    bind_mcp_server_manager(None)
 
 
 def _call(name: str, call_id: str, **arguments: object) -> ModelResponse:
@@ -106,6 +98,51 @@ class _ScriptedModel(SyntheticModel):
         **kwargs: object,
     ) -> AsyncIterator[ModelResponse]:
         yield await self.ainvoke(messages, tools=tools, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+async def test_disabled_dynamic_load_does_not_seed_discarded_tools_into_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """A rebuilt ordinary call keeps its own visible numbering when background jobs are off."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": [], "learning": False},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": [{"calculator": {"defer": True}}]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    responses = [_call("load_tool", "loader", tool_name="calculator"), _call("add", "sum", a=2, b=3)]
+    monkeypatch.setattr(
+        "mindroom.agents._load_agent_model_instance",
+        lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await ai_response(
+            make_turn_context("general", session_id="load-approval"),
+            prompt="Add two and three.",
+            config=config,
+            runtime_paths=paths,
+            show_tool_calls=show_tool_calls,
+            supports_native_tool_approval=True,
+        )
+    paused = raised.value.paused
+    assert not responses
+    assert [entry.tool_name for entry in paused.tools] == ["add"]
+    assert [entry.tool_name for entry in paused.tool_trace] == ["add"]
+    assert "load_tool" not in paused.response_text
+    if show_tool_calls:
+        assert "`add` [1]" in paused.response_text
 
 
 @pytest.mark.asyncio
@@ -505,7 +542,7 @@ async def test_approval_settlement_uses_typed_status(
         yield RunContentEvent(content="Terminal response")
         on_completed(CompletedAttempt(status=status))
 
-    monkeypatch.setattr("mindroom.approval_execution.stream_agent_response", stream)
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
     settlement = _stream_continuation_turn(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=False),
@@ -725,7 +762,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
             PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),
         )
 
-    monkeypatch.setattr("mindroom.approval_execution.stream_agent_response", stream)
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
     published: list[str] = []
 
     async def progress(chunk: StructuredStreamChunk) -> None:

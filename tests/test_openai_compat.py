@@ -51,6 +51,7 @@ from mindroom.api.openai_compat import (
     _is_error_response,
 )
 from mindroom.api.openai_request_parsing import _extract_content_text
+from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.judgment import TypeSafeJudgmentConfig
@@ -58,6 +59,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
+from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.judgment.client import JudgmentClient
@@ -70,11 +72,10 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.provider_media_fallback import install_provider_media_fallback
+from mindroom.providers.media_fallback import install_provider_media_fallback
 from mindroom.routing import ResponderSelection
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
-from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -449,7 +450,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         session_id="openai-session",
     )
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
         agent = create_agent(
             "code",
             config=config,
@@ -494,7 +495,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
         session_id="openai-session",
     )
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
         agent = create_agent(
             "code",
             config=config,
@@ -551,7 +552,7 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
         session_id="openai-session",
     )
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
         agent = create_agent(
             "code",
             config=config,
@@ -605,7 +606,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         session_id="openai-session",
     )
 
-    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
         agent = create_agent(
             "code",
             config=config,
@@ -1264,7 +1265,7 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
-            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
             patch(
                 "mindroom.ai._run_cached_agent_attempt",
@@ -1791,6 +1792,7 @@ class TestStreamingCompletion:
                 test_config,
                 _runtime_paths(),
                 None,
+                model_name="default",
             )
 
         assert isinstance(response, openai_compat._OpenAIStreamingResponse)
@@ -1847,6 +1849,7 @@ class TestStreamingCompletion:
                 runtime_paths,
                 None,
                 None,
+                model_name="default",
                 execution_identity=execution_identity,
             )
 
@@ -2357,7 +2360,7 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         background=BackgroundTask(existing_background),
     )
 
-    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock)
+    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2461,7 +2464,7 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2508,7 +2511,7 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock)
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
 
     async def receive() -> dict[str, str]:
         await partial_sent.wait()
@@ -2545,6 +2548,7 @@ async def test_openai_json_response_skips_background_when_send_fails() -> None:
             background=BackgroundTask(background),
         ),
         completion_lock,
+        None,
     )
 
     async def receive() -> dict[str, str]:
@@ -2574,6 +2578,7 @@ async def test_openai_error_response_releases_lock_when_send_fails() -> None:
     response = openai_compat._attach_openai_completion_lock_release(
         openai_compat._error_response(500, "failed", error_type="server_error"),
         completion_lock,
+        None,
     )
 
     async def receive() -> dict[str, str]:
@@ -3214,6 +3219,43 @@ def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config
     assert arun.call_args.kwargs["user_id"] == "@alice:localhost"
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_team_run_records_helper_usage_in_its_conversation(team_app_client: TestClient, stream: bool) -> None:
+    """Helper work during an API team run, such as a member's Claude Code session, belongs to the team conversation."""
+    owners: list[HelperUsageOwner | None] = []
+    mock_team = _make_test_team()
+
+    async def stream_events() -> AsyncIterator[object]:
+        owners.append(get_helper_usage_owner())
+        yield TeamContentEvent(content="Team answer")
+
+    async def run() -> TeamRunOutput:
+        owners.append(get_helper_usage_owner())
+        return TeamRunOutput(content="Team answer")
+
+    mock_team.arun = MagicMock(side_effect=lambda *_args, **kwargs: stream_events() if kwargs.get("stream") else run())
+    with (
+        patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
+        ),
+        patch(
+            "mindroom.api.openai_compat._prepare_openai_team_prompt",
+            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+        ),
+    ):
+        response = team_app_client.post(
+            "/v1/chat/completions",
+            headers={"X-Session-Id": "team-session"},
+            json={"model": "team/super_team", "messages": [{"role": "user", "content": "Build it"}], "stream": stream},
+        )
+
+    assert response.status_code == 200
+    assert len(owners) == 1
+    assert owners[0] is not None
+    assert owners[0].session_id == mock_team.arun.call_args.kwargs["session_id"]
+
+
 class TestTeamCompletion:
     """Tests for team model support (Phase 3)."""
 
@@ -3261,6 +3303,7 @@ class TestTeamCompletion:
                 config=team_config,
                 runtime_paths=runtime_paths,
                 thread_history=[],
+                team_model_name="default",
                 execution_identity=execution_identity,
             )
 
@@ -3542,6 +3585,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -3804,6 +3848,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -4275,6 +4320,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
+                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
 
@@ -4510,7 +4556,7 @@ class TestTeamCompletion:
     def test_team_member_materialization_failure_returns_generic_500(self, team_app_client: TestClient) -> None:
         """Configured team build failures should not expose internal exception details."""
         with (
-            patch("mindroom.model_loading.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=MagicMock()),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
             patch(
                 "mindroom.teams.create_agent",
@@ -5011,11 +5057,6 @@ class TestTeamCompletion:
                     new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
                 ),
                 patch(
-                    "mindroom.teams.team_tool_definition_payloads_for_logging",
-                    return_value=[{"name": "demo_tool", "description": "Demo"}],
-                    create=True,
-                ),
-                patch(
                     "mindroom.teams.model_params_payload",
                     return_value={"temperature": 0.7},
                     create=True,
@@ -5030,11 +5071,12 @@ class TestTeamCompletion:
                     config=config,
                     runtime_paths=runtime_paths,
                     thread_history=[],
+                    team_model_name="default",
                 )
 
         assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
         assert prepared_prompt.run_metadata is not None
-        assert prepared_prompt.run_metadata["tools_schema"] == [{"name": "demo_tool", "description": "Demo"}]
+        assert "tools_schema" not in prepared_prompt.run_metadata
         assert prepared_prompt.run_metadata["model_params"] == {"temperature": 0.7}
         assert prepared_prompt.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         with open_bound_scope_session_context(
@@ -5085,7 +5127,7 @@ class TestTeamCompletion:
         )
         with (
             patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.model_loading.get_model_instance"),
+            patch("mindroom.providers.model_loading.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             mock_create.return_value = MagicMock(name="GeneralAgent")
@@ -5108,6 +5150,11 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models(
+                        "collab_team",
+                        collaborate_config,
+                        lambda model_name: model_name,
+                    ),
                 )
 
             mock_team_init.assert_called_once()
@@ -5117,7 +5164,7 @@ class TestTeamCompletion:
         """Coordinate mode sets delegate_to_all_members=False on Team."""
         with (
             patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.model_loading.get_model_instance"),
+            patch("mindroom.providers.model_loading.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             mock_create.return_value = MagicMock(name="GeneralAgent")
@@ -5154,6 +5201,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
             mock_team_init.assert_called_once()
@@ -5180,7 +5228,7 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.model_loading.get_model_instance"),
+            patch("mindroom.providers.model_loading.get_model_instance"),
             patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
@@ -5199,6 +5247,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
         assert mock_team_init.call_args.kwargs["id"] == "coord_team"
@@ -5225,7 +5274,7 @@ class TestTeamCompletion:
         with (
             patch("mindroom.teams.create_agent", return_value=member),
             patch(
-                "mindroom.model_loading.get_model_instance",
+                "mindroom.providers.model_loading.get_model_instance",
                 return_value=FakeModel(id="test-model", provider="fake"),
             ),
         ):
@@ -5247,6 +5296,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
 
         assert team.num_history_runs is None
@@ -5284,7 +5334,7 @@ class TestTeamCompletion:
                 execution_identity=execution_identity,
                 team_name="super_team",
             ) as scope_context,
-            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             assert scope_context is not None
             agents, team, mode = openai_compat._build_team(
@@ -5294,6 +5344,7 @@ class TestTeamCompletion:
                 execution_identity=execution_identity,
                 scope_context=scope_context,
                 session_id="openai-team-session",
+                models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
             )
 
         try:
@@ -5359,6 +5410,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
             mock_close.assert_called_once_with(
                 agents=[built_agent],
@@ -5394,7 +5446,7 @@ class TestTeamCompletion:
         mock_knowledge = MagicMock()
         with (
             patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.model_loading.get_model_instance"),
+            patch("mindroom.providers.model_loading.get_model_instance"),
             patch(
                 "mindroom.teams.resolve_agent_knowledge_access",
                 return_value=_KnowledgeResolution(knowledge=mock_knowledge),
@@ -5421,6 +5473,7 @@ class TestTeamCompletion:
                     runtime_paths,
                     execution_identity=None,
                     scope_context=scope_context,
+                    models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
                 )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge

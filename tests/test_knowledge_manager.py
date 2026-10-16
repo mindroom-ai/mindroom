@@ -40,7 +40,7 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
-from mindroom import embedder_health, file_locks
+from mindroom import file_locks
 from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.background_tasks import wait_for_background_tasks
@@ -51,9 +51,9 @@ from mindroom.constants import (
     DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
     KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_embedder_api_key
-from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import get_embedder_api_key
+from mindroom.embeddings import embedder_health
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
@@ -64,6 +64,7 @@ from mindroom.knowledge.file_listing import (
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
+from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.indexing_config import IndexingSettings, knowledge_git_dir
@@ -394,6 +395,34 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     assert all(alpha_marker not in document.content for document in beta_cross)
 
 
+def _published_result_index(base_id: str, **_kwargs: object) -> object:
+    """Publish one "result from <base_id>" document, so merged search results name the bases searched."""
+    vector_db = _VectorDb(collection=f"collection_{base_id}")
+    vector_db.create()
+    _VectorDb.collections[vector_db.collection_name] = [
+        {
+            "content": f"result from {base_id}",
+            "metadata": {"source_path": f"{base_id}.md"},
+        },
+    ]
+    knowledge = SimpleNamespace(
+        vector_db=vector_db,
+        name=None,
+        description=None,
+        max_results=10,
+    )
+    return SimpleNamespace(
+        key=SimpleNamespace(base_id=base_id),
+        index=SimpleNamespace(
+            knowledge=knowledge,
+            state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
+        ),
+        availability=KnowledgeAvailability.READY,
+        state=None,
+        schedule_refresh_on_access=False,
+    )
+
+
 @pytest.mark.parametrize(
     ("authored_source_count", "expected_result_count", "memory_source_expected"),
     [
@@ -420,33 +449,7 @@ def test_default_merged_search_budget_is_bounded_while_representing_sources_that
     )
     runtime_paths = runtime_paths_for(config)
 
-    def _published_index(base_id: str, **_kwargs: object) -> object:
-        vector_db = _VectorDb(collection=f"collection_{base_id}")
-        vector_db.create()
-        _VectorDb.collections[vector_db.collection_name] = [
-            {
-                "content": f"result from {base_id}",
-                "metadata": {"source_path": f"{base_id}.md"},
-            },
-        ]
-        knowledge = SimpleNamespace(
-            vector_db=vector_db,
-            name=None,
-            description=None,
-            max_results=10,
-        )
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                knowledge=knowledge,
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-            schedule_refresh_on_access=False,
-        )
-
-    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_index)
+    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_result_index)
 
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
@@ -457,6 +460,49 @@ def test_default_merged_search_budget_is_bounded_while_representing_sources_that
         any(document.content.startswith("result from file_memory_agent_helper_") for document in documents)
         is memory_source_expected
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("only", "expected_sources"),
+    [
+        pytest.param(None, {"docs", "faq", "file memory"}, id="all"),
+        pytest.param(("faq",), {"faq"}, id="named"),
+        pytest.param(("docs", "faq"), {"docs", "faq"}, id="every-base-named"),
+        pytest.param(("faq", "wiki", "notes"), {"faq"}, id="only-its-own-semantic-bases"),
+        pytest.param((), set(), id="none"),
+    ],
+)
+async def test_narrowed_agent_knowledge_searches_only_the_named_bases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
+    only: tuple[str, ...] | None,
+    expected_sources: set[str],
+) -> None:
+    """A narrowed resolution searches only the named semantic bases the agent has, without the file-memory overlay."""
+    config = _file_memory_config(tmp_path, "helper")
+    config.agents["helper"].knowledge_bases = ["docs", "faq", "notes"]
+    config.knowledge_bases.update(
+        {base_id: KnowledgeBaseConfig(path=str(tmp_path / base_id)) for base_id in ("docs", "faq", "wiki")},
+    )
+    config.knowledge_bases["notes"] = KnowledgeBaseConfig(path=str(tmp_path / "notes"), mode="files")
+    runtime_paths = runtime_paths_for(config)
+    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_result_index)
+
+    resolution = (
+        await knowledge_utils.resolve_agent_knowledge_access_async("helper", config, runtime_paths, only=only)
+        if asynchronous
+        else resolve_agent_knowledge_access("helper", config, runtime_paths, only=only)
+    )
+
+    knowledge = resolution.knowledge
+    documents = knowledge.vector_db.search(query="anything", limit=10) if knowledge is not None else []
+    searched = {document.content.removeprefix("result from ") for document in documents}
+    assert {
+        "file memory" if base_id.startswith("file_memory_") else base_id for base_id in searched
+    } == expected_sources
 
 
 def _record_git_sync(
@@ -6150,7 +6196,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
         execution_identity=_identity("@alice:localhost"),
     )
 
-    assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
+    assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge.refresh_entrypoint")
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
     assert captured_env["TMPDIR"] == tempfile.gettempdir()

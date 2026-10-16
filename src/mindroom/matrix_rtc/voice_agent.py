@@ -13,12 +13,14 @@ The heavy ``livekit`` / ``livekit-agents`` dependencies are optional (the
 from __future__ import annotations
 
 import asyncio
-import importlib.util
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.dependencies import check_deps_installed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -33,12 +35,13 @@ if TYPE_CHECKING:
         ConversationItemAddedEvent,
         ErrorEvent,
         FunctionToolsExecutedEvent,
+        SessionUsageUpdatedEvent,
         SpeechCreatedEvent,
+        UserStateChangedEvent,
     )
-    from livekit.agents.voice.io import AudioInput
+    from livekit.agents.voice.io import AudioInput, AudioOutput
     from livekit.agents.voice.speech_handle import SpeechHandle
 
-    from mindroom.matrix_rtc.call_tools import CallAgentResponse
     from mindroom.matrix_rtc.focus import SfuGrant
 
 logger = get_logger(__name__)
@@ -53,6 +56,12 @@ _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
 _CALL_TURN_CORRELATION_KEY = "mindroom_call_turn_id"
+#: GPT-Live streams speech in real time with a normal lead of one 100 ms delta,
+#: so an event-loop stall leaves the speech it held back queued to play late.
+#: When the caller starts talking over more than this much queued speech, the
+#: queue is discarded so they hear the model react instead of the late speech.
+#: Up to this much stays for GPT-Live to finish or yield on its own.
+_LIVE_OUTPUT_MAX_QUEUED_S = 0.5
 
 
 class _AudioFrameStream:
@@ -298,18 +307,22 @@ class _AuthorizedParticipantAudioInput:
             await asyncio.gather(*self._close_tasks, return_exceptions=True)
 
 
+#: Modules the optional ``matrix_calls`` extra provides; pyproject.toml owns its package requirements.
+MATRIX_CALLS_MODULES = ["livekit.rtc", "livekit.agents", "livekit.plugins.openai"]
+
+
 def matrix_calls_dependencies_available() -> bool:
     """Whether the optional ``matrix_calls`` extra is installed."""
-    # find_spec("livekit.rtc") raises (rather than returning None) when the
-    # parent "livekit" package itself is missing.
-    try:
-        return (
-            importlib.util.find_spec("livekit.rtc") is not None
-            and importlib.util.find_spec("livekit.agents") is not None
-            and importlib.util.find_spec("livekit.plugins.openai") is not None
-        )
-    except ModuleNotFoundError:
-        return False
+    return check_deps_installed(MATRIX_CALLS_MODULES)
+
+
+@dataclass(frozen=True)
+class CallAgentResponse:
+    """One normal MindRoom agent turn returned to the cascaded voice pipe."""
+
+    text: str
+    tool_names: tuple[str, ...] = ()
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +344,8 @@ class VoiceAgentOptions:
     on_session_terminated: Callable[[bool], None] | None = None
     #: Called with a safe, actionable user-facing description of a runtime failure.
     on_session_error: Callable[[str], None] | None = None
+    #: Saves the speech model's cumulative token usage for the call after each update.
+    record_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -372,6 +387,30 @@ class LiveVoiceUsage:
 
 
 @dataclass(frozen=True)
+class _RealtimeResponseUsage:
+    """Token usage of one realtime speech-model response."""
+
+    created_at: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    reasoning_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class RealtimeCallUsage:
+    """Every response's token usage so far in one realtime call."""
+
+    usage_id: str
+    model: str
+    created_at: float
+    responses: tuple[_RealtimeResponseUsage, ...]
+
+
+@dataclass(frozen=True)
 class LiveVoiceAgentOptions:
     """GPT-Live speech with delegation to the normal MindRoom agent."""
 
@@ -403,7 +442,10 @@ class RealtimeVoiceBridge:
         self._session: Any = None
         self._owned_speech_resource_closers: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._session_event_tasks: set[asyncio.Future[None]] = set()
-        self._reported_error_notices: set[str] = set()
+        self._usage_lock = asyncio.Lock()
+        self._realtime_usage: RealtimeCallUsage | None = None
+        self._saved_realtime_usage: RealtimeCallUsage | None = None
+        self._record_realtime_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
 
@@ -528,6 +570,8 @@ class RealtimeVoiceBridge:
         if isinstance(options, CascadedVoiceAgentOptions):
             private_sync_close = await _attach_private_transcript_synchronizer(session)
             self._owned_speech_resource_closers += (private_sync_close,)
+        elif isinstance(options, LiveVoiceAgentOptions):
+            _drop_live_backlog_on_caller_speech(session)
 
     def _log_media_snapshot(self) -> None:
         """Log local publications and remote subscription state for call diagnostics."""
@@ -565,6 +609,69 @@ class RealtimeVoiceBridge:
 
         self._register_termination_listener(session, options)
         self._register_error_listener(session, options)
+        if isinstance(options, VoiceAgentOptions) and options.record_usage is not None:
+            self._register_usage_listener(session, options.model, options.record_usage)
+
+    def _register_usage_listener(
+        self,
+        session: AgentSession,
+        model: str,
+        record_usage: Callable[[RealtimeCallUsage], Awaitable[None]],
+    ) -> None:
+        """Keep the realtime speech model's cumulative token usage saved for the call."""
+        from livekit.agents.metrics.usage import LLMModelUsage  # noqa: PLC0415
+
+        usage_id = uuid4().hex
+        created_at = time.time()
+        self._record_realtime_usage = record_usage
+
+        totals = (0, 0, 0, 0, 0, 0, 0)
+        responses: list[_RealtimeResponseUsage] = []
+
+        def _on_usage(event: SessionUsageUpdatedEvent) -> None:
+            nonlocal totals
+            # Accept updates while the session drains at hang-up; teardown awaits their saves.
+            llm_usage = [entry for entry in event.usage.model_usage if isinstance(entry, LLMModelUsage)]
+            if not llm_usage:
+                return
+            # LiveKit reports running totals after each response, so the increase is that response's usage.
+            current = (
+                sum(entry.input_tokens for entry in llm_usage),
+                sum(entry.output_tokens for entry in llm_usage),
+                sum(entry.input_cached_tokens for entry in llm_usage),
+                sum(entry.input_cache_creation_tokens for entry in llm_usage),
+                sum(entry.input_audio_tokens for entry in llm_usage),
+                sum(entry.output_audio_tokens for entry in llm_usage),
+                sum(entry.output_reasoning_tokens for entry in llm_usage),
+            )
+            increase = [now - then for now, then in zip(current, totals, strict=True)]
+            totals = current
+            if not any(increase):
+                return
+            responses.append(_RealtimeResponseUsage(time.time(), *increase))
+            self._realtime_usage = RealtimeCallUsage(
+                usage_id=usage_id,
+                model=model,
+                created_at=created_at,
+                responses=tuple(responses),
+            )
+            self._schedule_session_event(self._save_realtime_usage())
+
+        session.on("session_usage_updated", _on_usage)
+
+    async def _save_realtime_usage(self) -> None:
+        # Saves run one at a time and write the newest totals, so a slow save cannot overwrite newer ones.
+        async with self._usage_lock:
+            usage = self._realtime_usage
+            record_usage = self._record_realtime_usage
+            if usage is None or record_usage is None or usage is self._saved_realtime_usage:
+                return
+            try:
+                await record_usage(usage)
+            except Exception as error:
+                logger.warning("call_realtime_usage_save_failed", error_type=type(error).__name__)
+            else:
+                self._saved_realtime_usage = usage
 
     def _register_error_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         """Turn provider/runtime failures into safe, actionable call notices."""
@@ -575,11 +682,7 @@ class RealtimeVoiceBridge:
         def _on_error(event: ErrorEvent) -> None:
             if self._session is not session:
                 return
-            notice = _describe_voice_error(event)
-            if notice in self._reported_error_notices:
-                return
-            self._reported_error_notices.add(notice)
-            on_error(notice)
+            on_error(_describe_voice_error(event))
 
         session.on("error", _on_error)
 
@@ -689,6 +792,11 @@ class RealtimeVoiceBridge:
             try:
                 if self._session_event_tasks:
                     await asyncio.gather(*self._session_event_tasks, return_exceptions=True)
+                if self._record_realtime_usage is not None:
+                    # Retry the call's latest total once if its last save failed.
+                    await self._save_realtime_usage()
+                    if self._realtime_usage is not self._saved_realtime_usage:
+                        logger.error("call_realtime_usage_unpersisted")
             finally:
                 try:
                     await _close_speech_resources(speech_resource_closers)
@@ -901,18 +1009,23 @@ def _build_mindroom_llm(
     return _MindRoomLLM()
 
 
+def _session_audio_output(session: AgentSession) -> AudioOutput:
+    """Return the RoomIO audio output attached by ``session.start()``."""
+    audio_output = session.output.audio
+    if audio_output is None:
+        msg = "Voice session has no audio output"
+        raise RuntimeError(msg)
+    return audio_output
+
+
 async def _attach_private_transcript_synchronizer(
     session: AgentSession,
 ) -> Callable[[], Awaitable[None]]:
     """Sync assistant playout text without publishing transcripts to the SFU."""
     from livekit.agents.voice.transcription import TranscriptSynchronizer  # noqa: PLC0415
 
-    audio_output = session.output.audio
-    if audio_output is None:
-        msg = "Cascaded voice session has no audio output to synchronize"
-        raise RuntimeError(msg)
     synchronizer = TranscriptSynchronizer(
-        next_in_chain_audio=audio_output,
+        next_in_chain_audio=_session_audio_output(session),
         next_in_chain_text=None,
     )
     try:
@@ -922,6 +1035,61 @@ async def _attach_private_transcript_synchronizer(
         await synchronizer.aclose()
         raise
     return synchronizer.aclose
+
+
+def _drop_live_backlog_on_caller_speech(session: AgentSession) -> None:
+    """Discard GPT-Live speech that a stall left queued once the caller talks over it."""
+    from livekit.agents.voice.io import AudioOutput, AudioOutputCapabilities  # noqa: PLC0415
+
+    class _LiveOutputBacklog(AudioOutput):
+        def __init__(self, audio_output: AudioOutput) -> None:
+            super().__init__(
+                label="MindRoomLiveOutputBacklog",
+                capabilities=AudioOutputCapabilities(pause=True),
+                next_in_chain=audio_output,
+                sample_rate=audio_output.sample_rate,
+            )
+            # The base class may put a proxy in front of the sink; use the chain it built.
+            self._sink = cast("AudioOutput", self.next_in_chain)
+            # When the audio already handed to the sink finishes playing at real-time pace.
+            self._playout_end = 0.0
+            self._capturing = False
+            # RoomIO discards the rest of a segment cleared before its flush, so those frames never play.
+            self._segment_cleared = False
+
+        async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+            await super().capture_frame(frame)
+            self._capturing = True
+            await self._sink.capture_frame(frame)
+            if not self._segment_cleared:
+                self._playout_end = max(self._playout_end, time.monotonic()) + frame.duration
+
+        def flush(self) -> None:
+            super().flush()
+            self._capturing = False
+            self._segment_cleared = False
+            self._sink.flush()
+
+        def clear_buffer(self) -> None:
+            self._playout_end = 0.0
+            self._segment_cleared = self._capturing
+            self._sink.clear_buffer()
+
+        def drop_backlog(self) -> None:
+            queued = self._playout_end - time.monotonic()
+            if queued > _LIVE_OUTPUT_MAX_QUEUED_S:
+                self.clear_buffer()
+                logger.warning("call_output_backlog_dropped", dropped_ms=round(queued * 1000))
+
+    output = _LiveOutputBacklog(_session_audio_output(session))
+    session.output.audio = output
+
+    # LiveKit reports this when GPT-Live starts hearing the caller, even while the model keeps talking.
+    def on_user_state_changed(event: UserStateChangedEvent) -> None:
+        if event.new_state == "speaking":
+            output.drop_backlog()
+
+    session.on("user_state_changed", on_user_state_changed)
 
 
 def _latest_user_transcript(chat_ctx: ChatContext) -> str:

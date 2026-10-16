@@ -19,11 +19,11 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import runs_without, save_runs
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
-from mindroom.history_run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
+from mindroom.session_storage.agent_storage import runs_without, save_runs
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -340,26 +340,15 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
     context = _queued_message_notice_context.get()
     if context is None or context.mid_turn_gate is None or context.state is None:
         return
-    pending = context.state.pending_message_snapshot()
+    state = context.state
+    pending = state.pending_message_snapshot()
     if not pending:
         return
-    if not context.notice_fired:
-        try:
-            finish = await context.mid_turn_gate.should_finish(pending)
-        except Exception:
-            # Agno logs and ignores post-tool callback failures, so restore the default here.
-            finish = False
-        if finish and not context.notice_fired and pending == context.state.pending_message_snapshot():
-            for message in pending:
-                if context.notice_fired or pending != context.state.pending_message_snapshot():
-                    break
-                try:
-                    await context.mid_turn_gate.acknowledge_deferred(message)
-                except Exception:
-                    logger.warning("mid_turn_reaction_failed")
-            # Matrix delivery can yield to a newer correction or a concurrent handoff.
-            if not context.notice_fired and pending == context.state.pending_message_snapshot():
-                return
+    if not context.notice_fired and await context.mid_turn_gate.defers(
+        pending,
+        current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
+    ):
+        return
     _append_queued_notice_if_needed(messages=messages, function_call_results=(), notice_text=notice_text, judged=True)
 
 

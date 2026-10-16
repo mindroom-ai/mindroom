@@ -94,7 +94,7 @@ def _create_test_agent(
         agent_compress_tool_results=agent_compress_tool_results,
     )
     with patch(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         return_value=FakeModel(id="fake-model", provider="fake"),
     ):
         return create_agent(

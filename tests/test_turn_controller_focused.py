@@ -4,8 +4,7 @@ These tests construct ``TurnController`` directly from ``TurnControllerDeps`` â€
 no ``AgentBot``/orchestrator boot â€” with real ``TurnPolicy``, ``ConversationResolver``,
 ``TurnStore`` (disk-backed ledger), and ``CoalescingGate`` collaborators, and typed
 recording fakes only at the execution and delivery seams (``ResponseRunner``,
-``DeliveryGateway``). They pin the turn contract from
-``docs/architecture/bot-runtime.md``: precheck filtering (via ``IngressValidator``),
+``DeliveryGateway``). They pin the turn contract: precheck filtering (via ``IngressValidator``),
 replay-guard rejection, policy decision routing, ingress-level command dispatch
 with terminal TurnStore outcomes (commands are control inputs that never enter
 the coalescing gate), durable dedup across restarts, and the controller-owned
@@ -28,13 +27,12 @@ from pydantic import ValidationError
 
 from mindroom import constants, interactive
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.attachments import register_local_attachment
+from mindroom.attachments.storage import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import (
+from mindroom.coalescing.batch import (
     CoalescingKey,
     PendingEvent,
     PreparedTurn,
@@ -42,6 +40,7 @@ from mindroom.coalescing_batch import (
     active_follow_up_coalescing_key,
     build_prepared_turn,
 )
+from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.access import ResponderAccessConfig
@@ -53,7 +52,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.credentials import load_desktop_credentials, save_desktop_credentials
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import (
@@ -78,8 +77,8 @@ from mindroom.event_journal import (
     PrincipalStore,
     VisibleMessage,
 )
+from mindroom.event_journal.opening import open_event_journal
 from mindroom.event_journal.store import TurnRecordStore
-from mindroom.event_journal_open import open_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
@@ -108,8 +107,8 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs, Respons
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.scheduling import ScheduledWorkflow
-from mindroom.scheduling_executor import _prepare_scheduled_trigger
+from mindroom.scheduling.executor import _prepare_scheduled_trigger
+from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
@@ -118,7 +117,7 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
-from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from mindroom.voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -868,6 +867,8 @@ def _obligation_runner(
             source_has_live_owner=harness.gate.has_pending_source_event,
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,
             replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
         schedule_trigger_sender_is_managed=lambda sender: sender == principal_id,
@@ -5480,17 +5481,18 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
     )
     reached, release = asyncio.Event(), asyncio.Event()
     first = True
+    plan_turn = TurnPolicy.plan_turn
 
-    async def hold_after_strict_authorization(_client: nio.AsyncClient, _room_id: str) -> bool:
+    async def hold_after_strict_authorization(policy: TurnPolicy, *args: object, **kwargs: object) -> object:
         nonlocal first
         if first:
             first = False
             assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
             reached.set()
             await release.wait()
-        return False
+        return await plan_turn(policy, *args, **kwargs)
 
-    monkeypatch.setattr("mindroom.text_ingress_dispatch.is_dm_room", hold_after_strict_authorization)
+    monkeypatch.setattr(TurnPolicy, "plan_turn", hold_after_strict_authorization)
     await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     try:
         await dispatcher.drain_once()

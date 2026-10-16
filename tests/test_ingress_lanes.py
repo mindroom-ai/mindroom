@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import inbound_turn_normalizer, interactive, voice_handler
+from mindroom import inbound_turn_normalizer, interactive
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
+from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -25,13 +26,14 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.voice import handler as voice_handler
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     make_pending_event,
     prepared_dispatch_result,
     record_turn_answered,
@@ -57,7 +59,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
 
@@ -269,7 +271,7 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
     )
 
     busy["value"] = False
-    with patch("mindroom.coalescing.logger") as logger_mock:
+    with patch("mindroom.coalescing.gate.logger") as logger_mock:
         release_ready.set()
         await _wait_for(lambda: slot.settled.is_set())
 
@@ -301,7 +303,7 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
     key = CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost"))
 
     slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
-    with patch("mindroom.coalescing.logger") as logger_mock:
+    with patch("mindroom.coalescing.gate.logger") as logger_mock:
         gate.submit_lane_slot(
             slot,
             key=key,
@@ -603,6 +605,8 @@ def _turn_controller_dispatcher(
             source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=bot._turn_store.has_live_turn_claim,
             replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
     )
@@ -756,6 +760,8 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
         replies_ended=lambda _reply_ids: None,
+        on_job_follow_up=AsyncMock(),
+        on_job_cancel=AsyncMock(),
     )
     dispatcher = JournalDispatcher(
         store=journal_store.principal("agent@lane"),
@@ -854,12 +860,12 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         ),
     ):
         await bot._turn_controller.handle_text_event(room, first)
-        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+        await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         await bot._turn_controller.handle_text_event(room, second)
         await bot._turn_controller.handle_text_event(room, other_thread_reply)
 
-        await _wait_for(lambda: sorted(generated) == ["$m1", "$m2", "$m3"], deadline_seconds=1.0)
+        await _wait_for(lambda: sorted(generated) == ["$m1", "$m2", "$m3"])
         assert not release_first_response.is_set()
 
         release_first_response.set()
@@ -986,7 +992,7 @@ async def test_hung_voice_download_fallback_releases_later_sender_slot(
     monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS", 0.05)
     try:
         with (
-            patch("mindroom.voice_handler._download_audio", side_effect=hung_download),
+            patch("mindroom.voice.handler._download_audio", side_effect=hung_download),
             patch(
                 "mindroom.turn_controller.dispatch_text_message",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
@@ -994,7 +1000,7 @@ async def test_hung_voice_download_fallback_releases_later_sender_slot(
         ):
             await bot._turn_controller.handle_media_event(room, voice_note)
             await bot._turn_controller.handle_text_event(room, later_text)
-            await _wait_for(lambda: "$later" in dispatched_source_ids, deadline_seconds=1.0)
+            await _wait_for(lambda: "$later" in dispatched_source_ids)
 
         assert "$voice" in dispatched_source_ids
         assert bot._coalescing_gate.lanes.all_settled()
@@ -1069,7 +1075,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         ),
     ):
         await bot._turn_controller.handle_text_event(room, first)
-        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+        await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         await bot._turn_controller.handle_media_event(room, voice_note)
         await bot._turn_controller.handle_text_event(room, echo)
@@ -1077,7 +1083,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         await bot._turn_controller.handle_media_event(room, image)
         await bot._turn_controller.handle_text_event(room, other_thread)
 
-        await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
+        await _wait_for(lambda: "$b1" in generated)
         assert not release_first_response.is_set()
         assert bot._coalescing_gate.lanes.all_settled()
         assert not bot._turn_store.is_handled("$e1")
@@ -1167,15 +1173,15 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             ),
         ):
             await bot._turn_controller.handle_text_event(room, first)
-            await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+            await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
             # The answer's callback hands the selection to a runner-owned task and returns while the active turn
             # still holds this conversation.
             answer_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, answer))
-            await asyncio.wait_for(answer_task, timeout=1.0)
+            await asyncio.wait_for(answer_task, timeout=SETTLE_TIMEOUT_SECONDS)
             await bot._turn_controller.handle_text_event(room, other_thread)
 
-            await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
+            await _wait_for(lambda: "$b1" in generated)
             assert not release_first_response.is_set()
             assert "$f1" not in generated
 
@@ -1368,7 +1374,7 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
         ),
     ):
         await bot._turn_controller.handle_text_event(room, first)
-        await asyncio.wait_for(first_locked.wait(), timeout=1.0)
+        await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
             await _enqueue_for_dispatch(

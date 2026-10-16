@@ -19,11 +19,12 @@ from agno.run.agent import RunOutput, RunStatus
 
 import mindroom.tools  # noqa: F401
 from mindroom.api.credentials_target import RequestCredentialsTarget, save_credentials_for_target
+from mindroom.approval.tool_approval import _matching_tool_approval_rule
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, ParticipantOutput, execute_workflow_spec
@@ -33,7 +34,6 @@ from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
-from mindroom.tool_approval import _matching_tool_approval_rule
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -231,7 +231,12 @@ def _tool_payload(result: str) -> dict[str, Any]:
 def _run_config(context: ToolRuntimeContext, function_owners: dict[str, frozenset[str]]) -> Config:
     """Build the participant overlay with the allowed tools the caller's config and dashboard grant."""
     allowed = dynamic_workflow_module._workflow_allowed_tools(context)
-    return dynamic_workflow_module._participant_run_config(context, function_owners, allowed=allowed)
+    return dynamic_workflow_module._participant_run_config(
+        context,
+        function_owners,
+        allowed=allowed,
+        reads_skills=False,
+    )
 
 
 def test_dynamic_workflow_tool_registered() -> None:

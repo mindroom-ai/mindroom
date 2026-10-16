@@ -30,9 +30,9 @@ import mindroom.tools.agno_compat_groq as groq_module
 import mindroom.tools.agno_compat_openai as openai_module
 import mindroom.tools.file as file_tool_module
 import mindroom.tools.path_safety as path_safety_module
-from mindroom.attachments import load_attachment
+from mindroom.attachments.storage import load_attachment
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachments
 from mindroom.custom_tools.chat_ui import ChatUITools

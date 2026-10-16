@@ -14,7 +14,8 @@ from agno.models.response import ToolExecution
 from agno.run.requirement import RunRequirement
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval_manager import initialize_approval_store
+from mindroom.approval.manager import initialize_approval_store
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
@@ -30,7 +31,6 @@ from mindroom.reply_presentation import (
     render_body,
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
-from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_store import TurnStore
@@ -78,7 +78,6 @@ def _paused(run_id: str = "run-1", text: str = "Reading document") -> PausedAtte
 @asynccontextmanager
 async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterator[AgentBot]:
     bot = await _streaming_bot(tmp_path)
-    bot.config.agents["general"].memory_backend = "none"
     # Tool markers are not what these tests are about.
     bot.config.defaults.show_tool_calls = False
 
@@ -99,7 +98,7 @@ async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterato
     )
     try:
         with patch(
-            "mindroom.approval_response.evaluate_tool_approval",
+            "mindroom.approval.response.evaluate_tool_approval",
             AsyncMock(return_value=(requires_human, 60.0)),
         ):
             yield bot

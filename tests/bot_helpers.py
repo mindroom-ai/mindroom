@@ -12,7 +12,7 @@ from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 
 import nio
 
-from mindroom.attachments import AttachmentRecord, register_local_attachment
+from mindroom.attachments.storage import AttachmentRecord, register_local_attachment
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from agno.knowledge.document import Document
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.coalescing import ReadyPendingEvent
+    from mindroom.coalescing.gate import ReadyPendingEvent
     from mindroom.config.knowledge import KnowledgeBaseConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.inbound_turn_normalizer import DispatchPayload

@@ -33,7 +33,10 @@ const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
   // New voice keys land in Other; the Voice page renders these by hand.
   voice: ["enabled", "visible_router_echo", "stt", "intelligence"],
   calls: "*",
+  budgets: "*",
   room_defaults: ["admins"],
+  // The Agent Keys card edits services and shows only while the broker runs; unmatched_hosts and private_networks stay in config.yaml.
+  egress_broker: "*",
 };
 
 const SETTINGS_SECTIONS: readonly SettingsSection[] = [

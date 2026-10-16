@@ -26,7 +26,7 @@ from agno.skills import LocalSkills, Skills
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
-from mindroom import agents, ai, provider_stream_retry
+from mindroom import agents, ai
 from mindroom.agent_cli.protocol import (
     ContextReadOperation,
     ToolCallOperation,
@@ -36,11 +36,11 @@ from mindroom.agent_cli.protocol import (
 )
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
-from mindroom.agent_storage import create_session_storage
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.mcp.config import MCPServerConfig
@@ -48,7 +48,9 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
+from mindroom.providers import stream_retry as provider_stream_retry
 from mindroom.response_turn import apply_exact_approval_decisions
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
@@ -243,7 +245,16 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
         )
         runtime.config.agents["code"] = AgentConfig(display_name="Code", learning=False)
         with_responder_access(runtime.config, "code", users=[runtime.requester_id])
-        runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+        runtime = replace(
+            runtime,
+            orchestrator=SimpleNamespace(
+                agent_cli_registry=TurnToolRegistry(),
+                budgets=BudgetMonitor(
+                    runtime_paths=runtime.runtime_paths,
+                    config_provider=lambda config=runtime.config: config,
+                ),
+            ),
+        )
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         children = []
 
@@ -329,7 +340,13 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
         learning=False,
         memory_backend="file",
     )
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+    runtime = replace(
+        runtime,
+        orchestrator=SimpleNamespace(
+            agent_cli_registry=TurnToolRegistry(),
+            budgets=BudgetMonitor(runtime_paths=runtime.runtime_paths, config_provider=lambda: runtime.config),
+        ),
+    )
     shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
     install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
@@ -536,7 +553,6 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
             [tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests
         )
     finally:
-        bind_mcp_server_manager(None)
         sync_mcp_tool_registry(None)
         await manager.shutdown()
 

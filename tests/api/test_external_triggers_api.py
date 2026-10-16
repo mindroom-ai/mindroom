@@ -371,7 +371,7 @@ def _trigger_api_context(
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "mindroom_data",
-        process_env={},
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
     )
     api_main.initialize_api_app(api_main.app, runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
@@ -696,6 +696,16 @@ def test_disallowed_kind_returns_422(trigger_api: TriggerApiContext) -> None:
     response = _post_signed(trigger_api, body=_body(kind="campground.closed"), nonce="wrong-kind")
 
     assert response.status_code == 422
+
+
+def test_non_finite_payload_value_returns_422_without_echoing_it(trigger_api: TriggerApiContext) -> None:
+    """A rejected NaN, which JSON responses cannot render, gets a 422 that does not repeat the body."""
+    response = _post_signed(trigger_api, body=_body(message=float("nan")), nonce="nan-message")
+
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert (error["type"], error["loc"], error["msg"]) == ("string_type", ["message"], "Input should be a valid string")
+    assert "input" not in error
 
 
 def test_delivery_uses_single_snapshot_for_auth_readiness_and_execute(

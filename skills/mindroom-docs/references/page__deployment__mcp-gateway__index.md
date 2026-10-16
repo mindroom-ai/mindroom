@@ -39,6 +39,7 @@ MINDROOM_MCP_GATEWAY_ENABLED=true
 
 The gateway is disabled by default and stays disabled unless all of these settings are present.
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment; loopback HTTP origins are accepted for local development.
+Internationalized hostnames must be written in their ASCII `xn--` form.
 Restart the API after changing any gateway environment variable.
 Until then, gateway routes return `404 MCP gateway is disabled`.
 If a gateway setting is invalid, the API logs `MCP gateway disabled: check public origin, limits, authentication, and account provisioning` and starts without the gateway.
@@ -73,7 +74,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 - One saved selection applies to all of a user's MCP clients and changes no other user's selection or connections.
 - Removing an agent or tool still works when stored data exceeds a lowered storage quota.
 
-Tools that share a service connection share its OAuth controls, and room-dependent tools are labeled **MindRoom only** and are not exposed.
+Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Matrix sign-in](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat) sessions carry no email, so with managed account provisioning those users see that notice and cannot approve MCP clients; they need trusted upstream sign-in for the MCP controls and consent.
@@ -106,6 +107,7 @@ MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS=https://client.example.org,http://localhost
 
 The gateway's public origin is allowed automatically.
 Additional origins must be HTTPS or loopback HTTP; wildcards are rejected.
+Internationalized hostnames in `MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS` must be written in their ASCII `xn--` form, and an invalid entry disables the gateway.
 Cross-origin MCP requests never carry browser cookies and do not grant access to dashboard APIs.
 The public registration, token, revocation, and discovery endpoints accept noncredentialed cross-origin requests.
 

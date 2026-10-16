@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
@@ -976,6 +976,11 @@ def oauth_verified_claim(credentials: dict[str, Any], key: str) -> str | None:
         return None
     value = claims.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def oauth_account_label(credentials: dict[str, Any]) -> str | None:
+    """Return how a connected account is shown: its verified email, else its verified login (GitHub)."""
+    return oauth_verified_claim(credentials, "email") or oauth_verified_claim(credentials, "login")
 
 
 def _same_external_identity(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:

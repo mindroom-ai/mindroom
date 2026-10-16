@@ -33,7 +33,7 @@ import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.embedding_errors import (
+from mindroom.embeddings.errors import (
     EmbedderRequestError,
     embedder_failure_is_transient,
     embedder_retry_after_seconds,

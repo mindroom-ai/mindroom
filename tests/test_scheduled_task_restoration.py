@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom import scheduling
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.scheduling import tasks as scheduling
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,

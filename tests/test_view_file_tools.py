@@ -11,7 +11,7 @@ import pytest
 from agno.tools.function import ToolResult
 from PIL import Image
 
-from mindroom.attachments import load_attachment, register_local_attachment
+from mindroom.attachments.storage import load_attachment, register_local_attachment
 from mindroom.config.models import FileAccess, ModelConfig
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools

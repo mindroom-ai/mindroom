@@ -12,7 +12,6 @@ from agno.media import Image
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -41,6 +40,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_text_tokens
 from tests.conftest import (
     FakeModel,
@@ -1261,7 +1261,26 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
     assert decision.reason == "forced"
 
 
-def test_classify_compaction_decision_does_not_compact_when_over_trigger_but_within_hard_budget() -> None:
+@pytest.mark.parametrize(
+    ("current_history_tokens", "allow_native_compaction", "expected_mode", "expected_reason", "expected_fitted"),
+    [
+        (10_000, True, "none", "under_trigger", 10_000),
+        (10_000, False, "none", "under_trigger", 10_000),
+        (10_001, True, "none", "within_hard_budget", 10_001),
+        (10_001, False, "required", "over_trigger_native_disabled", 10_000),
+        (20_001, True, "required", "history_exceeds_hard_budget", 20_000),
+        (20_001, False, "required", "history_exceeds_hard_budget", 20_000),
+    ],
+)
+def test_classify_compaction_decision_compacts_at_trigger_only_without_native_compaction(
+    current_history_tokens: int,
+    expected_mode: str,
+    expected_reason: str,
+    expected_fitted: int,
+    *,
+    allow_native_compaction: bool,
+) -> None:
+    """Native compaction owns the range between the trigger and hard budgets, so runs without it compact there."""
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
         text_compaction_available=True,
@@ -1281,11 +1300,13 @@ def test_classify_compaction_decision_does_not_compact_when_over_trigger_but_wit
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
-        current_history_tokens=10_001,
+        current_history_tokens=current_history_tokens,
+        allow_native_compaction=allow_native_compaction,
     )
 
-    assert decision.mode == "none"
-    assert decision.reason == "within_hard_budget"
+    assert decision.mode == expected_mode
+    assert decision.reason == expected_reason
+    assert decision.fitted_replay_tokens == expected_fitted
 
 
 def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: Path) -> None:
@@ -1501,7 +1522,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     agent = _agent(db=storage)
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

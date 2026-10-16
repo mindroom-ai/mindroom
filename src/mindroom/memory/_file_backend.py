@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.constants import resolve_config_relative_path
-from mindroom.embedding_errors import classified_embedder_error
+from mindroom.embeddings.errors import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -537,9 +537,25 @@ def _schedule_semantic_refresh_at(
     )
 
 
-def refresh_agent_memory_search(agent_name: str, root: Path, config: Config, runtime_paths: RuntimePaths) -> None:
-    """Re-index a shared agent's file memory at ``root`` after its files changed outside the memory tool."""
-    _schedule_semantic_refresh_at(agent_name, agent_scope_user_id(agent_name), root, config, runtime_paths, None)
+def refresh_agent_memory_search(
+    agent_name: str,
+    root: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    """Re-index an agent's file memory at ``root`` after its files changed outside the memory tool.
+
+    A private agent's memory is one requester's, so ``execution_identity`` names that requester.
+    """
+    _schedule_semantic_refresh_at(
+        agent_name,
+        agent_scope_user_id(agent_name),
+        root,
+        config,
+        runtime_paths,
+        execution_identity,
+    )
 
 
 def _schedule_scope_semantic_refresh(

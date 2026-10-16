@@ -18,8 +18,8 @@ There are two kinds of triggers:
 - Single-use [agent callbacks](#agent-callbacks), created with the `callback_manager` tool, give a background task a Bash/curl script that wakes the originating agent and thread once.
 
 Triggers are created and managed by tool calls in a live Matrix conversation, not in `config.yaml`.
-Trigger records are stored in the primary runtime's control state, `MINDROOM_CONTROL_STATE_PATH` when set and `control_state/` under the storage root otherwise.
-Agent workers and sandbox runners do not receive that path.
+Trigger records are stored in the primary runtime's [control state](deployment/storage.md#data-persistence).
+Agent workers and sandbox runners do not receive the control state path.
 
 ## Configuration
 

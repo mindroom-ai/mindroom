@@ -14,12 +14,12 @@ from uuid import uuid4
 
 from agno.agent import Agent
 
-from mindroom import model_loading
-from mindroom.agent_storage import create_session_storage, load_agent_session
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.providers import model_loading
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.session_storage.agent_storage import create_session_storage, load_agent_session
 from mindroom.tool_system.worker_routing import (
     SerializedToolExecutionIdentity,
     ToolExecutionIdentity,
@@ -51,7 +51,6 @@ class _FlushSessionEntry(TypedDict, total=False):
     worker_key: str | None
     execution_identity: SerializedToolExecutionIdentity | None
     dirty: bool
-    in_flight: bool
     first_dirty_at: int
     last_seen_at: int
     last_session_updated_at: int | None
@@ -240,8 +239,6 @@ def mark_auto_flush_dirty_session(
             "execution_identity": serialized_identity,
             "dirty": True,
             "dirty_revision": dirty_revision + 1,
-            # Keep in-flight status if a flush is already running for this key.
-            "in_flight": bool(existing.get("in_flight", False)),
             "first_dirty_at": first_dirty_at,
             "last_seen_at": now,
             "next_attempt_at": None,
@@ -575,10 +572,13 @@ class MemoryAutoFlushWorker:
         for key, entry in dirty_items:
             if len(selected_keys) >= max_total:
                 break
-            if entry.get("in_flight", False):
-                continue
             next_attempt_at = entry.get("next_attempt_at")
             if isinstance(next_attempt_at, int) and next_attempt_at > now:
+                continue
+            # Readiness needs only the entry, so check it before decoding the stored session.
+            idle_ready = now - entry.get("last_seen_at", now) >= settings.idle_seconds
+            age_ready = now - entry.get("first_dirty_at", now) >= settings.max_dirty_age_seconds
+            if not (idle_ready or age_ready):
                 continue
 
             agent_name = entry.get("agent_name")
@@ -619,17 +619,11 @@ class MemoryAutoFlushWorker:
                     _write_state_unlocked(self.storage_path, latest_state)
                 continue
 
-            idle_ready = now - entry.get("last_seen_at", now) >= settings.idle_seconds
-            age_ready = now - entry.get("first_dirty_at", now) >= settings.max_dirty_age_seconds
-            if not (idle_ready or age_ready):
-                continue
-
             selected_keys.append(key)
             per_agent_count[batch_key] = per_agent_count.get(batch_key, 0) + 1
             with _STATE_LOCK:
                 latest_state = _read_state_unlocked(self.storage_path)
                 latest_entry = latest_state["sessions"].get(key, entry)
-                latest_entry["in_flight"] = True
                 latest_entry["last_session_updated_at"] = session_updated_at
                 flush_started_dirty_revision = latest_entry.get("dirty_revision", 0)
                 if not isinstance(flush_started_dirty_revision, int):
@@ -676,7 +670,6 @@ class MemoryAutoFlushWorker:
                 cooldown = _retry_cooldown_seconds(settings, failures)
                 latest_entry["consecutive_failures"] = failures
                 latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry["in_flight"] = False
                 latest_entry.pop("flush_started_dirty_revision", None)
                 latest_state["sessions"][key] = latest_entry
                 _write_state_unlocked(self.storage_path, latest_state)
@@ -695,7 +688,6 @@ class MemoryAutoFlushWorker:
                 cooldown = _retry_cooldown_seconds(settings, failures)
                 latest_entry["consecutive_failures"] = failures
                 latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry["in_flight"] = False
                 latest_entry.pop("flush_started_dirty_revision", None)
                 latest_state["sessions"][key] = latest_entry
                 _write_state_unlocked(self.storage_path, latest_state)
@@ -732,7 +724,6 @@ class MemoryAutoFlushWorker:
             latest_entry["dirty"] = (
                 has_newer_dirty_marks if isinstance(flush_started_dirty_revision, int) else has_newer_updates
             )
-            latest_entry["in_flight"] = False
             if isinstance(latest_session_updated_at, int):
                 latest_entry["last_session_updated_at"] = latest_session_updated_at
             if isinstance(session_updated_at, int):

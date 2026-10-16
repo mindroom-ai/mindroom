@@ -31,9 +31,10 @@ from mindroom.constants import (
     sandbox_startup_manifest_path,
     startup_manifest_sha256,
 )
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
+from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     descriptive_worker_id_for_key,
@@ -41,6 +42,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
+    worker_log_id,
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -2331,6 +2333,7 @@ router:
         ("agents/other/workspace/docs", "link"),
         ("agents/other/workspace/docs", "directory"),
         ("workers/other/docs", "directory"),
+        ("shared_directories/other/report/docs", "directory"),
         ("knowledge/docs", "link"),
     ],
 )
@@ -5251,8 +5254,8 @@ def test_kubernetes_script_worker_omits_agent_vault_identity_material(tmp_path: 
     assert not {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} & volume_names
 
 
-def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp_path: Path) -> None:
-    """The defensive vault-name guard should include the worker key that failed."""
+def test_agent_vault_main_env_error_names_worker_log_id_when_vault_name_missing(tmp_path: Path) -> None:
+    """The defensive vault-name guard should name the worker that failed by its log ID."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
@@ -5271,7 +5274,8 @@ def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp
     with pytest.raises(WorkerBackendError) as exc_info:
         backend._resources._agent_vault_main_env(worker_key=worker_key)
 
-    assert f"worker_key={worker_key!r}" in str(exc_info.value)
+    assert f"worker={worker_log_id(worker_key)!r}" in str(exc_info.value)
+    assert worker_key not in str(exc_info.value)
 
 
 def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> None:
@@ -5532,3 +5536,74 @@ def test_kubernetes_startup_stops_workers_whose_template_mounts_state_roots(
     pod_lists.clear()
     with pytest.raises(WorkerBackendError, match="did not stop"):
         legacy_state_root_mounts._stop_kubernetes_workers_mounting_state_roots(backend._resources)
+
+
+def _shared_directory_backend(tmp_path: Path) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, RuntimePaths]:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+agents:
+  alpha:
+    display_name: Alpha
+    worker_scope: shared
+  beta:
+    display_name: Beta
+    worker_scope: shared
+models:
+  default:
+    provider: openai
+    id: gpt-6-astra
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    create_shared_directory(runtime_paths, owner="alpha", name="report")
+    return backend, apps_api, runtime_paths
+
+
+def _share_mounts(body: dict[str, object]) -> list[dict[str, object]]:
+    volume_mounts = body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]  # type: ignore[index]
+    return [mount for mount in volume_mounts if "shared_directories" in str(mount["mountPath"])]
+
+
+def test_kubernetes_workers_mount_shared_directories_for_owner_and_members(tmp_path: Path) -> None:
+    """The owner's pod mounts its shared directory writable and an invited agent's pod read-only."""
+    backend, apps_api, runtime_paths = _shared_directory_backend(tmp_path)
+    add_shared_directory_member(runtime_paths, owner="alpha", name="report", member="beta")
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:alpha"), now=10.0)
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:beta"), now=10.0)
+
+    alpha_body, beta_body = apps_api.created_bodies
+    share_mount = {
+        "name": "worker-storage",
+        "mountPath": "/app/worker/shared_directories/alpha/report",
+        "subPath": "shared_directories/alpha/report",
+    }
+    assert _share_mounts(alpha_body) == [share_mount]
+    assert _share_mounts(beta_body) == [{**share_mount, "readOnly": True}]
+
+
+def test_kubernetes_ready_cache_rechecks_shared_directories(tmp_path: Path) -> None:
+    """A cached ready worker is not reused after an invitation, so its Deployment gains the mount."""
+    backend, apps_api, runtime_paths = _shared_directory_backend(tmp_path)
+    first = backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:beta"), now=10.0)
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:beta"), now=15.0)
+    assert len(apps_api.created_bodies) == 1
+    assert _share_mounts(apps_api.created_bodies[0]) == []
+
+    add_shared_directory_member(runtime_paths, owner="alpha", name="report", member="beta")
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:beta"), now=20.0)
+
+    assert apps_api.deleted_names == [first.worker_id]
+    assert _share_mounts(apps_api.created_bodies[-1]) == [
+        {
+            "name": "worker-storage",
+            "mountPath": "/app/worker/shared_directories/alpha/report",
+            "subPath": "shared_directories/alpha/report",
+            "readOnly": True,
+        },
+    ]

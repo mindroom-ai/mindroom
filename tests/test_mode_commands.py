@@ -11,7 +11,8 @@ import nio
 import pytest
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents, minimal_mode_preflight
+from mindroom import agents
+from mindroom.agent_cli import minimal_mode_preflight
 from mindroom.agent_cli.shell_access import agent_cli_shell_env
 from mindroom.agent_modes import clear_agent_mode, resolve_agent_mode, set_agent_mode
 from mindroom.commands import mode_commands
@@ -19,7 +20,7 @@ from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, _CommandParser
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.constants import primary_records_dir
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -96,7 +97,7 @@ async def test_mode_command_matches_response_runner_session(
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
+    set_agent_mode(paths, root, "general", target.session_id, "minimal")
     result = mode_commands.handle_mode_command(
         f"general {action}",
         config=config,
@@ -132,7 +133,7 @@ async def test_private_agent_mode_is_isolated_per_requester(tmp_path: Path) -> N
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
+    set_agent_mode(paths, root, "general", target.session_id, "minimal")
 
     def show(requester_id: str) -> str:
         return mode_commands.handle_mode_command(
@@ -175,7 +176,7 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
     ).state_root
-    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     room = nio.MatrixRoom(runtime.room_id, "@router:example.test")
     event = nio.RoomMessageText.from_dict(
         {
@@ -267,7 +268,7 @@ def test_selection_refuses_unsafe_worker_shell_deployment_before_saving(
         paths,
         build_execution_identity_from_runtime_context(context),
     )
-    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard")
     saved = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
@@ -303,7 +304,7 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
     ).state_root
-    set_agent_mode(context.runtime_paths, root, "helper", context.session_id, "minimal", context.requester_id)
+    set_agent_mode(context.runtime_paths, root, "helper", context.session_id, "minimal")
     assert "minimal" in mode_commands.handle_mode_command("helper show", **kwargs)
     assert "shell" in mode_commands.handle_mode_command("helper minimal", **kwargs)
     assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "minimal"
@@ -385,7 +386,7 @@ def test_selection_checks_effective_shell_permissions(
             worker_target=target,
             primary_built_tool=primary_built,
         )
-    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard")
     prior_choice = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
@@ -444,7 +445,6 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         "helper",
         context.session_id,
         "standard",
-        context.requester_id,
     )
     saved = _mode_file(context.runtime_paths, storage.state_root).read_bytes()
 

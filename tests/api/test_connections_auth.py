@@ -241,7 +241,7 @@ def test_signed_nonadmin_can_enter_personal_and_oauth_completion_routes(
 
 
 @pytest.mark.parametrize("portal_setting", [None, "", "   "])
-@pytest.mark.parametrize("path", ["/connections", "/connections/assets/portal.js"])
+@pytest.mark.parametrize("path", ["/connections", "/connections/nested", "/connections/assets/portal.js"])
 def test_disabled_connections_frontend_is_unavailable(
     portal_setting: str | None,
     path: str,
@@ -304,6 +304,30 @@ def test_connections_static_routes_use_only_dedicated_bundle(
     response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
     assert response.status_code == 200
     assert response.text == content
+
+
+@pytest.mark.parametrize("path", ["/connections/egress", "/connections/egress/", "/connections/egress/agents"])
+@pytest.mark.parametrize(("broker_port", "status_code"), [(None, 404), ("8768", 200)])
+def test_portal_serves_the_agent_keys_page_only_while_the_broker_is_on(
+    path: str,
+    broker_port: str | None,
+    status_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Without a broker port the portal's Agent Keys page is a 404, while the rest of the portal stays served."""
+    portal = tmp_path / "connections"
+    portal.mkdir()
+    (portal / "index.html").write_text("connections")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
+    response = connections_auth_client(MINDROOM_EGRESS_BROKER_PORT=broker_port).get(
+        path,
+        headers=signed_connections_headers("alice"),
+    )
+    assert response.status_code == status_code
+    assert (response.text == "connections") is (status_code == 200)
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
@@ -411,3 +435,139 @@ def test_signed_administrator_can_load_dashboard_html(
     response = connections_auth_client().get("/", headers=signed_connections_headers("owner"))
     assert response.status_code == 200
     assert response.text == "administrator dashboard"
+
+
+_BROWSER_ACCEPT = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+
+
+@pytest.mark.parametrize("path", ["/", "/credentials", "/agents/code?tab=tools", "/apix"])
+def test_non_admin_html_get_redirects_to_connections(
+    path: str,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """A signed user who opens a dashboard page in the browser lands on their own page instead of a JSON 403."""
+    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/connections?notice=admin-only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/config/load", "/api/config", "/api/credentials", "/api/oauth/google_drive/authorize"],
+)
+@pytest.mark.parametrize("accept", [_BROWSER_ACCEPT["Accept"], "application/json", "*/*"])
+def test_non_admin_api_calls_keep_the_json_403(
+    path: str,
+    accept: str,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Under /api/ the refusal stays a JSON 403, whatever the client accepts."""
+    headers = {**signed_connections_headers("alice"), "Accept": accept}
+    response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Administrator access required"}
+    assert "location" not in response.headers
+
+
+@pytest.mark.parametrize("accept", ["application/json", "*/*", "text/plain"])
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_non_admin_dashboard_requests_without_html_accept_stay_refused(
+    accept: str,
+    method: str,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Only a browser asking for HTML is redirected; any other client, and HEAD, still gets the 403."""
+    headers = {**signed_connections_headers("alice"), "Accept": accept}
+    response = connections_auth_client().request(method, "/", headers=headers, follow_redirects=False)
+    assert response.status_code == 403
+    assert "location" not in response.headers
+
+
+def test_non_admin_html_head_is_not_redirected(
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """The redirect is for page loads (GET), so a HEAD request keeps the plain refusal."""
+    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    response = connections_auth_client().head("/", headers=headers, follow_redirects=False)
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/connections",
+        "/api/connections/agents/personal/google_drive/status",
+        "/api/oauth/google_drive/callback",
+        "/api/oauth/google_drive/success",
+        "/api/oauth/google_drive/reset",
+    ],
+)
+def test_oauth_and_connections_routes_are_untouched_by_the_html_redirect(
+    path: str,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Callback, success, reset, and Connections API routes behave as before for a browser request."""
+    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
+    assert response.status_code == 200
+    assert "location" not in response.headers
+
+
+@pytest.mark.parametrize("portal_setting", [None, "", "   "])
+def test_html_get_without_the_portal_agent_keeps_dashboard_access(
+    portal_setting: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Without MINDROOM_CONNECTIONS_AGENT no route is restricted, so a signed user's page load is never redirected."""
+    (tmp_path / "index.html").write_text("administrator dashboard")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
+    client = connections_auth_client(MINDROOM_CONNECTIONS_AGENT=portal_setting)
+    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+
+    page = client.get("/", headers=headers, follow_redirects=False)
+    api = client.get("/api/config", headers=headers, follow_redirects=False)
+
+    assert (page.status_code, page.text) == (200, "administrator dashboard")
+    assert api.status_code == 200
+    assert "location" not in page.headers
+    assert "location" not in api.headers
+
+
+def test_administrator_and_connections_pages_are_not_redirected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """An administrator keeps the dashboard, and a signed user keeps the Connections pages."""
+    (tmp_path / "index.html").write_text("administrator dashboard")
+    portal = tmp_path / "connections"
+    portal.mkdir()
+    (portal / "index.html").write_text("connections")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
+    # The Agent Keys page exists while the broker is on.
+    client = connections_auth_client(MINDROOM_EGRESS_BROKER_PORT="8768")
+    owner = client.get("/", headers={**signed_connections_headers("owner"), **_BROWSER_ACCEPT}, follow_redirects=False)
+    assert (owner.status_code, owner.text) == (200, "administrator dashboard")
+    alice = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    for path in ("/connections", "/connections/egress"):
+        page = client.get(path, headers=alice, follow_redirects=False)
+        assert (page.status_code, page.text) == (200, "connections")
+
+
+def test_unsigned_html_get_still_gets_its_login_response(
+    connections_auth_client: Callable[..., TestClient],
+) -> None:
+    """The redirect is for signed non-administrators only; an anonymous browser is not sent to Connections."""
+    response = connections_auth_client().get("/", headers=_BROWSER_ACCEPT, follow_redirects=False)
+    assert response.status_code in {401, 403}
+    assert not response.headers.get("location", "").startswith("/connections")

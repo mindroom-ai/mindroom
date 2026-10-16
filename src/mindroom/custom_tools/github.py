@@ -15,7 +15,7 @@ from github.GithubRetry import GithubRetry
 from github.Requester import Requester
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.agno_compat_github_errors import (
     call_with_provider_failure_capture,
     install_provider_log_filter,
@@ -44,6 +44,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
+from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,7 +61,8 @@ logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
 _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE = "GitHub request failed"
-# Fixed hints stand in for provider-controlled error text, which never reaches the agent.
+_GITHUB_PROVIDER_DETAIL_MAX_CHARS = 500
+# Fixed hints explain statuses GitHub also uses for hidden resources and rate limits.
 _GITHUB_PROVIDER_STATUS_HINTS = {
     403: "this GitHub connection lacks permission for the request, or GitHub rate-limited it",
     404: (
@@ -77,18 +79,44 @@ def _github_exception_status_code(exc: GithubException) -> int | None:
     return None
 
 
-def _github_provider_error_result(status_code: int | None) -> str:
-    if status_code is None:
-        return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
-    message = f"{_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE} with HTTP {status_code}"
-    hint = _GITHUB_PROVIDER_STATUS_HINTS.get(status_code)
-    if hint is not None:
-        message = f"{message}: {hint}"
+def _github_error_entry_text(error: object) -> str | None:
+    if isinstance(error, str):
+        return error
+    if not isinstance(error, dict):
+        return None
+    entry = cast("dict[str, object]", error)
+    labels = ", ".join(f"{key}: {entry[key]}" for key in ("field", "code") if isinstance(entry.get(key), str))
+    message = entry.get("message")
+    if not isinstance(message, str):
+        return labels
+    return f"{message} ({labels})" if labels else message
+
+
+def _github_exception_detail(exc: GithubException) -> str | None:
+    """Return GitHub's message and per-field errors as bounded, credential-redacted plain text."""
+    data = exc.data
+    if not isinstance(data, dict):
+        return None
+    errors = data.get("errors")
+    parts = [data.get("message"), *map(_github_error_entry_text, errors if isinstance(errors, list) else ())]
+    detail = " ".join("; ".join(part for part in parts if isinstance(part, str) and part).split())
+    return redact_sensitive_text(detail, max_length=_GITHUB_PROVIDER_DETAIL_MAX_CHARS) or None
+
+
+def _github_provider_error_result(status_code: int | None, detail: str | None) -> str:
+    message = _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE
+    if status_code is not None:
+        message = f"{message} with HTTP {status_code}"
+        hint = _GITHUB_PROVIDER_STATUS_HINTS.get(status_code)
+        if hint is not None:
+            message = f"{message}: {hint}"
+    if detail is not None:
+        message = f"{message}. GitHub said: {detail}"
     return json.dumps({"error": message})
 
 
 def _record_github_provider_failure(exc: GithubException) -> None:
-    record_provider_failure(_github_exception_status_code(exc))
+    record_provider_failure(_github_exception_status_code(exc), _github_exception_detail(exc))
 
 
 class _GithubProviderFailureRequester(Requester):
@@ -176,8 +204,8 @@ class _SanitizeGithubProviderLogFilter(logging.Filter):
             if isinstance(exception, GithubException):
                 status_code = _github_exception_status_code(exception)
                 _record_github_provider_failure(exception)
-                record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
-                record.args = (status_code if status_code is not None else "unknown",)
+                record.msg = "GitHub provider request failed (operation=%s, error_type=GithubException, status_code=%s)"
+                record.args = (record.funcName, status_code if status_code is not None else "unknown")
                 record.exc_info = None
                 record.exc_text = None
                 record.stack_info = None
@@ -217,8 +245,10 @@ def _normalized_access_token(value: object) -> str | None:
 
 
 def _sanitized_github_exception_result(exc: GithubException) -> str:
-    _record_github_provider_failure(exc)
-    return _github_provider_error_result(_github_exception_status_code(exc))
+    status_code = _github_exception_status_code(exc)
+    detail = _github_exception_detail(exc)
+    record_provider_failure(status_code, detail)
+    return _github_provider_error_result(status_code, detail)
 
 
 class GithubTools(AgnoGithubTools):
@@ -357,6 +387,7 @@ class GithubTools(AgnoGithubTools):
             def oauth_entrypoint(
                 *args: object,
                 _entrypoint: Callable[..., object] = entrypoint,
+                _tool_name: str = function.name,
                 **kwargs: object,
             ) -> object:
                 try:
@@ -370,6 +401,7 @@ class GithubTools(AgnoGithubTools):
                 logger.warning(
                     "github_tool_call_failed",
                     provider_id=self._oauth_provider.id,
+                    tool_name=_tool_name,
                     error_type="GithubException",
                     status_code=status_code,
                 )
@@ -380,7 +412,7 @@ class GithubTools(AgnoGithubTools):
                             self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
                         ),
                     )
-                return _github_provider_error_result(status_code)
+                return _github_provider_error_result(status_code, provider_failure.detail)
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)

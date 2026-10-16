@@ -15,13 +15,19 @@ import aiohttp
 import nio
 import pytest
 from agno.utils import log as agno_log
+from chromadb.api.client import Client
+from chromadb.config import Settings
 
 from mindroom.constants import RuntimePaths
+from mindroom.knowledge.read_process import read_chroma
+from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.logging_config import (
     bound_log_context,
     configure_default_logging,
+    current_log_file,
     get_logger,
     setup_logging,
+    setup_subprocess_logging,
     subprocess_logging_env,
 )
 from mindroom.message_target import MessageTarget
@@ -573,7 +579,7 @@ def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
     request = {"base_id": "docs", "config_data": {"GIT_CONFIG_VALUE_0": _FRAME_LOCAL_CREDENTIAL}}
 
     completed = subprocess.run(
-        [sys.executable, "-m", "mindroom.knowledge_refresh_runner"],
+        [sys.executable, "-m", "mindroom.knowledge.refresh_entrypoint"],
         input=json.dumps(request).encode(),
         capture_output=True,
         check=False,
@@ -696,7 +702,7 @@ def test_knowledge_refresh_subprocess_logs_like_its_parent(
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
 
     completed = subprocess.run(
-        [sys.executable, "-m", "mindroom.knowledge_refresh_runner"],
+        [sys.executable, "-m", "mindroom.knowledge.refresh_entrypoint"],
         input=json.dumps({"base_id": "docs"}).encode(),
         env={**os.environ, **subprocess_logging_env()},
         capture_output=True,
@@ -710,3 +716,53 @@ def test_knowledge_refresh_subprocess_logs_like_its_parent(
     assert record["event"] == "Knowledge refresh subprocess failed"
     assert record["level"] == "error"
     assert "missing config_data" in str(record["exception"])
+
+
+@pytest.mark.parametrize("level", ["INFO", "WARNING"])
+def test_knowledge_read_worker_logs_like_its_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    level: str,
+) -> None:
+    """The read worker renders Agno's search logs and its own failures in the parent's format and level."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level=level, runtime_paths=_runtime_paths(tmp_path))
+    index = tmp_path / "index"
+    with Client(settings=Settings(is_persistent=True, persist_directory=str(index))) as client:
+        client.create_collection("docs").add(ids=["a"], embeddings=[[1.0, 0.0]], documents=["alpha"])
+    capfd.readouterr()
+
+    assert len(read_chroma(ReadRequest(str(index), "docs", "alpha", [1.0, 0.0])).documents) == 1
+    invalid_filter = {"team": {"$invalid": "https://reader:synthetic-secret@example.test"}}
+    with pytest.raises(RuntimeError, match="ValueError"):
+        read_chroma(ReadRequest(str(index), "docs", "alpha", [1.0, 0.0], filters=invalid_filter))
+
+    stderr = capfd.readouterr().err
+    records = _stderr_records(stderr.encode())
+    expected = [("Found 1 documents", "info", "agno")] if level == "INFO" else []
+    expected.append(("Knowledge read failed", "error", "mindroom.knowledge.read_worker"))
+    assert [(record["event"], record["level"], record["logger"]) for record in records] == expected
+    assert "$invalid" in str(records[-1]["exception"])
+    assert "synthetic-secret" not in stderr
+
+
+def test_subprocess_logging_appends_to_the_parent_log_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child given the parent's log file appends its records there, next to the parent's."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    assert log_file.parent.name == "logs"
+    get_logger("tests.parent").info("parent_event")
+
+    setup_subprocess_logging(log_file=log_file)
+    get_logger("tests.child").info("child_event")
+    logging.shutdown()
+
+    events = [json.loads(line)["event"] for line in log_file.read_text().splitlines()]
+    assert "parent_event" in events
+    assert events[-1] == "child_event"

@@ -17,8 +17,8 @@ from openai.types.responses import Response
 from openai.types.responses.response_input_item_param import ResponseInputItemParam
 from pydantic import TypeAdapter
 
-from mindroom.codex_model import CodexResponses
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.codex_model import CodexResponses
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
 
 if TYPE_CHECKING:
     from pathlib import Path

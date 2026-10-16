@@ -24,7 +24,6 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -51,7 +50,8 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.usage_storage import quote_identifier
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.usage.storage import quote_identifier
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )

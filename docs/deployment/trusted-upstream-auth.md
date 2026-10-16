@@ -7,7 +7,7 @@ icon: lucide/log-in
 Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned reverse proxy or identity gateway that has already authenticated the human.
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
-The [MCP Gateway](mcp-gateway.md) and the [usage export service](../usage.md#usage-export-service) also build on this mode.
+The [MCP Gateway](mcp-gateway.md), the [usage export service](../usage.md#usage-export-service), and the [budget service](../budgets.md#budget-service) also build on this mode.
 The [Connections portal](#connections-portal) can use this mode or [Matrix sign-in from MindRoom Chat](#matrix-sign-in-from-mindroom-chat), which needs no identity gateway.
 
 Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
@@ -122,6 +122,7 @@ Using an agent requires a matching `access.users` grant, administrator authority
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](../oauth-framework.md#who-can-connect-an-account), and connections made here are the same ones tools use.
 Disconnecting a shared connection affects every agent using its [credential scope](../oauth-framework.md#where-connections-are-stored).
+While the [egress broker](egress-broker.md) is on, the portal and its Agent Keys page link to each other.
 The portal never shows tokens, model configuration, generic credential editing, or OAuth client settings; operators still configure OAuth clients.
 When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
 Users choose the agents and tools the optional [MCP Gateway](mcp-gateway.md#choose-exposed-agents-and-tools) exposes on the same page.
@@ -217,6 +218,7 @@ Both charts fail to render when `enabled` is true without `userIdHeader`, when `
 Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
 With the Connections portal enabled, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the portal and the OAuth callback, success, and reset pages keep their own access checks.
+A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
 A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) never reaches dashboard routes, so it needs no administrator check.
 
 Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.

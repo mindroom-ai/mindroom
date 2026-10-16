@@ -12,9 +12,9 @@ import nio
 import pytest
 from agno.media import Image
 
-from mindroom.attachments import _attachment_id_for_event, register_local_attachment
-from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
+from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
+from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, LaneSlot, ReadyPendingEvent
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SOURCE_KIND_KEY,
@@ -73,7 +73,7 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.ingress_lanes import ReceiptLaneKey
+    from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -146,7 +146,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
                 new_callable=MagicMock,
@@ -750,7 +749,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
                 new_callable=MagicMock,
@@ -1303,7 +1301,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
                 new_callable=MagicMock,
@@ -1372,7 +1369,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
                 new_callable=MagicMock,
@@ -1463,7 +1459,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
                 new_callable=MagicMock,

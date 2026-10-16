@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,8 +18,9 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import router as agent_cli_router
-from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
+from mindroom.api.auth import ApiAuthState, dashboard_cors_origins, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
+from mindroom.api.budgets import router as budgets_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
 from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
@@ -30,6 +32,8 @@ from mindroom.api.connections_session import router as connections_session_route
 # Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
+from mindroom.api.egress_broker import router as egress_broker_router
+from mindroom.api.egress_credentials import router as egress_credentials_router
 from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
@@ -51,25 +55,25 @@ from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
 from mindroom.api.usage_export import close_usage_export_runner
+from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.embedder_health import get_embedder_failure
+from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
+from mindroom.credentials.sync import sync_env_to_credentials
+from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
-from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.legacy_state_root_records import migrate_state_root_records
-from mindroom.legacy_tool_credentials import migrate_tool_credential_defaults
-from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.matrix_openid import allowed_client_origins
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
-from mindroom.origins import normalized_origin
+from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
+from mindroom.usage.legacy_usage_storage import migrate_usage_storage
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
@@ -87,18 +91,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
-_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
-_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
     config_lifecycle.CONFIG_PENDING_RESTART_HEADER,
-)
-_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
-    "http://localhost:3003",
-    "http://localhost:5173",
-    "http://127.0.0.1:3003",
-    "http://127.0.0.1:5173",
 )
 
 
@@ -639,44 +635,10 @@ def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | N
     return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
 
 
-def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
-    """Return hosted browser origins allowed to make credentialed API calls."""
-    return list(
-        dict.fromkeys(
-            origin
-            for origin in (
-                normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
-                normalized_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
-            )
-            if origin is not None
-        ),
-    )
-
-
 def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _DashboardCorsSettings:
-    """Return dashboard CORS settings for one runtime context."""
-    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
-        return _DashboardCorsSettings(allow_origins=("*",), allow_credentials=False)
-
-    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
-    if configured_origins is None:
-        hosted_origins = tuple(_api_cors_origins(runtime_paths))
-        if hosted_origins:
-            return _DashboardCorsSettings(allow_origins=hosted_origins, allow_credentials=True)
-
-    origins = _parse_dashboard_cors_allowed_origins(configured_origins)
-    return _DashboardCorsSettings(
-        allow_origins=origins,
-        allow_credentials="*" not in origins,
-    )
-
-
-def _parse_dashboard_cors_allowed_origins(configured_origins: str | None) -> tuple[str, ...]:
-    """Parse a comma-separated dashboard CORS origin list."""
-    if configured_origins is None:
-        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
-    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
-    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    """Return dashboard CORS settings for one runtime context; credentials are never allowed with `*`."""
+    origins = dashboard_cors_origins(runtime_paths)
+    return _DashboardCorsSettings(allow_origins=origins, allow_credentials="*" not in origins)
 
 
 def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
@@ -696,6 +658,7 @@ app = FastAPI(
     docs_url=_api_docs["docs_url"],
     redoc_url=_api_docs["redoc_url"],
     openapi_url=_api_docs["openapi_url"],
+    exception_handlers={RequestValidationError: validation_error_response},
 )
 initialize_api_app(app, _runtime_paths)
 # Added before CORS, so a 413 still carries the dashboard's CORS headers.
@@ -765,8 +728,10 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 app.include_router(auth_router)
 app.include_router(connections_session_router)
 app.include_router(connections_router)
+app.include_router(egress_credentials_router)
 install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
+app.include_router(egress_broker_router, dependencies=[Depends(verify_user)])
 app.include_router(provider_setup_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
@@ -781,6 +746,7 @@ app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(usage_router)  # Routes require dashboard, signed personal, or dedicated service authentication.
+app.include_router(budgets_router)  # Routes require dashboard or dedicated budget-service authentication.
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)

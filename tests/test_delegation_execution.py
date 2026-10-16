@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -21,12 +21,11 @@ from agno.team import Team
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
-from mindroom.approval_execution import _collect_agent_continuation
-from mindroom.approval_response import require_ordered_pause_presentation
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.execution import _collect_agent_continuation
+from mindroom.approval.response import require_ordered_pause_presentation
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -41,6 +40,7 @@ from mindroom.delegation.recovery import _cancel_delegations, cancel_approval_de
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import (
     _attach_team_pause_presentation,
     _collect_team_continuation,
@@ -52,8 +52,13 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
-from tests.history_helpers import RecordingModel
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import (
+    DelegationModel,
+    _call,
+    _delegate_runtime_context,
+    _runtime_paths,
+    _saved_approval_calls,
+)
 from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:
@@ -61,55 +66,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.db.base import BaseDb
-    from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
-
-
-@dataclass
-class DelegationModel(RecordingModel):
-    """Deterministic model runs real Agno tool and pause machinery."""
-
-    responses: list[ModelResponse] = field(default_factory=list)
-
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        """Consume one planned provider response."""
-        self.seen_messages = list(cast("list[Message]", kwargs.get("messages", [])))
-        return self.responses.pop(0)
-
-    async def ainvoke_stream(self, *_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        """Use planned responses through Agno's real streaming machinery."""
-        yield await self.ainvoke(*_args, **kwargs)
-
-
-def _call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
-    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
-
-
-def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
-    """Supply the saved journal calls when a test drives delegation without Matrix publication."""
-    calls = []
-    for tool in state.pending_tools:
-        call_id = str(tool["tool_call_id"])
-        if state.pending_child_id is None:
-            assert tool["tool_name"] in {"run_subagent", "continue_subagent"}
-            assert state.pending_agent_name is not None
-            invoking_agent, toolkit_name = state.pending_agent_name, "delegate"
-        else:
-            source = state.pending_tool_sources[call_id]
-            invoking_agent, toolkit_name = source.child.child_agent_name, source.toolkit_name
-        calls.append(
-            ApprovalCall(
-                tool_call_id=call_id,
-                tool_name=str(tool["tool_name"]),
-                invoking_agent=invoking_agent,
-                toolkit_name=toolkit_name,
-                expires_at_ns=2**62,
-                arguments_digest=approval_arguments_digest(tool["tool_args"]),
-            ),
-        )
-    return tuple(calls)
 
 
 @pytest.mark.asyncio

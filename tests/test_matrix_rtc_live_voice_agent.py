@@ -11,9 +11,8 @@ from livekit.agents.llm import ChatContext
 from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 from structlog.testing import capture_logs
 
-from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.live_voice_agent import _LiveDelegationRunner
-from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions
+from mindroom.matrix_rtc.voice_agent import CallAgentResponse, LiveVoiceAgentOptions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -211,6 +210,42 @@ async def test_live_reconnect_retains_context_from_cancelled_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_delegation_joins_split_speech_into_one_turn() -> None:
+    """Fragments of one utterance reach the delegate as a single line per speaker."""
+    respond = AsyncMock(return_value=CallAgentResponse("Done."))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    context = ChatContext.empty()
+    context.add_message(role="assistant", content=" Sure, one moment.")
+    context.add_message(role="assistant", content=" I am checking.")
+    context.add_message(role="user", content=" Wait")
+    context.add_message(role="user", content=", can you check")
+    runner.submit(GPTLiveDelegation("one", ". Can you check whether the bakery opens early?"), context)
+    await asyncio.gather(*runner._tasks)
+
+    assert respond.await_args.args[0].endswith(
+        "\n\nassistant: Sure, one moment. I am checking.\n"
+        "user: Wait, can you check. Can you check whether the bakery opens early?",
+    )
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_finalized_speech_with_leading_space_does_not_repeat_dispatched_words() -> None:
+    """Provider transcripts keep a leading space that the stripped pending text lacks."""
+    respond = AsyncMock(return_value=CallAgentResponse("Done."))
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    context = ChatContext.empty()
+    runner.submit(GPTLiveDelegation("one", " Check weather"), context)
+    await asyncio.gather(*runner._tasks)
+    context.add_message(role="user", content=" Check weather and trains")
+    runner.submit(GPTLiveDelegation("two", ""), context)
+    await asyncio.gather(*runner._tasks)
+
+    assert respond.await_args.args[0].endswith("\n\nuser: and trains")
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
 async def test_live_splits_large_unicode_results_without_losing_content() -> None:
     """Provider commentary stays below the per-append token cap."""
     result = "Status: 晴れです。 " * 200
@@ -248,3 +283,58 @@ async def test_live_delegation_failure_returns_safe_notice_and_next_turn_works()
     assert any("live_voice_agent.py:" in frame for frame in failure["traceback_frames"])
     assert sink.results[-1] == ("Done.", "two")
     await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_delegation_times_each_stage_and_matches_acks_by_client_event_id() -> None:
+    """Queued work reports its lock wait, and each acknowledgement finds its chunk by sent event ID."""
+    release = asyncio.Event()
+
+    async def respond(_text: str, _on_tools: Callable[[list[str]], None] | None) -> CallAgentResponse:
+        await release.wait()
+        return CallAgentResponse("x" * 700)
+
+    sink = CommentarySink()
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", sink))
+    with capture_logs() as logs:
+        runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
+        runner.submit(GPTLiveDelegation("two", "Second"), ChatContext.empty())
+        await asyncio.sleep(0.01)
+        release.set()
+        await asyncio.gather(*runner._tasks)
+        # The SDK sends commentary in call order; a greeting append carries no delegation.
+        runner.on_client_event({"type": "session.commentary.append", "event_id": "greet"})
+        for index, (_text, delegation_id) in enumerate(sink.results):
+            runner.on_client_event(
+                {"type": "session.commentary.append", "event_id": f"append_{index}", "delegation_id": delegation_id},
+            )
+        for client_event_id in ("append_1", "greet", "append_0"):
+            runner.on_commentary_acked({"type": "session.commentary.appended", "client_event_id": client_event_id})
+    await runner.aclose()
+
+    stages = [entry for entry in logs if entry["event"] == "call_delegation_stage"]
+    assert [(entry["delegation_id"], entry["stage"]) for entry in stages] == [
+        ("one", "created"),
+        ("two", "created"),
+        ("one", "lock_acquired"),
+        ("one", "response_done"),
+        ("one", "commentary_appended"),
+        ("one", "commentary_appended"),
+        ("two", "lock_acquired"),
+        ("two", "response_done"),
+        ("two", "commentary_appended"),
+        ("two", "commentary_appended"),
+        ("one", "commentary_acked"),
+        ("one", "commentary_acked"),
+    ]
+    lock_waits = {entry["delegation_id"]: entry["elapsed_ms"] for entry in stages if entry["stage"] == "lock_acquired"}
+    assert lock_waits["two"] >= 10
+    assert {entry["response_chars"] for entry in stages if entry["stage"] == "response_done"} == {700}
+    appended = [
+        (entry["chunk_index"], entry["chunk_count"]) for entry in stages if entry["stage"] == "commentary_appended"
+    ]
+    assert appended == [(0, 2), (1, 2), (0, 2), (1, 2)]
+    assert [entry["chunk_index"] for entry in stages if entry["stage"] == "commentary_acked"] == [1, 0]
+    for delegation_id in ("one", "two"):
+        elapsed = [entry["elapsed_ms"] for entry in stages if entry["delegation_id"] == delegation_id]
+        assert elapsed == sorted(elapsed)

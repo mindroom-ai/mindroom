@@ -35,9 +35,9 @@ from mindroom.event_journal import (
     EventJournalStore,
     EventKind,
 )
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
-from mindroom.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.pending_event_worker import PendingEventWorker
 from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit, ignore_delivered_projection
 from tests.journal_membership_helpers import admit_room_membership

@@ -20,6 +20,7 @@ from mindroom.ai import (
     _PreparedAgentRun,
 )
 from mindroom.bot import AgentBot
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -33,6 +34,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import EventJournalStore, PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
     HookContextSupport,
@@ -51,7 +53,6 @@ from mindroom.response_runner import (
     ResponseRunnerDeps,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
@@ -350,6 +351,7 @@ def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNam
         hook_matrix_admin=lambda: matrix_admin,
         hook_room_state_querier=lambda: None,
         hook_room_state_putter=lambda: None,
+        budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
     )
 
 

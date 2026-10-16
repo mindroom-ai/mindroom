@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import nio
 
-from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
@@ -27,7 +27,7 @@ from mindroom.matrix.media import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.coalescing_batch import CoalescingKey
+    from mindroom.coalescing.batch import CoalescingKey
     from mindroom.message_target import ResponseLifecycleKey
 
 

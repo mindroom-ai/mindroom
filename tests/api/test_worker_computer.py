@@ -24,8 +24,8 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
-from mindroom.worker_browser import WorkerBrowserRuntime
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
+from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
 from tests.test_worker_computer_runtime import FakeDisplay

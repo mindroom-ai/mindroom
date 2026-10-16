@@ -20,7 +20,7 @@ from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.logging_config import get_logger
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecision, ParticipationGate
-from mindroom.provider_tool_policy import without_provider_tools
+from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping

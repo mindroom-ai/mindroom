@@ -77,9 +77,8 @@ class ScriptWorkerClient:
 
         ``config_snapshot`` holds the live config fields runners resolve; workers mount no config and resolve agents only from it.
         """
-        data = await self._request(
+        data = await self._post(
             worker,
-            method="POST",
             url=worker_api_endpoint(worker, "script-run"),
             json={
                 "protocol_version": SCRIPT_PROTOCOL_VERSION,
@@ -102,13 +101,10 @@ class ScriptWorkerClient:
         run_id: str,
     ) -> WorkerScriptStatus:
         """Poll one worker-owned supervisor handle."""
-        data = await self._request(
+        data = await self._post(
             worker,
-            method="GET",
-            url=f"{worker_api_endpoint(worker, 'script-status')}/{quote(run_id, safe='')}",
-            params={
-                "worker_key": worker.worker_key,
-            },
+            url=f"{worker_api_endpoint(worker, 'script-status')}/{quote(run_id, safe='')}/status",
+            json={"worker_key": worker.worker_key},
         )
         self._raise_structured_failure(data)
         state = data.get("state")
@@ -131,9 +127,8 @@ class ScriptWorkerClient:
         force: bool = False,
     ) -> WorkerScriptCancel:
         """Request graceful or forced termination of one worker-owned handle."""
-        data = await self._request(
+        data = await self._post(
             worker,
-            method="POST",
             url=f"{worker_api_endpoint(worker, 'script-cancel')}/{quote(run_id, safe='')}/cancel",
             json={
                 "worker_key": worker.worker_key,
@@ -157,14 +152,12 @@ class ScriptWorkerClient:
             unknown_handle=unknown_handle,
         )
 
-    async def _request(
+    async def _post(
         self,
         worker: WorkerHandle,
         *,
-        method: Literal["GET", "POST"],
         url: str,
-        json: dict[str, object] | None = None,
-        params: dict[str, str] | None = None,
+        json: dict[str, object],
     ) -> dict[str, object]:
         token = worker.auth_token
         if token is None:
@@ -172,18 +165,12 @@ class ScriptWorkerClient:
             raise ScriptWorkerError(message, failure_kind="worker")
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-                response = await client.request(
-                    method,
-                    url,
-                    headers={_TOKEN_HEADER: token},
-                    json=json,
-                    params=params,
-                )
+                # The body carries the worker key, which names the requester, because access logs record URLs.
+                response = await client.post(url, headers={_TOKEN_HEADER: token}, json=json)
         except httpx.HTTPError as exc:
             message = f"Worker script request failed: {exc}"
             raise ScriptWorkerError(message, failure_kind="worker") from exc
         if response.status_code >= 400:
-            # Validation errors echo rejected request values, such as the launch's config snapshot.
             detail = error_detail_from_response(
                 response,
                 fallback=f"Worker script request failed with status {response.status_code}.",

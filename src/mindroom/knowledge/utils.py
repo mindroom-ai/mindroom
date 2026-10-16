@@ -11,9 +11,9 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
-from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.file_memory_knowledge import resolve_agent_file_memory_knowledge
+from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
 from mindroom.knowledge.refresh_policy import (
     RefreshCooldownKey,
     cooldown_elapsed,
@@ -22,7 +22,7 @@ from mindroom.knowledge.refresh_policy import (
     refresh_trigger,
 )
 from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
-from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
+from mindroom.knowledge.source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
@@ -47,6 +47,7 @@ __all__ = [
     "resolve_agent_knowledge_access_async",
     "resolve_knowledge_base_access",
     "resolve_knowledge_base_access_async",
+    "semantic_agent_knowledge_base_ids",
 ]
 
 logger = get_logger(__name__)
@@ -210,7 +211,8 @@ def _prune_refresh_schedule_bookkeeping() -> None:
         _refresh_scheduled_at.pop(cache_key, None)
 
 
-def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
+def semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
+    """Return the configured knowledge bases an agent searches semantically."""
     return tuple(
         base_id
         for base_id in config.resolve_entity(agent_name).knowledge_base_ids
@@ -308,24 +310,41 @@ def _finish_base_knowledge_resolution(
     return knowledge, availability, last_error
 
 
+def _agent_knowledge_base_ids(
+    agent_name: str,
+    config: Config,
+    file_memory_base_id: str | None,
+    only: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    """Return the bases one agent searches; a narrowed set keeps only the configured bases it names."""
+    base_ids = semantic_agent_knowledge_base_ids(agent_name, config)
+    if only is not None:
+        return tuple(base_id for base_id in base_ids if base_id in only)
+    return (*base_ids, file_memory_base_id) if file_memory_base_id is not None else base_ids
+
+
 def resolve_agent_knowledge_access(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    only: tuple[str, ...] | None = None,
 ) -> _KnowledgeResolution:
-    """Resolve configured knowledge base(s) with diagnostics for one agent."""
-    file_memory = resolve_agent_file_memory_knowledge(
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity,
+    """Resolve configured knowledge base(s) with diagnostics for one agent, narrowed to ``only`` when set."""
+    # A narrowed resolution never searches file memory, so it skips building that overlay.
+    file_memory = (
+        None
+        if only is not None
+        else resolve_agent_file_memory_knowledge(agent_name, config, runtime_paths, execution_identity)
     )
     effective_config = file_memory.config if file_memory is not None else config
-    base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
-    if file_memory is not None:
-        base_ids = (*base_ids, file_memory.base_id)
+    base_ids = _agent_knowledge_base_ids(
+        agent_name,
+        config,
+        file_memory.base_id if file_memory is not None else None,
+        only,
+    )
     resolved_bases = [
         _resolve_base_knowledge(
             base_id,
@@ -345,19 +364,28 @@ async def resolve_agent_knowledge_access_async(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    only: tuple[str, ...] | None = None,
 ) -> _KnowledgeResolution:
-    """Resolve agent knowledge without blocking the event loop on published-index I/O."""
-    file_memory = await asyncio.to_thread(
-        resolve_agent_file_memory_knowledge,
-        agent_name,
-        config,
-        runtime_paths,
-        execution_identity,
+    """Resolve agent knowledge without blocking the event loop on published-index I/O, narrowed to ``only`` when set."""
+    # A narrowed resolution never searches file memory, so it skips building that overlay.
+    file_memory = (
+        None
+        if only is not None
+        else await asyncio.to_thread(
+            resolve_agent_file_memory_knowledge,
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity,
+        )
     )
     effective_config = file_memory.config if file_memory is not None else config
-    base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
-    if file_memory is not None:
-        base_ids = (*base_ids, file_memory.base_id)
+    base_ids = _agent_knowledge_base_ids(
+        agent_name,
+        config,
+        file_memory.base_id if file_memory is not None else None,
+        only,
+    )
     resolved_bases = [
         await _resolve_base_knowledge_async(
             base_id,

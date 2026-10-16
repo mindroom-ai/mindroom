@@ -15,16 +15,18 @@ import nio
 from nio import AuthenticatedToDeviceEvent
 from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
-from mindroom.approval_inbound import (
+from mindroom.approval.inbound import (
     handle_tool_approval_action,
     maybe_handle_tool_approval_reply,
     parse_approval_response_event,
 )
+from mindroom.approval.tool_approval import is_process_active_approval_card
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -61,7 +63,6 @@ from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_loop import bot_ingestion_config, sliding_sync_room_subscriptions
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
-from mindroom.matrix_delivery import TurnHandoff
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
@@ -80,15 +81,14 @@ from mindroom.runtime_shutdown import (
 )
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
 from .background_tasks import create_background_task, wait_for_background_tasks
-from .coalescing import CoalescingGate
-from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
+from .coalescing.batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
+from .coalescing.gate import CoalescingGate
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths
@@ -109,7 +109,7 @@ from .event_journal import (
     PrincipalStore,
     SemanticConsumer,
 )
-from .event_journal_open import OpenEventJournal, open_event_journal
+from .event_journal.opening import OpenEventJournal, open_event_journal
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -143,7 +143,7 @@ from .response_runner import (
     prepare_memory_and_model_context,
 )
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .scheduling import (
+from .scheduling.tasks import (
     ScheduledTaskRunnerOwner,
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -154,12 +154,15 @@ from .scheduling import (
     set_scheduled_task_runner_owner,
 )
 from .startup_errors import PermanentStartupError
+from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
+from .tool_jobs.follow_ups import follow_up_event
+from .tool_jobs.runtime import get_background_runtime
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
-from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
+from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -172,7 +175,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync, ReplyMembershipPreAdmission
-    from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
@@ -184,6 +187,7 @@ if TYPE_CHECKING:
     from mindroom.reply_lifecycle import Reply
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.tool_jobs.conversation import ConversationKey
 
 
 class _ProcessShutdownMatrixClient(Protocol):
@@ -528,6 +532,7 @@ class AgentBot:
                     self.wait_for_admission_or_shutdown,
                 ),
                 on_configured_room_joined=self._post_join_room_setup,
+                get_conversation_reader=lambda: self._conversation_reader,
             ),
         )
         self._init_runtime_components()
@@ -707,6 +712,7 @@ class AgentBot:
                 on_media=self._on_media_message,
                 on_reaction=self._on_reaction,
                 on_approval=self._on_unknown_event,
+                on_job_cancel=self._on_job_cancel,
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
@@ -717,6 +723,7 @@ class AgentBot:
                 ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
                 replies_ended=self._replies_ended,
+                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
             ),
             room_for_id=self._room_for_journal_event,
             schedule_trigger_sender_is_managed=lambda sender: (
@@ -1125,6 +1132,14 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str) -> None:
+        """Admit a follow-up for jobs that ended in one of this bot's conversations, and wake the journal worker."""
+        now_ms = int(time.time() * 1000)
+        await self.journal_principal().admit(
+            follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms),
+        )
+        self._journal_dispatcher.wake()
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
         """Wake response-local CLI waits, then release unowned sources to the journal."""
@@ -1706,6 +1721,9 @@ class AgentBot:
                 self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
+            if (runtime := get_background_runtime(self.runtime_paths)) is not None:
+                # Nobody here can see or cancel the work this entity leaves behind.
+                await cancel_room_jobs(runtime, agent_name=self.agent_name, room_id=room_id)
             # The departure ended the room's approvals without their settlement.
             self._response_runner.release_approval_holds_in_room(room_id)
             await self._room_lifecycle.forget_invited_room(room_id)
@@ -1724,9 +1742,9 @@ class AgentBot:
                 sliding_sync_room_subscriptions(self.rooms, self.config.matrix_sync.sliding_timeline_limit),
             )
 
-    def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
+    async def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
-        self._call_manager = maybe_build_call_manager(
+        self._call_manager = await maybe_build_call_manager(
             agent_name=self.agent_name,
             config=self.config,
             client=client,
@@ -1892,7 +1910,7 @@ class AgentBot:
                 self._on_invite_before_sync_certification,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
-            self._register_call_manager_callbacks(client)
+            await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,
                 client=client,
@@ -2815,6 +2833,25 @@ class AgentBot:
         """
         record = self._turn_store.get_turn_record(turn_id)
         return record.indexed_event_ids if record is not None else (turn_id,)
+
+    async def _on_job_cancel(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Cancel this entity's background jobs a person asked to stop from their client."""
+        runtime = get_background_runtime(self.runtime_paths)
+        sender = event.source.get("sender")
+        if runtime is None or not isinstance(sender, str):
+            return
+        await handle_job_cancel_event(
+            runtime,
+            agent_name=self.agent_name,
+            room_id=room.room_id,
+            content=event.source.get("content") or {},
+            sender_may_cancel=person_may_cancel(
+                sender,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                may_talk=lambda sender_id: self._turn_policy.can_reply_to_sender_in_room(sender_id, room.room_id),
+            ),
+        )
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

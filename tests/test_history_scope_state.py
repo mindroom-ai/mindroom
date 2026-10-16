@@ -19,14 +19,16 @@ from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 from agno.tools.function import Function
+from sqlalchemy import event
 
-from mindroom.agent_storage import create_session_storage, create_state_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
 )
 from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
+    add_pending_force_compaction_scope,
+    has_queued_force_compaction,
     read_scope_seen_event_ids,
     read_scope_state,
     set_force_compaction_state,
@@ -36,7 +38,8 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
 )
-from mindroom.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage, get_agent_session
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -290,6 +293,30 @@ def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     assert read_scope_state(session, team_scope).force_compact_before_next_run is False
 
 
+def test_queued_force_compaction_reads_the_session_row_without_its_runs(storage: BaseDb) -> None:
+    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    assert has_queued_force_compaction(storage, "flagged", agent_scope) is False
+
+    flagged = _session("flagged", runs=[_completed_run("run-1")])
+    set_force_compaction_state(flagged, agent_scope, HistoryScopeState(), force=True)
+    pending = _session("pending", runs=[_completed_run("run-2")])
+    pending.session_data = {"session_state": add_pending_force_compaction_scope(None, agent_scope)}
+    for session in (flagged, pending, _session("idle", runs=[_completed_run("run-3")])):
+        seed_session(storage, session)
+    statements: list[str] = []
+    event.listen(storage.db_engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+
+    assert has_queued_force_compaction(storage, "flagged", agent_scope) is True
+    assert has_queued_force_compaction(storage, "pending", agent_scope) is True
+    assert has_queued_force_compaction(storage, "flagged", team_scope) is False
+    assert has_queued_force_compaction(storage, "pending", team_scope) is False
+    assert has_queued_force_compaction(storage, "idle", agent_scope) is False
+    assert has_queued_force_compaction(storage, "missing", agent_scope) is False
+    assert statements
+    assert not any(storage.runs_table_name in statement for statement in statements)
+
+
 def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -401,7 +428,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

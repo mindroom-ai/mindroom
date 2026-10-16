@@ -24,11 +24,10 @@ from mindroom.agents import (
     create_agent,
     get_agent_toolkit_names,
 )
-from mindroom.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.desktop.credentials import (
@@ -36,7 +35,8 @@ from mindroom.desktop.credentials import (
     save_desktop_credentials,
 )
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
-from mindroom.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
+from mindroom.providers.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
+from mindroom.providers.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
     return resolve_runtime_paths(
@@ -64,6 +64,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         process_env={
             "MATRIX_HOMESERVER": "http://localhost:8008",
             "MINDROOM_NAMESPACE": "",
+            **env,
         },
     )
 
@@ -93,8 +94,8 @@ def _clear_loaded_tools_state() -> Generator[None, None, None]:
     dynamic_toolkits_module._loaded_tools.clear()
 
 
-def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
-    runtime_paths = _runtime_paths(tmp_path)
+def _validated_config(tmp_path: Path, raw: dict[str, object], **env: str) -> Config:
+    runtime_paths = _runtime_paths(tmp_path, **env)
     config = Config.validate_with_runtime(raw, runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     return config
@@ -847,6 +848,124 @@ def test_build_agent_toolkit_gates_dynamic_tool_continuation(tmp_path: Path) -> 
     assert member.functions["unload_tool"].stop_after_tool_call is False
 
 
+def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
+    return {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+
+
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_deferred_egress_credentials_is_discoverable_only_while_the_broker_is_on(
+    tmp_path: Path,
+    *,
+    broker_on: bool,
+) -> None:
+    """With the broker off the deferred egress tool is not listed, searchable, or loadable."""
+    env = _egress_broker_env(broker_on=broker_on)
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"egress_credentials": {"defer": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw, **env)
+
+    manager = build_agent_toolkit(
+        "dynamic_tools",
+        agent_name="code",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path, **env),
+        worker_tools=[],
+        runtime_overrides=None,
+        execution_identity=None,
+        session_id="thread-a",
+    )
+
+    assert manager is not None
+    listed = _tool_payload(manager.list_tools())
+    searched = _tool_payload(manager.tool_search("egress"))
+    loaded = _tool_payload(manager.load_tool("egress_credentials"))
+    assert [entry["name"] for entry in listed["tools"]] == (["egress_credentials", "sleep"] if broker_on else ["sleep"])
+    assert [match["name"] for match in searched["matches"]] == (["egress_credentials"] if broker_on else [])
+    assert loaded["status"] == ("loaded" if broker_on else "unknown")
+    assert ("egress_credentials" in loaded["loaded_tools"]) is broker_on
+
+
+def test_a_lone_deferred_egress_credentials_tool_gives_no_dynamic_tools_while_the_broker_is_off(
+    tmp_path: Path,
+) -> None:
+    """An agent whose only deferred tool is unavailable gets no empty dynamic tools manager."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"egress_credentials": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    manager = build_agent_toolkit(
+        "dynamic_tools",
+        agent_name="code",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path),
+        worker_tools=[],
+        runtime_overrides=None,
+        execution_identity=None,
+        session_id="thread-a",
+    )
+
+    assert manager is None
+
+
+@pytest.mark.parametrize("native_tool_search", [False, True])
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_deferred_prompt_names_egress_credentials_only_while_the_broker_is_on(
+    tmp_path: Path,
+    *,
+    native_tool_search: bool,
+    broker_on: bool,
+) -> None:
+    """The deferred-tool prompt, manager-backed or native, leaves out the egress tool with the broker off."""
+    env = _egress_broker_env(broker_on=broker_on)
+    raw = _base_config_data()
+    if native_tool_search:
+        raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
+        raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"egress_credentials": {"defer": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw, **env)
+
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path, **env),
+        execution_identity=None,
+        session_id="thread-a",
+    )
+
+    prompt = _render_system_prompt(agent)
+    assert ("egress_credentials" in prompt) is broker_on
+    assert "sleep" in prompt
+
+
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_an_eager_egress_credentials_tool_is_attached_only_while_the_broker_is_on(
+    tmp_path: Path,
+    *,
+    broker_on: bool,
+) -> None:
+    """The broker switch also decides the eager entry."""
+    env = _egress_broker_env(broker_on=broker_on)
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["egress_credentials", "sleep"]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw, **env)
+
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path, **env),
+        execution_identity=None,
+        session_id="thread-a",
+    )
+
+    assert ("egress_credentials" in {toolkit.name for toolkit in agent.tools}) is broker_on
+
+
 def test_dynamic_tools_manager_catalog_responses_use_one_loaded_state_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -956,11 +1075,8 @@ def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_p
             return []
 
     bind_mcp_server_manager(_FakeMCPManager())  # type: ignore[arg-type]
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            results = [_tool_payload(result) for result in executor.map(manager.load_tool, ("mcp_demo", "shell"))]
-    finally:
-        bind_mcp_server_manager(None)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [_tool_payload(result) for result in executor.map(manager.load_tool, ("mcp_demo", "shell"))]
 
     assert {payload["status"] for payload in results} == {"loaded", "function_name_collision"}
     assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") in (

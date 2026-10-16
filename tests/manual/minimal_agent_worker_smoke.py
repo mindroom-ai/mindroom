@@ -33,18 +33,18 @@ import yaml
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_modes import resolve_agent_mode
-from mindroom.agent_storage import create_session_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.commands import mode_commands
 from mindroom.config.agent import AgentConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import setup_logging
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.runtime import shutdown_primary_worker_manager

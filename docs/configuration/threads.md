@@ -214,6 +214,7 @@ The agent gets the wrap-up notice without a judgment when:
 Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
+With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](../tools/agent-orchestration.md#when-a-call-becomes-a-job).
 Queued messages are handled after the active response finishes either way.
 A reply waiting for a [tool approval](../tool-approval.md) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.

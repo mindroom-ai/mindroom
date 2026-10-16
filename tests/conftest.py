@@ -1,6 +1,7 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import asyncio
+import gc
 import os
 import re
 import shutil
@@ -46,22 +47,23 @@ from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
-import mindroom.approval_manager as approval_manager_module
+import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.handled_turns as handled_turns_module
+import mindroom.knowledge.read_process as knowledge_read_process_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.matrix_openid as matrix_openid_module
-import mindroom.scheduling as scheduling_module
+import mindroom.scheduling.tasks as scheduling_module
+import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import CoalescingDrainResult
-from mindroom.coalescing_batch import PendingEvent
+from mindroom.coalescing.batch import PendingEvent
+from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
@@ -96,6 +98,7 @@ from mindroom.event_journal import (
     VisibleMessage,
 )
 from mindroom.event_journal import reads as journal_reads
+from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
@@ -126,10 +129,10 @@ from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix_delivery import TurnHandoff
+from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
-from mindroom.provider_media_fallback import reset_model_media_capability_cache
+from mindroom.providers.media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -138,6 +141,7 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
+from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -146,8 +150,10 @@ from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
-from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
+from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
+from mindroom.workers import runtime as workers_runtime_module
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -1834,7 +1840,7 @@ class DiesAfterAcknowledgement:
         )
 
 
-# Drops contract 2's journal handoff, for tests that are not about it. Named
+# Drops the outbox-enqueue journal handoff, for tests that are not about it. Named
 # rather than a bare lambda so a reader can see that the handoff was
 # deliberately stubbed here, not forgotten. Tests that care what the handoff
 # settles use a real journal store instead.
@@ -2923,12 +2929,23 @@ def build_private_template_dir(tmp_path: Path) -> Callable[..., Path]:
     return _build
 
 
+@pytest.fixture
+def test_ca_pem() -> str:
+    """Return a valid test CA certificate in PEM format."""
+    return make_test_ca_pem()
+
+
 @pytest_asyncio.fixture
 async def aioresponse() -> AsyncGenerator[aioresponses, None]:
     """Async fixture for mocking HTTP responses in tests."""
     # Based on https://github.com/matrix-nio/matrix-nio/blob/main/tests/conftest_async.py
     with aioresponses() as m:
         yield m
+
+
+# Deadline for a test wait that should finish. A passing wait returns as soon as its work is done,
+# so the deadline only bounds a hang; it is generous because parallel runs stall background work.
+SETTLE_TIMEOUT_SECONDS = 30.0
 
 
 @pytest.fixture(autouse=True)
@@ -2964,7 +2981,7 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     Tests use ':localhost' Matrix IDs and non-namespaced localparts unless they
     explicitly opt into a different runtime context.
     """
-    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+    monkeypatch.setenv("MATRIX_HOMESERVER", "http://localhost:8008")
     monkeypatch.delenv("MATRIX_SERVER_NAME", raising=False)
     monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
@@ -2981,6 +2998,20 @@ def _forget_openid_audience_support(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a router registered as the scheduled-task runner owner from leaking into later tests."""
     monkeypatch.setattr(scheduling_module, "_runner_owner", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
+    monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)
+
+
+@pytest.fixture(autouse=True)
+def _reopen_primary_worker_manager() -> Generator[None, None, None]:
+    """Reopen the process-wide primary worker manager after a test runs a real shutdown."""
+    yield
+    if not workers_runtime_module._PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 @pytest.fixture(autouse=True)
@@ -3017,6 +3048,18 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
 
 
+@pytest.fixture(autouse=True)
+def _never_freeze_the_test_heap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep orchestrator initialization from freezing the pytest worker's heap.
+
+    Cycles among frozen objects are never collected, so every test that
+    initializes an orchestrator would pin its own fixtures, mocks, and
+    orchestrator for the rest of the worker's life.
+    `tests/test_heap_probe.py` covers the real freeze against a fake `gc`.
+    """
+    monkeypatch.setattr(gc, "freeze", lambda: None)
+
+
 @pytest.fixture(scope="session")
 def _worker_tmpdir_link_root() -> Generator[Path, None, None]:
     """Hold this session's worker TMPDIR links in one short directory removed at the end."""
@@ -3041,6 +3084,12 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Separate each test's pinned instances; tests still own shutdown of live resources."""
+    monkeypatch.setattr(tool_jobs_instances, "_instances", {})
 
 
 @pytest.fixture(autouse=True)
@@ -3127,6 +3176,14 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _discard_warm_knowledge_reader() -> Generator[None, None, None]:
+    """Keep the idle knowledge reader child one test started, with its environment, out of the next test."""
+    knowledge_read_process_module._discard_warm_reader()
+    yield
+    knowledge_read_process_module._discard_warm_reader()
+
+
+@pytest.fixture(autouse=True)
 def _reset_voice_echo_barriers() -> Generator[None, None, None]:
     """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
     _reset_visible_voice_echo_barriers()
@@ -3175,7 +3232,7 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                     ),
                 )
                 stack.enter_context(
-                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", new=allow_sender),
+                    patch("mindroom.approval.inbound.is_sender_allowed_for_responder", new=allow_sender),
                 )
                 stack.enter_context(
                     patch(

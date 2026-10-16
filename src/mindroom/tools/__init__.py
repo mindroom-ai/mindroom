@@ -124,6 +124,7 @@ from mindroom.tools.script import script_tools
 from mindroom.tools.searxng import searxng_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
+from mindroom.tools.shared_directories import shared_directories_tools
 from mindroom.tools.shell import shell_tools
 from mindroom.tools.shopify import shopify_tools
 from mindroom.tools.slack import slack_tools
@@ -131,6 +132,7 @@ from mindroom.tools.sleep import sleep_tools
 from mindroom.tools.spider import spider_tools
 from mindroom.tools.spotify import spotify_tools
 from mindroom.tools.sql import sql_tools
+from mindroom.tools.stop_reply import stop_reply_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
@@ -262,6 +264,7 @@ __all__ = [
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",
+    "shared_directories_tools",
     "shell_tools",
     "shopify_tools",
     "slack_tools",
@@ -269,6 +272,7 @@ __all__ = [
     "spider_tools",
     "spotify_tools",
     "sql_tools",
+    "stop_reply_tools",
     "tavily_tools",
     "telegram_tools",
     "thread_model_tools",
@@ -468,3 +472,28 @@ def _agent_vault_access_tools() -> type[Toolkit]:
     from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools
 
     return AgentVaultAccessTools
+
+
+@register_tool_with_metadata(
+    name="egress_credentials",
+    file_access=ToolFileAccess.NONE,
+    requires_primary_runtime=True,
+    display_name="Egress Credentials",
+    description="See which API keys and connected accounts this agent can use through the egress broker and where to add them",
+    category=ToolCategory.INTEGRATIONS,
+    icon="KeyRound",
+    icon_color="text-amber-600",
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
+    config_fields=[],
+    function_names=("list_egress_credentials",),
+)
+def _egress_credentials_tools() -> type[Toolkit]:
+    """Return the egress broker credential status tool."""
+    from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
+
+    return EgressCredentialsTools

@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import create_state_storage, get_team_session
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
+from mindroom.session_storage.agent_storage import create_state_storage, get_team_session
 from mindroom.teams import _persist_bound_seen_event_ids
 from tests.conftest import seed_session
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import worker_dir_name, worker_log_id
 from mindroom.workers.backend import (
     WorkerBackend,
     WorkerBackendError,
@@ -140,7 +140,7 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
     """Resolve local runtime paths from a local worker handle."""
     state_root = handle.debug_metadata.get("state_root")
     if state_root is None:
-        msg = f"Worker '{handle.worker_key}' does not expose local state metadata."
+        msg = f"Worker '{worker_log_id(handle.worker_key)}' does not expose local state metadata."
         raise WorkerBackendError(msg)
     return local_worker_state_paths_for_root(Path(state_root))
 
@@ -311,7 +311,7 @@ class _LocalWorkerBackend:
             try:
                 self._ensure_worker_state(paths)
             except Exception as exc:
-                failure_reason = f"Failed to initialize worker '{spec.worker_key}': {exc}"
+                failure_reason = f"Failed to initialize worker '{worker_log_id(spec.worker_key)}': {exc}"
                 with self._lock:
                     self._record_failure_locked(paths, spec.worker_key, failure_reason, now=timestamp)
                 raise WorkerBackendError(failure_reason) from exc

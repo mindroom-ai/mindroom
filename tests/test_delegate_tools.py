@@ -24,9 +24,9 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.thread_models import set_thread_model_override
-from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
@@ -38,13 +38,11 @@ from tests.conftest import (
     make_relation_lookup,
     runtime_paths_for,
 )
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-    from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _make_config(agents: dict[str, AgentConfig]) -> Config:
@@ -55,47 +53,8 @@ def _make_config(agents: dict[str, AgentConfig]) -> Config:
     )
 
 
-def _runtime_paths(storage_path: Path) -> RuntimePaths:
-    """Create explicit runtime paths for delegate-tool agent creation tests."""
-    return resolve_runtime_paths(
-        config_path=storage_path / "config.yaml",
-        storage_path=storage_path,
-        process_env={},
-    )
-
-
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
     return bind_runtime_paths(config, _runtime_paths(storage_path))
-
-
-def _delegate_runtime_context(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> ToolRuntimeContext:
-    """Build the requester context every successful delegation requires."""
-    room_id = execution_identity.room_id if execution_identity is not None else "!room:example.org"
-    source_thread_id = execution_identity.thread_id if execution_identity is not None else None
-    resolved_thread_id = execution_identity.resolved_thread_id if execution_identity is not None else None
-    session_id = execution_identity.session_id if execution_identity is not None else room_id
-    requester_id = execution_identity.requester_id if execution_identity is not None else "@alice:example.org"
-    return make_test_tool_runtime_context(
-        agent_name="leader",
-        target=MessageTarget(
-            room_id=room_id,
-            source_thread_id=source_thread_id,
-            resolved_thread_id=resolved_thread_id,
-            reply_to_event_id=None,
-            session_id=session_id,
-        ),
-        requester_id=requester_id,
-        client=MagicMock(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-    )
 
 
 def _fake_indexing_settings(base_id: str) -> IndexingSettings:
@@ -574,7 +533,7 @@ class TestDelegateKnowledge:
             _assert_direct_result_with_receipt(result, "Found relevant docs")
 
     @pytest.mark.asyncio
-    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
     async def test_delegation_schedules_initial_load_for_unready_shared_base(
         self,
         mock_storage: MagicMock,
@@ -883,8 +842,6 @@ class TestDelegateKnowledge:
                 runtime_paths,
                 thread_id="$thread",
                 model_name=thread_model_name,
-                room_id="!room:example.org",
-                set_by="@alice:example.org",
                 entity_names=("leader", "worker"),
                 config=config,
             )
@@ -1013,7 +970,7 @@ class TestDelegateConfigValidation:
 class TestDelegateAutoInjection:
     """Test that DelegateTools is auto-injected when delegate_to is configured."""
 
-    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
     def test_auto_inject_delegate_tool(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Agent with delegate_to should automatically get the delegate tool."""
         config = _make_config(
@@ -1037,7 +994,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" in tool_names
 
-    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
     def test_no_delegate_tool_without_config(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Agent without delegate_to should not get the delegate tool."""
         config = _make_config(
@@ -1056,7 +1013,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
     def test_depth_limit_prevents_injection(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """At max depth, delegate tool should not be auto-injected."""
         config = _make_config(
@@ -1081,7 +1038,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
     def test_explicit_delegate_skipped_when_delegate_to_empty(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Explicit 'delegate' in tools list should be skipped when delegate_to is empty."""
         config = _make_config(
@@ -1104,7 +1061,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
     def test_depth_limit_prevents_explicit_delegate_tool(
         self,
         mock_storage: MagicMock,
@@ -1135,7 +1092,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
     def test_depth_limit_prevents_default_tools_delegate(
         self,
         mock_storage: MagicMock,

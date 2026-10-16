@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.credential_policy import (
+from mindroom.credentials.policy import (
     _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     OAUTH_CREDENTIAL_FIELDS,
     credential_service_policy,
@@ -98,6 +98,37 @@ def test_local_shared_service_policy(service: str, worker_scope: str, expected: 
 def test_agent_scoped_service_policy(service: str, worker_scope: str | None, expected: bool) -> None:
     """Shared worker scope should keep OAuth tokens in per-agent primary-runtime storage."""
     assert credential_service_policy(service, worker_scope).uses_primary_runtime_agent_scoped_credentials is expected
+
+
+@pytest.mark.parametrize("scope", ["shared", "user", "user_agent"])
+def test_egress_services_are_primary_only_and_not_grantable(scope: str) -> None:
+    """Egress broker services should be primary-only and not worker-grantable in all scopes."""
+    policy = credential_service_policy("egress_github", scope, primary_built_tool=False)
+    assert policy.primary_built_tool
+    assert not policy.worker_grantable_supported
+
+    # Verify primary-only placement for each scope
+    if scope == "shared":
+        assert policy.uses_primary_runtime_agent_scoped_credentials
+        assert not policy.uses_primary_runtime_scoped_credentials
+        assert not policy.uses_local_shared_credentials
+    elif scope in ("user", "user_agent"):
+        assert policy.uses_primary_runtime_scoped_credentials
+        assert not policy.uses_primary_runtime_agent_scoped_credentials
+        assert not policy.uses_local_shared_credentials
+
+
+@pytest.mark.parametrize("service", ["egress_x_oauth", "egress_x_oauth_client"])
+@pytest.mark.parametrize("scope", ["shared", "user", "user_agent", None])
+def test_egress_services_with_oauth_suffixes_stay_primary_only(service: str, scope: str | None) -> None:
+    """An OAuth-looking suffix never turns an egress service into an OAuth token or client service."""
+    policy = credential_service_policy(service, scope)
+    assert policy.primary_built_tool
+    assert not policy.worker_grantable_supported
+    assert not policy.uses_primary_runtime_global_credentials
+    assert not policy.uses_local_shared_credentials
+    assert policy.uses_primary_runtime_agent_scoped_credentials is (scope == "shared")
+    assert policy.uses_primary_runtime_scoped_credentials is (scope in {"user", "user_agent"})
 
 
 @pytest.mark.parametrize(

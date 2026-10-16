@@ -21,8 +21,6 @@ from agno.session.summary import SessionSummary
 from agno.team import Team
 from PIL import Image as PillowImage
 
-from mindroom.agent_storage import get_agent_session
-from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history import archive
@@ -39,7 +37,9 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint
-from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import _agent, _completed_run, _completed_team_run, _make_config, _session, _team_session
@@ -675,7 +675,10 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         defaults_compaction=CompactionConfig(enabled=auto_compact, reserve_tokens=1000, replay_window_tokens=6000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=30000)},
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: FakeModel(id="summary"))
+    monkeypatch.setattr(
+        "mindroom.providers.model_loading.get_model_instance",
+        lambda *_args, **_kwargs: FakeModel(id="summary"),
+    )
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
         AsyncMock(return_value=SessionSummary(summary="Keep the recent instruction")),

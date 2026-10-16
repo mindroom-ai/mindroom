@@ -116,14 +116,33 @@ class MidTurnGate:
         """Keep the latest Matrix-acknowledged text for subsequent queue snapshots."""
         self.visible_response_text = text
 
-    async def acknowledge_deferred(self, message: QueuedMessage) -> None:
+    async def _acknowledge_deferred(self, message: QueuedMessage) -> None:
         """Attempt one acknowledgement per message after the caller accepts the decision."""
         if self.on_defer is None or message.event_id in self._acknowledged:
             return
         self._acknowledged.add(message.event_id)
         await self.on_defer(message.event_id)
 
-    async def should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
+    async def defers(self, pending: tuple[QueuedMessage, ...], *, current: Callable[[], bool]) -> bool:
+        """Return whether ``pending`` can wait for the active reply, acknowledging each message while ``current`` holds."""
+        try:
+            finish = await self._should_finish(pending)
+        except Exception:
+            # Callers hand off as on a failed judgment; Agno logs and ignores post-tool callback failures.
+            finish = False
+        if not finish:
+            return False
+        for message in pending:
+            # Matrix delivery can yield to a newer correction or a concurrent handoff.
+            if not current():
+                return False
+            try:
+                await self._acknowledge_deferred(message)
+            except Exception:
+                logger.warning("mid_turn_reaction_failed")
+        return current()
+
+    async def _should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
         """Continue only with sufficient confidence that no interruption is needed."""
         async with self._lock:
             if self._checked == pending:

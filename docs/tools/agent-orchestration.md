@@ -17,6 +17,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 
 Related tools documented elsewhere:
 
+- [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - List which Agent Keys services have a key or connected account for this agent, and where to add missing ones.
 - [`oauth_connections`](../oauth-framework.md#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](../openclaw.md#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](../usage.md#usage_stats) - Read-only summaries of retained usage.
@@ -26,6 +27,7 @@ Related tools documented elsewhere:
 
 `delegate` gives an agent `run_subagent` and `continue_subagent`, which run another configured agent in a fresh session and return its answer inside the same tool call.
 Use it when the caller needs a specialist's result before continuing; use [`matrix_message`](matrix-message.md#agent-conversations) for a conversation that should be visible in Matrix.
+With [background jobs](#background-jobs) enabled, managed calls accept `background_after`, a child that needs approval posts its own cards from its job, and detached children may overlap.
 
 ### Agent Delegation
 
@@ -67,6 +69,8 @@ run_subagent(
     minimal: bool = False,
     system_prompt: str | None = None,
     tools: list[str] | None = None,
+    skills: list[str] | None = None,
+    knowledge: list[str] | None = None,
     profile: str | None = None,
 ) -> str
 continue_subagent(subagent_id: str, message: str) -> str
@@ -120,14 +124,16 @@ Common errors:
 An agent whose own name is in `delegate_to` can write the prompt of a fresh copy of itself in place of its configured identity and instructions.
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
+Pass `skills` with a subset of the caller's skill names and `knowledge` with a subset of its `semantic` [knowledge base](../knowledge.md) IDs, or `[]` for none; omitting either keeps all of the caller's only when `tools` is omitted too, so a child with a `tools` list has only the skills and knowledge bases it names.
+Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](../memory.md#searching-file-memory) through `search_knowledge_base`.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
-The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories and skills are left out; a child with a `tools` list also has no knowledge search, though it can still read file-mode knowledge bases with its file tools.
+The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories are left out.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](../configuration/history.md), the summary of its earlier turns.
 [Minimal subagents](agent-cli.md#minimal-subagents) describes what a minimal authored subagent, started with `minimal=True` or a profile's `mode: minimal`, needs and can read.
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
-An authored subagent whose `tools` include `delegate` can author further copies only within those tools, a copy without `tools` inherits them except `delegate` at the maximum depth, and it cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools.
+An authored subagent with `delegate` can author further copies only within its own `tools`, `skills`, and `knowledge` lists: a copy that omits `tools` inherits its tools, except `delegate` at the maximum depth, one that also omits `skills` or `knowledge` inherits those, and an authored subagent with any of these lists cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools, skills, and knowledge.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
-A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools.
+A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, a kept configured skill can run its scripts, and file tools can still read `files`-mode knowledge bases.
 
 ```python
 run_subagent(
@@ -153,16 +159,18 @@ You are a hostile reviewer.
 Find the three most serious risks in the proposal you are given, each with evidence.
 ```
 
-`description` is required, `tools`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
-An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt` or `tools`.
+`description` is required, `tools`, `skills`, `knowledge`, `model`, and `mode` (`standard` or `minimal`) are optional, and the body after the frontmatter is the system prompt.
+An explicit `model` or `minimal=True` in the call overrides the profile, and `profile` cannot be combined with `system_prompt`, `tools`, `skills`, or `knowledge`.
 Profile names use lowercase letters, digits, `-`, and `_`, up to 64 characters, and each file is limited to 64 KiB.
 On the agent's next run, its `run_subagent` tool lists every profile with its description and every invalid profile with the reason, or, when that list would exceed 2,000 characters, only a note to list `subagents/` itself.
 A subagent keeps the persona it started with, so editing or deleting a profile affects only subagents started afterwards.
 
 Authoring errors:
 
-- `Cannot author a subagent for '<name>': system_prompt, tools, and profile apply only to yourself.` - authoring applies only to the caller's own copy.
+- `Cannot author a subagent for '<name>': system_prompt, tools, skills, knowledge, and profile apply only to yourself.` - authoring applies only to the caller's own copy.
 - `Cannot delegate: unknown tool '<entry>'. Your tools: ...` - `tools` names a toolkit or function the caller does not have.
+- `Cannot delegate: unknown skill '<name>'. Your skills: ...` - `skills` names a skill the caller does not have.
+- `Cannot delegate: unknown knowledge base '<id>'. Your knowledge bases: ...` - `knowledge` names something other than one of the caller's `semantic` knowledge bases, such as a `files`-mode base or the caller's file memory.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
 - `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
@@ -176,8 +184,142 @@ Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mind
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
-For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
+For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, skills, knowledge bases, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
 These files are audit exports that MindRoom never reads, so editing or deleting them does not affect the delegation.
+
+## Background jobs
+
+This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; configs from `mindroom config init` turn it on.
+Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
+With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and shell tools keep their own background commands.
+Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
+An approval that needed a job fails when it resumes while the option is off.
+
+Tools that can run as background jobs accept an optional `background_after` argument, which the tool itself never receives.
+It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
+The name `background_after` is reserved on managed tools.
+If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
+Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
+Their schemas omit `background_after`, and a value for it is rejected before execution.
+Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
+
+Exclude complete toolkits in YAML when they should retain native execution:
+
+```yaml
+background_tool_jobs:
+  enabled: true
+  exclude_toolkits: [shell, my_plugin_toolkit]
+  approval_wait_timeout: 120
+```
+
+The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
+Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
+Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
+The generic runtime adds no `background_after`, creates no job, and does not release these calls when a newer message arrives.
+A tool's own argument named `background_after` remains its native argument.
+Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
+
+With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
+Shell handles do not appear in `job(action="list")` or the jobs bar, and cannot be controlled with `job`.
+
+### When a call becomes a job
+
+| `background_after` | Behavior |
+| --- | --- |
+| Omitted or `null` | Wait until completion or until a newer human message arrives in the conversation. |
+| `0` | Return a job handle immediately while execution continues. |
+| Positive finite seconds | Return the result if ready within that many seconds, otherwise continue in the background and return a job handle. |
+
+Negative, nonnumeric, boolean, and nonfinite values are rejected before execution.
+A newer human message in the conversation releases the wait without pausing or cancelling the work, so the agent answers the new message while the job runs on.
+For an agent with [`mid_turn`](../configuration/threads.md#mid-turn-coalescing), only a message its judge says cannot wait releases the wait; one that can wait gets the `defer_reaction` and the call keeps waiting.
+Scheduled turns and other agents' messages queued behind the reply wait for it instead.
+
+### Seeing and cancelling jobs
+
+MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
+The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
+In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
+Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
+**Stop**, an edit, or deleting a message stops only that reply; its jobs keep running until they are cancelled.
+Removing the agent from a room cancels its jobs there.
+An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
+The agent is told a cancelled call was cancelled, and not to run it again unless you ask.
+Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
+
+### How results reach the agent
+
+A job belongs to its conversation and requester, and to the agent that answers there; a team owns the jobs its members start for it.
+For a team formed on the fly by mentioning several agents, the follow-up comes from the agent that posted the team's reply, on its own.
+While a reply of that agent runs, it is told after its next tool call which jobs ended meanwhile and is asked to acknowledge them with one `job(action="collect")` call, which returns their results.
+A job with no useful output still needs acknowledging; a cancelled job needs none.
+A reply that starts after jobs ended is told the same way when it begins.
+Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
+A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
+Cancelled jobs and a silent schedule's jobs get no follow-up; the next reply hears of cancelled jobs, and a silent schedule's next run hears of its own.
+Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
+Another requester's reply in a shared room never hears of these results.
+A job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own.
+
+### The `job` function
+
+The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
+The management function never asks for approval, since it acts only on the caller's own jobs.
+Enabling background jobs reserves the function name `job`; custom and plugin tools must use another function name.
+
+| Action | Behavior |
+| --- | --- |
+| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes, including collected ones. A call that returned its result before its wait ended never became a job and is not listed, unless its reply could not be saved. |
+| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget. |
+| `cancel` | Ask one job to stop and return at once; the next notice reports how it ended. |
+| `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
+
+Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+
+For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
+Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.
+A team member sees only its own jobs.
+Changing a tool's authored settings, other than for MCP tools, cancels its still-running jobs and blocks access to their saved results until the settings match again.
+Include/exclude filters remain checked per function.
+Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
+`job(action="list")` rediscovers handles after compaction, later turns, and a restart.
+For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
+Large supported results use the same configured automatic file-saving policy as other tools.
+Redirecting a stored result does not rerun the original tool or change its saved output.
+Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
+
+### Approvals
+
+A managed tool call that needs approval asks for it from its job, so a pending approval never blocks the conversation.
+The job posts the approval card, reports `awaiting_approval`, and runs the call only once it is approved; a denied or expired approval becomes the job's `denied` outcome.
+The reply waits for the decision for `background_tool_jobs.approval_wait_timeout` seconds, then goes on while the job keeps waiting; the result arrives like any other job's.
+The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
+A call's own `background_after`, or a newer human message, releases the reply the same way.
+Cancelling the job before the decision denies its card.
+Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
+
+A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
+Cancelling the job denies its open cards.
+A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job.
+Cards a job posts offer no automatic approval option, and automatic approvals granted on other cards do not apply to them.
+A message never counts as an approval, and current permissions are rechecked before a job's call runs.
+Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
+Tools the model provider runs itself never become jobs.
+Tool calls made through `mindroom-agent` inside a shell command or during a voice call never become jobs, and a [minimal-mode](agent-cli.md) reply leaves background results to the agent's next standard reply.
+
+### Retention and limits
+
+Listing jobs does not count as reading their results.
+Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
+A reply that a crash or shutdown cuts short is answered again in place and told which calls its stopped attempt already finished, including detached job starts with their job IDs.
+Reading a result again returns its original output and does not repeat its effects.
+A result remains available for 30 days after the job ended or was last read; the job is then deleted once its turn has finished and no approval is pending in the conversation.
+Active jobs are never deleted.
+A deleted job is unavailable like any unknown job, and its original tool call cannot run again.
+Jobs of a plugin tool require the same plugin installation path and current grants; moving the plugin directory makes them unavailable.
+
+A job's full result, including media and files, may be up to 64 MiB; a larger result makes the job fail with a size-limit error.
+The configured large-output policy can save long text to a file before that limit applies.
 
 ## [`dynamic_workflow`]
 
@@ -212,11 +354,13 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
-  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `model`, and `mode`.
+  - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads or runs a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
+    It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     A participant used by several steps continues one session.
-    Each run uses the prompt, tools, and model its participants had when the run started, even if a profile changes during the run.
+    Each run uses the prompt, tools, skills, and model its participants had when the run started, even if a profile changes during the run.
     Each step writes a [delegation record](#delegation-records), and its `delegation_id` appears in `step_outputs.json`.
   - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
     It runs with its configured model and without tools, skills, knowledge, durable state, or context files.

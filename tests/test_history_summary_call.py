@@ -14,7 +14,6 @@ from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
 
 import mindroom.background_tasks as background_tasks_module
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
@@ -42,6 +41,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -387,7 +387,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
         capture_logs() as logs,

@@ -30,7 +30,11 @@ from mindroom.matrix.identity import (
     validate_email_to_matrix_mapping,
 )
 from mindroom.origins import normalized_origin
-from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
+from mindroom.tool_system.dependencies import (
+    auto_install_enabled,
+    auto_install_optional_extra_for_import_retry,
+    optional_dependency_environment,
+)
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -263,7 +267,8 @@ def _init_supabase_auth(
         return None
 
     try:
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
     except ModuleNotFoundError:
         disabled_hint = ""
         if not auto_install_enabled(runtime_paths):
@@ -274,7 +279,8 @@ def _init_supabase_auth(
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
             )
             raise ImportError(msg) from None
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
 
     return cast("_SupabaseClientProtocol", create_client(*credentials))
 
@@ -771,6 +777,49 @@ def _request_path_with_query(request: Request) -> str:
     return f"{path}?{query}" if query else path
 
 
+_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
+_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
+_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+)
+
+
+def _hosted_browser_origins(runtime_paths: RuntimePaths) -> list[str]:
+    """Return hosted browser origins allowed to make credentialed API calls."""
+    return list(
+        dict.fromkeys(
+            origin
+            for origin in (
+                normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                normalized_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+            )
+            if origin is not None
+        ),
+    )
+
+
+def dashboard_cors_origins(runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Return the browser origins the dashboard API serves cross-origin; `("*",)` when every origin is allowed.
+
+    `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` allows every origin. Otherwise
+    `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` lists them; unset, a hosted instance allows its own origins and any
+    other instance the local development servers.
+    """
+    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
+        return ("*",)
+    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
+    if configured_origins is None:
+        hosted_origins = tuple(_hosted_browser_origins(runtime_paths))
+        if hosted_origins:
+            return hosted_origins
+        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+
+
 def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings, next_path: str | None) -> str:
     origin = normalized_origin(auth_settings.public_url)
     if origin is None:
@@ -956,6 +1005,15 @@ def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
     return {"user_id": matrix_user_id, "email": None, "matrix_user_id": matrix_user_id, "auth_source": "matrix_openid"}
 
 
+def is_administrator(matrix_user_id: object, snapshot: ApiSnapshot) -> bool:
+    """Return whether a signed Matrix user is a platform administrator in the snapshot's config."""
+    return (
+        isinstance(matrix_user_id, str)
+        and snapshot.runtime_config is not None
+        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
+    )
+
+
 def _require_connections_route_authorized(
     request: Request,
     auth_user: dict[str, Any],
@@ -970,14 +1028,27 @@ def _require_connections_route_authorized(
     if _is_oauth_popup_path(path, frozenset({"callback", "success", "reset"})):
         # These handlers independently validate their state or reset capability.
         return
-    matrix_user_id = auth_user.get("matrix_user_id")
-    if (
-        isinstance(matrix_user_id, str)
-        and snapshot.runtime_config is not None
-        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
-    ):
+    if is_administrator(auth_user.get("matrix_user_id"), snapshot):
         return
+    if _is_browser_page_request(request):
+        # A user who opens a dashboard page lands on their own page, which says why, instead of a JSON refusal.
+        raise HTTPException(
+            status_code=303,
+            detail="Administrator access required",
+            headers={"Location": "/connections?notice=admin-only"},
+        )
     raise HTTPException(status_code=403, detail="Administrator access required")
+
+
+def _is_browser_page_request(request: Request) -> bool:
+    """Recognize a browser loading a page: a GET that accepts HTML, outside the API."""
+    path = request.scope["path"]
+    return (
+        request.method == "GET"
+        and "text/html" in request.headers.get("accept", "").lower()
+        and path != "/api"
+        and not path.startswith("/api/")
+    )
 
 
 async def require_connections_user(request: Request) -> dict[str, Any]:
@@ -1000,11 +1071,40 @@ async def require_personal_user(request: Request) -> dict[str, Any]:
 
 async def require_usage_service(request: Request) -> None:
     """Authenticate the dedicated usage-export service without creating a user identity."""
+    await _require_service_jwt(
+        request,
+        audience_env="MINDROOM_USAGE_SERVICE_JWT_AUDIENCE",
+        client_id_env="MINDROOM_USAGE_SERVICE_CLIENT_ID",
+        unconfigured_detail="Usage export service authentication is not configured",
+        invalid_detail="Invalid usage service JWT",
+    )
+
+
+async def require_budget_service(request: Request) -> None:
+    """Authenticate the dedicated budget service without creating a user identity."""
+    await _require_service_jwt(
+        request,
+        audience_env="MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE",
+        client_id_env="MINDROOM_BUDGET_SERVICE_CLIENT_ID",
+        unconfigured_detail="Budget service authentication is not configured",
+        invalid_detail="Invalid budget service JWT",
+    )
+
+
+async def _require_service_jwt(
+    request: Request,
+    *,
+    audience_env: str,
+    client_id_env: str,
+    unconfigured_detail: str,
+    invalid_detail: str,
+) -> None:
+    """Require a trusted-upstream service assertion for one dedicated audience and client ID."""
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
     jwt_settings = settings.jwt
-    audience = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_JWT_AUDIENCE")
-    client_id = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_CLIENT_ID")
+    audience = _env_text(auth_state.runtime_paths, audience_env)
+    client_id = _env_text(auth_state.runtime_paths, client_id_env)
     if (
         not settings.enabled
         or settings.user_id_header is None
@@ -1017,7 +1117,7 @@ async def require_usage_service(request: Request) -> None:
         or client_id is None
         or auth_state.trusted_upstream_jwt_client is None
     ):
-        raise HTTPException(status_code=503, detail="Usage export service authentication is not configured")
+        raise HTTPException(status_code=503, detail=unconfigured_detail)
 
     claims = await _verified_trusted_upstream_jwt_claims(
         request,
@@ -1027,7 +1127,7 @@ async def require_usage_service(request: Request) -> None:
         issuer=jwt_settings.issuer,
         algorithms=("RS256",),
         required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
-        invalid_detail="Invalid usage service JWT",
+        invalid_detail=invalid_detail,
     )
 
     if (
@@ -1036,7 +1136,7 @@ async def require_usage_service(request: Request) -> None:
         or not isinstance(claims.get("common_name"), str)
         or claims["common_name"] != client_id
     ):
-        raise HTTPException(status_code=401, detail="Invalid usage service JWT")
+        raise HTTPException(status_code=401, detail=invalid_detail)
 
 
 async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[str, Any]:

@@ -11,12 +11,13 @@ from typing import TYPE_CHECKING
 from agno.models.message import Message
 
 from mindroom import ai_runtime
-from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
+from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
     SKILL_REVIEW_NOTICE_CONTENT_KEY,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -28,6 +29,7 @@ from mindroom.constants import (
     UI_ACTION_CONTENT_KEY,
     RuntimePaths,
 )
+from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
 from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
@@ -61,7 +63,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.team import Team
 
-    from mindroom.attachments import AttachmentRecord
+    from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
@@ -78,6 +80,9 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "in_progress": "You (reply still streaming)",
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
+_HOOK_OUTPUT_LABEL = "[posted automatically by hook {hook_source}, not written by you or any agent]"
+# Claims about who wrote a message; only MindRoom's own accounts may make them.
+_AUTHORSHIP_CLAIM_KEYS = (ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY)
 # Notices that are not turns: lifecycle notices describe the runtime, a Chat UI request is a tool
 # call's fallback text for other clients (answers and error reports name the canvas themselves),
 # and a thread summary is the thread's title.
@@ -205,19 +210,23 @@ def _clean_partial_reply_body(body: str) -> str:
     return clean_partial_reply_text(body)
 
 
-def _without_untrusted_original_senders(
+def _has_authorship_claim(message: ResolvedVisibleMessage) -> bool:
+    return any(key in message.content for key in _AUTHORSHIP_CLAIM_KEYS)
+
+
+def _without_untrusted_authorship_claims(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Sequence[ResolvedVisibleMessage] | None:
-    """Drop relay attribution that a sender outside MindRoom wrote, so the prompt names each message's real author."""
-    if not thread_history or not any(ORIGINAL_SENDER_KEY in message.content for message in thread_history):
+    """Drop relay or hook claims that a sender outside MindRoom wrote, so the prompt names each message's real author."""
+    if not thread_history or not any(_has_authorship_claim(message) for message in thread_history):
         return thread_history
     internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
     return [
         message
-        if message.sender in internal_sender_ids or ORIGINAL_SENDER_KEY not in message.content
-        else replace(message, content={k: v for k, v in message.content.items() if k != ORIGINAL_SENDER_KEY})
+        if message.sender in internal_sender_ids or not _has_authorship_claim(message)
+        else replace(message, content={k: v for k, v in message.content.items() if k not in _AUTHORSHIP_CLAIM_KEYS})
         for message in thread_history
     ]
 
@@ -236,6 +245,20 @@ def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
     return isinstance(original_sender, str) and bool(original_sender)
 
 
+def _is_own_reply(message: ResolvedVisibleMessage, response_sender_id: str | None) -> bool:
+    """Return whether this agent wrote one visible message.
+
+    Relayed user messages and hook output also arrive from the agent's account, but the agent wrote neither.
+    Replaying hook progress as assistant turns taught the model to write fake progress lines itself.
+    """
+    return (
+        bool(response_sender_id)
+        and message.sender == response_sender_id
+        and not _is_relayed_user_message(message)
+        and hook_source_from_content(message.content) is None
+    )
+
+
 def _should_strip_visible_tool_markers(
     message: ResolvedVisibleMessage,
     *,
@@ -244,11 +267,7 @@ def _should_strip_visible_tool_markers(
     """Return whether visible marker lines are known MindRoom display chrome."""
     if isinstance(message.content.get(TOOL_TRACE_CONTENT_KEY), dict):
         return True
-    return (
-        response_sender_id is not None
-        and message.sender == response_sender_id
-        and not _is_relayed_user_message(message)
-    )
+    return _is_own_reply(message, response_sender_id)
 
 
 def _context_body_from_visible_message(
@@ -301,11 +320,7 @@ def _context_message_from_visible_message(
     # them to the model it can continue the pattern as plain text with no trace.
     body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
     annotation = format_attachment_annotation(list(attachment_records))
-    if (
-        response_sender_id is not None
-        and message.sender == response_sender_id
-        and not _is_relayed_user_message(message)
-    ):
+    if _is_own_reply(message, response_sender_id):
         if message.content.get("msgtype") == "m.audio":
             body = f"[audio message: {body}]"
         if annotation:
@@ -316,6 +331,9 @@ def _context_message_from_visible_message(
         return Message(role="assistant", content=f"\n\n{body}")
     if annotation:
         body = f"{body}\n{annotation}" if body else annotation
+    hook_source = hook_source_from_content(message.content)
+    if hook_source is not None:
+        body = f"{_HOOK_OUTPUT_LABEL.format(hook_source=hook_source)}\n{body}"
     event_id = message.event_id or None
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
@@ -729,14 +747,13 @@ def _get_unseen_messages_for_sender(
     in_progress_event_ids: set[str] = set()
     for msg in thread_history:
         event_id = msg.event_id
-        sender = msg.sender
         if event_id and event_id in seen_event_ids:
             continue
         if current_event_id and event_id == current_event_id:
             continue
         if _has_nothing_to_read(msg):
             continue
-        if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
+        if _is_own_reply(msg, sender_id):
             partial_kind = _classify_partial_reply(
                 msg,
                 active_event_ids=active_event_ids,
@@ -1042,7 +1059,7 @@ async def prepare_agent_execution_context(
         scope_context=scope_context,
         prompt=prompt,
         transient_context_messages=transient_context_messages,
-        thread_history=_without_untrusted_original_senders(thread_history, config, runtime_paths),
+        thread_history=_without_untrusted_authorship_claims(thread_history, config, runtime_paths),
         response_sender_id=response_sender,
         current_sender_id=current_sender_id,
         member_display_names=ctx.member_display_names,
@@ -1126,7 +1143,7 @@ async def _prepare_bound_team_execution_context(
         scope_context=scope_context,
         prompt=prompt,
         transient_context_messages=transient_context_messages,
-        thread_history=_without_untrusted_original_senders(thread_history, config, runtime_paths),
+        thread_history=_without_untrusted_authorship_claims(thread_history, config, runtime_paths),
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         member_display_names=member_display_names,

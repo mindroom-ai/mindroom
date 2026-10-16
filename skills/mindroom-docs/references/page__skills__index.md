@@ -144,8 +144,7 @@ agents:
       archive_after_days: 30
 ```
 
-Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
-Self-hosted configurations from `mindroom config init` leave it off.
+`mindroom config init` and newly provisioned hosted instances enable it for the starter Mind agent; set `agents.<name>.skill_learning.enabled: false` to turn it off.
 Reviews incur additional model usage, reported under `kind: skill_learning` in [usage tracking](https://docs.mindroom.chat/usage/#token-usage).
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
 

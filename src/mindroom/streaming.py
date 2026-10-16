@@ -13,7 +13,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
-from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -481,9 +480,15 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
     """Format one outbound payload from immutable stream state."""
     text_to_send = snapshot.accumulated_text if snapshot.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
 
-    response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
+    in_progress = snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES
+    # A block still arriving is unfinished, not malformed, so only the final text warns about unparsed blocks.
+    response = interactive.parse_and_format_interactive(
+        text_to_send,
+        extract_mapping=True,
+        warn_unparsed=not in_progress,
+    )
     display_text = response.formatted_text
-    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+    if in_progress:
         # An interactive block still arriving is raw JSON; its question renders once the block closes.
         display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
 
@@ -518,7 +523,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         extra_content=extra_content,
         markdown_renderer=snapshot.markdown_renderer,
     )
-    if snapshot.stream_status in _IN_PROGRESS_STREAM_STATUSES:
+    if in_progress:
         # Matrix suppresses m.notice before evaluating mention rules. Streaming
         # updates may already contain mentions, so using m.text here would make
         # every progressive edit eligible for a push notification.
@@ -1017,17 +1022,13 @@ class StreamingResponse:
             "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
         )
         try:
-            retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
-            retry_terminal_update_immediately = (
-                final_stream_status != STREAM_STATUS_COMPLETED and resolved_cancel_source != "sync_restart"
-            )
+            retry_terminal_update = resolved_cancel_source != "sync_restart"
             send_succeeded = await self._send_or_edit_message(
                 client,
                 is_final=True,
                 allow_empty_progress=has_placeholder,
                 stream_status=final_stream_status,
                 retry_on_failure=retry_terminal_update,
-                retry_without_backoff=retry_terminal_update_immediately,
             )
         except asyncio.CancelledError as cancelled_error:
             terminal_cancel_source = resolved_cancel_source or classify_cancel_source(cancelled_error)
@@ -1112,7 +1113,6 @@ class StreamingResponse:
         allow_empty_progress: bool = False,
         stream_status: str | None = None,
         retry_on_failure: bool = False,
-        retry_without_backoff: bool = False,
         boundary_refresh: bool = False,
         force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
@@ -1136,7 +1136,6 @@ class StreamingResponse:
             force_nonterminal_delivery=force_nonterminal_delivery,
             capture_completions=capture_completions,
             retry_on_failure=retry_on_failure and is_final,
-            retry_without_backoff=retry_without_backoff and is_final,
         )
 
     async def _send_prepared_delivery(
@@ -1150,7 +1149,6 @@ class StreamingResponse:
         force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
         retry_on_failure: bool = False,
-        retry_without_backoff: bool = False,
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
@@ -1194,8 +1192,6 @@ class StreamingResponse:
                 content=prepared_delivery.content,
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
-                retry_without_backoff=retry_without_backoff,
-                retry_sync_recovery=not is_final or retry_on_failure,
                 is_final=durable_terminal,
                 progress=_progress_state(prepared_delivery.committed_state) if self.durable_reply else None,
             )
@@ -1413,7 +1409,6 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
-        retry_sync_recovery: bool,
         is_final: bool = False,
         progress: ProgressState | None = None,
     ) -> bool:
@@ -1432,7 +1427,6 @@ class StreamingResponse:
                 self.room_id,
                 content,
                 display_text,
-                retry_sync_recovery=retry_sync_recovery,
                 **durable_progress,
             )
         else:
@@ -1440,7 +1434,6 @@ class StreamingResponse:
                 client,
                 self.room_id,
                 content,
-                retry_sync_recovery=retry_sync_recovery,
             )
         if delivered is None:
             return False
@@ -1456,7 +1449,6 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
-        retry_sync_recovery: bool,
         is_final: bool = False,
         progress: ProgressState | None = None,
     ) -> bool:
@@ -1470,7 +1462,6 @@ class StreamingResponse:
                 self.event_id,
                 content,
                 display_text,
-                retry_sync_recovery=retry_sync_recovery,
                 **durable_progress,
             )
         else:
@@ -1480,7 +1471,6 @@ class StreamingResponse:
                 self.event_id,
                 content,
                 display_text,
-                retry_sync_recovery=retry_sync_recovery,
             )
         return delivered is not None
 
@@ -1504,8 +1494,6 @@ class StreamingResponse:
         content: dict[str, Any],
         display_text: str,
         retry_on_failure: bool = False,
-        retry_without_backoff: bool = False,
-        retry_sync_recovery: bool = False,
         is_final: bool = False,
         progress: ProgressState | None = None,
     ) -> bool:
@@ -1515,7 +1503,7 @@ class StreamingResponse:
         and for a durable reply also its cancelled or error notice. A cancelled
         or failed stream of any other kind ends with a direct edit.
         """
-        total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
+        total_attempts = 2 if retry_on_failure else 1
         for attempt in range(1, total_attempts + 1):
             try:
                 if self.event_id is None:
@@ -1524,7 +1512,6 @@ class StreamingResponse:
                         client,
                         content=content,
                         display_text=display_text,
-                        retry_sync_recovery=retry_sync_recovery,
                         is_final=is_final,
                         progress=progress,
                     ):
@@ -1536,14 +1523,11 @@ class StreamingResponse:
                         client,
                         content=content,
                         display_text=display_text,
-                        retry_sync_recovery=retry_sync_recovery,
                         is_final=is_final,
                         progress=progress,
                     ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
-            except SendRetryError:
-                raise
             except Exception:
                 logger.warning(
                     "Streaming update attempt raised an exception",

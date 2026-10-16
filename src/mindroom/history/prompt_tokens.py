@@ -8,7 +8,7 @@ resolved execution plan.
 
 The prompt-only tool surface (model-visible payloads plus tool instructions)
 is prepared once per agent or team instance and reused by static token
-budgeting and run-metadata assembly within that turn. Agent and team instances
+budgeting within that turn. Agent and team instances
 are rebuilt per response, so the surface never outlives one turn's tool state.
 """
 
@@ -33,7 +33,7 @@ from agno.tools.function import Function
 from mindroom.agno_compat_prepared_tools import prepare_team_prompt_tools, temporary_tool_instructions
 from mindroom.timing import timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from mindroom.tool_schema_cache import cached_processed_schema
+from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -129,16 +129,6 @@ def _estimate_team_non_prompt_static_tokens(team: Team) -> int:
     return static_tokens + surface.definition_tokens
 
 
-def agent_tool_definition_payloads_for_logging(agent: Agent) -> list[dict[str, object]]:
-    """Return model-visible agent tool schemas using Agno's prompt-preparation path."""
-    return [deepcopy(payload) for payload in _agent_prompt_tool_surface(agent).payloads]
-
-
-def team_tool_definition_payloads_for_logging(team: Team) -> list[dict[str, object]]:
-    """Return model-visible team tool schemas using Agno's prompt-preparation path."""
-    return [deepcopy(payload) for payload in _team_prompt_tool_surface(team).payloads]
-
-
 def _cached_tool_surface(entity: Agent | Team) -> _PromptToolSurface | None:
     with _TOOL_SURFACE_CACHE_LOCK:
         entry = _TOOL_SURFACE_CACHE.get(id(entity))
@@ -166,7 +156,7 @@ def _store_tool_surface(entity: Agent | Team, surface: _PromptToolSurface) -> No
 def _agent_prompt_tool_surface(agent: Agent) -> _PromptToolSurface:
     """Prepare (or reuse) the prompt-only tool surface for one agent instance.
 
-    The estimator and run-metadata assembly only need model-visible schemas and
+    The estimators only need model-visible schemas and
     tool instructions, not executable validate-call wrappers. Preparing those
     schemas here reuses cached Function schema metadata across fresh Agent
     instances.

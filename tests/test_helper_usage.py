@@ -19,9 +19,8 @@ from agno.run.agent import RunOutput, RunStatus
 from agno.tools.calculator import CalculatorTools
 
 from mindroom.agent_cli.approval import CliApprovalCall
-from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.agents import create_agent
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ToolConfigEntry
@@ -39,6 +38,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.teams import (
     TeamMode,
     _attach_team_pause_presentation,
@@ -51,8 +51,8 @@ from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     build_execution_identity_from_runtime_context,
 )
-from mindroom.usage_stats import collect_admin_usage, collect_self_usage
-from mindroom.usage_storage import quote_identifier
+from mindroom.usage.stats import collect_admin_usage, collect_self_usage
+from mindroom.usage.storage import quote_identifier
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.history_helpers import (
@@ -139,7 +139,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         ),
     ]
     monkeypatch.setattr(
-        "mindroom.model_loading.get_model_instance",
+        "mindroom.providers.model_loading.get_model_instance",
         lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
     )
     original_add = CalculatorTools.add
@@ -273,7 +273,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 raise RuntimeError(msg)
             return CompletedApprovalRun(response_text="Finished.", metadata_content={})
 
-        monkeypatch.setattr("mindroom.approval_execution._stream_continuation_turn", recovered_response)
+        monkeypatch.setattr("mindroom.approval.execution._stream_continuation_turn", recovered_response)
 
     async def resume() -> CompletedApprovalRun | PausedAttempt:
         if caller == "team":
@@ -487,7 +487,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             ),
         ],
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: model)
     with open_scope() as scope_context, helper_usage_context(scope_context):
         assert scope_context is not None
         storage = scope_context.storage

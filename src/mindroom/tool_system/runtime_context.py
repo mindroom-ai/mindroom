@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
-from mindroom.attachment_ids import unique_attachment_ids
+from mindroom.attachments.ids import unique_attachment_ids
 from mindroom.hooks import (
     CustomEventContext,
     HookContextSupport,
@@ -37,9 +37,11 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.delegation.state import SubagentPersona
     from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import (
         HookMatrixAdmin,
@@ -55,7 +57,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
-    from mindroom.scheduling import SchedulingRuntime
+    from mindroom.scheduling.tasks import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
@@ -72,6 +74,7 @@ class DetachedRequesterContext:
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
     config_provider: Callable[[], Config | None]
+    budget_monitor: BudgetMonitor | None
 
 
 _DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = ContextVar(
@@ -83,6 +86,14 @@ _DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = Conte
 def get_detached_requester_context() -> DetachedRequesterContext | None:
     """Return authority established by the current detached request boundary."""
     return _DETACHED_REQUESTER_CONTEXT.get()
+
+
+def current_budget_monitor() -> BudgetMonitor | None:
+    """Return the spend monitor of the current conversation or detached API request."""
+    if (context := get_tool_runtime_context()) is not None:
+        return context.budget_monitor
+    detached = get_detached_requester_context()
+    return detached.budget_monitor if detached is not None else None
 
 
 @contextmanager
@@ -132,10 +143,11 @@ class ToolRuntimeContext:
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[Function], bool] | None = None
-    # Tools of the authored subagent running this turn; copies it authors stay within them.
-    persona_tools: tuple[str, ...] | None = None
+    # Persona of the authored subagent running this turn; copies it authors stay within its tools, skills, and knowledge.
+    persona: SubagentPersona | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
+    source_kind: str | None = None
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
 
@@ -143,6 +155,16 @@ class ToolRuntimeContext:
     def current_config(self) -> Config:
         """Return the managed runtime's current config or this detached snapshot."""
         return self.config_provider() if self.config_provider is not None else self.config
+
+    @property
+    def recipient(self) -> str:
+        """The entity whose Matrix account answers this turn: its team transport, or the agent itself."""
+        return self.transport_agent_name or self.agent_name
+
+    @property
+    def budget_monitor(self) -> BudgetMonitor | None:
+        """Return the managed runtime's spend monitor; detached contexts have none."""
+        return self.orchestrator.budgets if self.orchestrator is not None else None
 
     def require_agent_reply_memberships(self) -> AgentReplyMembershipIndex:
         """Return the injected index or reject membership-aware extension work."""
@@ -390,6 +412,7 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
             orchestrator=self.runtime.orchestrator,
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
+            source_kind=source_envelope.source_kind if source_envelope is not None else None,
             agent_reply_memberships=self.runtime.agent_reply_memberships,
             config_provider=lambda: self.runtime.config,
         )
@@ -536,7 +559,7 @@ def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -
     return build_tool_execution_identity(
         channel="matrix",
         agent_name=context.agent_name,
-        transport_agent_name=context.transport_agent_name or context.agent_name,
+        transport_agent_name=context.transport_agent_name,
         runtime_paths=context.runtime_paths,
         requester_id=context.requester_id,
         room_id=target.room_id,
@@ -563,8 +586,7 @@ def execution_identity_matches_tool_runtime_context(
         and execution_identity.session_id == target.session_id
         and execution_identity.tenant_id == context.runtime_paths.env_value("CUSTOMER_ID")
         and execution_identity.account_id == context.runtime_paths.env_value("ACCOUNT_ID")
-        and (execution_identity.transport_agent_name or execution_identity.agent_name)
-        == (context.transport_agent_name or context.agent_name)
+        and execution_identity.recipient == context.recipient
     )
 
 
@@ -577,7 +599,7 @@ def runtime_context_from_dispatch_context(dispatch_context: ToolDispatchContext)
 
 def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeContext) -> SchedulingRuntime:
     """Build the canonical live scheduling runtime for one Matrix tool context."""
-    from mindroom.scheduling import SchedulingRuntime  # noqa: PLC0415
+    from mindroom.scheduling.tasks import SchedulingRuntime  # noqa: PLC0415
 
     if context.room is None:
         msg = "Scheduling runtime requires a cached Matrix room in tool runtime context"

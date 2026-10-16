@@ -15,9 +15,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.egress_broker.env import egress_tool_unavailable
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
+from mindroom.shared_directories.paths import shared_directory_roots
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     ConfigField,
     ToolAuthoredOverrideValidator,
@@ -27,7 +30,12 @@ from mindroom.tool_system.declarations import (
     ToolMetadata,
     ToolValidationInfo,
 )
-from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
+from mindroom.tool_system.dependencies import (
+    auto_install_optional_extra_for_import_retry,
+    ensure_tool_deps,
+    optional_dependency_environment,
+)
+from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.legacy_tool_overrides import retired_tool_override
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
@@ -55,7 +63,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
 
 logger = get_logger(__name__)
 
@@ -639,7 +647,7 @@ def _apply_implicit_toolkit_filters(
     excluded_names = set(exclude_tools or ())
     for registered_functions in (toolkit.functions, toolkit.async_functions):
         for function_name in tuple(registered_functions):
-            if (included_names is not None and function_name not in included_names) or function_name in excluded_names:
+            if not tool_name_allowed(function_name, include=included_names, exclude=excluded_names):
                 del registered_functions[function_name]
 
 
@@ -669,6 +677,13 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
+        # Shared directories change during a response, so path tools resolve them on each call.
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: functools.partial(
+            shared_directory_roots,
+            runtime_config,
+            runtime_paths,
+            worker_target.routing_agent_name if worker_target is not None else None,
+        ),
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
 
@@ -731,7 +746,15 @@ def _build_tool_instance(
     )
 
     metadata = TOOL_METADATA[tool_name]
-    tool_class = TOOL_REGISTRY[tool_name]()
+    factory = TOOL_REGISTRY[tool_name]
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
+    construction = ToolConstruction.from_factory(
+        tool_name,
+        factory,
+        tool_config_overrides=validated_tool_config_overrides,
+    )
+    with optional_dependency_environment():
+        tool_class = factory()
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         metadata,
         runtime_paths,
@@ -750,7 +773,6 @@ def _build_tool_instance(
     ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
         tool_name,
@@ -779,7 +801,8 @@ def _build_tool_instance(
     )
     include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
 
-    toolkit = cast("Any", tool_class)(**init_kwargs)
+    with optional_dependency_environment():
+        toolkit = cast("Any", tool_class)(**init_kwargs)
     _apply_implicit_toolkit_filters(
         toolkit,
         include_tools=include_tools,
@@ -796,20 +819,20 @@ def _build_tool_instance(
         else None
     )
     wrap_toolkit_for_output_files(toolkit, output_file_policy)
-    if disable_sandbox_proxy:
-        return toolkit
-    return maybe_wrap_toolkit_for_sandbox_proxy(
-        tool_name,
-        toolkit,
-        runtime_paths=runtime_paths,
-        credentials_manager=resolved_credentials_manager,
-        tool_init_overrides=proxy_tool_init_overrides or None,
-        tool_config_overrides=validated_tool_config_overrides,
-        extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
-        worker_tools_override=worker_tools_override,
-        shared_storage_root_path=shared_storage_root_path,
-        worker_target=worker_target,
-    )
+    if not disable_sandbox_proxy:
+        toolkit = maybe_wrap_toolkit_for_sandbox_proxy(
+            tool_name,
+            toolkit,
+            runtime_paths=runtime_paths,
+            credentials_manager=resolved_credentials_manager,
+            tool_init_overrides=proxy_tool_init_overrides or None,
+            tool_config_overrides=validated_tool_config_overrides,
+            extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
+            worker_tools_override=worker_tools_override,
+            shared_storage_root_path=shared_storage_root_path,
+            worker_target=worker_target,
+        )
+    return bind_toolkit_construction(toolkit, construction)
 
 
 def get_tool_by_name(
@@ -1188,6 +1211,23 @@ def resolved_tool_metadata_for_runtime(
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
     return resolved_state.tool_metadata
+
+
+def listable_tool_metadata(runtime_paths: RuntimePaths, config: Config) -> dict[str, ToolMetadata]:
+    """Return the tools a tool listing offers for one runtime config: the visible ones that can run here.
+
+    The egress credentials tool cannot run while the egress broker is off. A plugin that fails to load drops its own
+    tools, never the listing.
+    """
+    return {
+        name: metadata
+        for name, metadata in resolved_tool_metadata_for_runtime(
+            runtime_paths,
+            config,
+            tolerate_plugin_load_errors=True,
+        ).items()
+        if not egress_tool_unavailable(name, runtime_paths)
+    }
 
 
 def _tool_validation_snapshot_from_state(

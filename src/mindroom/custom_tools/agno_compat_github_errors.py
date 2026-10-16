@@ -29,6 +29,7 @@ class _GithubProviderFailure:
     """Typed provider failure captured before Agno serializes the exception."""
 
     status_code: int | None
+    detail: str | None
 
 
 _github_provider_failure: ContextVar[_GithubProviderFailure | None] = ContextVar(
@@ -37,9 +38,9 @@ _github_provider_failure: ContextVar[_GithubProviderFailure | None] = ContextVar
 )
 
 
-def record_provider_failure(status_code: int | None) -> None:
-    """Capture owner-classified status before Agno catches the provider failure."""
-    _github_provider_failure.set(_GithubProviderFailure(status_code))
+def record_provider_failure(status_code: int | None, detail: str | None) -> None:
+    """Capture owner-classified status and sanitized detail before Agno catches the provider failure."""
+    _github_provider_failure.set(_GithubProviderFailure(status_code, detail))
 
 
 def _is_serialized_github_error_result(result: object) -> bool:

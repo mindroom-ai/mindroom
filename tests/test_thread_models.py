@@ -17,8 +17,9 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.message_target import MessageTarget
@@ -82,8 +83,6 @@ def test_store_roundtrip(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -121,8 +120,6 @@ def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -141,8 +138,6 @@ def test_store_prunes_oldest_entries(tmp_path: Path, monkeypatch: pytest.MonkeyP
             runtime_paths,
             thread_id=f"$thread-{index}:localhost",
             model_name="large",
-            room_id=ROOM_ID,
-            set_by="@user:localhost",
             entity_names=("test_agent",),
             config=config,
         )
@@ -161,8 +156,6 @@ def test_store_invalidates_cached_records_when_mtime_changes(tmp_path: Path) -> 
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -186,8 +179,6 @@ def test_resolve_runtime_model_prefers_thread_override(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -225,8 +216,6 @@ def test_resolve_runtime_model_thread_override_beats_room_override(
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -249,8 +238,6 @@ def test_resolve_runtime_model_active_model_beats_thread_override(tmp_path: Path
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -274,8 +261,6 @@ def test_resolve_runtime_model_ignores_stale_thread_override(tmp_path: Path) -> 
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="removed-model",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -298,8 +283,6 @@ def test_resolve_runtime_model_without_thread_id_keeps_authored_model(tmp_path: 
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -354,7 +337,6 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     response = handle_model_command(
@@ -414,8 +396,6 @@ def test_model_command_show(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -453,8 +433,6 @@ def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path, wri
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent", "removed_agent"),
         config=readded_config,
     )
@@ -589,8 +567,6 @@ def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )
@@ -719,6 +695,42 @@ async def test_thread_model_tool_can_switch_after_current_tool_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_over_budget_switch_continues_this_response_on_the_fallback() -> None:
+    """A mid-response switch to a priced model must not bypass the requester's budget."""
+    context = _make_tool_context()
+    context.config.models["large"].pricing = ModelPricing(input=5, output=30)
+    context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
+    context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+
+    with tool_runtime_context(context):
+        payload = json.loads(
+            await ThreadModelTools().switch_thread_model("large", when="after-toolcall"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["model"] == "cheap"
+    assert payload["requested_model"] == "large"
+    assert "budget" in payload["note"]
+    assert _stored_model(context.runtime_paths, THREAD_ID) == "large"
+
+
+@pytest.mark.asyncio
+async def test_over_budget_next_turn_switch_says_replies_use_the_fallback() -> None:
+    """The agent should not promise the requested model while the requester is over budget."""
+    context = _make_tool_context()
+    context.config.models["large"].pricing = ModelPricing(input=5, output=30)
+    context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
+    context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
+
+    with tool_runtime_context(context):
+        payload = json.loads(await ThreadModelTools().switch_thread_model("large"))
+
+    assert payload["model"] == "large"
+    assert "budget" in payload["note"]
+    assert "`cheap`" in payload["note"]
+
+
+@pytest.mark.asyncio
 async def test_thread_model_tool_rejects_unknown_switch_timing() -> None:
     """Accepting an unknown timing value could persist a change with undefined execution semantics."""
     context = _make_tool_context()
@@ -754,8 +766,6 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
         context.runtime_paths,
         thread_id=THREAD_ID,
         model_name="removed-model",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=context.config,
     )
@@ -763,7 +773,6 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
         context.runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     with tool_runtime_context(context):
@@ -860,8 +869,6 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path, display_nam
         runtime_paths,
         thread_id=THREAD_ID,
         model_name="large",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("test_agent",),
         config=config,
     )

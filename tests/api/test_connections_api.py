@@ -17,9 +17,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mindroom.api import config_lifecycle, main, oauth
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.matrix.state import MatrixState
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
+from mindroom.oauth.providers import OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.test_api import (
     _trusted_upstream_jwks,
@@ -38,6 +40,9 @@ from tests.api.test_oauth_api import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+    from mindroom.oauth.providers import OAuthProvider, OAuthRuntimeEndpoints
+
 
 @pytest.fixture
 def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
@@ -52,6 +57,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
+        "MATRIX_HOMESERVER": "http://localhost:8008",
         "TEST_OAUTH_CLIENT_ID": "test-client",
         "TEST_OAUTH_CLIENT_SECRET": "test-secret",
     }
@@ -100,6 +106,15 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     }
 
 
+def _enable_egress_broker(portal: dict[str, Any]) -> None:
+    """Restart the API with an egress broker port, which turns Agent Keys on, and republish the portal's config."""
+    paths = replace(portal["paths"], process_env={**portal["paths"].process_env, "MINDROOM_EGRESS_BROKER_PORT": "8768"})
+    portal["paths"] = paths
+    main.initialize_api_app(main.app, paths)
+    _publish_config(main.app, paths, portal["payload"])
+    _use_runtime_auth_settings(main.app)
+
+
 def test_catalog_includes_deferred_oauth_tools_without_status_calls(
     portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -119,16 +134,17 @@ def test_catalog_includes_deferred_oauth_tools_without_status_calls(
 
 def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, Any]) -> None:
     """Tool visibility does not depend on having an OAuth provider."""
-    portal["payload"]["agents"]["personal"]["tools"].append("matrix_message")
+    portal["payload"]["agents"]["personal"]["tools"].extend(["matrix_message", "claude_agent"])
     _publish_config(main.app, portal["paths"], portal["payload"])
     _use_runtime_auth_settings(main.app)
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     tools = {tool["name"]: tool for tool in response.json()["agents"][0]["tools"]}
     assert tools["calculator"]["provider"] is None
-    assert tools["calculator"]["requires_room_context"] is False
+    assert tools["calculator"]["mcp_available"] is True
     assert tools["google_drive"]["provider"] == "google_drive"
-    assert tools["matrix_message"]["requires_room_context"] is True
+    assert tools["matrix_message"]["mcp_available"] is False
+    assert tools["claude_agent"]["mcp_available"] is False
 
 
 @pytest.mark.parametrize(
@@ -181,9 +197,9 @@ def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
     ("content_type", "body", "expected"),
     [
         ("image/png", b"thumbnail", 200),
-        ("image/svg+xml", b"thumbnail", 404),
-        ("image/png", b"", 404),
-        ("image/png", b"x" * (1024 * 1024 + 1), 404),
+        ("image/svg+xml", b"thumbnail", 204),
+        ("image/png", b"", 204),
+        ("image/png", b"x" * (1024 * 1024 + 1), 204),
     ],
     ids=["raster", "svg", "empty", "oversized"],
 )
@@ -229,8 +245,8 @@ def test_avatar_serves_current_matrix_thumbnail(
 
 
 @pytest.mark.parametrize("avatar_url", [None, "https://example.org/picture.png", "mxc://example.org/"])
-def test_avatar_unavailable_for_missing_or_invalid_profile(portal: dict[str, Any], avatar_url: str | None) -> None:
-    """An absent or non-Matrix picture cannot turn the endpoint into an arbitrary URL proxy."""
+def test_avatar_without_image_is_204(portal: dict[str, Any], avatar_url: str | None) -> None:
+    """An absent or non-Matrix picture is "no avatar", never an arbitrary URL proxy, and never a 404 in the console."""
     state = MatrixState()
     state.add_account("agent_personal", "personal", None, domain="example.org", access_token="avatar-token")  # noqa: S106
     state.save(runtime_paths=portal["paths"])
@@ -240,7 +256,17 @@ def test_avatar_unavailable_for_missing_or_invalid_profile(portal: dict[str, Any
             payload={"avatar_url": avatar_url},
         )
         response = portal["client"].get("/api/connections/agents/personal/avatar", headers=portal["headers"]["alice"])
-    assert response.status_code == 404
+        assert not any("thumbnail" in str(key) for key in matrix.requests)
+    assert response.status_code == 204
+    assert response.content == b""
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_avatar_of_an_agent_without_a_matrix_account_is_204(portal: dict[str, Any]) -> None:
+    """An agent that has not logged into Matrix yet has no avatar either."""
+    response = portal["client"].get("/api/connections/agents/personal/avatar", headers=portal["headers"]["alice"])
+    assert response.status_code == 204
+    assert response.content == b""
 
 
 @pytest.mark.parametrize("stage", ["profile", "thumbnail"])
@@ -287,6 +313,58 @@ def test_avatar_requires_visible_agent(
         )
         assert not matrix.requests
     assert response.status_code == expected
+
+
+@pytest.mark.parametrize(
+    ("user", "is_administrator"),
+    [("admin", True), ("bob", False), ("mallory", False)],
+)
+def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, is_administrator: bool) -> None:
+    """Every signed user, even one with no agents, learns who they are and whether the dashboard is open to them."""
+    response = portal["client"].get("/api/connections/me", headers=portal["headers"][user])
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "matrix_user_id": f"@{user}:example.org",
+        "email": f"{user}@example.org",
+        "is_administrator": is_administrator,
+        "egress_enabled": False,
+        "portal_enabled": True,
+    }
+    assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_me_says_whether_agent_keys_are_enabled(portal: dict[str, Any], *, broker_on: bool) -> None:
+    """The Connections header learns whether the egress broker is on, so it links the Agent Keys page only then."""
+    if broker_on:
+        _enable_egress_broker(portal)
+    for user in ("admin", "bob", "mallory"):
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"][user])
+        assert response.status_code == 200, response.text
+        assert response.json()["egress_enabled"] is broker_on
+
+
+def test_me_says_when_only_the_agent_keys_page_is_served(portal: dict[str, Any]) -> None:
+    """Without the portal agent setting the Agent Keys page is still served, so its header must not link the portal."""
+    env = {**portal["paths"].process_env, "MINDROOM_EGRESS_BROKER_PORT": "8768"}
+    del env["MINDROOM_CONNECTIONS_AGENT"]
+    paths = replace(portal["paths"], process_env=env)
+    main.initialize_api_app(main.app, paths)
+    _publish_config(main.app, paths, portal["payload"])
+    _use_runtime_auth_settings(main.app)
+
+    response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+
+    assert response.status_code == 200, response.text
+    assert response.json()["egress_enabled"] is True
+    assert response.json()["portal_enabled"] is False
+
+
+def test_me_needs_a_signed_identity_and_takes_no_target(portal: dict[str, Any]) -> None:
+    """The identity route is not an anonymous or target-selecting route."""
+    client = portal["client"]
+    assert client.get("/api/connections/me").status_code == 401
+    assert client.get("/api/connections/me?agent_name=other", headers=portal["headers"]["alice"]).status_code == 400
 
 
 @pytest.mark.parametrize("query", ["agent_name=other", "worker_key=other", "user_id=bob", "execution_scope=user"])
@@ -598,7 +676,7 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
 
 
 def test_agent_user_sees_shared_connection_without_management(shared_portal: dict[str, Any]) -> None:
-    """Using a shared agent reveals availability without shared-account mutation authority."""
+    """Using a shared agent reveals the connected account without shared-account mutation authority."""
     shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
     _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
     _use_runtime_auth_settings(main.app)
@@ -623,7 +701,7 @@ def test_agent_user_sees_shared_connection_without_management(shared_portal: dic
     status = client.get(f"{base}/status", headers=headers["bob"])
     assert status.status_code == 200, status.text
     assert status.json()["connected"] is True
-    assert status.json()["account_label"] is None
+    assert status.json()["account_label"] == "alice@example.com"
     assert status.json()["can_connect"] is False
     for action in ("connect", "disconnect"):
         assert client.post(f"{base}/{action}", headers=headers["bob"], json={}).status_code == 403
@@ -900,3 +978,143 @@ def test_catalog_reports_connection_sharing_by_provider_and_scope(
     assert personal["services"][0]["is_shared"] is False
     assert research["is_shared"] is True
     assert research["services"][0]["is_shared"] is expected_shared
+
+
+def _connect_account(portal: dict[str, Any], user: str, agent: str) -> None:
+    """Complete the OAuth flow for one user on one agent, as the browser popup does."""
+    client, headers = portal["client"], portal["headers"]
+    connect = client.post(f"/api/connections/agents/{agent}/google_drive/connect", headers=headers[user], json={})
+    assert connect.status_code == 200, connect.text
+    state = parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
+    callback = client.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        headers=headers[user],
+        follow_redirects=False,
+    )
+    assert callback.status_code in {302, 303, 307}, callback.text
+
+
+def _catalog_services(portal: dict[str, Any], user: str) -> dict[str, dict[str, Any]]:
+    response = portal["client"].get("/api/connections", headers=portal["headers"][user])
+    assert response.status_code == 200, response.text
+    return {agent["agent_name"]: agent["services"][0] for agent in response.json()["agents"]}
+
+
+def test_catalog_says_whether_each_service_is_connected_for_the_viewer(portal: dict[str, Any]) -> None:
+    """The catalog carries the connected flag the expanded row would show, without refreshing any token."""
+    refresh = AsyncMock(side_effect=AssertionError("The catalog must not refresh tokens"))
+    with patch.object(oauth, "refresh_oauth_credentials", refresh):
+        assert _catalog_services(portal, "alice")["personal"]["connected"] is False
+    _connect_account(portal, "alice", "personal")
+    with patch.object(oauth, "refresh_oauth_credentials", refresh):
+        assert _catalog_services(portal, "alice")["personal"]["connected"] is True
+        # A private agent's account belongs to the user who connected it.
+        assert _catalog_services(portal, "bob")["personal"]["connected"] is False
+    refresh.assert_not_called()
+    status = portal["client"].get(
+        "/api/connections/agents/personal/google_drive/status",
+        headers=portal["headers"]["alice"],
+    )
+    assert status.json()["connected"] is True
+
+
+def test_catalog_never_bootstraps_an_oauth_client_to_read_connected_state(
+    portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading connected state is a local read: a provider with no stored client reads as not connected, offline."""
+    bootstrapped: list[str] = []
+
+    async def failing_bootstrapper(provider: OAuthProvider, _runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
+        bootstrapped.append(provider.id)
+        msg = "bootstrap unavailable"
+        raise OAuthProviderError(msg)
+
+    provider = replace(portal["provider"], runtime_bootstrapper=failing_bootstrapper)
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (provider,))
+    oauth_registry.clear_oauth_provider_cache()
+    get_runtime_credentials_manager(portal["paths"]).delete_credentials("test_drive_oauth_client")
+
+    for user in ("alice", "bob"):
+        assert _catalog_services(portal, user)["personal"]["connected"] is False
+
+    assert bootstrapped == []
+
+
+def test_catalog_shows_a_shared_account_as_connected_to_managers_and_to_users(shared_portal: dict[str, Any]) -> None:
+    """Everyone who uses a shared agent sees its connection, whether or not they may change it."""
+    shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    for user in ("alice", "bob"):
+        assert _catalog_services(shared_portal, user)["research"]["connected"] is False
+    _connect_account(shared_portal, "alice", "research")
+    alice, bob = _catalog_services(shared_portal, "alice"), _catalog_services(shared_portal, "bob")
+    assert (alice["research"]["can_manage"], alice["research"]["connected"]) == (True, True)
+    assert (bob["research"]["can_manage"], bob["research"]["connected"]) == (False, True)
+    # Another shared agent has its own connection.
+    assert alice["personal"]["connected"] is False
+
+
+def test_catalog_survives_a_service_whose_state_cannot_be_read(
+    portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreadable connection shows as not connected and neither fails the catalog nor leaks the error."""
+    monkeypatch.setattr(
+        oauth,
+        "authenticated_connection_status",
+        AsyncMock(side_effect=HTTPException(503, "internal-client-secret")),
+    )
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"][0]["services"][0]["connected"] is False
+    assert "internal-client-secret" not in response.text
+
+
+def _catalog_managers(portal: dict[str, Any], user: str) -> dict[str, list[str]]:
+    response = portal["client"].get("/api/connections", headers=portal["headers"][user])
+    assert response.status_code == 200, response.text
+    return {agent["agent_name"]: agent["managers"] for agent in response.json()["agents"]}
+
+
+def test_catalog_names_the_credential_managers_of_shared_agents(shared_portal: dict[str, Any]) -> None:
+    """Shared and unscoped agents list their credential managers, as the egress listing does; private ones list none."""
+    shared_portal["payload"]["agents"]["support"]["worker_scope"] = "user"
+    # The Agent Keys section names them for every shared agent while the broker is on.
+    _enable_egress_broker(shared_portal)
+    agents = {
+        agent["agent_name"]: agent["managers"]
+        for agent in shared_portal["client"]
+        .get("/api/connections", headers=shared_portal["headers"]["admin"])
+        .json()["agents"]
+    }
+    assert agents == {
+        "personal": [],
+        "research": ["@alice:example.org", "@mallory:example.org"],
+        # A shared agent that runs per user keeps its keys per requester, so nobody manages them together.
+        "support": [],
+    }
+
+
+def test_catalog_names_credential_managers_only_to_users_they_matter_to_while_the_broker_is_off(
+    shared_portal: dict[str, Any],
+) -> None:
+    """Without Agent Keys, managers are named only to a user with a connection on the agent that only they can change."""
+    research_managers = ["@alice:example.org", "@mallory:example.org"]
+    shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    # Bob uses Research and cannot change its shared Drive connection; Alice manages it herself.
+    assert _catalog_managers(shared_portal, "bob")["research"] == research_managers
+    assert _catalog_managers(shared_portal, "alice")["research"] == []
+
+    shared_portal["payload"]["agents"]["research"]["tools"] = ["calculator"]
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    assert _catalog_managers(shared_portal, "bob")["research"] == []
+
+    _enable_egress_broker(shared_portal)
+    assert _catalog_managers(shared_portal, "bob")["research"] == research_managers
+    assert _catalog_managers(shared_portal, "alice")["research"] == research_managers

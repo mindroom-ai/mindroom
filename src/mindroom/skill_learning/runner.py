@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Protocol
 
 from agno.run.agent import RunOutput
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.llm_request_logging import bind_llm_request_log_context
@@ -27,6 +26,7 @@ from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.library import archive_unused_skills
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress, library_turn

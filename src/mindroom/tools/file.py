@@ -13,6 +13,7 @@ from agno.tools.file.file import TEXT_EXTENSIONS, _extract_snippet, _format_size
 from agno.utils.log import log_debug, log_error
 
 from mindroom.path_confinement import is_git_metadata_path, read_regular_file_within_root
+from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -37,9 +38,10 @@ from mindroom.tools.path_safety import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from mindroom.config.models import FileAccess
+    from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 
 # Agno searches only text files up to this size.
 _SEARCH_CONTENT_MAX_BYTES = 500 * 1024
@@ -66,9 +68,11 @@ class _MindRoomFileTools(AgnoFileTools):
         exclude_patterns: list[str] | None = None,
         all: bool = False,  # noqa: A002
         file_access: FileAccess = "workspace",
+        shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
         **kwargs: object,
     ) -> None:
         self.restrict_to_base_dir = file_access == "workspace"
+        self.shared_directory_roots = shared_directory_roots
         super().__init__(
             base_dir=base_dir,
             enable_save_file=enable_save_file,
@@ -102,6 +106,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Refused path {file_name}: {exc}")
             return False, base_dir
 
+    @shared_directory_aware("file_name", writes=True)
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
         """Save content to a file, with clear blocked-path errors."""
         try:
@@ -122,6 +127,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error saving to file: {e}")
             return f"Error saving to file: {e}"
 
+    @shared_directory_aware("file_name", writes=False)
     def read_file_chunk(self, file_name: str, start_line: int, end_line: int, encoding: str = "utf-8") -> str:
         """Read a range of lines from a file."""
         try:
@@ -137,6 +143,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error reading file: {e}")
             return f"Error reading file: {e}"
 
+    @shared_directory_aware("file_name", writes=True)
     def replace_file_chunk(
         self,
         file_name: str,
@@ -165,6 +172,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error patching file: {e}")
             return f"Error patching file: {e}"
 
+    @shared_directory_aware("file_name", writes=False)
     def read_file(self, file_name: str, encoding: str = "utf-8") -> str:
         """Read a file with clear blocked-path errors."""
         try:
@@ -183,6 +191,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error reading file: {e}")
             return f"Error reading file: {e}"
 
+    @shared_directory_aware("file_name", writes=True)
     def delete_file(self, file_name: str) -> str:
         """Delete a file or empty directory with clear blocked-path errors."""
         safe, path = self._check_path(file_name, self.base_dir)
@@ -199,6 +208,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error removing {file_name}: {e}")
             return f"Error removing file: {e}"
 
+    @shared_directory_aware("directory", writes=False)
     def list_files(self, directory: str = ".") -> str:
         """List files in a directory, falling back to absolute paths outside base_dir."""
         try:
@@ -214,6 +224,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error reading files: {e}")
             return f"Error reading files: {e}"
 
+    @shared_directory_aware("pattern", writes=False)
     def search_files(self, pattern: str) -> str:
         """Search for files, allowing absolute patterns only when restriction is disabled."""
         try:
@@ -252,6 +263,7 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(error_msg)
             return error_msg
 
+    @shared_directory_aware("directory", writes=False)
     def search_content(self, query: str, directory: str | None = None, limit: int = 10) -> str:
         """Search file contents, reaching outside ``base_dir`` only with unrestricted file access.
 
@@ -331,7 +343,7 @@ class _MindRoomFileTools(AgnoFileTools):
             if lower_query in content.lower():
                 matches.append(
                     {
-                        "file": file_path.relative_to(self.base_dir).as_posix(),
+                        "file": format_path_for_output(file_path, self.base_dir),
                         "size": _format_size(len(payload)),
                         "snippet": _extract_snippet(content, query),
                     },
@@ -354,7 +366,7 @@ class _MindRoomFileTools(AgnoFileTools):
     description="Read, write, list, and search files in the agent workspace",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.AGENT,
-    managed_init_args=(ToolManagedInitArg.FILE_ACCESS,),
+    managed_init_args=(ToolManagedInitArg.FILE_ACCESS, ToolManagedInitArg.SHARED_DIRECTORY_ROOTS),
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,

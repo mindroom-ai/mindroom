@@ -7,9 +7,9 @@ from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.attachment_ids import merge_attachment_ids
-from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
-from mindroom.attachments import (
+from mindroom.attachments.ids import merge_attachment_ids
+from mindroom.attachments.media import attachment_records_to_media, resolve_scoped_attachments
+from mindroom.attachments.storage import (
     format_attachments_prompt,
     format_voice_transcript_attachment_guidance,
     parse_attachment_ids_from_thread_history,
@@ -35,7 +35,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
-from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
+from mindroom.voice.handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
 if TYPE_CHECKING:
     from pathlib import Path

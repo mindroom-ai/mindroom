@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from agno.knowledge.embedder.base import Embedder
 
-from mindroom.embedding_errors import (
+from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
     describe_embedder_error,

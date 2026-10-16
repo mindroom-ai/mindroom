@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix_rtc.spoken_turns import spoken_continuation
 from mindroom.memory import add_agent_memory
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -90,6 +91,7 @@ class CallTranscript:
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
     _header_written: bool = field(default=False, init=False)
+    _open_speaker: str | None = field(default=None, init=False)
     _flush_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     @classmethod
@@ -123,13 +125,23 @@ class CallTranscript:
         )
 
     def record(self, speaker: str, text: str) -> None:
-        """Record one finalized conversation turn (safe from sync callbacks)."""
-        text = text.strip()
+        """Record one finalized transcript item (safe from sync callbacks).
+
+        Consecutive items from the same speaker extend one turn, and its line stays open in the file until the turn ends.
+        """
+        text = " ".join(text.split())
         if not text:
             return
-        self._spoken.append((speaker, text))
-        stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
-        self._pending.append(f"- `{stamp}` **{speaker}**: {text}\n")
+        if self._open_speaker == speaker:
+            continuation = spoken_continuation(text)
+            self._spoken[-1] = (speaker, self._spoken[-1][1] + continuation)
+            self._pending.append(continuation)
+        else:
+            self._end_open_line()
+            self._spoken.append((speaker, text))
+            stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
+            self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
+            self._open_speaker = speaker
         self._schedule_flush()
 
     @property
@@ -141,9 +153,15 @@ class CallTranscript:
         """Record one realtime tool-execution round without counting it as speech."""
         if not tool_names:
             return
+        self._end_open_line()
         stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
         self._pending.append(f"- `{stamp}` _tools used: {', '.join(tool_names)}_\n")
         self._schedule_flush()
+
+    def _end_open_line(self) -> None:
+        if self._open_speaker is not None:
+            self._pending.append("\n")
+            self._open_speaker = None
 
     def _schedule_flush(self) -> None:
         if self._flush_task is not None and not self._flush_task.done():
@@ -200,6 +218,7 @@ class CallTranscript:
         """Flush remaining turns and store a memory reference for the call."""
         ended_at = datetime.now(tz=UTC)
         duration_minutes = max(1, round((ended_at - self.started_at).total_seconds() / 60))
+        self._end_open_line()
         try:
             await self._flush()
         except OSError as error:

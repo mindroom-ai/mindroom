@@ -9,11 +9,15 @@ from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from mindroom.agent_storage import create_state_storage, run_session_storage_operation, save_independent_usage
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.logging_config import get_logger
-from mindroom.usage_storage import (
+from mindroom.session_storage.agent_storage import (
+    create_state_storage,
+    run_session_storage_operation,
+    save_independent_usage,
+)
+from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_SESSION_TABLE,
     SYSTEM_USAGE_STORAGE_NAME,
@@ -29,7 +33,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.usage_storage import IndependentUsageKind
+    from mindroom.usage.storage import IndependentUsageKind
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,13 @@ def helper_usage_context(scope_context: ScopeSessionContext | None) -> Iterator[
                 else None
             ),
         )
+    with helper_usage_owner_context(owner):
+        yield
+
+
+@contextmanager
+def helper_usage_owner_context(owner: HelperUsageOwner | None) -> Iterator[None]:
+    """Bind one explicit usage owner for an async call, stream pull, or close."""
     token = _HELPER_USAGE_OWNER.set(owner)
     try:
         yield

@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from mindroom.api.auth import dashboard_requires_credential
 from mindroom.cli.main import app
-from mindroom.cli.service import require_login_service, start_login_service
+from mindroom.cli.service import _confirm_action, require_login_service, start_login_service
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, resolve_primary_runtime_paths
 from mindroom.services.config import (
     InstallResult,
@@ -961,6 +961,22 @@ def _shell_runtime(tmp_path: Path, **process_env: str) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
     return resolve_primary_runtime_paths(config_path=config_path, process_env=process_env)
+
+
+@pytest.mark.parametrize(("typed", "expected"), [("\n", True), ("y\n", True), ("n\n", False)])
+def test_confirm_action_reads_the_answer(typed: str, expected: bool) -> None:
+    """Enter accepts, as the question's `[Y/n]` says, and `n` declines."""
+    with CliRunner().isolation(input=typed) as (_, _, output):
+        assert _confirm_action("Install?") is expected
+    assert b"Install? [Y/n]" in output.getvalue()
+
+
+def test_confirm_action_cancels_quietly_at_end_of_input() -> None:
+    """Closed input or Ctrl+C cancels the command without an error exit."""
+    with CliRunner().isolation(input="") as (_, _, output), pytest.raises(typer.Exit) as exit_info:
+        _confirm_action("Install?")
+    assert exit_info.value.exit_code == 0
+    assert b"Cancelled." in output.getvalue()
 
 
 @pytest.mark.parametrize(

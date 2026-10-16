@@ -51,6 +51,7 @@
       "icon": "PanelsTopLeft",
       "icon_color": "text-violet-500",
       "name": "chat_ui",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -170,6 +171,7 @@
       "icon": "SiDiscord",
       "icon_color": "text-indigo-500",
       "name": "discord",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -196,6 +198,7 @@
       "icon": null,
       "icon_color": null,
       "name": "invite_router",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -223,6 +226,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-emerald-500",
       "name": "matrix_api",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -249,6 +253,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-green-500",
       "name": "matrix_message",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -275,6 +280,7 @@
       "icon": "LayoutList",
       "icon_color": "text-blue-500",
       "name": "matrix_room",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -362,6 +368,7 @@
       "icon": "Mic",
       "icon_color": "text-green-500",
       "name": "matrix_voice_message",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -640,10 +647,38 @@
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Stop the reply another agent or team is writing in the current conversation",
+      "display_name": "Stop Reply",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "stop_agent_reply"
+      ],
+      "helper_text": null,
+      "icon": "MessageSquare",
+      "icon_color": "text-red-500",
+      "name": "stop_reply",
+      "requires_conversation": false,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,
@@ -896,6 +931,7 @@
       "icon": "SiTelegram",
       "icon_color": "text-blue-500",
       "name": "telegram",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -922,6 +958,7 @@
       "icon": "Share2",
       "icon_color": "text-sky-500",
       "name": "thread_move",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -949,6 +986,7 @@
       "icon": "CircleCheckBig",
       "icon_color": "text-emerald-500",
       "name": "thread_resolution",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -975,6 +1013,7 @@
       "icon": "MessageCircleMore",
       "icon_color": "text-cyan-500",
       "name": "thread_summary",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -1003,6 +1042,7 @@
       "icon": "Tags",
       "icon_color": "text-emerald-500",
       "name": "thread_tags",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -1164,6 +1204,7 @@
       "icon": "SiTwilio",
       "icon_color": "text-red-600",
       "name": "twilio",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -1240,6 +1281,7 @@
       "icon": "SiWebex",
       "icon_color": "text-blue-600",
       "name": "webex",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -1442,6 +1484,7 @@
       "icon": "SiWhatsapp",
       "icon_color": "text-green-500",
       "name": "whatsapp",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -1516,6 +1559,7 @@
       "icon": "FaCog",
       "icon_color": "text-blue-600",
       "name": "airflow",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -1567,6 +1611,7 @@
       "icon": "FaCode",
       "icon_color": "text-blue-600",
       "name": "apify",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -1643,6 +1688,7 @@
       "icon": "FaAws",
       "icon_color": "text-orange-500",
       "name": "aws_lambda",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -1773,6 +1819,7 @@
       "icon": "SiBitbucket",
       "icon_color": "text-blue-600",
       "name": "bitbucket",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -1925,6 +1972,7 @@
       "icon": "FaCalendarAlt",
       "icon_color": "text-blue-600",
       "name": "cal_com",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -1958,6 +2006,7 @@
       "icon": "Calculator",
       "icon_color": "text-blue-500",
       "name": "calculator",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -2071,6 +2120,7 @@
       "icon": "VolumeX",
       "icon_color": "text-purple-500",
       "name": "cartesia",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2282,6 +2332,7 @@
       "icon": "Bot",
       "icon_color": "text-orange-500",
       "name": "claude_agent",
+      "requires_conversation": true,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
@@ -2325,6 +2376,7 @@
       "icon": "Code",
       "icon_color": "text-purple-500",
       "name": "coding",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -2356,6 +2408,7 @@
       "icon": "Settings",
       "icon_color": "text-purple-500",
       "name": "config_manager",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
@@ -2449,6 +2502,7 @@
       "icon": "SiConfluence",
       "icon_color": "text-blue-600",
       "name": "confluence",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2584,6 +2638,7 @@
       "icon": "Globe",
       "icon_color": "text-blue-500",
       "name": "custom_api",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -2833,6 +2888,7 @@
       "icon": "FaTerminal",
       "icon_color": "text-blue-600",
       "name": "daytona",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
@@ -2896,6 +2952,7 @@
       "icon": "SiDocker",
       "icon_color": "text-blue-500",
       "name": "docker",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -2923,6 +2980,7 @@
       "icon": "PackagePlus",
       "icon_color": "text-sky-500",
       "name": "dynamic_tools",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -3004,6 +3062,7 @@
       "icon": "Terminal",
       "icon_color": "text-blue-600",
       "name": "e2b",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
@@ -3142,6 +3201,7 @@
       "icon": "SiElevenlabs",
       "icon_color": "text-orange-500",
       "name": "eleven_labs",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -3231,6 +3291,7 @@
       "icon": "FaRobot",
       "icon_color": "text-purple-600",
       "name": "fal",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -3445,6 +3506,7 @@
       "icon": "FaFolder",
       "icon_color": "text-yellow-500",
       "name": "file",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -3599,6 +3661,7 @@
       "icon": "FaFileExport",
       "icon_color": "text-green-600",
       "name": "file_generation",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -3663,6 +3726,7 @@
       "icon": "TrendingUp",
       "icon_color": "text-green-600",
       "name": "financial_datasets_api",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -3799,6 +3863,7 @@
       "icon": "SiGooglegemini",
       "icon_color": "text-blue-500",
       "name": "gemini",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -3874,6 +3939,7 @@
       "icon": "SiGiphy",
       "icon_color": "text-purple-500",
       "name": "giphy",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -3966,6 +4032,7 @@
       "oauth_fallback_fields": [
         "access_token"
       ],
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -4099,6 +4166,7 @@
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
       "name": "google_bigquery",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -4243,6 +4311,7 @@
       "icon": "SiGooglemaps",
       "icon_color": "text-red-500",
       "name": "google_maps",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -4335,6 +4404,7 @@
       "icon": "SiGooglesheets",
       "icon_color": "text-green-600",
       "name": "google_sheets",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -4473,6 +4543,7 @@
       "icon": "TbBrain",
       "icon_color": "text-orange-500",
       "name": "groq",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -4624,6 +4695,7 @@
       "icon": "SiJira",
       "icon_color": "text-blue-600",
       "name": "jira",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -4670,6 +4742,7 @@
       "icon": "SiLinear",
       "icon_color": "text-purple-600",
       "name": "linear",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -4803,6 +4876,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "lumalabs",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -4926,6 +5000,7 @@
       "icon": "Video",
       "icon_color": "text-purple-600",
       "name": "modelslabs",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -5006,6 +5081,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "moviepy_video_tools",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -5144,6 +5220,7 @@
       "icon": "SiNeo4J",
       "icon_color": "text-blue-500",
       "name": "neo4j",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -5329,6 +5406,7 @@
       "icon": "SiOpenai",
       "icon_color": "text-green-600",
       "name": "openai",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -5351,6 +5429,7 @@
       "icon": "Workflow",
       "icon_color": "text-orange-500",
       "name": "openclaw_compat",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -5477,6 +5556,7 @@
       "icon": "WiDaySunny",
       "icon_color": "text-orange-500",
       "name": "openweather",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -5593,6 +5673,7 @@
       "icon": "SiPostgresql",
       "icon_color": "text-blue-700",
       "name": "postgres",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -5662,6 +5743,7 @@
       "icon": "SiPython",
       "icon_color": "text-blue-500",
       "name": "python",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -5772,6 +5854,7 @@
       "icon": "FaBrain",
       "icon_color": "text-purple-500",
       "name": "reasoning",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
@@ -5985,6 +6068,7 @@
       "icon": "AwsRedshift",
       "icon_color": "text-red-600",
       "name": "redshift",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -6060,6 +6144,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "replicate",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -6145,6 +6230,7 @@
       "icon": "FileCode2",
       "icon_color": "text-cyan-500",
       "name": "script",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -6171,6 +6257,7 @@
       "icon": "Settings",
       "icon_color": "text-indigo-500",
       "name": "self_config",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -6283,6 +6370,7 @@
       "icon": "Terminal",
       "icon_color": "text-green-500",
       "name": "shell",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -6334,6 +6422,7 @@
       "icon": "Clock",
       "icon_color": "text-purple-500",
       "name": "sleep",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -6403,6 +6492,7 @@
       "icon": "SiTrello",
       "icon_color": "text-blue-600",
       "name": "trello",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -6518,6 +6608,7 @@
       "icon": "FaChartBar",
       "icon_color": "text-indigo-500",
       "name": "visualization",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -6567,6 +6658,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "web_browser_tools",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -6666,6 +6758,7 @@
       "icon": "SiZendesk",
       "icon_color": "text-green-600",
       "name": "zendesk",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -6753,6 +6846,7 @@
       "icon": "FaAws",
       "icon_color": "text-orange-500",
       "name": "aws_ses",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -6850,6 +6944,7 @@
       "icon": "Mail",
       "icon_color": "text-blue-600",
       "name": "email",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -7001,6 +7096,7 @@
       "icon": "SiGmail",
       "icon_color": "text-red-500",
       "name": "gmail",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -7077,6 +7173,7 @@
       "icon": "Mail",
       "icon_color": "text-blue-600",
       "name": "resend",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -7157,6 +7254,7 @@
       "icon": "SiSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
@@ -7259,6 +7357,7 @@
       "icon": "SiYoutube",
       "icon_color": "text-red-600",
       "name": "youtube",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -7285,6 +7384,7 @@
       "icon": "RefreshCw",
       "icon_color": "text-cyan-500",
       "name": "update_awareness",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -7326,6 +7426,7 @@
       "icon": "FaChartBar",
       "icon_color": "text-cyan-500",
       "name": "usage_stats",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -7438,6 +7539,7 @@
       "icon": "Lock",
       "icon_color": "text-amber-600",
       "name": "agent_vault_access",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
@@ -7476,6 +7578,7 @@
       "icon": "FiShield",
       "icon_color": "text-emerald-600",
       "name": "approved_egress",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "special",
@@ -7706,10 +7809,37 @@
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
       "name": "composio",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "See which API keys and connected accounts this agent can use through the egress broker and where to add them",
+      "display_name": "Egress Credentials",
+      "docs_url": null,
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "list_egress_credentials"
+      ],
+      "helper_text": null,
+      "icon": "KeyRound",
+      "icon_color": "text-amber-600",
+      "name": "egress_credentials",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,
@@ -7733,6 +7863,7 @@
       "icon": "Unplug",
       "icon_color": "text-amber-500",
       "name": "oauth_connections",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -7822,6 +7953,7 @@
       "icon": "SiShopify",
       "icon_color": "text-green-600",
       "name": "shopify",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -7883,6 +8015,7 @@
       "icon": "SiAtlassian",
       "icon_color": "text-blue-600",
       "name": "atlassian",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -7911,6 +8044,7 @@
       "icon": "Paperclip",
       "icon_color": "text-teal-500",
       "name": "attachments",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -7938,6 +8072,7 @@
       "icon": "Webhook",
       "icon_color": "text-amber-500",
       "name": "callback_manager",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -8008,6 +8143,7 @@
       "icon": "SiClickup",
       "icon_color": "text-purple-600",
       "name": "clickup",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -8032,6 +8168,7 @@
       "icon": "Minimize2",
       "icon_color": "text-amber-500",
       "name": "compact_context",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -8170,6 +8307,7 @@
       "icon": "FaFileCsv",
       "icon_color": "text-green-600",
       "name": "csv",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -8195,6 +8333,7 @@
       "icon": "Users",
       "icon_color": "text-blue-500",
       "name": "delegate",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -8232,6 +8371,7 @@
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "special",
@@ -8333,6 +8473,7 @@
       "icon": "Database",
       "icon_color": "text-yellow-600",
       "name": "duckdb",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
@@ -8377,6 +8518,7 @@
       "icon": "Workflow",
       "icon_color": "text-violet-500",
       "name": "dynamic_workflow",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -8407,6 +8549,7 @@
       "icon": "Webhook",
       "icon_color": "text-emerald-500",
       "name": "external_trigger_manager",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -8475,6 +8618,7 @@
       "icon": "SiGooglecalendar",
       "icon_color": "text-blue-600",
       "name": "google_calendar",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -8545,6 +8689,7 @@
       "icon": "SiGoogledocs",
       "icon_color": "text-blue-600",
       "name": "google_docs",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -8668,6 +8813,7 @@
       "icon": "SiGoogledrive",
       "icon_color": "text-green-600",
       "name": "google_drive",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -8727,6 +8873,7 @@
       "icon": "SiGoogletasks",
       "icon_color": "text-blue-600",
       "name": "google_tasks",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
@@ -8878,6 +9025,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "mem0",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
@@ -8908,6 +9056,7 @@
       "icon": "Brain",
       "icon_color": "text-violet-500",
       "name": "memory",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -9009,6 +9158,7 @@
       "icon": "SiNotion",
       "icon_color": "text-gray-800",
       "name": "notion",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -9148,6 +9298,7 @@
       "icon": "FaChartArea",
       "icon_color": "text-blue-500",
       "name": "openbb",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -9212,6 +9363,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
@@ -9238,6 +9390,7 @@
       "icon": "Share2",
       "icon_color": "text-emerald-500",
       "name": "report_publishing",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -9269,6 +9422,39 @@
       "icon": "Calendar",
       "icon_color": "text-emerald-500",
       "name": "scheduler",
+      "requires_conversation": false,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Create directories that other agents can read from their own workers",
+      "display_name": "Shared Directories",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "create_shared_directory",
+        "invite_to_shared_directory",
+        "remove_from_shared_directory",
+        "delete_shared_directory",
+        "list_shared_directories"
+      ],
+      "helper_text": null,
+      "icon": "FolderOpen",
+      "icon_color": "text-amber-500",
+      "name": "shared_directories",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -9293,6 +9479,7 @@
       "icon": "Brain",
       "icon_color": "text-emerald-500",
       "name": "skill_manage",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -9479,6 +9666,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "sql",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
@@ -9509,6 +9697,7 @@
       "icon": "Cpu",
       "icon_color": "text-purple-500",
       "name": "thread_model",
+      "requires_conversation": false,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -9538,6 +9727,7 @@
       "icon": "ListTodo",
       "icon_color": "text-blue-500",
       "name": "todo",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
@@ -9584,6 +9774,7 @@
       "icon": "SiTodoist",
       "icon_color": "text-red-500",
       "name": "todoist",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -9739,6 +9930,7 @@
       "icon": "FaChartLine",
       "icon_color": "text-purple-600",
       "name": "yfinance",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -9888,6 +10080,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "zep",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
@@ -9978,6 +10171,7 @@
       "icon": "FaSpider",
       "icon_color": "text-purple-600",
       "name": "agentql",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -10055,6 +10249,7 @@
       "icon": "SiArxiv",
       "icon_color": "text-red-600",
       "name": "arxiv",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -10179,6 +10374,7 @@
       "icon": "Search",
       "icon_color": "text-blue-600",
       "name": "baidusearch",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -10293,6 +10489,7 @@
       "icon": "FaPalette",
       "icon_color": "text-blue-500",
       "name": "brandfetch",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -10443,6 +10640,7 @@
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
       "name": "brightdata",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -10563,6 +10761,7 @@
       "icon": "FaChrome",
       "icon_color": "text-orange-500",
       "name": "browser",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -10629,6 +10828,7 @@
       "icon": "FaChrome",
       "icon_color": null,
       "name": "browser_mcp",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -10784,6 +10984,7 @@
       "icon": "FaChrome",
       "icon_color": "text-blue-600",
       "name": "browserbase",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
@@ -10920,6 +11121,7 @@
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
       "name": "crawl4ai",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -11068,6 +11270,7 @@
       "icon": "SiDuckduckgo",
       "icon_color": "text-orange-500",
       "name": "duckduckgo",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -11387,6 +11590,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "exa",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -11537,6 +11741,7 @@
       "icon": "FaSpider",
       "icon_color": "text-orange-500",
       "name": "firecrawl",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -11576,6 +11781,7 @@
       "icon": "SiGooglescholar",
       "icon_color": "text-blue-500",
       "name": "google_scholar",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -11712,6 +11918,7 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "googlesearch",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -11788,6 +11995,7 @@
       "icon": "FaHackerNews",
       "icon_color": "text-orange-600",
       "name": "hackernews",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -11925,6 +12133,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "jina",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -12012,6 +12221,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "linkup",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -12077,6 +12287,7 @@
       "icon": "FaNewspaper",
       "icon_color": "text-blue-600",
       "name": "newspaper",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -12143,6 +12354,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "oxylabs",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -12242,6 +12454,7 @@
       "icon": "SiPubmed",
       "icon_color": "text-blue-600",
       "name": "pubmed",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -12393,6 +12606,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "scrapegraph",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -12473,6 +12687,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "searxng",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "requires_config"
@@ -12549,6 +12764,7 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "serpapi",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -12711,6 +12927,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "serper",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -12812,6 +13029,7 @@
       "icon": "FaSpider",
       "icon_color": "text-red-600",
       "name": "spider",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -13141,6 +13359,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "tavily",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -13412,6 +13631,7 @@
       "icon": "FaFileAlt",
       "icon_color": "text-teal-500",
       "name": "trafilatura",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -13524,6 +13744,7 @@
       "icon": "SiUnsplash",
       "icon_color": "text-gray-800",
       "name": "unsplash",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -13565,6 +13786,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "website",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -13629,6 +13851,7 @@
       "icon": "SiWikipedia",
       "icon_color": "text-gray-700",
       "name": "wikipedia",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -13702,6 +13925,7 @@
       "icon": "Home",
       "icon_color": "text-blue-500",
       "name": "homeassistant",
+      "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
@@ -13821,6 +14045,7 @@
       "icon": "SiReddit",
       "icon_color": "text-orange-500",
       "name": "reddit",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -13937,6 +14162,7 @@
       "icon": "SiX",
       "icon_color": "text-blue-400",
       "name": "x",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -14019,6 +14245,7 @@
       "icon": "SiZoom",
       "icon_color": "text-blue-500",
       "name": "zoom",
+      "requires_conversation": false,
       "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"

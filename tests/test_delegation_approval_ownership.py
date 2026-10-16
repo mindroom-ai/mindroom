@@ -18,10 +18,9 @@ from agno.team import Team
 from agno.tools.calculator import CalculatorTools
 from agno.tools.function import UserInputField
 
-from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -34,16 +33,16 @@ from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import TeamMode, _attach_team_pause_presentation, continue_paused_team_run
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _noop_typing
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,7 +120,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
         "mindroom.agents._load_agent_model_instance",
         lambda _config, _paths, _name, owner: parent_model if owner.session_id == identity.session_id else child_model,
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
     executed = []
     original_add = CalculatorTools.add
 
@@ -308,7 +307,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
                         "resolve_for_agent_async",
                         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
                     )
-                    monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
+                    monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
                     continuation = approval_continuation(
                         approval_id="saved-child-approval",
                         run_id=paused.run_id,
@@ -420,7 +419,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
         "mindroom.agents._load_agent_model_instance",
         lambda _config, _paths, _name, owner: parent_model if owner.session_id == identity.session_id else child_model,
     )
-    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
+    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
     executed = []
     original_add = CalculatorTools.add
 
@@ -504,7 +503,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
         "resolve_for_agent_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
-    monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
+    monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
     cards = []
     for _ in range(3):
         if not isinstance(result, PausedAttempt):

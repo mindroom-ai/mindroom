@@ -16,7 +16,7 @@ Validate a file with:
 mindroom config validate --path /path/to/config.yaml
 ```
 
-Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which need a restart.
+Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes and turning [background tool jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) on or off or changing their excluded toolkits, which need a restart.
 Edits to an agent's or team's own settings, such as `instructions`, `model`, `tools`, or a team's `mode`, apply from its next reply without restarting it.
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
 An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
@@ -69,7 +69,10 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
+| `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
+| `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
+| `budgets` | Default monthly spending cap per user and the fallback model | [Budgets](https://docs.mindroom.chat/budgets/) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
 | `matrix_sync` | Matrix sync transport and limits | [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync) |
 | `event_journal` | Storage for the Matrix event journal | [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal) |
@@ -189,11 +192,12 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 |----------|-------------|---------|
 | `MINDROOM_CONFIG_PATH` | Path to `config.yaml` | `./config.yaml`, then `~/.mindroom/config.yaml` |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
+| `MINDROOM_CONTROL_STATE_PATH` | Separate root for the primary's [control state](https://docs.mindroom.chat/deployment/storage/#data-persistence); relative paths resolve from the config directory | `control_state/` under `MINDROOM_STORAGE_PATH` |
 | `MINDROOM_SESSION_STORAGE_PATH` | Separate root for agent and team session databases; relative paths resolve from the config directory, and other state stays under `MINDROOM_STORAGE_PATH` (see [Storage](https://docs.mindroom.chat/deployment/storage/)) | `MINDROOM_STORAGE_PATH` |
 | `MINDROOM_CONFIG_TEMPLATE` | File copied to the config path when `config.yaml` does not exist, used by Docker images to seed config | _(unset)_ |
 | `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Key for encrypted-at-rest credential files (see [Credential Storage Encryption](https://docs.mindroom.chat/oauth-framework/#credential-storage-encryption)) | _(unset)_ |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`); `mindroom run --log-level` takes precedence | `INFO` |
-| `MINDROOM_LOGGER_LEVELS` | Comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,nio:WARNING` | _(unset)_ |
+| `MINDROOM_LOGGER_LEVELS` | Comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,nio:WARNING`; MindRoom logger names are module paths, so `mindroom.scheduling:DEBUG` covers one package and `mindroom.coalescing.ingress_lanes:DEBUG` one module | _(unset)_ |
 | `MINDROOM_LOG_FORMAT` | `text` for readable logs or `json` for structured logs | `text` |
 | `NO_COLOR` | Any nonempty value disables console colors and styled tracebacks; installed background services set this to `1` | _(unset)_ |
 
@@ -201,7 +205,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
+| `MATRIX_HOMESERVER` | Matrix homeserver URL; use the default URL for hosted pairing or your own URL for self-hosting | `https://mindroom.chat` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
 | `MATRIX_SSL_VERIFY` | Set to `false` for a dev or self-signed homeserver; it covers `MATRIX_HOMESERVER` and its MatrixRTC voice-call requests, never the provisioning service or other homeservers (see [TLS Trust](https://docs.mindroom.chat/matrix/#tls-trust)) | `true` |
 | `MATRIX_REGISTRATION_TOKEN` | Registration token for creating managed agent accounts on a self-hosted homeserver | _(unset)_ |
@@ -243,10 +247,11 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
-| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | `1`/`true`/`yes` disables automatic tool dependency installation | _(unset; auto-install enabled)_ |
+| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | `1`/`true`/`yes` disables automatic installation of missing optional dependencies, such as tool and voice-call extras | _(unset; auto-install enabled)_ |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |

@@ -269,7 +269,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_callback = MagicMock()
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
         ingestion_session = AsyncMock()
         mock_login.return_value = _owned_login(mock_client, ingestion_session)
 
@@ -339,7 +338,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_callback = MagicMock()
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
         mock_ensure_user.return_value = None
 
         async def _login_with_actual_identity(
@@ -451,10 +449,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
-        mock_client.has_uncommitted_classic_sync_state = False
         mock_client.next_batch = ""
         mock_client.user_id = mock_agent_user.user_id
         mock_client.device_id = "DEVICEID"
@@ -1576,7 +1571,6 @@ class TestAgentBot(AgentBotTestBase):
                 "can_reply_to_sender_in_room",
                 return_value=False,
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await self._invoke_handler(bot, handler_name, room, event)
 
@@ -1592,7 +1586,7 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.config.main.load_config")
     @patch("mindroom.teams.resolve_agent_knowledge_access")
     @patch("mindroom.teams.create_agent")
-    @patch("mindroom.model_loading.get_model_instance")
+    @patch("mindroom.providers.model_loading.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")

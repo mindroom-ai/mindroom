@@ -22,6 +22,7 @@ import httpx
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
@@ -65,7 +66,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.workers.backend import WorkerBackend
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
@@ -347,8 +348,7 @@ def _build_worker_routing_payload(
                 payload["execution_identity"] = to_json_compatible(asdict(execution_identity))
             return payload, None
 
-        effective_agent_name = routing_agent_name
-        if effective_agent_name is None:
+        if worker_target is None or routing_agent_name is None:
             msg = (
                 f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
                 "when using a dedicated worker backend."
@@ -356,10 +356,9 @@ def _build_worker_routing_payload(
             raise RuntimeError(msg)
 
         worker_key = resolve_unscoped_worker_key(
-            agent_name=effective_agent_name,
-            execution_identity=execution_identity,
-            tenant_id=worker_target.tenant_id if worker_target is not None else None,
-            account_id=worker_target.account_id if worker_target is not None else None,
+            agent_name=routing_agent_name,
+            tenant_id=worker_target.tenant_id,
+            account_id=worker_target.account_id,
         )
         worker_handle = resolved_worker_manager.ensure_worker(
             WorkerSpec(worker_key),
@@ -367,7 +366,7 @@ def _build_worker_routing_payload(
         )
         return (
             {
-                "routing_agent_name": effective_agent_name,
+                "routing_agent_name": routing_agent_name,
                 "worker_key": worker_key,
             },
             worker_handle,
@@ -377,7 +376,6 @@ def _build_worker_routing_payload(
         msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
         raise RuntimeError(msg)
 
-    effective_agent_name = routing_agent_name
     if worker_scope == "user_agent":
         worker_key, resolved_private_agent_names = _resolve_user_agent_worker_payload(
             tool_name=tool_name,
@@ -400,7 +398,7 @@ def _build_worker_routing_payload(
     return (
         {
             "worker_scope": worker_scope,
-            "routing_agent_name": effective_agent_name,
+            "routing_agent_name": routing_agent_name,
             "worker_key": worker_key,
             "execution_identity": to_json_compatible(asdict(execution_identity)),
             "private_agent_names": (
@@ -987,6 +985,20 @@ def _call_proxy_sync(
         if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
             # A minimal response's grant travels with each command to the agent's own worker.
             execution_env = {**(execution_env or {}), **cli_env.env()}
+        if tool_name in EXECUTION_ENV_TOOL_NAMES and egress_broker_enabled(runtime_paths):
+            # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
+            from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
+
+            execution_env = {
+                **(execution_env or {}),
+                **execution_env_for_worker(
+                    runtime_paths,
+                    config=manager_context.runtime_config,
+                    worker_target=worker_target,
+                    routed_worker_key=worker_payload.get("worker_key"),
+                    call_env=execution_env,
+                ),
+            }
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:

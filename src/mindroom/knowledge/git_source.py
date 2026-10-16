@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlparse
 
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.file_locks import current_inherited_file_lock
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.file_listing import (
@@ -51,6 +51,7 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME, shared_storage_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -599,7 +600,7 @@ class GitKnowledgeSource:
         env: dict[str, str] | None = None,
         remote: bool = False,
     ) -> str:
-        _require_unlinked_worktree(self.source_path)
+        self._require_safe_worktree()
         capability = current_inherited_file_lock()
         inherited_lock_fd = None if capability is None else capability.fileno_for(self.source_path)
         owns_process_group = _git_process_group_is_owned_here()
@@ -743,11 +744,21 @@ class GitKnowledgeSource:
         self._tracked_relative_paths = set(tracked_files)
         return tracked_files
 
+    def _require_safe_worktree(self) -> None:
+        """Refuse a checkout that worker code could swap for a link while Git runs in it."""
+        _require_unlinked_worktree(self.source_path)
+        # An owner's worker writes its shared directories, and Git reopens the worktree by path after this check.
+        if self.source_path.is_relative_to(
+            shared_storage_root(self.runtime_paths.storage_root) / SHARED_DIRECTORIES_DIRNAME,
+        ):
+            msg = f"Refusing to run Git in knowledge folder {self.source_path}: it is inside a shared directory"
+            raise RuntimeError(msg)
+
     async def _ensure_repository(self, git_config: KnowledgeGitConfig) -> bool:
         """Make the MindRoom-owned repository exist; return whether it was just created."""
         expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
         initialized = False
-        _require_unlinked_worktree(self.source_path)
+        self._require_safe_worktree()
         if not await asyncio.to_thread(git_checkout_present, self.source_path, self.git_dir):
             if await asyncio.to_thread(adopt_in_tree_git_dir, self.base_id, self.source_path, self.git_dir):
                 logger.info(

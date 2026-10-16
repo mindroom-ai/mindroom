@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.memory._semantic_file_search as semantic_file_search
-from mindroom.agent_storage import load_agent_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -24,6 +23,7 @@ from mindroom.memory import (
 )
 from mindroom.memory.auto_flush import _build_existing_memory_context
 from mindroom.memory.functions import append_agent_daily_memory
+from mindroom.session_storage.agent_storage import load_agent_session
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -174,7 +174,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                         "room_id": "!legacy:example.org",
                         "thread_id": "$legacy-thread",
                         "dirty": True,
-                        "in_flight": False,
                         "first_dirty_at": 100,
                         "last_seen_at": 200,
                         "last_session_updated_at": 190,
@@ -191,7 +190,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                         "worker_key": None,
                         "execution_identity": None,
                         "dirty": False,
-                        "in_flight": False,
                         "first_dirty_at": 110,
                         "last_seen_at": 210,
                         "consecutive_failures": 0,
@@ -216,7 +214,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                 "worker_key": None,
                 "execution_identity": None,
                 "dirty": True,
-                "in_flight": False,
                 "first_dirty_at": 100,
                 "last_seen_at": 200,
                 "last_session_updated_at": 190,
@@ -233,7 +230,6 @@ def test_reprioritize_rewrites_legacy_location_fields_only(
                 "worker_key": None,
                 "execution_identity": None,
                 "dirty": False,
-                "in_flight": False,
                 "first_dirty_at": 110,
                 "last_seen_at": 210,
                 "consecutive_failures": 0,
@@ -333,6 +329,51 @@ async def test_worker_respects_batch_limits(
 
 
 @pytest.mark.asyncio
+async def test_a_flush_mark_left_by_an_older_release_does_not_block_flushing(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session an older release left marked in flight after a crash is flushed after restart."""
+    storage_path = tmp_path
+    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
+    state_file = storage_path / "memory_flush_state.json"
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    payload["sessions"]["general:s1"]["in_flight"] = True
+    state_file.write_text(json.dumps(payload), encoding="utf-8")
+    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
+
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this important decision")],
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+    writes: list[str] = []
+
+    def _fake_append_daily_memory(content: str, agent_name: str, **_: object) -> dict[str, str]:
+        writes.append(f"{agent_name}:{content}")
+        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
+
+    worker = MemoryAutoFlushWorker(
+        storage_path=storage_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    await worker._run_cycle(config)
+
+    assert len(writes) == 1
+
+
+@pytest.mark.asyncio
 async def test_worker_session_load_does_not_block_the_event_loop(
     tmp_path: Path,
     config: Config,
@@ -381,6 +422,50 @@ async def test_worker_session_load_does_not_block_the_event_loop(
 
     assert observed_progress.is_set(), "session read blocked the event loop"
     assert not observer.is_alive()
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_load_a_dirty_session_before_it_is_ready_to_flush(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selection pass must not decode a stored session until its entry is idle or old enough to flush."""
+    config.memory.auto_flush.idle_seconds = 120
+    now = 1_000
+    monkeypatch.setattr("mindroom.memory.auto_flush._now_ts", lambda: now)
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="s1")
+    loaded_session_ids: list[str] = []
+
+    def _load_session(
+        _agent: str,
+        _config: object,
+        _runtime_paths: object,
+        session_id: str,
+        **_kwargs: object,
+    ) -> _FakeSession:
+        loaded_session_ids.append(session_id)
+        return _FakeSession(updated_at=100, messages=[])
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _load_session)
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    process_session_key = AsyncMock()
+    monkeypatch.setattr(worker, "_process_session_key", process_session_key)
+
+    await worker._run_cycle(config)
+
+    assert loaded_session_ids == []
+    process_session_key.assert_not_awaited()
+
+    now += config.memory.auto_flush.idle_seconds
+    await worker._run_cycle(config)
+
+    assert loaded_session_ids == ["s1"]
+    process_session_key.assert_awaited_once_with(config, "general:s1")
 
 
 @pytest.mark.asyncio
@@ -644,7 +729,6 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
     session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is True
-    assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
 
 
@@ -703,7 +787,6 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
     session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is False
-    assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
     assert session_state["last_session_updated_at"] == 200
     assert append_calls == []
@@ -961,7 +1044,7 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
         captured["storage"] = storage
         return storage
 
-    monkeypatch.setattr("mindroom.agent_storage.create_session_storage", _fake_create_session_storage)
+    monkeypatch.setattr("mindroom.session_storage.agent_storage.create_session_storage", _fake_create_session_storage)
 
     assert (
         load_agent_session(
@@ -991,9 +1074,9 @@ def test_load_agent_session_uses_canonical_session_helper(
     def _fake_create_session_storage(*_args: object, **_kwargs: object) -> object:
         return storage
 
-    monkeypatch.setattr("mindroom.agent_storage.create_session_storage", _fake_create_session_storage)
+    monkeypatch.setattr("mindroom.session_storage.agent_storage.create_session_storage", _fake_create_session_storage)
     monkeypatch.setattr(
-        "mindroom.agent_storage.get_agent_session",
+        "mindroom.session_storage.agent_storage.get_agent_session",
         lambda actual_storage, session_id: (
             sentinel if actual_storage is storage and session_id == "session-1" else None
         ),

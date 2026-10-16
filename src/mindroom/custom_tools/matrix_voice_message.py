@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
 
-from mindroom.credentials_sync import get_secret_from_env
+from mindroom.credentials.sync import get_secret_from_env
 from mindroom.custom_tools.attachment_helpers import (
     resolve_context_thread_id,
     resolve_optional_room_id,

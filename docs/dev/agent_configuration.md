@@ -477,6 +477,8 @@ Below is a representative selection:
 - **matrix_message** - Send messages to other Matrix rooms
 - **thread_move** - Move the current Matrix thread into another room with `move_thread`
 - **thread_summary** - Write or update a one-line Matrix thread summary with `set_thread_summary`
+- **stop_reply** - Stop another agent's or team's reply in the current conversation with `stop_agent_reply`
+- **shared_directories** - Create a directory and invite other agents to read it from their own workers
 - **thread_model** - Show, switch, or reset the model override for the current Matrix thread (applies from the next message)
 
 ### AI & Generation Tools

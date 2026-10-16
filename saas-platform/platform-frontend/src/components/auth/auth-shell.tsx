@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
+import { PlausibleAnalytics } from '@/components/PlausibleAnalytics'
 
 type AuthShellProps = {
   title: string
@@ -28,6 +29,7 @@ export function AuthShell({
   return (
     <main className="auth-glass-page relative min-h-screen overflow-hidden bg-[#0f0d2e] px-4 py-6 text-white sm:px-6">
       <HeroParticleBackground variant="auth" />
+      <PlausibleAnalytics />
       <div className="relative z-10 flex min-h-[calc(100vh-3rem)] items-center justify-center">
         <section className="relative w-full max-w-[440px] rounded-2xl border border-white/20 bg-[#12102a]/35 p-6 shadow-[0_24px_90px_rgba(0,0,0,0.42)] backdrop-blur-md backdrop-saturate-150 sm:p-8">
           <div className="pointer-events-none absolute inset-0 rounded-2xl shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]" />

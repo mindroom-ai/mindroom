@@ -24,13 +24,14 @@ from agno.models.response import ModelResponse
 from agno.tools.function import ToolResult
 from starlette.responses import StreamingResponse
 
-from mindroom import provider_media_fallback, provider_stream_retry
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
-from mindroom.model_loading import get_model_instance
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
-from mindroom.provider_media_fallback import install_provider_media_fallback, reset_model_media_capability_cache
+from mindroom.providers import media_fallback as provider_media_fallback
+from mindroom.providers import stream_retry as provider_stream_retry
+from mindroom.providers.media_fallback import install_provider_media_fallback, reset_model_media_capability_cache
+from mindroom.providers.model_loading import get_model_instance
 from mindroom.tool_system.context_bound_streams import close_async_stream
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -220,7 +221,7 @@ def _load[LoadedModel](model: LoadedModel, tmp_path: Path) -> LoadedModel:
         ),
         test_runtime_paths(tmp_path),
     )
-    with patch("mindroom.model_loading._create_model_for_provider", return_value=cast("Model", model)):
+    with patch("mindroom.providers.model_loading._create_model_for_provider", return_value=cast("Model", model)):
         loaded = get_model_instance(config, runtime_paths_for(config))
     return cast("LoadedModel", loaded)
 

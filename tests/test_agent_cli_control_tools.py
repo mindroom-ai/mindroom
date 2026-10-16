@@ -17,19 +17,20 @@ from agno.skills import LocalSkills, Skills
 from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents, cli_approval_recovery
+from mindroom import agents
+from mindroom.agent_cli import cli_approval_recovery
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
 from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
+from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.ai import collect_streamed_response_content
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -43,7 +44,6 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
-from mindroom.minimal_agent import MinimalAgent
 from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
 from mindroom.response_turn import (
     PausedAnswer,
@@ -52,6 +52,8 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
     paused_attempt_from_response,
 )
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, execute_agent_tool_call
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -556,7 +558,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
     arguments = {"agent_name": "code", "task": "work"}
     if mode in {"recover", "recover_again"}:
         shell_toolkit = shell_tools()(runtime_paths=runtime.runtime_paths)
-        agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+        bind_toolkit_authority(shell_toolkit, authored_name="shell")
         catalog.agent = MinimalAgent(
             id="helper",
             model=catalog.agent.model,
@@ -815,7 +817,6 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     assert binding.catalog is catalog
     assert materialized == [True]
     await catalog.close()
-    bind_mcp_server_manager(None)
     sync_mcp_tool_registry(None)
     await manager.shutdown()
 

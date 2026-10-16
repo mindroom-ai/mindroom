@@ -8,9 +8,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.config.main import failed_config_source_fingerprint, load_config
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.config.yaml_includes import partial_source_files
-from mindroom.config_reload import ConfigReloadStatus
-from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
+from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import (
     build_config_update_plan,
@@ -18,6 +18,7 @@ from mindroom.orchestration.config_updates import (
     plugin_change_paths,
 )
 from mindroom.orchestration.runtime import cancel_logged_task, create_logged_task
+from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -130,7 +131,12 @@ class ConfigReloadLifecycle:
         """Acknowledge source bytes only after their complete runtime publication."""
         self._fully_applied_config = config
         self.status = ConfigReloadStatus(
-            status="restart_required" if pending_event_journal_restart(config, self.runtime_paths) else "applied",
+            status="restart_required"
+            if (
+                pending_event_journal_restart(config, self.runtime_paths)
+                or pending_background_tool_jobs_restart(config, self.runtime_paths)
+            )
+            else "applied",
             fingerprint=config.source_fingerprint,
         )
 

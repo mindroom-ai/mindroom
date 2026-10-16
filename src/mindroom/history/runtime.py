@@ -8,8 +8,6 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-from mindroom import model_loading
-from mindroom.agno_compat_provider_errors import is_provider_timeout
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.compaction import SummaryModel, compact_scope_history
 from mindroom.history.native import configure_native_history, native_history_route
@@ -43,6 +41,7 @@ from mindroom.history.storage import (
     set_force_compaction_state,
     update_scope_state_on_latest,
 )
+from mindroom.history.team_scope import ad_hoc_team_has_private_member
 from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycleFailure,
@@ -57,8 +56,9 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.logging_config import get_logger
+from mindroom.providers import model_loading
+from mindroom.providers.agno_compat_provider_errors import is_provider_timeout
 from mindroom.redaction import redact_sensitive_text
-from mindroom.team_scope import ad_hoc_team_has_private_member
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
 
@@ -359,6 +359,7 @@ async def prepare_scope_history(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
+        allow_native_compaction=allow_native_compaction,
     )
     logger.info(
         "History preparation check",
@@ -400,6 +401,12 @@ async def prepare_scope_history(
             )
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
+        # Compaction skips history that already fits its budget, so a trigger-level pass targets the trigger.
+        compaction_budget = (
+            execution_plan.replay_budget_tokens
+            if compaction_decision.reason == "over_trigger_native_disabled"
+            else execution_plan.hard_replay_budget_tokens
+        )
         compaction_result = await _run_scope_compaction_with_lifecycle(
             mode="manual" if state.force_compact_before_next_run else "auto",
             storage=scope_context.storage,
@@ -407,7 +414,7 @@ async def prepare_scope_history(
             scope=scope_context.scope,
             state=state,
             resolved_inputs=resolved_inputs,
-            history_budget=execution_plan.hard_replay_budget_tokens,
+            history_budget=compaction_budget,
             current_history_tokens=current_history_tokens,
             runs_before=len(visible_runs),
             replay_model=native_model,

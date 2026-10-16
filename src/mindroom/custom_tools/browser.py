@@ -27,8 +27,8 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
-from mindroom.browser_profile import clear_stale_singleton_locks
+from mindroom.browser.fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
+from mindroom.browser.profile_locks import clear_stale_singleton_locks
 from mindroom.custom_tools.attachments import resolve_context_attachment_path
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
@@ -551,6 +551,20 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
     return (
         f"{expected_text}{cache_text}.{installed_text} Run `{_PLAYWRIGHT_INSTALL_COMMAND}` from the MindRoom checkout."
     )
+
+
+async def _goto(page: Page, target_url: str) -> None:
+    """Load one URL, saying when the relay or egress proxy may have refused its destination."""
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        if "net::ERR_SOCKS_CONNECTION_FAILED" not in exc.message:
+            raise
+        msg = (
+            f"{exc.message}\nThe browser's proxy could not connect to this destination; outbound access to its host "
+            "or port may not be allowed from this browser."
+        )
+        raise RuntimeError(msg) from exc
 
 
 def _copy_within_limit(source: BinaryIO, output: BinaryIO, max_bytes: int) -> int:
@@ -1321,7 +1335,7 @@ class BrowserTools(Toolkit):
             await page.set_content(html, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
         else:
             assert target_url is not None
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+            await _goto(page, target_url)
         if self._worker_display is not None:
             await page.bring_to_front()
         state.active_target_id = target_id
@@ -1367,7 +1381,7 @@ class BrowserTools(Toolkit):
     async def _navigate(self, profile_name: str, target_url: str, target_id: str | None) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        await tab.page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+        await _goto(tab.page, target_url)
         state.active_target_id = resolved_target_id
         return {
             "action": "navigate",

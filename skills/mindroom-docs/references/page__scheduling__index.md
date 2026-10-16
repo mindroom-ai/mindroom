@@ -290,12 +290,15 @@ agents:
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
-- Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
+- A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](https://docs.mindroom.chat/personal-rooms/) with the agent.
+  Only the agent named by `personal_rooms.agent` can run automations as a private agent, its entries cannot set `room`, and it inherits only default entries without `room`.
+  A requester without a personal room, or whom the agent may no longer answer, is skipped.
+  Everyone who can read that personal room, such as an agent the requester invited or an adopted room's other participants, sees the prompts and replies, like any other reply there.
 - The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
-- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- An agent, or each requester's instance of a private agent, runs one automation at a time; one that comes due meanwhile starts when the other ends.
 - A check that cannot read what it checks posts a warning in the room.
 - A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
@@ -306,7 +309,7 @@ For conditions that need your own code, write a [plugin automation](https://docs
 Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
-1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4).
+1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
 2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:

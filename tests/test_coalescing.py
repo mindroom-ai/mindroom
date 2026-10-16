@@ -12,13 +12,7 @@ import nio
 import pytest
 
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
-from mindroom.coalescing import (
-    CoalescingGate,
-    IngressAdmissionClosedError,
-    ReadyPendingEvent,
-    is_coalescing_exempt_source_kind,
-)
-from mindroom.coalescing_batch import (
+from mindroom.coalescing.batch import (
     ActiveFollowUpCoalescingOwner,
     CoalescingKey,
     PendingEvent,
@@ -29,6 +23,13 @@ from mindroom.coalescing_batch import (
     is_active_follow_up_coalescing_key,
     requester_coalescing_key,
 )
+from mindroom.coalescing.gate import (
+    CoalescingGate,
+    IngressAdmissionClosedError,
+    ReadyPendingEvent,
+    is_coalescing_exempt_source_kind,
+)
+from mindroom.coalescing.ingress_lanes import LaneDelivery, ReceiptLaneKey
 from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active, turn_dispatch_recovery_scope
@@ -39,7 +40,6 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.execution_preparation import _messages_with_current_prompt
-from mindroom.ingress_lanes import LaneDelivery, ReceiptLaneKey
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_record import SourceEventMetadata

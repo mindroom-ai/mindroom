@@ -14,10 +14,9 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom import coalescing
-from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
-from mindroom.coalescing import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
-from mindroom.coalescing_batch import (
+from mindroom.attachments.storage import _attachment_id_for_event, load_attachment, register_local_attachment
+from mindroom.coalescing import gate as coalescing
+from mindroom.coalescing.batch import (
     CoalescingKey,
     PendingEvent,
     PreparedTurn,
@@ -25,6 +24,8 @@ from mindroom.coalescing_batch import (
     active_follow_up_coalescing_key,
     build_prepared_turn,
 )
+from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
+from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -74,7 +75,6 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     _BatchMediaAttachmentResult,
 )
-from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
@@ -96,6 +96,7 @@ from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     dispatch_context_result,
@@ -382,7 +383,7 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
     duplicate_reservation.cancel.assert_called_once_with()
 
 
-async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
+async def _wait_for(condition: Callable[[], bool]) -> None:
     """Poll until a test condition becomes true."""
     ready = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -395,7 +396,7 @@ async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 
 
     _mark_ready()
     try:
-        async with asyncio.timeout(deadline_seconds):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             await ready.wait()
     except TimeoutError as exc:
         msg = "Timed out waiting for async test condition"
@@ -1695,7 +1696,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await _wait_for(lambda: len(runs) == 2, deadline_seconds=3)
+            await _wait_for(lambda: len(runs) == 2)
             await bot._coalescing_gate.drain_all()
             await response_runner.drain_inbox_responses()
     finally:
@@ -1798,7 +1799,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key), deadline_seconds=3)
+            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key))
             await bot._coalescing_gate.drain_all()
             await response_runner.drain_inbox_responses()
     finally:
@@ -1879,7 +1880,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
-            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key), deadline_seconds=3)
+            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key))
             await bot._coalescing_gate.drain_all()
             await response_runner.drain_inbox_responses()
     finally:
@@ -2272,7 +2273,7 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$text", "$voice"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$text", "$voice"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2398,7 +2399,7 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$typed1", "$voice", "$typed2"]], deadline_seconds=0.5)
+    await _wait_for(lambda: calls == [["$typed1", "$voice", "$typed2"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2531,14 +2532,14 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
-    await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=0.2)
+    await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     await _admit_ready(gate, resolved_key, make_pending_event(followup, room, source_kind="message"))
     await asyncio.sleep(0.02)
 
     assert calls == [["$voice"]]
 
     release_voice_dispatch.set()
-    await _wait_for(lambda: calls == [["$voice"], ["$followup"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$voice"], ["$followup"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2591,7 +2592,7 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [(resolved_key, ["$voice", "$typed"])], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [(resolved_key, ["$voice", "$typed"])])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2643,7 +2644,7 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [(resolved_key, ["$typed", "$voice"])], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [(resolved_key, ["$typed", "$voice"])])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2695,7 +2696,7 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$voice", "$typed"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$voice", "$typed"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2748,7 +2749,7 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
     assert calls == []
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$typed", "$voice"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$typed", "$voice"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2808,7 +2809,7 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     assert calls == [["$typed"]]
 
     release_voice.set()
-    await _wait_for(lambda: calls == [["$typed"], ["$voice"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$typed"], ["$voice"]])
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2974,7 +2975,6 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
                 (voice_key, ["$voice"]),
             ]
         ),
-        deadline_seconds=0.2,
     )
     assert _coalescing_gate_is_idle(gate)
 
@@ -3755,7 +3755,7 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
+    with patch("mindroom.coalescing.gate.emit_elapsed_timing") as mock_emit:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4248,7 +4248,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
+    with patch("mindroom.coalescing.gate.emit_elapsed_timing") as mock_emit:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4276,7 +4276,7 @@ async def test_coalescing_enqueue_logs_pending_count() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.info") as mock_info:
+    with patch("mindroom.coalescing.gate.logger.info") as mock_info:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
@@ -4305,8 +4305,8 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
         is_shutting_down=lambda: False,
     )
     with (
-        patch("mindroom.coalescing._COALESCING_FLUSH_WARNING_SECONDS", 0.0),
-        patch("mindroom.coalescing.logger.warning") as mock_warning,
+        patch("mindroom.coalescing.gate._COALESCING_FLUSH_WARNING_SECONDS", 0.0),
+        patch("mindroom.coalescing.gate.logger.warning") as mock_warning,
     ):
         await _admit_ready(
             gate,
@@ -4351,7 +4351,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 
     loop.set_exception_handler(capture_loop_exception)
     try:
-        with patch("mindroom.coalescing.logger.exception") as mock_exception:
+        with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
             await _admit_ready(
                 gate,
                 CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4391,7 +4391,7 @@ async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback()
         on_dispatch_failure=failure_handoffs.append,
     )
 
-    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+    with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4468,7 +4468,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+    with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4519,7 +4519,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+    with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4660,7 +4660,7 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with patch("mindroom.coalescing.logger.debug") as mock_debug:
+    with patch("mindroom.coalescing.gate.logger.debug") as mock_debug:
         await _admit_ready(
             gate,
             CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -4755,7 +4755,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await _wait_for(lambda: bot._turn_store.is_handled("$m1"), deadline_seconds=1.0)
+        await _wait_for(lambda: bot._turn_store.is_handled("$m1"))
 
     assert bot._turn_store.is_handled("$m1")
     assert bot._turn_store.is_handled("$m2")

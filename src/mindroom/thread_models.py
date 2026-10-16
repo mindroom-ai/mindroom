@@ -130,8 +130,6 @@ def set_thread_model_override(
     *,
     thread_id: str,
     model_name: str,
-    room_id: str,
-    set_by: str,
     entity_names: Iterable[str],
     config: Config,
 ) -> None:
@@ -147,8 +145,6 @@ def set_thread_model_override(
     record = {
         **{field: value for field, value in current.items() if field not in unconfigured},
         **dict.fromkeys(_entity_fields(entity_names), model_name),
-        "room_id": room_id,
-        "set_by": set_by,
         "set_at": datetime.now(UTC).isoformat(),
     }
     _save_thread_record(path, overrides, thread_id, record)

@@ -46,7 +46,10 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - Leave out implementation mechanics: locks, transactions, journals, caches, retries, internal IDs, module and class names, ordering internals, encoding details, and change history such as "previously" or "now".
   Also leave out hardening limits that normal use never reaches and behavior on rare failure, cancellation, recovery, and replay paths, unless a user would plausibly ask about them.
   Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
-  Every `docs/architecture/` page and every page outside the nav, such as `docs/dev/`, is for contributors and operators and may explain mechanisms; user docs name implementation details only when a documented procedure needs them.
+  User docs name implementation details only when a documented procedure needs them.
+- **Design and architecture documents** (`docs/architecture/` and the design records in `docs/dev/`) hold only what the code cannot show: reasons, decisions and rejected alternatives, assumptions, external constraints and wire contracts, refuted theories, evidence, limitations, invariant purposes, linked operator procedures, and open questions.
+  Do not describe what the code does there beyond the inventories this file requires, such as the code map, `security-posture.md`, the plaintext inventory in `matrix-event-journal-security.md`, and the Agno upstream map.
+  Name each dated record `docs/dev/YYYY-MM-DD-<title>.md` after its creation date.
 - Sentences like these fail the question test:
   - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." states a hardening limit normal use never reaches, with no effect a user sees.
   - "Restart recovery now checks the handled-turn ledger before replaying journal events." narrates a mechanism and its history; the outcome is "restarts do not produce duplicate replies".
@@ -59,6 +62,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - Never add a production branch, wrapper, or fallback whose only purpose is to preserve an old test expectation.
 - Treat `src/mindroom/bot.py` and `src/mindroom/orchestrator.py` as composition roots and lifecycle shells, not feature implementation modules.
 - Default to putting new behavior in focused modules or collaborators, then wire it into `bot.py` or `orchestrator.py` through a small public method or dependency.
+- Group a feature's modules in a `src/mindroom/<feature>/` subpackage with a docstring-only `__init__.py`; add a root module only when unrelated owners share it.
 - A PR that adds substantial code to `bot.py` or `orchestrator.py` must explain why the code truly belongs at that lifecycle boundary and why a focused module would be worse.
 - During PR review, flag growth in `bot.py` or `orchestrator.py` as a design smell unless it is limited to routing, lifecycle coordination, dependency wiring, or calls into extracted collaborators.
 - Every 3 review rounds, if reviews still show many issues or new major bug classes, stop patching and reconsider the design before another patch round.
@@ -90,7 +94,7 @@ Design migrations around that assumption rather than adding machinery to coordin
 - Verify release provenance from history and tags.
   The last release that accepted old data is not the last native writer release.
   State unreleased, unversioned external input, no tagged native model, or schema-based recovery explicitly when no single release cutoff exists.
-- Keep the boundary map in `docs/architecture/migrations.md` aligned with changes; source comments own the exact provenance and test references.
+- Source comments own each rule's provenance and test references; `docs/architecture/migrations.md` holds only cross-cutting migration decisions and dependency-owned migrations.
 
 ### Agno Compatibility Policy
 
@@ -272,7 +276,7 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 
 **Code map**: `docs/architecture/code-map.md` holds the inbound turn pipeline, a one-line purpose for each key module under `src/mindroom/`, and where persistent state lives.
 Read it to locate code, and update its rows when you add, rename, or remove a key module.
-Turn handling is described in `docs/architecture/bot-runtime.md`, and minimal-mode ownership and recovery in `docs/architecture/agent-cli.md`.
+The reasons behind turn handling are in `docs/architecture/bot-runtime.md`, and minimal-mode ownership and recovery in `docs/architecture/agent-cli.md`.
 
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`

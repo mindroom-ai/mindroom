@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.credentials import validate_service_name
+from mindroom.credentials.manager import validate_service_name
 
 
 class LLMJudgmentConfig(BaseModel):

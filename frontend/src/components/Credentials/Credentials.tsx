@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Copy,
   Eye,
   EyeOff,
@@ -25,6 +26,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/use-toast";
+import { EgressBroker } from "./EgressBroker";
 
 interface CredentialStatusResponse {
   service: string;
@@ -91,6 +93,8 @@ export function Credentials() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [isJsonVisible, setIsJsonVisible] = useState(false);
+  // Most people never need the raw payloads, so they stay out of the way until opened.
+  const [rawOpen, setRawOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestCredentialsRequestRef = useRef(0);
   const selectedServiceRef = useRef("");
@@ -452,198 +456,229 @@ export function Credentials() {
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden">
       <div className="h-full flex flex-col gap-4">
+        <EgressBroker />
+
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-xl">Credentials Manager</CardTitle>
+            <CardTitle className="text-xl">
+              <button
+                type="button"
+                aria-expanded={rawOpen}
+                aria-controls={rawOpen ? "raw-credential-payloads" : undefined}
+                onClick={() => {
+                  // Collapsing hides the payloads again, so they are never left showing.
+                  if (rawOpen) setIsJsonVisible(false);
+                  setRawOpen(!rawOpen);
+                }}
+                className="flex w-full items-center justify-between gap-2 text-left"
+              >
+                Raw credential payloads (advanced)
+                <ChevronDown
+                  aria-hidden="true"
+                  className={cn(
+                    "h-5 w-5 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none",
+                    rawOpen && "rotate-180",
+                  )}
+                />
+              </button>
+            </CardTitle>
             <CardDescription>
               Manage raw credential payloads by service name (for tools, model
               aliases, and private integrations).
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline">Services: {sortedServices.length}</Badge>
-              {selectedService ? (
-                <Badge variant="default">Active: {selectedService}</Badge>
-              ) : null}
-            </div>
+          {rawOpen && (
+            <CardContent id="raw-credential-payloads" className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">
+                  Services: {sortedServices.length}
+                </Badge>
+                {selectedService ? (
+                  <Badge variant="default">Active: {selectedService}</Badge>
+                ) : null}
+              </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] gap-4">
-              <Card className="border border-border/60 h-full flex flex-col">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base">Services</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3 h-full min-h-0 flex flex-col">
-                  <div className="flex gap-2">
-                    <Input
-                      value={newServiceName}
-                      onChange={(event) =>
-                        setNewServiceName(event.target.value)
-                      }
-                      placeholder="new_service_name"
-                    />
-                    <Button variant="outline" onClick={handleCreateService}>
-                      <Plus className="h-4 w-4 mr-1" />
-                      Add
-                    </Button>
-                  </div>
+              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] gap-4">
+                <Card className="border border-border/60 h-full flex flex-col">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-base">Services</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3 h-full min-h-0 flex flex-col">
+                    <div className="flex gap-2">
+                      <Input
+                        value={newServiceName}
+                        onChange={(event) =>
+                          setNewServiceName(event.target.value)
+                        }
+                        placeholder="new_service_name"
+                      />
+                      <Button variant="outline" onClick={handleCreateService}>
+                        <Plus className="h-4 w-4 mr-1" />
+                        Add
+                      </Button>
+                    </div>
 
-                  <div className="space-y-1 overflow-auto pr-1 flex-1 min-h-0">
-                    {isLoadingServices ? (
-                      <p className="text-sm text-muted-foreground">
-                        Loading services...
-                      </p>
-                    ) : sortedServices.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">
-                        No services found yet. Add one and save JSON
-                        credentials.
-                      </p>
-                    ) : (
-                      sortedServices.map((service) => {
-                        const isActive = service.service === selectedService;
-                        return (
-                          <button
-                            key={service.service}
-                            type="button"
-                            onClick={() => handleSelectService(service.service)}
-                            className={cn(
-                              "w-full rounded-md border p-2 text-left transition-colors",
-                              isActive
-                                ? "border-primary bg-primary/5"
-                                : "border-border hover:border-primary/40 hover:bg-muted/40",
-                            )}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <code className="text-xs font-medium">
-                                {service.service}
-                              </code>
-                              <Badge
-                                variant={
-                                  service.hasCredentials
-                                    ? "default"
-                                    : "secondary"
-                                }
-                              >
-                                {service.hasCredentials
-                                  ? "Configured"
-                                  : "Empty"}
-                              </Badge>
-                            </div>
-                            {service.keyNames.length > 0 ? (
-                              <p className="mt-1 text-xs text-muted-foreground truncate">
-                                Keys: {service.keyNames.join(", ")}
-                              </p>
-                            ) : null}
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="border border-border/60">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4" />
-                    Credential Payload
-                  </CardTitle>
-                  <CardDescription>
-                    {selectedService ? (
-                      <>
-                        Editing <code>{selectedService}</code>
-                      </>
-                    ) : (
-                      "Select or create a service to edit credentials"
-                    )}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50/80 p-2 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-200">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                    <p>
-                      Credentials are hidden by default for safer screen
-                      sharing. Showing or copying exposes cleartext secrets.
-                    </p>
-                  </div>
-                  <div className="flex justify-end">
-                    <Button
-                      variant="outline"
-                      onClick={() => setIsJsonVisible((previous) => !previous)}
-                      disabled={!selectedService || isLoadingCredentials}
-                    >
-                      {isJsonVisible ? (
-                        <EyeOff className="h-4 w-4 mr-2" />
-                      ) : (
-                        <Eye className="h-4 w-4 mr-2" />
-                      )}
-                      {isJsonVisible ? "Hide" : "Show"}
-                    </Button>
-                  </div>
-                  <div className="relative">
-                    <Textarea
-                      value={jsonDraft}
-                      onChange={(event) => setJsonDraft(event.target.value)}
-                      disabled={!selectedService || isLoadingCredentials}
-                      className={cn(
-                        "font-mono min-h-[320px] transition-[filter] duration-150",
-                        selectedService &&
-                          !isJsonVisible &&
-                          "blur-sm pointer-events-none select-none",
-                      )}
-                      placeholder='{"api_key":"..."}'
-                    />
-                    {selectedService && !isJsonVisible ? (
-                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-background/10">
-                        <p className="rounded-md border bg-background/90 px-3 py-1 text-xs text-muted-foreground shadow-sm">
-                          Credentials hidden for screen sharing. Click Show to
-                          reveal.
+                    <div className="space-y-1 overflow-auto pr-1 flex-1 min-h-0">
+                      {isLoadingServices ? (
+                        <p className="text-sm text-muted-foreground">
+                          Loading services...
                         </p>
-                      </div>
-                    ) : null}
-                  </div>
+                      ) : sortedServices.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                          No services found yet. Add one and save JSON
+                          credentials.
+                        </p>
+                      ) : (
+                        sortedServices.map((service) => {
+                          const isActive = service.service === selectedService;
+                          return (
+                            <button
+                              key={service.service}
+                              type="button"
+                              onClick={() =>
+                                handleSelectService(service.service)
+                              }
+                              className={cn(
+                                "w-full rounded-md border p-2 text-left transition-colors",
+                                isActive
+                                  ? "border-primary bg-primary/5"
+                                  : "border-border hover:border-primary/40 hover:bg-muted/40",
+                              )}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <code className="text-xs font-medium">
+                                  {service.service}
+                                </code>
+                                <Badge
+                                  variant={
+                                    service.hasCredentials
+                                      ? "default"
+                                      : "secondary"
+                                  }
+                                >
+                                  {service.hasCredentials
+                                    ? "Configured"
+                                    : "Empty"}
+                                </Badge>
+                              </div>
+                              {service.keyNames.length > 0 ? (
+                                <p className="mt-1 text-xs text-muted-foreground truncate">
+                                  Keys: {service.keyNames.join(", ")}
+                                </p>
+                              ) : null}
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
 
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      onClick={handleSave}
-                      disabled={!selectedService || isSaving}
-                    >
-                      <Save className="h-4 w-4 mr-2" />
-                      {isSaving ? "Saving..." : "Save"}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={handleTest}
-                      disabled={!selectedService || isTesting}
-                    >
-                      <FlaskConical className="h-4 w-4 mr-2" />
-                      {isTesting ? "Testing..." : "Test"}
-                    </Button>
-                    <Button variant="outline" onClick={handleRefresh}>
-                      <RefreshCw className="h-4 w-4 mr-2" />
-                      Refresh
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => void handleCopy()}
-                      disabled={!selectedService}
-                    >
-                      <Copy className="h-4 w-4 mr-2" />
-                      Copy JSON
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      onClick={handleDelete}
-                      disabled={!selectedService || isDeleting}
-                    >
-                      <Trash2 className="h-4 w-4 mr-2" />
-                      {isDeleting ? "Deleting..." : "Delete"}
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          </CardContent>
+                <Card className="border border-border/60">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <CheckCircle2 className="h-4 w-4" />
+                      Credential Payload
+                    </CardTitle>
+                    <CardDescription>
+                      {selectedService ? (
+                        <>
+                          Editing <code>{selectedService}</code>
+                        </>
+                      ) : (
+                        "Select or create a service to edit credentials"
+                      )}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50/80 p-2 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-200">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <p>
+                        Credentials are hidden by default for safer screen
+                        sharing. Showing or copying exposes cleartext secrets.
+                      </p>
+                    </div>
+                    <div className="flex justify-end">
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          setIsJsonVisible((previous) => !previous)
+                        }
+                        disabled={!selectedService || isLoadingCredentials}
+                      >
+                        {isJsonVisible ? (
+                          <EyeOff className="h-4 w-4 mr-2" />
+                        ) : (
+                          <Eye className="h-4 w-4 mr-2" />
+                        )}
+                        {isJsonVisible ? "Hide" : "Show"}
+                      </Button>
+                    </div>
+                    <div className="relative">
+                      <Textarea
+                        value={jsonDraft}
+                        onChange={(event) => setJsonDraft(event.target.value)}
+                        disabled={!selectedService || isLoadingCredentials}
+                        className={cn(
+                          "font-mono min-h-[320px] transition-[filter] duration-150",
+                          selectedService &&
+                            !isJsonVisible &&
+                            "blur-sm pointer-events-none select-none",
+                        )}
+                        placeholder='{"api_key":"..."}'
+                      />
+                      {selectedService && !isJsonVisible ? (
+                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-background/10">
+                          <p className="rounded-md border bg-background/90 px-3 py-1 text-xs text-muted-foreground shadow-sm">
+                            Credentials hidden for screen sharing. Click Show to
+                            reveal.
+                          </p>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        onClick={handleSave}
+                        disabled={!selectedService || isSaving}
+                      >
+                        <Save className="h-4 w-4 mr-2" />
+                        {isSaving ? "Saving..." : "Save payload"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleTest}
+                        disabled={!selectedService || isTesting}
+                      >
+                        <FlaskConical className="h-4 w-4 mr-2" />
+                        {isTesting ? "Testing..." : "Test"}
+                      </Button>
+                      <Button variant="outline" onClick={handleRefresh}>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Refresh
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => void handleCopy()}
+                        disabled={!selectedService}
+                      >
+                        <Copy className="h-4 w-4 mr-2" />
+                        Copy JSON
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        onClick={handleDelete}
+                        disabled={!selectedService || isDeleting}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        {isDeleting ? "Deleting..." : "Delete"}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            </CardContent>
+          )}
         </Card>
 
         {error ? (

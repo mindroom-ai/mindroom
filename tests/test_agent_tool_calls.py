@@ -22,8 +22,8 @@ from agno.session.agent import AgentSession
 from agno.tools.function import Function, FunctionCall, ToolResult
 from agno.tools.toolkit import Toolkit
 
-from mindroom import approval_tools
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget

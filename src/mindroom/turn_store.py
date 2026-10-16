@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
 
-from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -21,6 +20,7 @@ from mindroom.handled_turns import (
 from mindroom.history.storage import remove_history_of_redacted_events, remove_run_by_event_id
 from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,

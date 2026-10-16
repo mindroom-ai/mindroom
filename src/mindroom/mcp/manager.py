@@ -18,7 +18,7 @@ from httpx2 import HTTPStatusError
 from mcp import ClientSession
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
     MCPServerConfig,
@@ -68,6 +68,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
+from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
@@ -78,7 +79,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -1176,11 +1177,16 @@ class MCPServerManager:
             msg = f"MCP server '{state.server_id}' is not connected"
             raise MCPConnectionError(state.server_id, msg)
         try:
-            result = await session.call_tool(
-                remote_tool_name,
-                arguments=arguments,
-                read_timeout_seconds=timeout_seconds,
-                progress_callback=progress_callback,
+            # The SDK keeps the context each request is sent from until the session's next message, and a
+            # turn's contextvars hold its Agent and tools; awaiting the task still forwards cancellation.
+            result = await asyncio.create_task(
+                session.call_tool(
+                    remote_tool_name,
+                    arguments=arguments,
+                    read_timeout_seconds=timeout_seconds,
+                    progress_callback=progress_callback,
+                ),
+                context=Context(),
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
@@ -1505,9 +1511,11 @@ class MCPServerManager:
         filtered_tools: list[MCPDiscoveredTool] = []
         function_names: set[str] = set()
         for tool in discovered_tools:
-            if exclude_tools and tool.name in exclude_tools:
-                continue
-            if include_tools and tool.name not in include_tools:
+            if not tool_name_allowed(
+                tool.name,
+                include=include_tools or None,
+                exclude=exclude_tools or None,
+            ):
                 continue
             try:
                 function_name = validate_mcp_function_name(
@@ -1776,7 +1784,11 @@ class MCPServerManager:
             sorted(
                 tool.remote_name
                 for tool in catalog.tools
-                if (not included or tool.remote_name in included) and (not excluded or tool.remote_name not in excluded)
+                if tool_name_allowed(
+                    tool.remote_name,
+                    include=included or None,
+                    exclude=excluded or None,
+                )
             ),
         )
         if remote_tool_name not in available_tools:

@@ -12,13 +12,13 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.run.agent import RunContentEvent
 
-from mindroom import provider_stream_retry
-from mindroom.agent_storage import get_agent_session
 from mindroom.ai import stream_agent_response
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.providers import stream_retry as provider_stream_retry
+from mindroom.session_storage.agent_storage import get_agent_session
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.test_openai_responses_stream import _created, _event, _response
 from tests.test_provider_stream_retry import _answer as _chat_answer
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
 
     from mindroom.ai import AIStreamChunk
-    from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
+    from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 
 type _API = Literal["chat_completions", "responses"]
 

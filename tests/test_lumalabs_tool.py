@@ -15,7 +15,7 @@ from agno.agent import Agent
 
 import mindroom.tools  # noqa: F401
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.metadata import get_tool_by_name
 
 if TYPE_CHECKING:

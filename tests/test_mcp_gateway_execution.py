@@ -15,7 +15,7 @@ from starlette.routing import Route
 from structlog.testing import capture_logs
 
 from mindroom import agents
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools import google_scholar
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.google_scholar import GoogleScholarTools

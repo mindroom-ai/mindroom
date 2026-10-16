@@ -27,17 +27,18 @@ from agno.session.agent import AgentSession
 from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents, approval_execution, approval_tools, cli_approval_recovery, minimal_agent
-from mindroom.agent_cli import response_owner
+from mindroom import agents
+from mindroom.agent_cli import cli_approval_recovery, minimal_agent, response_owner
+from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.agent_cli.approval import CliApprovalCall
+from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_cli.events import emit_cli_suspension, project_cli_execution
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_storage import create_session_storage, create_state_storage
-from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
-from mindroom.cli_approval_waits import CliApprovalWaits
+from mindroom.approval import execution as approval_execution
+from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
@@ -49,6 +50,8 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
@@ -284,7 +287,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     function.requires_confirmation = True
     catalog = await _catalog(tmp_path, [function])
     shell_toolkit = shell_tools()(runtime_paths=catalog.runtime_context.runtime_paths)
-    agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+    bind_toolkit_authority(shell_toolkit, authored_name="shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[function, shell_toolkit])
     catalog.run_response.agent_id = "helper"
     catalog.run_response.metadata = {"source": "original"}
@@ -413,7 +416,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     """A shell approval rule on the outer Bash recovers as an honest notice, never a replay."""
     catalog = await _catalog(tmp_path, [])
     shell_toolkit = shell_tools()(runtime_paths=catalog.runtime_context.runtime_paths)
-    agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+    bind_toolkit_authority(shell_toolkit, authored_name="shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[shell_toolkit])
     catalog.run_response.agent_id = "helper"
     catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
@@ -580,7 +583,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 
     toolkit = Toolkit(name="media", tools=[media])
     toolkit.functions["media"].requires_confirmation = nested in {"approval", "suspend"}
-    agents._set_toolkit_approval_origin(toolkit, "media")
+    bind_toolkit_authority(toolkit, authored_name="media")
     agent.add_tool(toolkit)
     name = "run_shell_command" if shell else "media"
     namespace = "shell" if shell else "media"
@@ -1046,7 +1049,7 @@ async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_exp
     )
     progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
 
-    with patch("mindroom.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
+    with patch("mindroom.agent_cli.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
         await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
 
     responses.request_failure.assert_not_awaited()

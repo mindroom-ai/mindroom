@@ -15,7 +15,7 @@ from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
 from structlog.testing import capture_logs
 
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _messages_with_thinking_as_text
+from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude, _messages_with_thinking_as_text
 from tests.test_claude_native_compaction import _CHECKPOINT, _TEXT, _response
 
 

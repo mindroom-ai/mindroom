@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from mindroom.scheduling import CronSchedule
+from mindroom.scheduling.tasks import CronSchedule
 
 
 class TestCronNaturalLanguage:
@@ -81,8 +81,8 @@ class TestCronNaturalLanguage:
             msg = "descriptor failure"
             raise ValueError(msg)
 
-        # On main, get_description is imported in mindroom.scheduling
-        monkeypatch.setattr("mindroom.scheduling.get_description", boom)
+        # On main, get_description is imported in mindroom.scheduling.tasks
+        monkeypatch.setattr("mindroom.scheduling.tasks.get_description", boom)
         assert schedule.to_natural_language("UTC").startswith("Cron: ")
 
     def test_fixed_time_is_described_in_the_configured_timezone(self) -> None:

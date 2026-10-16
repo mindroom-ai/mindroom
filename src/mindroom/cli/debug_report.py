@@ -147,7 +147,7 @@ def debug_report(
     ),
     output: Path | None = typer.Option(None, "--output", "-o", help="Write the JSON here instead of stdout."),  # noqa: B008
 ) -> None:
-    """Collect everything the backend stored about a reported conversation, as JSON."""
+    """Collect what MindRoom stored about a reported conversation, as JSON."""
     ids = collect_ids(
         _read_report(report) if report is not None else None,
         event_ids=event or (),

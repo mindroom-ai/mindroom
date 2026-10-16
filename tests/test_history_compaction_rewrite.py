@@ -19,7 +19,6 @@ from agno.run.base import RunStatus
 from agno.session.summary import SessionSummary
 from agno.utils.models.claude import format_messages as format_claude_messages
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -59,8 +58,9 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
-from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import (
@@ -693,7 +693,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -919,7 +919,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -978,7 +978,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1051,7 +1051,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1168,7 +1168,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1224,7 +1224,7 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

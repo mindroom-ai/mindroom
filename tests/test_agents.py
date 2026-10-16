@@ -31,7 +31,6 @@ from structlog.testing import capture_logs
 import mindroom.workspaces as workspaces_module
 from mindroom import agents as agents_module
 from mindroom import path_confinement, prompts
-from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _AdditionalContextChunk,
     _apply_preload_cap,
@@ -44,6 +43,7 @@ from mindroom.agents import (
     create_agent,
     get_agent_toolkit_names,
 )
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -53,10 +53,10 @@ from mindroom.config.agent import (
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history.session_context import close_team_runtime_state_dbs
@@ -64,7 +64,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.matrix.state import MatrixState
-from mindroom.private_instance_identity import (
+from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
 )
@@ -80,8 +80,11 @@ from mindroom.runtime_resolution import (
 from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
+from mindroom.session_storage.agent_storage import get_agent_runtime_state_dbs
+from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -429,7 +432,7 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
     }
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
     config = _test_config()
@@ -438,7 +441,7 @@ def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "CalculatorAgent"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the general agent is created correctly."""
     config = _test_config()
@@ -456,7 +459,7 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.learning.user_memory.mode is LearningMode.ALWAYS
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_role_describes_local_tool_execution_environment(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
@@ -475,7 +478,7 @@ def test_agent_role_describes_local_tool_execution_environment(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_role_describes_mixed_dedicated_worker_routing(
     _mock_storage: MagicMock,  # noqa: PT019
     mock_get_tool_by_name: MagicMock,
@@ -538,6 +541,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -557,6 +561,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -581,6 +586,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
@@ -605,6 +611,7 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             file_access=file_access,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
+            shared_directories=(),
         )
         assert expected in rendered
         assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
@@ -612,6 +619,29 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): `duckdb`."
             in rendered
         )
+
+
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
+def test_agent_role_lists_the_shared_directories_the_agent_reaches(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """An agent learns the path, owner, and access of each shared directory it owns or joined."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    create_shared_directory(runtime_paths, owner="general", name="report")
+    create_shared_directory(runtime_paths, owner="calculator", name="sums")
+    add_shared_directory_member(runtime_paths, owner="general", name="report", member="calculator")
+    shares = runtime_paths.storage_root / "shared_directories"
+
+    calculator = _create_agent_for_test("calculator", config=config)
+    general = _create_agent_for_test("general", config=config)
+
+    assert (
+        f"- Shared directories: `{shares / 'calculator' / 'sums'}` (yours, read-write), "
+        f"`{shares / 'general' / 'report'}` (from general, read-only)."
+    ) in calculator.role
+    assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in general.role
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
@@ -624,12 +654,13 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         file_access="workspace",
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
     assert "Not confined by file_access" not in rendered
 
 
 @patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_role_omits_tool_that_failed_to_build(
     _mock_storage: MagicMock,  # noqa: PT019
     _mock_get_tool_by_name: MagicMock,  # noqa: PT019
@@ -646,7 +677,7 @@ def test_agent_role_omits_tool_that_failed_to_build(
 
 
 @pytest.mark.parametrize("tool_name", ["report_publishing", "oauth_connections"])
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
@@ -683,7 +714,7 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
     ],
 )
 @pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
@@ -752,7 +783,7 @@ def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
     assert "reset_oauth_connection" in toolkits["oauth_connections"].async_functions
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_restricted_agent_omits_tool_execution_environment(
     _mock_storage: MagicMock,  # noqa: PT019
 ) -> None:
@@ -793,7 +824,7 @@ def test_get_agent_runtime_state_dbs_includes_learning_storage(tmp_path: Path) -
         history_db.close()
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Agents with hidden tool calls get a prompt hint to avoid narrating tool usage."""
     config = _test_config()
@@ -837,7 +868,7 @@ def test_history_limits_require_positive_values(factory: Callable[[], object], f
         factory()
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """All agents should get the scheduler tool even when not explicitly configured."""
     config = _test_config()
@@ -849,7 +880,7 @@ def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # 
     assert "scheduler" in tool_names
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """defaults.tools should be merged into every agent's configured tools."""
     config = _test_config()
@@ -863,7 +894,7 @@ def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None
     assert "calculator" in tool_names
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """An agent tool already present should not be duplicated by defaults.tools."""
     config = _test_config()
@@ -876,7 +907,7 @@ def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> 
     assert tool_names.count("scheduler") == 1
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Agent include_default_tools=False should skip defaults.tools entirely."""
     config = _test_config()
@@ -938,7 +969,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -956,7 +987,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -979,7 +1010,7 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -998,7 +1029,7 @@ def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1024,7 +1055,7 @@ def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_continues_when_implied_tool_import_fails(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1086,7 +1117,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1143,7 +1174,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     assert [tool.name for tool in agent.tools] == ["shell"]
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
@@ -1168,7 +1199,7 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1189,7 +1220,7 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -1244,6 +1275,37 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
     function = toolkit.async_functions["list_memories"].model_copy(deep=True)
     function.process_entrypoint()
     assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
+
+
+@pytest.mark.parametrize("tool_name", ["memory", "self_config", "skill_manage"])
+def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name: str) -> None:
+    """Background tool jobs authorize a direct toolkit's calls only from the construction it records."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+    agent_runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        create=True,
+    )
+
+    toolkit = build_agent_toolkit(
+        tool_name,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        agent_runtime=agent_runtime,
+        execution_identity=None,
+    )
+
+    assert toolkit is not None
+    construction = get_toolkit_construction(toolkit)
+    assert construction is not None
+    assert construction.name == tool_name
 
 
 def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path) -> None:
@@ -2282,7 +2344,7 @@ def test_private_workspace_template_reconciles_missing_files_in_owned_partially_
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -2305,7 +2367,7 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_passes_authored_shell_runtime_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -2336,7 +2398,7 @@ def test_create_agent_passes_authored_shell_runtime_overrides(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -2369,7 +2431,7 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     config = _test_config()
     runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
 
-    with patch("mindroom.agent_storage._ConversationSqliteDb"):
+    with patch("mindroom.session_storage.agent_storage._ConversationSqliteDb"):
         _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     mock_load_plugins.assert_called_once()
@@ -2416,7 +2478,7 @@ def test_create_agent_rejects_bare_env_var_context_files() -> None:
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -2442,7 +2504,7 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """openclaw_compat should stay in the runtime toolkit list and imply matrix_message."""
     config = _test_config()
@@ -2488,7 +2550,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     assert effective_tools.count("attachments") == 1
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
     config = _test_config()
@@ -2497,7 +2559,7 @@ def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "CodeAgent"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the shell agent is created correctly."""
     config = _test_config()
@@ -2506,7 +2568,7 @@ def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.name == "ShellAgent"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the summary agent is created correctly."""
     config = _test_config()
@@ -2522,7 +2584,7 @@ def test_get_agent_unknown() -> None:
         _create_agent_for_test("unknown", config=config)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     """Tests that learning can be disabled per agent."""
     config = _test_config()
@@ -2533,7 +2595,7 @@ def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     assert mock_storage.call_count == 1
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_storage: MagicMock) -> None:
     """Tests that defaults.learning is used when per-agent learning is omitted."""
     config = _test_config()
@@ -2548,7 +2610,7 @@ def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_st
     assert mock_storage.call_count == 1
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that learning mode can be configured as agentic."""
     config = _test_config()
@@ -2562,7 +2624,7 @@ def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # no
     assert agent.learning.user_memory.mode is LearningMode.AGENTIC
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     """Tests that learning mode falls back to defaults when agent config is None."""
     config = _test_config()
@@ -2583,7 +2645,7 @@ def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     assert mock_storage.call_count == 2
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Session and learning databases should live under the canonical agent state root."""
     config = _test_config()
@@ -2595,7 +2657,7 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_routes_only_sessions_to_explicit_session_storage(
     mock_storage: MagicMock,
     tmp_path: Path,
@@ -2618,7 +2680,7 @@ def test_get_agent_routes_only_sessions_to_explicit_session_storage(
     assert agent_state_root_path(storage_root, "general") / "sessions" / "general.db" not in db_files
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Worker scope should not change the canonical session and learning paths."""
     config = _test_config()
@@ -2644,7 +2706,7 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     mock_storage: MagicMock,
     tmp_path: Path,
@@ -2677,7 +2739,7 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     assert agent_root / "learning" / "general.db" in db_files
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_shared_identity(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -2969,7 +3031,7 @@ def test_resolve_agent_owned_path_rejects_path_traversal(tmp_path: Path) -> None
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -3190,7 +3252,7 @@ def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
     assert loaded[0].body == "config"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
@@ -3237,7 +3299,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_tools(
     mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
@@ -3270,7 +3332,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_state(
     mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
@@ -3307,7 +3369,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Context files should load directly from the canonical workspace."""
     config = _test_config()
@@ -3427,7 +3489,7 @@ def test_preload_cap_leaves_untruncated_context_unmarked() -> None:
     assert "SECOND_START" in rendered
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_context_section_states_files_are_preloaded(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -3446,7 +3508,7 @@ def test_agent_context_section_states_files_are_preloaded(
     assert "Do not re-read a file" in agent.role
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Missing context files should not prevent agent creation."""
     config = _test_config()
@@ -3473,7 +3535,7 @@ def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: P
     other_cwd.mkdir(parents=True, exist_ok=True)
     os.chdir(other_cwd)
     try:
-        with patch("mindroom.agent_storage._ConversationSqliteDb"):
+        with patch("mindroom.session_storage.agent_storage._ConversationSqliteDb"):
             agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
     finally:
         os.chdir(original_cwd)
@@ -3719,7 +3781,7 @@ def test_copy_workspace_template_without_xattr_apis(tmp_path: Path, monkeypatch:
     assert (workspace_root / "AGENTS.md").read_text(encoding="utf-8") == "template\n"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -3804,7 +3866,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     assert alice_workspace.parent == private_instance_scope_root_path(tmp_path, alice_worker_key) / "general"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_private_template_dir_does_not_imply_context_files(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -3851,7 +3913,7 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
     assert "Template user." not in agent.role
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_loads_private_workspace_skills(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -3896,7 +3958,7 @@ def test_create_agent_loads_private_workspace_skills(
     assert agent.skills.get_skill_names() == ["private-skill"]
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_private_root_requires_execution_identity(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -3915,7 +3977,7 @@ def test_create_agent_private_root_requires_execution_identity(
     assert not (tmp_path / "mind_data").exists()
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_disabled_tool_names_omit_resolved_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -4071,6 +4133,74 @@ def test_native_approval_capability_preserves_tool_authored_confirmation() -> No
     assert filtered is toolkit
     assert toolkit.functions["native_confirmation"].requires_confirmation is True
     assert toolkit.functions["native_confirmation"].approval_type is None
+
+
+def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None:
+    """A gated call that can become a managed job asks as its job; a call that must finish in its run still pauses it."""
+    config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
+
+    def gated(*, connects: bool = False, **options: bool) -> Function:
+        toolkit = Toolkit(name="approval-test", tools=[Function(name="gated", entrypoint=lambda: None, **options)])
+        toolkit._requires_connect = connects
+        agents_module.apply_tool_approval_capability(
+            toolkit,
+            config,
+            supports_native_tool_approval=True,
+            approvals_as_jobs=True,
+        )
+        return toolkit.functions["gated"]
+
+    job = gated()
+    assert (job.requires_confirmation, job.approval_type) == (False, JOB_APPROVAL_TYPE)
+    for paused in (gated(stop_after_tool_call=True), gated(requires_user_input=True), gated(connects=True)):
+        assert (paused.requires_confirmation, paused.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
+    # An authored confirmation is the tool's own pause, never a job's approval.
+    authored = gated(requires_confirmation=True)
+    assert (authored.requires_confirmation, authored.approval_type) == (True, None)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "depth", "asks_as_job"),
+    [(True, 0, True), (False, 0, False), (True, 1, False)],
+    ids=["top-level", "jobs-off", "subagent"],
+)
+def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    depth: int,
+    asks_as_job: bool,
+) -> None:
+    """A subagent's calls and excluded toolkits keep pausing their run, as every call does with jobs off."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper", tools=["calculator", "shell"])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval=ToolApprovalConfig(
+                rules=[
+                    ApprovalRuleConfig(match="add", action="require_approval"),
+                    ApprovalRuleConfig(match="run_shell_command", action="require_approval"),
+                ],
+            ),
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
+        ),
+        runtime_paths,
+    )
+
+    agent = _create_agent_for_test("helper", config, delegation_depth=depth)
+
+    functions = {
+        name: function
+        for toolkit in agent.tools
+        if isinstance(toolkit, Toolkit)
+        for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
+    }
+    expected = JOB_APPROVAL_TYPE if asks_as_job else POLICY_CONFIRMATION_APPROVAL_TYPE
+    assert (functions["add"].requires_confirmation, functions["add"].approval_type) == (not asks_as_job, expected)
+    # Shell keeps its own waiting behavior by default, so it keeps pausing for its approval.
+    shell = functions["run_shell_command"]
+    assert (shell.requires_confirmation, shell.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
 
 
 def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
@@ -4236,7 +4366,7 @@ async def test_create_agent_runs_plugin_tool_hooks_for_agno_generated_functions(
     assert "[TOOL CALL DECLINED]" in str(memory_result.result)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
@@ -4275,7 +4405,7 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
     assert "## Personality Context" not in agent.role
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
 def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,

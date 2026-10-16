@@ -22,6 +22,7 @@ from mindroom import agents, ai
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import response_cli_lifetime
+from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
@@ -33,11 +34,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
-from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging, estimate_agent_static_tokens
+from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, estimate_agent_static_tokens
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.hooks import EnrichmentItem
 from mindroom.memory.functions import MemoryPromptParts
-from mindroom.minimal_agent import MinimalAgent
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -327,7 +327,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     identity = build_execution_identity_from_runtime_context(runtime)
     root = resolve_agent_storage("helper", runtime.config, runtime.runtime_paths, identity).state_root
-    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     saved_choice = (primary_records_dir(root, runtime.runtime_paths) / "agent_modes.json").read_bytes()
     workspace = root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -421,7 +421,7 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
     identity = build_execution_identity_from_runtime_context(runtime)
     root = resolve_agent_storage("helper", runtime.config, runtime.runtime_paths, identity).state_root
-    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     agent = agents.create_agent(
@@ -718,7 +718,6 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
             "helper",
             ctx.session_id,
             "standard",
-            runtime.requester_id,
         )
         ctx = replace(ctx, reply_to_event_id="$next", correlation_id="next")
         runtime = replace(runtime, target=replace(runtime.target, reply_to_event_id="$next"), correlation_id="next")
@@ -767,7 +766,7 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
     )
     agent.response_context = _turn_context()
     assert estimate_agent_static_tokens(agent, "budget input") > 0
-    assert [item["name"] for item in agent_tool_definition_payloads_for_logging(agent)] == ["bash"]
+    assert [item["name"] for item in _agent_prompt_tool_surface(agent).payloads] == ["bash"]
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
             await agent.aget_tools(

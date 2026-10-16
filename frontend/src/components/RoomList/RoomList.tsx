@@ -20,7 +20,7 @@ export function RoomList() {
   const handleCreateRoom = (roomName?: string) => {
     createRoom({
       display_name: roomName || "New Room",
-      description: "New room",
+      description: "",
       agents: [],
     });
   };

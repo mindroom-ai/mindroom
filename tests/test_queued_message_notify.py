@@ -24,9 +24,8 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
-from mindroom import ai_runtime, model_loading
+from mindroom import ai_runtime
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
@@ -34,7 +33,7 @@ from mindroom.ai_runtime import (
     register_queued_notice_storage,
 )
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing_batch import (
+from mindroom.coalescing.batch import (
     CoalescingKey,
     RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
@@ -77,6 +76,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.providers import model_loading
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import (
@@ -86,6 +86,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
@@ -544,7 +545,6 @@ def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
 
     assert state.has_pending_human_messages()
     assert state.pending_human_messages == 1
-    assert state.is_set()
 
     state.consume_waiting_human_message("$unknown")
     assert state.pending_human_messages == 1
@@ -554,7 +554,6 @@ def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
 
     assert not state.has_pending_human_messages()
     assert state.pending_human_messages == 0
-    assert not state.is_set()
 
 
 def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
@@ -1190,7 +1189,7 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -1257,7 +1256,7 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -1376,7 +1375,7 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2011,7 +2010,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2086,7 +2085,7 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
             lifecycle_lock.release()
 
     assert observed_pending == [True, False]
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2165,7 +2164,7 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
             lifecycle_lock.release()
 
     assert observed_pending == [True, False]
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2230,7 +2229,7 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
     assert await follow_up_task == "$followup-response"
 
     assert follow_up_observed_pending == [False]
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2451,7 +2450,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
         queued_signal.finish_response_turn()
 
     mock_plan_turn.assert_not_awaited()
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2513,7 +2512,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
         queued_signal.finish_response_turn()
 
     mock_plan_turn.assert_not_awaited()
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2538,7 +2537,7 @@ async def test_reserved_follow_up_cleanup_when_hook_suppression_returns_before_d
         case.queued_signal.finish_response_turn()
 
     mock_plan_turn.assert_not_awaited()
-    assert not case.queued_signal.is_set()
+    assert not case.queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2555,7 +2554,6 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
@@ -2570,7 +2568,7 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
     finally:
         case.queued_signal.finish_response_turn()
 
-    assert not case.queued_signal.is_set()
+    assert not case.queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2587,7 +2585,6 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(return_value=_DispatchPlan(kind="route", router_message="route this")),
@@ -2604,7 +2601,7 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
         case.queued_signal.finish_response_turn()
 
     mock_route.assert_awaited_once()
-    assert not case.queued_signal.is_set()
+    assert not case.queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2621,7 +2618,6 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(
@@ -2647,7 +2643,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
     finally:
         case.queued_signal.finish_response_turn()
 
-    assert not case.queued_signal.is_set()
+    assert not case.queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2664,7 +2660,6 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(
@@ -2689,7 +2684,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
     finally:
         case.queued_signal.finish_response_turn()
 
-    assert not case.queued_signal.is_set()
+    assert not case.queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2730,7 +2725,7 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
     finally:
         queued_signal.finish_response_turn()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2778,7 +2773,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
     finally:
         queued_signal.finish_response_turn()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2856,8 +2851,6 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
     assert captured_dispatches == ["dispatched"]
     assert pre_signal.pending_human_messages == 0
     assert post_signal.pending_human_messages == 0
-    assert not pre_signal.is_set()
-    assert not post_signal.is_set()
 
 
 @pytest.mark.asyncio
@@ -2921,7 +2914,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
 
     assert captured_dispatches == ["dispatched"]
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2966,7 +2959,7 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
         queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
@@ -2993,7 +2986,7 @@ def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
     finally:
         queued_signal.finish_response_turn()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 def test_managed_message_does_not_reserve_queued_human_notice(tmp_path: Path) -> None:
@@ -3024,7 +3017,7 @@ def test_managed_message_does_not_reserve_queued_human_notice(tmp_path: Path) ->
     finally:
         queued_signal.finish_response_turn()
 
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -3071,7 +3064,7 @@ async def test_lifecycle_notice_is_cancelled_when_lock_wait_is_cancelled(tmp_pat
         queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
     assert not queued_signal.has_active_response_turn()
 
 
@@ -3646,7 +3639,7 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
             config=config,
             execution_identity=None,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
         patch("mindroom.teams.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):

@@ -6,7 +6,7 @@ site_name = "MindRoom"
 site_description = "AI agents that know you and your work, in a chat app anyone can use. Open source, any model, self-host or hosted."
 site_author = "MindRoom Team"
 site_url = "https://docs.mindroom.chat/"
-extra_css = ["assets/themed-video.css"]
+extra_css = ["assets/themed-video.css", "assets/extra.css"]
 extra_javascript = ["assets/themed-video.js"]
 copyright = "Copyright &copy; 2025–2026 MindRoom Team"
 
@@ -49,6 +49,7 @@ nav = [
     { "Thread Exports" = "thread-exports.md" },
     { "Bug Reports" = "bug-reports.md" },
     { "Usage Tracking" = "usage.md" },
+    { "Budgets" = "budgets.md" },
   ] },
   { "Matrix" = [
     { "Matrix Integration" = "matrix.md" },
@@ -93,6 +94,7 @@ nav = [
     { "Connect Google Accounts" = "deployment/google-services-user-oauth.md" },
     { "Google OAuth Apps & Scopes" = "deployment/google-services-oauth.md" },
     { "Security Model" = "architecture/security-posture.md" },
+    { "Egress Broker Design" = "architecture/egress-broker-design.md" },
   ] },
   { "Extend & Integrate" = [
     { "Plugins" = "plugins.md" },
@@ -107,6 +109,7 @@ nav = [
     { "Docker" = "deployment/docker.md" },
     { "Kubernetes" = "deployment/kubernetes.md" },
     { "Workers & Sandboxing" = "deployment/sandbox-proxy.md" },
+    { "Agent Keys" = "deployment/egress-broker.md" },
     { "Approved Egress" = "deployment/approved-egress.md" },
     { "Trusted Upstream Auth" = "deployment/trusted-upstream-auth.md" },
     { "Data Storage & Journal" = "deployment/storage.md" },
@@ -156,16 +159,16 @@ toggle.name = "Switch to light mode"
 [[project.theme.palette]]
 media = "(prefers-color-scheme: light)"
 scheme = "default"
-primary = "indigo"
-accent = "teal"
+primary = "custom"
+accent = "custom"
 toggle.icon = "lucide/sun"
 toggle.name = "Switch to dark mode"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: dark)"
 scheme = "slate"
-primary = "indigo"
-accent = "teal"
+primary = "custom"
+accent = "custom"
 toggle.icon = "lucide/moon-star"
 toggle.name = "Switch to system preference"
 
@@ -203,6 +206,11 @@ link = "https://pypi.org/project/mindroom/"
 # Enable GitHub-style admonitions (> [!NOTE], > [!TIP], etc.)
 # This converts them to Zensical's native !!! syntax during build
 [project.markdown_extensions.gfm_admonition]
+
+# Markdown inside HTML blocks and attributes such as { .md-button }, used by the home page
+[project.markdown_extensions.md_in_html]
+
+[project.markdown_extensions.attr_list]
 
 # Enable syntax highlighting for fenced code blocks
 [project.markdown_extensions.pymdownx.highlight]

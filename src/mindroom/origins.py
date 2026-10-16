@@ -11,7 +11,7 @@ def normalized_origin(url: str | None) -> str | None:
     """Return the origin a browser would send for one URL, or None when it has none."""
     try:
         parsed = urlsplit((url or "").strip())
-        scheme, host, port = parsed.scheme.lower(), parsed.hostname, parsed.port
+        scheme, host, port = parsed.scheme, parsed.hostname, parsed.port
     except ValueError:
         return None
     if scheme not in _DEFAULT_PORTS or not host or parsed.netloc.endswith(":"):
@@ -41,7 +41,7 @@ def parse_browser_origin(value: str) -> str:
     if (
         origin is None
         or parsed.path not in {"", "/"}
-        or not (parsed.scheme.lower() == "https" or loopback)
+        or not (origin.startswith("https://") or loopback)
         or any(c in "*?#" or c.isspace() or ord(c) < 32 for c in value)
     ):
         msg = f"Browser origin must be explicit HTTPS or loopback HTTP: {value!r}"

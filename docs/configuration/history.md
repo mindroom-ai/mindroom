@@ -50,7 +50,8 @@ defaults:
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply only when history exceeds the hard replay budget, or when [requested manually](#manual-compaction).
+Text compaction runs before a reply when history exceeds the hard replay budget, or when [requested manually](#manual-compaction).
+A [scheduled task](../scheduling.md) run with a `history_limit` cannot use native compaction, so it also runs text compaction once history exceeds the compaction threshold.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
 If compaction fails, the notice reads `Compaction failed; continuing with trimmed history.` with the reason, and the reply continues with fitted history.
 

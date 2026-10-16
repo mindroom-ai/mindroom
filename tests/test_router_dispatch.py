@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.attachments import _attachment_id_for_event, register_local_attachment
+from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import ResponderCandidatePermissions
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -671,7 +671,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
                 new_callable=MagicMock,
@@ -769,7 +768,6 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             await bot._on_message(room, text_event)
@@ -862,7 +860,6 @@ class TestAgentBot(AgentBotTestBase):
                     [],
                 ),
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
@@ -1038,7 +1035,6 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             await bot._on_message(room, text_event)
@@ -1090,7 +1086,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1154,7 +1149,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",

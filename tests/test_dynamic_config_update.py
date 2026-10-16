@@ -20,7 +20,7 @@ from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import orchestrator_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
@@ -251,7 +251,7 @@ class TestDynamicConfigUpdate:
         persist_entity_accounts(updated_config, runtime_paths)
 
         # Mock the AI model to return a proper workflow
-        with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
+        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
             mock_agent = MagicMock()
             mock_response = MagicMock()
 
@@ -274,7 +274,7 @@ class TestDynamicConfigUpdate:
             mock_model = MagicMock()
             mock_get_model.return_value = mock_model
 
-            with patch("mindroom.scheduling.Agent") as mock_agent_class:
+            with patch("mindroom.scheduling.tasks.Agent") as mock_agent_class:
                 mock_agent_class.return_value = mock_agent
 
                 # Parse with the updated config

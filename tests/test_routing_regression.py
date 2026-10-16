@@ -18,8 +18,8 @@ from agno.models.ollama import Ollama
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -1388,7 +1388,6 @@ class TestRoutingRegression:
                     body="can anyone help?",
                 ),
                 room,
-                False,
                 has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
             )
 
@@ -1470,7 +1469,6 @@ class TestRoutingRegression:
                 body="ops, help",
             ),
             room,
-            False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
@@ -1752,7 +1750,7 @@ class TestRoutingRegression:
     @patch("mindroom.teams.create_agent")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.model_loading.get_model_instance")
+    @patch("mindroom.providers.model_loading.get_model_instance")
     @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,

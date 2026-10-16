@@ -26,11 +26,12 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
+from mindroom.agent_cli.cli_shell_agent import CliShellAgent
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_executions
+from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
-from mindroom.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.agno_participation import participation_model
 from mindroom.ai_run_metadata import (
     accumulate_model_request_metrics,
@@ -39,10 +40,8 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.claude_prompt_cache import aclose_anthropic_async_client
-from mindroom.cli_shell_agent import CliShellAgent
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -59,7 +58,6 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
-from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
 from mindroom.history.replay import apply_replay_plan
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
@@ -86,13 +84,13 @@ from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.minimal_agent import MinimalAgent
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
     close_unreturned_agent,
     prepare_prompt_branches,
     prewarm_agent_model_client,
 )
+from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -113,8 +111,12 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
+from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_jobs.notices import append_turn_start_job_note
+from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     AuditedToolExecution,
@@ -124,6 +126,7 @@ from mindroom.tool_system.events import (
     format_tool_combined,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -381,7 +384,12 @@ async def _finalize_agent_turn_model(
     if model is None and holder.agent is not None:
         model = holder.agent.model
     if model is not None:
-        await run_coroutine_until_complete(aclose_anthropic_async_client(model))
+
+        async def close() -> None:
+            await aclose_anthropic_async_client(model)
+
+        if not defer_execution_cleanup(close, resource=model):
+            await run_coroutine_until_complete(close())
 
 
 def _build_agent_turn_callbacks(
@@ -1313,6 +1321,9 @@ async def _prepare_agent_run_context(
     """Prepare one agent response lifecycle through metadata assembly."""
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
+    if delegation_depth == 0 and ctx.agent_mode != "minimal":
+        # Only a top-level standard reply can collect jobs, so only it hears which ended.
+        ctx = replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items))
     prepared_run = await _prepare_agent_and_prompt(
         ctx,
         prompt=prompt,
@@ -1361,7 +1372,6 @@ async def _prepare_agent_run_context(
             thread_id=ctx.thread_id,
             requester_id=ctx.requester_id,
             correlation_id=ctx.correlation_id,
-            tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
             model_params=model_params_payload(agent.model) if agent.model is not None else {},
             extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
         )
@@ -1417,6 +1427,7 @@ async def run_delegated_child_response(
         runtime_paths,
         refresh_scheduler=refresh_scheduler,
         execution_identity=identity,
+        only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     context = get_tool_runtime_context()
     child_context = child_tool_runtime_context(context, child) if context is not None else None
@@ -1435,25 +1446,41 @@ async def run_delegated_child_response(
         active_model_name=child.model_name,
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
     )
+    # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
     with tool_runtime_context(child_context):
-        return await ai_response(
-            turn,
-            prompt=prompt,
-            runtime_paths=runtime_paths,
-            config=active_config,
-            knowledge=knowledge.knowledge,
-            run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
-            include_interactive_questions=False,
-            include_openai_compat_guidance=identity.channel == "openai_compat",
-            tool_function_filter=context.tool_function_filter if context is not None else None,
-            execution_identity=identity,
-            delegation_depth=child.depth,
-            refresh_scheduler=refresh_scheduler,
-            attempt_model_runtime=ToolRuntimeModelBinding(),
-            supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
-            collect_streamed_response=True,
-            turn_recorder=TurnRecorder(user_message=prompt),
+        return await run_with_tool_execution_identity(
+            identity,
+            operation=lambda: ai_response(
+                turn,
+                prompt=prompt,
+                runtime_paths=runtime_paths,
+                config=active_config,
+                knowledge=knowledge.knowledge,
+                run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
+                include_interactive_questions=False,
+                include_openai_compat_guidance=identity.channel == "openai_compat",
+                tool_function_filter=context.tool_function_filter if context is not None else None,
+                execution_identity=identity,
+                delegation_depth=child.depth,
+                refresh_scheduler=refresh_scheduler,
+                attempt_model_runtime=ToolRuntimeModelBinding(),
+                supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
+                collect_streamed_response=True,
+                turn_recorder=TurnRecorder(user_message=prompt),
+            ),
         )
+
+
+def _with_background_tool_jobs(
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ResponseTurnContext:
+    """Run the turn's managed calls as background jobs while the instance runs them, except in a voice call."""
+    return replace(
+        ctx,
+        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
+    )
 
 
 async def ai_response(  # noqa: C901, PLR0915
@@ -1535,6 +1562,7 @@ async def ai_response(  # noqa: C901, PLR0915
         Agent response string
 
     """
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.agent_mode == "minimal":
@@ -2071,6 +2099,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _require_turn_session_id(ctx)

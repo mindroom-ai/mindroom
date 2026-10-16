@@ -27,6 +27,7 @@ from tests.api.test_api import (
     _trusted_upstream_strict_jwt_env,
 )
 from tests.api.test_oauth_api import (
+    _expect_styled_oauth_page,
     _fake_provider,
     _publish_config,
     _runtime_paths,
@@ -294,8 +295,7 @@ def test_two_session_users_connect_under_their_own_ids_not_owner(signin: dict[st
 
     state = _connect_state(alice)
     wrong_user = bob.get(callback_url, params={"code": "test-code", "state": state}, follow_redirects=False)
-    assert wrong_user.status_code == 403
-    assert wrong_user.json() == {"detail": "OAuth state does not belong to the current user"}
+    _expect_styled_oauth_page(wrong_user, status=403, message="OAuth state does not belong to the current user")
 
     # Bob's attempt did not consume the state, so alice still finishes her own flow with it.
     callback = alice.get(callback_url, params={"code": "test-code", "state": state}, follow_redirects=False)
@@ -581,8 +581,7 @@ def test_portal_flow_callback_rejects_dashboard_login_only(signin: dict[str, Any
         params={"code": "test-code", "state": state},
         follow_redirects=False,
     )
-    assert rejected.status_code == 403
-    assert rejected.json() == {"detail": "OAuth state does not belong to the current user"}
+    _expect_styled_oauth_page(rejected, status=403, message="OAuth state does not belong to the current user")
 
     _complete_callback(portal, state)
     stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")

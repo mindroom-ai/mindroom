@@ -12,13 +12,13 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.history.session_context import create_scope_session_storage, open_bound_scope_session_context
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts

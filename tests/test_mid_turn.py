@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from agno.agent import Agent
@@ -16,18 +16,18 @@ from agno.tools.function import Function, ToolResult
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom import model_loading
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
+from mindroom.providers import model_loading
 from mindroom.response_lifecycle import _QueuedMessageState
 from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
@@ -203,16 +203,24 @@ async def test_defer_reaction_requires_accepted_current_decision(outcome: str) -
 
 
 @pytest.mark.asyncio
-async def test_queue_change_during_reaction_still_requests_wrap_up() -> None:
-    """A correction arriving while Matrix acknowledges a reaction must still cause handoff."""
+@pytest.mark.parametrize("queued", [("Thanks",), ("Thanks", "No rush")])
+@pytest.mark.parametrize("change", ["correction", "handoff"])
+async def test_queue_change_during_reaction_still_requests_wrap_up(
+    queued: tuple[str, ...],
+    change: Literal["correction", "handoff"],
+) -> None:
+    """A correction or a concurrent handoff while Matrix acknowledges any reaction must still cause handoff."""
     state = _QueuedMessageState()
-    state.add_waiting_human_message("$first", text="Thanks")
-    state.add_waiting_human_message("$second", text="No rush")
+    for index, text in enumerate(queued):
+        state.add_waiting_human_message(f"$queued{index}", text=text)
     acknowledgements: list[str] = []
 
     async def acknowledge(event_id: str) -> None:
         acknowledgements.append(event_id)
-        state.add_waiting_human_message("$correction", text="Stop")
+        if change == "correction":
+            state.add_waiting_human_message("$correction", text="Stop")
+        else:
+            context.notice_fired = True
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         return True
@@ -225,8 +233,58 @@ async def test_queue_change_during_reaction_still_requests_wrap_up() -> None:
     ) as context:
         await model.aresponse(_resumed_messages())
         assert context.notice_fired
-    assert acknowledgements == ["$first"]
+    assert acknowledgements == ["$queued0"]
     assert any(message.content == "WRAP UP NOW" for message in model.requests[0]["messages"])
+
+
+@pytest.mark.asyncio
+async def test_a_wait_judges_again_a_queue_that_changed_during_its_defer_reaction() -> None:
+    """A message that arrives while Matrix acknowledges another is judged with it, so one that can wait ends no wait."""
+    state = _QueuedMessageState()
+    judged: list[tuple[str | None, ...]] = []
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        judged.append(tuple(message.text for message in state.pending_message_snapshot()))
+        return "Stop" not in judged[-1]
+
+    async def acknowledge(event_id: str) -> None:
+        if event_id == "$thanks":
+            state.add_waiting_human_message("$norush", text="No rush")
+
+    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
+    waiter = asyncio.create_task(state.wait())
+    state.add_waiting_human_message("$thanks", text="Thanks")
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert not waiter.done()
+    assert judged == [("Thanks",), ("Thanks", "No rush")]
+    state.add_waiting_human_message("$stop", text="Stop")
+    await asyncio.wait_for(waiter, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_wait_judges_again_a_queue_that_lost_a_message_during_its_judgment() -> None:
+    """A decision counts only for the queue it judged, so a queue that shrank meanwhile is judged again at once."""
+    state = _QueuedMessageState()
+    judged: list[tuple[str | None, ...]] = []
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        judged.append(tuple(message.text for message in state.pending_message_snapshot()))
+        if judged[-1] == ("Thanks", "Stop"):
+            # The thanks no longer waits for this reply, as when its own turn is dropped.
+            state.consume_waiting_human_message("$thanks")
+        return "Stop" not in judged[-1]
+
+    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
+    waiter = asyncio.create_task(state.wait())
+    state.add_waiting_human_message("$thanks", text="Thanks")
+    for _ in range(100):
+        await asyncio.sleep(0)
+    state.add_waiting_human_message("$stop", text="Stop")
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert waiter.done()
+    assert judged == [("Thanks",), ("Thanks", "Stop"), ("Stop",)]
 
 
 @pytest.mark.asyncio
@@ -245,14 +303,14 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
     state.add_waiting_human_message("$first", text="Use that file")
     first = state.pending_message_snapshot()
     gate.record_visible_response("I found the file. Now editing it.")
-    assert await gate.should_finish(first)
+    assert await gate.defers(first, current=lambda: True)
     assert evidence[0]["queued_messages"] == [
         {"text": "Use that file", "visible_response": "I found the file.\n🔧 `read_file` [1]"},
     ]
-    assert await gate.should_finish(first)
+    assert await gate.defers(first, current=lambda: True)
     assert len(evidence) == 1
     state.add_waiting_human_message("$second", text="Stop editing")
-    assert await gate.should_finish(state.pending_message_snapshot())
+    assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
     assert evidence[1]["queued_messages"][1]["visible_response"] == "I found the file. Now editing it."
     assert "completed_tools" not in evidence[0]
 
@@ -273,7 +331,7 @@ async def test_unknown_or_unsafe_visible_progress_keeps_wrap_up(progress: str | 
     gate.visible_response_text = progress
     state = _QueuedMessageState(mid_turn_gate=gate)
     state.add_waiting_human_message("$queued", text="Thanks")
-    assert not await gate.should_finish(state.pending_message_snapshot())
+    assert not await gate.defers(state.pending_message_snapshot(), current=lambda: True)
 
 
 @pytest.mark.asyncio
@@ -288,11 +346,12 @@ async def test_finish_reuses_exact_queue_but_rechecks_a_new_message() -> None:
 
     gate = MidTurnGate(active_text="Install the dependencies", evaluate=evaluate)
     first = (QueuedMessage("$one", "Thanks"),)
-    assert await gate.should_finish(first)
-    assert await gate.should_finish(first)
+    assert await gate.defers(first, current=lambda: True)
+    assert await gate.defers(first, current=lambda: True)
     assert len(requests) == 1
-    assert not await gate.should_finish(
+    assert not await gate.defers(
         (*first, QueuedMessage("$two", "Use the other version")),
+        current=lambda: True,
     )
     assert len(requests) == 2
     evidence = requests[0]["state"]["conversation"][0]["text"]
@@ -310,7 +369,7 @@ async def test_incomplete_or_sensitive_queue_keeps_wrap_up(text: str | None) -> 
         pytest.fail("Incomplete context must not reach inference")
 
     gate = MidTurnGate(active_text="Do the original task", evaluate=evaluate)
-    assert not await gate.should_finish((QueuedMessage("$one", text),))
+    assert not await gate.defers((QueuedMessage("$one", text),), current=lambda: True)
 
 
 @pytest.mark.asyncio
@@ -322,7 +381,7 @@ async def test_nonapproval_keeps_wrap_up(decision: bool | None) -> None:
         return decision
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    assert not await gate.should_finish((QueuedMessage("$one", "Please change it"),))
+    assert not await gate.defers((QueuedMessage("$one", "Please change it"),), current=lambda: True)
 
 
 @pytest.mark.asyncio
@@ -335,8 +394,9 @@ async def test_json_credentials_are_checked_before_evidence_encoding(*, active: 
 
     credential_text = '{"password": "fake_secret_for_test"}'
     gate = MidTurnGate(active_text=credential_text if active else "Do the task", evaluate=evaluate)
-    assert not await gate.should_finish(
+    assert not await gate.defers(
         (QueuedMessage("$new", "Thanks" if active else credential_text),),
+        current=lambda: True,
     )
 
 
@@ -351,7 +411,7 @@ async def test_judgment_cancellation_propagates_without_caching_approval() -> No
         raise AssertionError
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    task = asyncio.create_task(gate.should_finish((QueuedMessage("$one", "Thanks"),)))
+    task = asyncio.create_task(gate.defers((QueuedMessage("$one", "Thanks"),), current=lambda: True))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -767,7 +827,7 @@ async def test_interrupt_probability_preserves_continuation_threshold(
     get_runtime_shared_credentials_manager(paths).save_credentials("openai", {"api_key": "synthetic"})
     gate = create_mid_turn_gate(config, paths, request_envelope(), prompt="Do the task", has_media=False)
     assert gate is not None
-    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is finish
+    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True) is finish
 
 
 @pytest.mark.asyncio
@@ -782,7 +842,7 @@ async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget(
         return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
-    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]
 
 
@@ -858,10 +918,10 @@ async def test_earlier_attachment_annotation_does_not_block_judgment() -> None:
         evaluate=evaluate,
         conversation_context=(JudgmentMessage("assistant", f"Saved the report {annotation}"),),
     )
-    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert len(requests) == 1
     # The same annotation in a queued message still means an attachment the judge cannot open.
-    assert not await gate.should_finish((QueuedMessage("$newer", annotation),))
+    assert not await gate.defers((QueuedMessage("$newer", annotation),), current=lambda: True)
 
 
 def _skip_reasons(logs: list[dict]) -> list[str]:
@@ -891,7 +951,7 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
     queued = "Is this still running? " + "q" * 3_000
     state.add_waiting_human_message("$queued", text=queued)
     with capture_logs() as logs:
-        assert await gate.should_finish(state.pending_message_snapshot())
+        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
     assert _skip_reasons(logs) == []
     conversation = requests[0]["state"]["conversation"]
     evidence = json.loads(conversation[-1]["text"])
@@ -918,7 +978,7 @@ async def test_judge_sees_the_newest_conversation_that_fits(count: int, size: in
         return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
-    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert requests[0].body is not None
     assert len(requests[0].body) <= MAX_REQUEST_BYTES
     sent = [message["text"] for message in json.loads(requests[0].body)["state"]["conversation"][:-1]]
@@ -942,7 +1002,7 @@ async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
         conversation_context=(JudgmentMessage("user", text),),
     )
     with capture_logs() as logs:
-        assert not await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+        assert not await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert _skip_reasons(logs) == ["history_unjudgeable"]
 
 
@@ -966,7 +1026,7 @@ async def test_megabyte_texts_cost_only_what_the_judge_sees(*, reply: bool) -> N
     gate.record_visible_response(body if reply else "")
     state.add_waiting_human_message("$queued", text="Thanks")
     with cpu_budget(0.25):
-        assert await gate.should_finish(state.pending_message_snapshot())
+        assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)
     assert len(requests) == 1
 
 
@@ -987,7 +1047,7 @@ async def test_only_conversation_that_reaches_the_judge_is_checked_for_credentia
         evaluate=evaluate,
         conversation_context=(*newer, credential) if newest else (credential, *newer),
     )
-    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is not newest
+    assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True) is not newest
     assert all(request.body is not None and b"fake_secret_for_test" not in request.body for request in requests)
 
 
@@ -1023,7 +1083,7 @@ async def test_skipped_judgment_logs_its_reason(setup: dict, reason: str) -> Non
     )
     pending = setup.get("pending", (QueuedMessage("$new", "Thanks"),))
     with capture_logs() as logs:
-        assert not await gate.should_finish(pending)
-        assert not await gate.should_finish(pending)
+        assert not await gate.defers(pending, current=lambda: True)
+        assert not await gate.defers(pending, current=lambda: True)
     assert _skip_reasons(logs) == [reason]
     assert "private input" not in str(logs)

@@ -13,6 +13,7 @@ from agno.run.base import RunStatus
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.budgets.monitor import budget_model
 from mindroom.delegation.audit import (
     child_audit_context,
     child_response_usage,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
     from mindroom.agent_modes import AgentMode
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import SubagentPersona
@@ -53,11 +55,25 @@ class _ChildRunObservation:
     """Exact terminal evidence collected while one child response envelope runs."""
 
     child: DelegationChild
+    parent: _ChildRunObservation | None = None
     response: RunOutput | None = None
     terminal: tuple[str, _ChildTerminalStatus, str] | None = None
 
 
 _CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
+
+
+def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, str, _DelegationGrant], ...]:
+    """Return the exact active native ancestry for a retained leaf execution owner, with each edge's grant."""
+    observation = _CHILD_RUN.get()
+    if observation is None or child_execution_identity(observation.child) != owner:
+        return ()
+    edges = []
+    while observation is not None:
+        child = observation.child
+        edges.append((child.caller_agent_name, child.child_agent_name, delegation_grant(child)))
+        observation = observation.parent
+    return tuple(reversed(edges))
 
 
 def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
@@ -70,13 +86,13 @@ def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
 
 
 def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:
-    """Rebind a caller's tool context to one child turn, carrying its persona's tool cap."""
+    """Rebind a caller's tool context to one child turn, carrying its persona as the cap on copies it authors."""
     return replace(
         context,
         agent_name=child.child_agent_name,
         active_model_name=child.model_name,
         target=replace(context.target, session_id=child.session_id),
-        persona_tools=child.persona.tools if child.persona is not None else None,
+        persona=child.persona,
     )
 
 
@@ -103,10 +119,12 @@ def note_child_run_id(
     """Publish the exact attempt and bound model before it can execute tools."""
     child.run_id = run_id
     context = get_tool_runtime_context()
-    if model_name is not None:
+    if model_name is None and context is not None:
+        model_name = context.active_model_name
+    if model_name is not None and model_name != child.model_name:
+        # A model switch during the run is what the child's follow-ups ask for next.
+        child.requested_model_name = model_name
         child.model_name = model_name
-    elif context is not None and context.active_model_name is not None:
-        child.model_name = context.active_model_name
     update_subagent_turn_sync(child, runtime_paths)
 
 
@@ -209,7 +227,7 @@ async def child_run_context(
     runtime_paths: RuntimePaths,
 ) -> AsyncIterator[_ChildRunObservation]:
     """Observe one child attempt and settle it independently of audit event capture."""
-    observation = _ChildRunObservation(child)
+    observation = _ChildRunObservation(child, parent=_CHILD_RUN.get())
     token = _CHILD_RUN.set(observation)
     try:
         async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
@@ -266,7 +284,8 @@ def delegation_grant(child: DelegationChild) -> _DelegationGrant:
     return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
 
 
-def _caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: _DelegationGrant) -> bool:
+def caller_grants_child(caller_name: str, agent_name: str, config: Config, grant: _DelegationGrant) -> bool:
+    """Return whether the caller's current config still grants this child, by delegation or its workflow tool."""
     caller = config.agents.get(caller_name)
     if caller is None:
         return False
@@ -360,7 +379,7 @@ def authorize_delegation(  # noqa: PLR0911
         return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-    caller_allows_target = _caller_grants_child(caller_name, agent_name, active_config, grant)
+    caller_allows_target = caller_grants_child(caller_name, agent_name, active_config, grant)
     # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
     # the caller already serves, possibly only through a team's access, keeps that access.
     if not caller_allows_target or (
@@ -398,6 +417,7 @@ def prepare_child_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     depth: int,
+    budget_monitor: BudgetMonitor | None,
     model: str | None = None,
     agent_mode: AgentMode = "standard",
     previous: DelegationChild | None = None,
@@ -407,7 +427,7 @@ def prepare_child_turn(
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the model, mode, and persona of the child it continues.
+    A follow-up keeps the mode and persona of the child it continues, and its requested model, checked again against the owner's budget.
     """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
@@ -420,17 +440,23 @@ def prepare_child_turn(
             session_id=session_id,
         )
     )
-    model_name = (
-        previous.model_name
-        if previous is not None
-        else config.resolve_runtime_model(
+    if previous is not None:
+        # LEGACY_COMPAT: Delegated children persisted without a requested model.
+        # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
+        # Last legacy release: v2026.10.244; replacement: the next release also persists requested_model_name.
+        # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
+        # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
+        requested_model_name = previous.requested_model_name or previous.model_name
+    else:
+        requested_model_name = config.resolve_runtime_model(
             entity_name=agent_name,
             active_model_name=model,
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
             runtime_paths=runtime_paths,
         ).model_name
-    )
+    # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
+    model_name = budget_model(config, runtime_paths, budget_monitor, owner.requester_id, requested_model_name)
     return DelegationChild(
         delegation_id=delegation_id,
         parent_tool_call_id=parent_tool_call_id,
@@ -440,6 +466,7 @@ def prepare_child_turn(
         session_id=session_id,
         run_id=uuid4().hex,
         model_name=model_name,
+        requested_model_name=requested_model_name,
         depth=depth + 1,
         execution_identity=serialize_tool_execution_identity(identity),
         subagent_id=previous.subagent_id if previous is not None else delegation_id,

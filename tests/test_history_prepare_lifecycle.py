@@ -15,7 +15,6 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.execution_preparation import (
@@ -24,8 +23,12 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
 )
 from mindroom.history.replay import _estimate_session_summary_tokens, estimate_prompt_visible_history_tokens
-from mindroom.history.runtime import prepare_bound_scope_history, prepare_scope_history
-from mindroom.history.session_context import open_scope_session_context
+from mindroom.history.runtime import (
+    prepare_bound_scope_history,
+    prepare_scope_history,
+    resolve_agent_preparation_inputs,
+)
+from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import (
     read_scope_state,
     set_force_compaction_state,
@@ -43,6 +46,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -133,7 +137,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     agent = _agent(db=storage)
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -203,7 +207,7 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -256,7 +260,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
-    with patch("mindroom.model_loading.get_model_instance", side_effect=ValueError("bad summary model")):
+    with patch("mindroom.providers.model_loading.get_model_instance", side_effect=ValueError("bad summary model")):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
             agent_name="test_agent",
@@ -303,7 +307,7 @@ async def test_prepare_history_for_run_compaction_failure_notice_redacts_credent
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch("mindroom.history.runtime._run_scope_compaction", new=AsyncMock(side_effect=error)),
@@ -353,7 +357,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch("mindroom.history.runtime._run_scope_compaction", new=AsyncMock(side_effect=asyncio.CancelledError)),
@@ -405,7 +409,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)),
@@ -488,7 +492,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -641,7 +645,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     )
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -765,7 +769,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     )
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -795,6 +799,112 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     assert summary_mock.await_count == 2
     assert len(prepared.compaction_outcomes) == 1
     assert len(archived_run_ids(storage)) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_native_compaction", [True, False])
+async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_compaction_is_disallowed(
+    tmp_path: Path,
+    *,
+    allow_native_compaction: bool,
+) -> None:
+    """A scheduled run with a history limit cannot rely on native compaction above the trigger budget."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                f"run-{index}",
+                messages=[
+                    Message(role="user", content="u" * 2_000),
+                    Message(role="assistant", content="a" * 2_000),
+                ],
+            )
+            for index in range(3)
+        ],
+    )
+    seed_session(storage, session)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    history_tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+    trigger_budget = history_tokens // 2
+    hard_budget = history_tokens * 2
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_enabled=True,
+        text_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=64_000,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=trigger_budget,
+        reserve_tokens=0,
+        static_prompt_tokens=0,
+        replay_budget_tokens=trigger_budget,
+        hard_replay_budget_tokens=hard_budget,
+        summary_input_budget_tokens=50_000,
+        compaction_timeout_seconds=600.0,
+    )
+    agent = _agent(db=storage)
+    resolved_inputs = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        config=config,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        execution_plan=execution_plan,
+    )
+    summary_mock = AsyncMock(return_value=SessionSummary(summary="short summary", updated_at=datetime.now(UTC)))
+    with (
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+    ):
+        prepared = await prepare_scope_history(
+            agent=agent,
+            agent_name="test_agent",
+            resolved_inputs=resolved_inputs,
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            allow_native_compaction=allow_native_compaction,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    if allow_native_compaction:
+        assert prepared.compaction_decision.mode == "none"
+        assert prepared.compaction_decision.reason == "within_hard_budget"
+        assert prepared.compaction_outcomes == []
+        summary_mock.assert_not_awaited()
+        assert len(persisted.runs or []) == 3
+        return
+
+    assert prepared.compaction_decision.mode == "required"
+    assert prepared.compaction_decision.reason == "over_trigger_native_disabled"
+    assert prepared.compaction_reply_outcome == "success"
+    summary_mock.assert_awaited_once()
+    [outcome] = prepared.compaction_outcomes
+    assert outcome.history_budget_tokens == trigger_budget
+    assert outcome.before_tokens == history_tokens
+    assert outcome.after_tokens <= trigger_budget
+    assert (
+        estimate_prompt_visible_history_tokens(
+            session=persisted,
+            scope=scope,
+            history_settings=_ALL_HISTORY_SETTINGS,
+        )
+        <= trigger_budget
+    )
 
 
 @pytest.mark.asyncio
@@ -886,7 +996,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1056,7 +1166,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1176,7 +1286,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             side_effect=lambda _config, _paths, name, **_kwargs: FakeModel(id=f"{name}-id", provider="fake"),
         ),
         patch(
@@ -1257,7 +1367,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     lifecycle = RecordingCompactionLifecycle()
 
     with (
-        patch("mindroom.model_loading.get_model_instance", side_effect=_load_model),
+        patch("mindroom.providers.model_loading.get_model_instance", side_effect=_load_model),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.runtime.logger.warning") as warning_mock,
     ):
@@ -1344,7 +1454,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     )
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(
@@ -1528,7 +1638,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
 
     with (
         patch(
-            "mindroom.model_loading.get_model_instance",
+            "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
         patch(

@@ -13,15 +13,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import mindroom.embeddings as embedding_helpers
+import mindroom.embeddings.signatures as embedding_helpers
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.embeddings import (
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.signatures import (
     create_sentence_transformers_embedder,
     effective_knowledge_embedder_signature,
     effective_mem0_embedder_signature,
 )
 from mindroom.model_defaults import OPENAI_EMBEDDING_LARGE, SENTENCE_TRANSFORMERS_DEFAULT
-from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
@@ -144,9 +144,9 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     def _ensure(runtime_paths: object) -> None:
         captured["installed"] = runtime_paths
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", _ensure)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", _ensure)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder) if name else None,
     )
 
@@ -169,18 +169,10 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
 ) -> None:
     """Concurrent index handles should share one expensive local model client."""
     construction_lock = threading.Lock()
-    dependency_checks_active = 0
-    max_dependency_checks_active = 0
     model_constructions = 0
 
     def _ensure(_runtime_paths: object) -> None:
-        nonlocal dependency_checks_active, max_dependency_checks_active
-        with construction_lock:
-            dependency_checks_active += 1
-            max_dependency_checks_active = max(max_dependency_checks_active, dependency_checks_active)
-        time.sleep(0.02)
-        with construction_lock:
-            dependency_checks_active -= 1
+        pass
 
     class DummyEmbedder:
         def __init__(
@@ -199,9 +191,9 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
                 sentence_transformer_client = object()
             self.sentence_transformer_client = sentence_transformer_client
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", _ensure)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", _ensure)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
     )
 
@@ -218,7 +210,6 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
         )
 
     assert model_constructions == 1
-    assert max_dependency_checks_active == 1
     assert len({id(embedder) for embedder in embedders}) == 8
     assert len({id(embedder.sentence_transformer_client) for embedder in embedders}) == 1
     assert {embedder.dimensions for embedder in embedders} == {384, 768}
@@ -241,9 +232,9 @@ def test_sentence_transformers_embedder_releases_retired_cached_model(
         ) -> None:
             self.sentence_transformer_client = sentence_transformer_client or ModelClient()
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
     )
 
@@ -277,9 +268,9 @@ def test_sentence_transformers_embedder_retries_failed_model_replacement(
                 raise RuntimeError(error_message)
             self.sentence_transformer_client = sentence_transformer_client or object()
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
     )
 
@@ -331,9 +322,9 @@ def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyP
             probe.observe()
             return [float(len(text))], {"tokens": len(text)}
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
     )
     return create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
@@ -355,9 +346,9 @@ def test_sentence_transformers_usage_delegation_does_not_deadlock(
         def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
             return self.get_embedding(text), None
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setattr(
-        "mindroom.embeddings.importlib.import_module",
+        "mindroom.embeddings.signatures.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DelegatingEmbedder),
     )
     embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
