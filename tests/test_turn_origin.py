@@ -10,8 +10,6 @@ from mindroom.dispatch_source import (
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
-from mindroom.tool_jobs.conversation import ConversationKey
-from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.turn_origin import (
     TurnIntent,
     classify_turn_origin,
@@ -414,50 +412,3 @@ def test_router_relay_original_sender_preserves_human_requester_or_inherited_hum
         )
         is None
     )
-
-
-@pytest.mark.parametrize(
-    ("source_kind", "unattended"),
-    [
-        (SCHEDULED_SOURCE_KIND, True),
-        (SILENT_SCHEDULE_SOURCE_KIND, True),
-        (HOOK_SOURCE_KIND, True),
-        (HOOK_DISPATCH_SOURCE_KIND, True),
-        (EXTERNAL_TRIGGER_SOURCE_KIND, True),
-        ("message", False),
-        ("voice", False),
-    ],
-)
-def test_automation_turns_are_unattended(source_kind: str, unattended: bool) -> None:
-    """Nobody sends the message that would release a wait in a turn automation started."""
-    origin = classify_turn_origin(
-        transport_sender_id="@human:localhost",
-        requester_id="@human:localhost",
-        sender_entity_name=None,
-        requester_entity_name=None,
-        source_kind=source_kind,
-        original_sender=None,
-        trusted_user_relay=False,
-    )
-
-    assert origin.unattended is unattended
-
-
-def test_a_job_follow_up_is_unattended() -> None:
-    """A follow-up about ended jobs is MindRoom's own turn, which no person is there to release."""
-    key = ConversationKey(
-        recipient="general",
-        room_id="!room:localhost",
-        thread_id=None,
-        requester_id="@human:localhost",
-        silent=False,
-    )
-
-    envelope = follow_up_envelope(
-        key,
-        follow_up_id="job-follow-up:a:b:1",
-        sender_id="@mindroom_general:localhost",
-        prompt="",
-    )
-
-    assert envelope.origin.unattended

@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
-from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation, current_wait_budget
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
     describe_job,
@@ -213,7 +213,7 @@ class JobTools(Toolkit):
                     job_id,
                     owner=owner,
                     depth=0,
-                    timeout=current_wait_budget(wait_timeout),
+                    timeout=wait_timeout,
                     # A job awaiting a human decision holds the reply no longer than the gated call itself does.
                     approval_timeout=current_approval_wait_timeout(),
                 )

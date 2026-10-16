@@ -76,7 +76,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, application_arguments, read_background_after
 from mindroom.tool_jobs.consumption import retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_wait_budget
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
@@ -814,7 +814,7 @@ async def _await_background_child(
             child.delegation_id,
             owner=owner,
             depth=depth,
-            timeout=current_wait_budget(background_after),
+            timeout=background_after,
             claim=claim,
             # A child awaiting a human decision holds its caller's reply no longer than a gated call's own wait does.
             approval_timeout=current_approval_wait_timeout(),

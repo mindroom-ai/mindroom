@@ -44,8 +44,6 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.tool_jobs.conversation import ConversationKey
-from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -1425,34 +1423,6 @@ class TestAgentBot(AgentBotTestBase):
         assert context.thread_id == "$raw-thread"
         assert context.resolved_thread_id is None
         assert context.target.source_thread_id == "$raw-thread"
-
-    def test_build_tool_runtime_context_carries_whether_the_turn_is_unattended(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Tool runtime context should say whether a person is there to release the turn's waits."""
-        config = _runtime_bound_config(
-            Config(agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])}),
-            tmp_path,
-        )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        key = ConversationKey("calculator", "!test:localhost", None, "@user:localhost", silent=False)
-        follow_up = follow_up_envelope(
-            key,
-            follow_up_id="job-follow-up:a:b:1",
-            sender_id="@calculator:localhost",
-            prompt="",
-        )
-        target = follow_up.target
-
-        assert bot._tool_runtime_support.build_context(
-            target,
-            user_id="@user:localhost",
-            source_envelope=follow_up,
-        ).unattended
-        assert not bot._tool_runtime_support.build_context(target, user_id="@user:localhost").unattended
 
     def test_response_lifecycle_lock_uses_resolved_thread_root(
         self,

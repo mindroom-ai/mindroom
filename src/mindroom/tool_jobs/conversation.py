@@ -29,24 +29,6 @@ class ConversationKey:
     silent: bool
 
 
-# Usually nobody sends the newer message that would release an unattended turn's wait, so a wait without a budget ends
-# after this long there and the work continues in the background, its result reported by a follow-up.
-_UNATTENDED_WAIT_SECONDS = 120.0
-
-
-def current_wait_budget(requested: float | None) -> float | None:
-    """Return how long the reply running now waits for a job: as requested, or a bounded wait in an unattended turn.
-
-    A silent schedule's jobs get no follow-up, so its run keeps waiting to report what they found.
-    """
-    if requested is not None:
-        return requested
-    context = get_tool_runtime_context()
-    if context is None or not context.unattended or context.source_kind == SILENT_SCHEDULE_SOURCE_KIND:
-        return None
-    return _UNATTENDED_WAIT_SECONDS
-
-
 def current_approval_wait_timeout() -> float | None:
     """Return how long the reply running now waits for a job's human decision before it goes on without it."""
     context = get_tool_runtime_context()

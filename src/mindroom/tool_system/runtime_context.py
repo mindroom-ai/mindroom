@@ -148,8 +148,6 @@ class ToolRuntimeContext:
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     source_kind: str | None = None
-    # Automation started this turn, so usually nobody sends the message that would release its waits.
-    unattended: bool = False
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
 
@@ -415,7 +413,6 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
             source_kind=source_envelope.source_kind if source_envelope is not None else None,
-            unattended=source_envelope is not None and source_envelope.origin.unattended,
             agent_reply_memberships=self.runtime.agent_reply_memberships,
             config_provider=lambda: self.runtime.config,
         )
