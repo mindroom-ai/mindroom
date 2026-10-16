@@ -85,6 +85,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     Agents keep what is worth remembering from every conversation without being asked, and look it up again when it becomes relevant ([Memory](memory.md)).
     A shared agent gets better as more people use it: what it learns while helping one person helps the next.
     With skill learning on, an agent also turns work it repeats into reusable skills, following the self-improvement loop of Hermes Agent ([Automatic Skill Learning](skills.md#automatic-skill-learning)).
+    With a knowledge graph on, it builds a map of the people, projects, and documents its conversations and tools reveal, with when each fact held and where it came from, and can explore its sources on a schedule to fill it in ([Knowledge Graph](knowledge-graph.md)).
     You can teach it directly too: tell it a preference or a correction, and it is remembered.
 
 -   ### :lucide-calendar-clock:{ .lg } They work while you don't
