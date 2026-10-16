@@ -167,8 +167,7 @@ class KimiChat(MindRoomOpenAIChat):
     prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
-        """Normalize CLI-config-style model IDs before Agno uses the model id."""
-        self.id = normalize_kimi_model_id(self.id)
+        """Keep the classic system role, which the Kimi Code endpoint requires."""
         super().__post_init__()
         if self.role_map is None:
             # Agno maps system messages to OpenAI's newer "developer" role, which

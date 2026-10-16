@@ -8619,7 +8619,7 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.judgment.conversation"
-depends_on = ["mindroom.constants", "mindroom.entity_resolution", "mindroom.judgment.state", "mindroom.matrix.sidecar_content", "mindroom.matrix.thread_diagnostics", "mindroom.matrix.thread_history_result", "mindroom.tool_system.events"]
+depends_on = ["mindroom.constants", "mindroom.entity_resolution", "mindroom.judgment.state", "mindroom.matrix.sidecar_content", "mindroom.matrix.thread_diagnostics", "mindroom.matrix.thread_history_result", "mindroom.requester_identity", "mindroom.tool_system.events"]
 
 [[modules]]
 path = "mindroom.routing_judgment"

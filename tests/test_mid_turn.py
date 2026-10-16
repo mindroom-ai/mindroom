@@ -927,11 +927,13 @@ def test_traced_agent_reply_reaches_the_judge_with_tool_tags(tmp_path: Path, mon
 
 
 def test_relayed_messages_keep_their_original_author_role(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A thread move copy of an agent reply stays an assistant turn, while a relayed person stays a user."""
+    """A thread move copy of an agent reply stays an assistant turn; a relayed person or the internal user stays a user."""
+    agents = {"@mindroom_router:localhost", "@mindroom_research:localhost"}
     monkeypatch.setattr(
         "mindroom.judgment.conversation.current_internal_sender_ids",
-        lambda *_: frozenset({"@mindroom_router:localhost", "@mindroom_research:localhost"}),
+        lambda *_: frozenset({*agents, "@mindroom_user:localhost"}),
     )
+    monkeypatch.setattr("mindroom.judgment.conversation.mindroom_user_id", lambda *_: "@mindroom_user:localhost")
     history = [
         make_visible_message(
             sender="@mindroom_router:localhost",
@@ -945,6 +947,12 @@ def test_relayed_messages_keep_their_original_author_role(tmp_path: Path, monkey
             event_id="$copy",
             content={"msgtype": "m.text", ORIGINAL_SENDER_KEY: "@mindroom_research:localhost"},
         ),
+        make_visible_message(
+            sender="@mindroom_router:localhost",
+            body="Daily: check the open PRs",
+            event_id="$automation",
+            content={"msgtype": "m.text", ORIGINAL_SENDER_KEY: "@mindroom_user:localhost"},
+        ),
         make_visible_message(body="Continue", event_id="$source"),
     ]
     assert conversation_context_before_sources(
@@ -956,6 +964,7 @@ def test_relayed_messages_keep_their_original_author_role(tmp_path: Path, monkey
     ) == (
         JudgmentMessage("user", "Find the release notes"),
         JudgmentMessage("assistant", "I found the release notes."),
+        JudgmentMessage("user", "Daily: check the open PRs"),
     )
 
 

@@ -10,6 +10,7 @@ from mindroom.judgment.state import JudgmentMessage
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.requester_identity import mindroom_user_id
 from mindroom.tool_system.events import body_with_tool_tags, message_tool_trace
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ def conversation_context_before_sources(
         # Only a proven new thread establishes that no earlier task context exists.
         return () if thread_id in source_event_ids else None
     internal_senders = current_internal_sender_ids(config, runtime_paths)
+    agent_senders = internal_senders - {mindroom_user_id(config, runtime_paths)}
     context: list[JudgmentMessage] = []
     for message in history:
         if message.event_id in source_event_ids:
@@ -70,10 +72,11 @@ def conversation_context_before_sources(
         text = message_judgment_text(message)
         if text is None:
             return None
-        # MindRoom relays speak for their original author, which may be another agent (thread move copies).
-        author = message.content.get(ORIGINAL_SENDER_KEY) if message.sender in internal_senders else None
-        role = (
-            "assistant" if message.sender in internal_senders and (not author or author in internal_senders) else "user"
-        )
+        role = "user"
+        if message.sender in internal_senders:
+            # A relay speaks for its original author: a person, MindRoom's internal user (a requester), or an agent.
+            author = message.content.get(ORIGINAL_SENDER_KEY)
+            if not author or (isinstance(author, str) and author in agent_senders):
+                role = "assistant"
         context.append(JudgmentMessage(role, text))
     return None
