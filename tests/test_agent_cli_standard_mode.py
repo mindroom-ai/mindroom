@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import re
+import weakref
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -411,3 +413,42 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
     ]
     assert '"status":"completed"' in tool_outputs[-2].replace(" ", ""), tool_outputs[-2]
     assert tool_outputs[-1] == "recalled:7", tool_outputs
+
+
+@pytest.mark.asyncio
+async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """A cancelled timer keeps the context it was scheduled from until its deadline, which must not hold the Agent."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    timers: list[asyncio.TimerHandle] = []
+    replying_agents: list[weakref.ref[Agent]] = []
+
+    async def wait(agent: Agent) -> str:
+        replying_agents.append(weakref.ref(agent))
+        # Like a request timeout that was not needed: cancelled, yet scheduled until its deadline.
+        timer = asyncio.get_running_loop().call_later(3600, lambda: None)
+        timer.cancel()
+        timers.append(timer)
+        return "waited"
+
+    original = agents.get_tool_by_name
+
+    def build(name: str, *args: object, **kwargs: object) -> object:
+        if name != "calculator":
+            return original(name, *args, **kwargs)
+        return Toolkit(name="calculator", tools=[wait])
+
+    monkeypatch.setattr(agents, "get_tool_by_name", build)
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    provider.steps = [[("wait", {})], "done"]
+
+    assert "done" in await _respond(runtime)
+    gc.collect()
+
+    assert _tool_output(provider) == "waited"
+    assert timers[0].cancelled()
+    assert replying_agents[0]() is None

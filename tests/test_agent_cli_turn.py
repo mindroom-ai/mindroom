@@ -580,6 +580,10 @@ async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end(
         assert events == ["retire"]
     assert current_cli_lifetime() is None
     assert events == ["retire", "close"]
+    # Contexts copied during the response can still reach the ended lifetime, which keeps no owner and takes none.
+    assert lifetime.owner is None
+    with pytest.raises(RuntimeError, match="has ended"):
+        lifetime.register(Owner(), registry)
 
 
 @pytest.mark.asyncio
