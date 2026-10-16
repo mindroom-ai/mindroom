@@ -49,10 +49,10 @@ from mindroom.streaming import (
     TEAM_PROGRESS_PLACEHOLDER,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
-    strip_visible_tool_markers,
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.tool_system.events import strip_visible_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence

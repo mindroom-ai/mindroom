@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
+from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from agno.models.response import ToolExecution
 
@@ -28,6 +29,7 @@ _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 _VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d+(?=\](?: ⏳)?\s*$)")
+_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
 
@@ -534,6 +536,87 @@ def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) 
 def is_visible_tool_marker_line(line: str) -> bool:
     """Return whether one plain-text line is a Matrix-visible tool marker."""
     return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
+
+
+def strip_visible_tool_markers(text: str) -> str:
+    """Remove display-only tool marker lines before text re-enters model context."""
+    lines = text.splitlines()
+    if not any(is_visible_tool_marker_line(line) for line in lines):
+        return text
+
+    filtered_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not is_visible_tool_marker_line(line):
+            filtered_lines.append(line)
+            index += 1
+            continue
+
+        index += 1
+        spacer_lines: list[str] = []
+        while index < len(lines) and not lines[index].strip():
+            spacer_lines.append(lines[index])
+            index += 1
+
+        # Tool markers rendered by MindRoom are often followed by a markdown
+        # separator. Remove the separator with the marker, but preserve ordinary
+        # blank-line spacing so surrounding prose does not get smashed together.
+        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
+            filtered_lines.extend(spacer_lines)
+            index += 1
+            if index < len(lines) and not lines[index].strip():
+                index += 1
+            continue
+
+        filtered_lines.extend(spacer_lines)
+    return "\n".join(filtered_lines).rstrip()
+
+
+def message_tool_trace(content: Mapping[str, object]) -> list[ToolTraceEntry] | None:
+    """Return the tool trace stored on one Matrix message, or None when it carries none."""
+    payload = content.get(_TOOL_TRACE_KEY)
+    if not isinstance(payload, dict):
+        return None
+    events = cast("dict[str, object]", payload).get("events")
+    if not isinstance(events, list):
+        return []
+    return deserialize_tool_trace(
+        cast("list[Mapping[str, object]]", [event for event in events if isinstance(event, dict)]),
+    )
+
+
+def body_without_tool_markers(body: str, content: Mapping[str, object]) -> str:
+    """Remove marker lines a stored tool trace proves are MindRoom chrome; leave other text alone."""
+    if message_tool_trace(content) is None:
+        return body
+    return strip_visible_tool_markers(body)
+
+
+def render_tool_tag(entry: ToolTraceEntry) -> str:
+    """Render one tool call as an attribute-quoted tag for judges, which read conversations as data."""
+    attrs = [f"name={xml_quoteattr(entry.tool_name)}"]
+    if entry.args_preview:
+        attrs.append(f"input={xml_quoteattr(entry.args_preview)}")
+    if entry.result_preview:
+        attrs.append(f"output={xml_quoteattr(entry.result_preview)}")
+    if entry.truncated:
+        attrs.append('truncated="true"')
+    return f"<tool {' '.join(attrs)}/>"
+
+
+def body_with_tool_tags(body: str, trace: Sequence[ToolTraceEntry]) -> str:
+    """Replace each marker with its trace entry's tag; a marker without an entry is dropped."""
+    lines: list[str] = []
+    for line in body.splitlines():
+        if not is_visible_tool_marker_line(line):
+            lines.append(line)
+            continue
+        index_match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line)
+        index = int(index_match.group()) if index_match is not None else 0
+        if 1 <= index <= len(trace):
+            lines.append(render_tool_tag(trace[index - 1]))
+    return "\n".join(lines)
 
 
 def _line_ending(line: str) -> str:

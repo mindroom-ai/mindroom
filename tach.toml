@@ -2404,6 +2404,7 @@ depends_on = [
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -6677,6 +6678,8 @@ expose = [
     "StructuredStreamChunk",
     "ToolTraceEntry",
     "append_stream_text",
+    "body_with_tool_tags",
+    "body_without_tool_markers",
     "build_tool_trace_content",
     "complete_pending_tool_block",
     "deserialize_tool_trace",
@@ -6685,9 +6688,12 @@ expose = [
     "format_tool_completed_event",
     "format_tool_started_event",
     "is_visible_tool_marker_line",
+    "message_tool_trace",
     "remap_visible_tool_marker_indices",
+    "render_tool_tag",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
+    "strip_visible_tool_markers",
     "tool_marker_text",
     "tool_markers_match_trace",
 ]

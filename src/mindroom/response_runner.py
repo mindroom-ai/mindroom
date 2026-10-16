@@ -145,7 +145,6 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
     clean_partial_reply_text,
-    strip_visible_tool_markers,
 )
 from mindroom.teams import (
     TeamMode,
@@ -162,6 +161,7 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.events import strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
