@@ -139,7 +139,7 @@ After exit code `4`, check the original call ID before retrying, because submitt
 
 CLI calls follow the agent's existing approval rules and interactive questions, and an approval applies to the exact tool and arguments shown.
 Each Bash command starts a fresh shell: workspace files persist, but shell variables and directory changes do not carry over.
-A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far, while one inside a background job, such as a minimal subagent's, has no default limit.
+A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far, while one inside a background job, such as a minimal subagent's when background jobs are enabled, has no default limit.
 In a reply, start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
 A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.

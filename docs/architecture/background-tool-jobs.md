@@ -15,7 +15,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
 - Jobs are the only way long work runs in the background, so the shell stops a command at its `timeout` instead of handing back a handle of its own.
-  A job's call has no default limit and any other call has 120 seconds, so a call that holds a reply always returns; Desktop shell and script runs keep the handle engine, because their lifecycles are not model calls.
+  A job's call has no default limit and any other call has 120 seconds, so a call outside a job always returns by its timeout; Desktop shell and script runs keep the handle engine, because their lifecycles are not model calls.
 - A worker `/execute` call streams its progress and a keep-alive every 5 seconds before its result line, so a job's call can run past every request timeout, a silent connection means the runner is gone, and a primary that stops reading stops the call.
   A call that is not a job keeps its limits, which the primary checks as lines arrive; persistent browser actions keep one response, because cancelling one closes the shared browser.
 - A request says whether it runs as a job, and the runner binds that job in its own process and in per-request children, so a tool sees the same ownership wherever it runs; a `mindroom-agent` call inherits it from its command's window.
