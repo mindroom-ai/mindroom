@@ -148,7 +148,7 @@ class ToolRuntimeContext:
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     source_kind: str | None = None
-    # Nobody is there to send the message that would release this turn's waits.
+    # Automation started this turn, so usually nobody sends the message that would release its waits.
     unattended: bool = False
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None

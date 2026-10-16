@@ -31,6 +31,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.hooks import HookRegistry
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import agno_execution, conversation, results
@@ -349,15 +350,25 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unattended", [True, False])
+@pytest.mark.parametrize(
+    ("unattended", "source_kind", "bounded"),
+    [
+        (True, SCHEDULED_SOURCE_KIND, True),
+        (False, MESSAGE_SOURCE_KIND, False),
+        (True, SILENT_SCHEDULE_SOURCE_KIND, False),
+    ],
+)
 async def test_an_unattended_turn_waits_for_its_jobs_only_so_long(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     unattended: bool,
+    source_kind: str,
+    bounded: bool,
 ) -> None:
     """Nobody sends the message that would release an unattended turn's wait, so its waits end while the work runs on.
 
-    A turn a person started keeps waiting until that person's next message.
+    A turn a person started keeps waiting until that person's next message, and a silent schedule's run keeps waiting
+    because its jobs get no follow-up that would report them later.
     """
     monkeypatch.setattr(conversation, "_UNATTENDED_WAIT_SECONDS", 0.05)
     release = asyncio.Event()
@@ -370,6 +381,7 @@ async def test_an_unattended_turn_waits_for_its_jobs_only_so_long(
     context = replace(
         _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths),
         unattended=unattended,
+        source_kind=source_kind,
     )
     owner = build_execution_identity_from_runtime_context(context)
     runtime = await tool_job_runtime(tmp_path)
@@ -385,9 +397,9 @@ async def test_an_unattended_turn_waits_for_its_jobs_only_so_long(
         async with execution_resources():
             with tool_runtime_context(context), pending_human_messages_context(asyncio.Event()):
                 parent = asyncio.create_task(agent.arun("start", session_id=context.session_id))
-                done, _ = await asyncio.wait({parent}, timeout=JOB_TEST_TIMEOUT if unattended else 0.5)
-                if not unattended:
-                    assert not done, "a turn a person started waits for its call until their next message"
+                done, _ = await asyncio.wait({parent}, timeout=JOB_TEST_TIMEOUT if bounded else 0.5)
+                if not bounded:
+                    assert not done, "a turn a person or a silent schedule started waits for its call"
                     release.set()
                     response = await asyncio.wait_for(parent, JOB_TEST_TIMEOUT)
                     assert response.tools is not None

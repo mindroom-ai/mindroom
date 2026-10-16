@@ -74,7 +74,7 @@ class TurnOrigin:
 
     @property
     def unattended(self) -> bool:
-        """Return whether automation, not a person's message, started this turn, so nobody is there to release its waits."""
+        """Return whether automation, not a person's message, started this turn, so usually nobody releases its waits."""
         return is_automation_source_kind(self.source_kind) or self.intent == TurnIntent.JOB_FOLLOW_UP
 
     @property
