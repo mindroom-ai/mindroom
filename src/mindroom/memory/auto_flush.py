@@ -648,6 +648,8 @@ class MemoryAutoFlushWorker:
                 _write_state_unlocked(self.storage_path, latest_state)
 
         for key in selected_keys:
+            if self._stop_event.is_set():
+                return
             await self._process_session_key(config, key)
 
     def _record_failure(self, key: str, entry: _FlushSessionEntry, now: int, settings: MemoryAutoFlushConfig) -> None:
@@ -703,47 +705,16 @@ class MemoryAutoFlushWorker:
             logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
             return
 
-        latest_session_updated_at: int | None = None
-        try:
-            latest_session = await asyncio.to_thread(
-                load_agent_session,
-                agent_name,
-                config,
-                self.runtime_paths,
-                session_id,
-                execution_identity=entry_execution_identity,
-            )
-        except Exception:
-            # The flush still counts as done; only the reread's update time is lost, and dirty marks decide a requeue.
-            logger.exception(
-                "Memory auto-flush could not reread a conversation",
-                agent=agent_name,
-                session_id=session_id,
-            )
-            latest_session = None
-        if latest_session is not None and isinstance(latest_session.updated_at, int):
-            latest_session_updated_at = latest_session.updated_at
-
         with _STATE_LOCK:
             latest_state = _read_state_unlocked(self.storage_path)
             latest_entry = latest_state["sessions"].get(key, entry)
             flush_started_dirty_revision = entry.get("flush_started_dirty_revision")
-            has_newer_dirty_marks = (
+            # Only requeue if the session was explicitly marked dirty again during this flush.
+            latest_entry["dirty"] = (
                 isinstance(flush_started_dirty_revision, int)
                 and isinstance(latest_entry.get("dirty_revision"), int)
                 and latest_entry["dirty_revision"] > flush_started_dirty_revision
             )
-            has_newer_updates = (
-                isinstance(latest_session_updated_at, int)
-                and isinstance(session_updated_at, int)
-                and latest_session_updated_at > session_updated_at
-            )
-            # Only requeue if the session was explicitly marked dirty again during this flush.
-            latest_entry["dirty"] = (
-                has_newer_dirty_marks if isinstance(flush_started_dirty_revision, int) else has_newer_updates
-            )
-            if isinstance(latest_session_updated_at, int):
-                latest_entry["last_session_updated_at"] = latest_session_updated_at
             if isinstance(session_updated_at, int):
                 latest_entry["last_flushed_session_updated_at"] = session_updated_at
             latest_entry["next_attempt_at"] = None

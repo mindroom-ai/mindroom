@@ -711,20 +711,39 @@ async def test_stopping_during_a_cycle_ends_the_worker_without_waiting_an_interv
 ) -> None:
     """Shutdown and a reload that turns auto-flush off wait for the worker, so a stop mid-cycle must not sleep 30 min."""
     config.memory.auto_flush.flush_interval_seconds = 1800
+    config.memory.auto_flush.batch.max_sessions_per_cycle = 2
+    config.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 2
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="first")
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="second")
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda *_args, **_kwargs: _FakeSession(
+            updated_at=100,
+            messages=[_FakeMessage(role="user", content="remember this decision")],
+        ),
+    )
     worker = MemoryAutoFlushWorker(
         storage_path=tmp_path,
         runtime_paths=runtime_paths_for(config),
         config_provider=lambda: config,
     )
-    real_cycle = worker._run_cycle
+    flushed = 0
 
-    async def stopped_mid_cycle(cycle_config: Config) -> None:
+    async def stopped_mid_flush(**_: object) -> str:
+        nonlocal flushed
+        flushed += 1
         worker.stop()
-        await real_cycle(cycle_config)
+        return "important decision"
 
-    monkeypatch.setattr(worker, "_run_cycle", stopped_mid_cycle)
+    monkeypatch.setattr("mindroom.memory.auto_flush._extract_memory_summary", stopped_mid_flush)
+    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", lambda *_, **__: {"id": "m"})
 
     await asyncio.wait_for(worker.run(), timeout=5)
+
+    # The conversation left over stays dirty for the next start.
+    assert flushed == 1
+    state = json.loads((tmp_path / "memory_flush_state.json").read_text())
+    assert sorted(entry["dirty"] for entry in state["sessions"].values()) == [False, True]
 
 
 @pytest.mark.asyncio
@@ -770,46 +789,6 @@ async def test_a_session_that_cannot_be_read_does_not_block_the_others(
     await worker._run_cycle(config)
     broken = _entry(tmp_path, "broken")
     assert (broken["consecutive_failures"], broken["next_attempt_at"]) == (2, now + 3 * cooldown)
-
-
-@pytest.mark.asyncio
-async def test_a_flushed_session_that_cannot_be_reread_is_not_flushed_again(
-    tmp_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The memory is already written when the reread fails, so the conversation is not flushed twice."""
-    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="s1")
-    loads = 0
-
-    def load(*_args: object, **_kwargs: object) -> _FakeSession:
-        nonlocal loads
-        loads += 1
-        # The cycle reads the session, the flush reads it again, and then the worker rereads it.
-        if loads == 3:
-            msg = "session database is locked"
-            raise OSError(msg)
-        return _FakeSession(updated_at=100, messages=[_FakeMessage(role="user", content="remember this decision")])
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", load)
-    monkeypatch.setattr("mindroom.memory.auto_flush._extract_memory_summary", _fake_extract_memory_summary)
-    writes: list[str] = []
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.append_agent_daily_memory",
-        lambda content, agent_name, **_: writes.append(f"{agent_name}:{content}") or {"id": "m"},
-    )
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-
-    await worker._run_cycle(config)
-    await worker._run_cycle(config)
-
-    assert len(writes) == 1
-    state = json.loads((tmp_path / "memory_flush_state.json").read_text())
-    assert [entry["dirty"] for entry in state["sessions"].values()] == [False]
 
 
 @pytest.mark.asyncio
@@ -944,7 +923,6 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
-    assert session_state["last_session_updated_at"] == 200
     assert append_calls == []
 
 
