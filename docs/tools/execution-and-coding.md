@@ -252,9 +252,9 @@ It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, a
 Only the agent that created a directory can invite, remove, or delete, and deleting a directory removes every file in it.
 Names use 1 to 64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit.
 
-The owner reads and writes the directory, and invited agents only read it.
+With dedicated workers, the owner reads and writes the directory and invited agents only read it; the table below shows other deployments.
 Invited agents do not need `shared_directories` themselves: they read the directory with `shell`, `python`, `file`, or `coding`, at the path that `create_shared_directory` and `list_shared_directories` return.
-Every agent that owns or joined a directory sees that path and its access in its prompt.
+Every agent that owns or joined a directory sees that path in its prompt.
 Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
 When MindRoom uses workers but an agent's `file` or `coding` runs in the primary process, `workspace` keeps those tools out of shared directories; add them to the agent's `worker_tools`.
 Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
@@ -269,9 +269,10 @@ Where tools run decides who reaches a shared directory:
 |---|---|---|---|
 | Dedicated Docker or Kubernetes workers | Read and write | Read only | No access |
 | Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
-| No workers | Read and write | Read only with `file` and `coding`, read and write with `shell` and `python` | Read and write with `shell` and `python` |
-| Compose or host-container `static_runner` | No access | No access | No access |
+| No workers, through `file` and `coding` under `file_access: workspace` | Read and write | Read only | No access |
+| Compose or host-container `static_runner` with only scratch storage mounted | No access | No access | No access |
 
+`shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
 A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
 
 ```yaml
