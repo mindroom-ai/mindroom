@@ -32,6 +32,10 @@ if TYPE_CHECKING:
 
 type _ThreadKind = Literal["conversation", "exploration", "automation"]
 type _RunKey = tuple[int, str]
+type Progress = tuple[int, str, int]
+
+# The piece number of a run that is fully covered, larger than any piece a split produces.
+RUN_DONE = 1 << 30
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
 KNOWLEDGE_GRAPH_FUNCTIONS = frozenset({"search_graph", "graph_entity"})
@@ -43,11 +47,12 @@ _MAX_LISTED_CALLS = 20
 
 @dataclass(frozen=True)
 class RenderedEpisode:
-    """One episode and the last run it covers."""
+    """One episode, how far into its conversation it reaches, and whose turns it holds."""
 
     episode: EpisodeInput
-    # None for a piece that ends inside a run, which completes nothing.
-    last_run: _RunKey | None
+    # `(created_at, run_id, piece)` of the newest piece it covers; RUN_DONE marks a run whose every piece is covered.
+    progress: Progress
+    requester_id: str | None
 
 
 def run_key(run: RunOutput) -> _RunKey:
@@ -90,36 +95,56 @@ def render_episodes(
     rendered: list[RenderedEpisode] = []
     lines: list[str] = []
     calls: list[str] = []
-    # The run of the newest line, which names the episode, and the newest run whose lines are all in it.
     newest: RunOutput | None = None
-    complete: RunOutput | None = None
+    progress: Progress | None = None
 
     def flush() -> None:
-        nonlocal complete
-        if lines and newest is not None:
-            last_run = run_key(complete) if complete is not None else None
-            rendered.append(RenderedEpisode(_episode(episode_kind, lines, newest, settings, calls=calls), last_run))
+        if lines and newest is not None and progress is not None:
+            episode = _episode(episode_kind, lines, newest, settings, calls=calls)
+            rendered.append(RenderedEpisode(episode, progress, _requester(newest)))
         lines.clear()
         calls.clear()
-        complete = None
 
     cap = settings.max_episode_chars
     for run in sorted(runs, key=run_key):
         items = _episode_items(run, episode_kind, agent_name, settings)
-        # Runs stay whole where they fit, so a conversation is split only between turns.
-        if lines and _size(lines) + _size([line for line, _ in items]) > cap:
+        if not items:
+            continue
+        # Runs stay whole where they fit and share an episode only with the same day and requester, so relative dates
+        # resolve against the right day and each episode's cost belongs to one person.
+        if (
+            lines
+            and newest is not None
+            and (
+                _size(lines) + _size([line for line, _ in items]) > cap
+                or _day(run) != _day(newest)
+                or _requester(run) != _requester(newest)
+            )
+        ):
             flush()
+        piece = 0
         for line, call in items:
-            # Only a run larger than the cap is split; a piece that ends inside it completes no run.
+            # Only a run larger than the cap is split; each piece records how far into the run it reaches.
             if lines and _size(lines) + len(line) + 1 > cap:
+                progress = (*run_key(run), piece)
                 flush()
+                piece += 1
             lines.append(line)
             if call is not None:
                 calls.append(call)
             newest = run
-        complete = run
+        progress = (*run_key(run), RUN_DONE)
     flush()
     return rendered
+
+
+def _day(run: RunOutput) -> str:
+    return datetime.fromtimestamp(run.created_at or 0, UTC).date().isoformat()
+
+
+def _requester(run: RunOutput) -> str | None:
+    requester = (run.metadata or {}).get("requester_id") or run.user_id
+    return requester if isinstance(requester, str) else None
 
 
 def _episode_items(

@@ -107,8 +107,8 @@ def _run(run_id: str, session_id: str, created_at: int, status: RunStatus = RunS
         ],
         metadata={"room_id": "!room:x", "thread_id": session_id.rsplit(":", 1)[-1], "requester_id": "@alice:x"},
         messages=[
-            Message(role="user", content=f"question {run_id}"),
-            Message(role="assistant", content=f"answer {run_id}"),
+            Message(role="user", content=f"question {run_id}", created_at=created_at),
+            Message(role="assistant", content=f"answer {run_id}", created_at=created_at),
         ],
     )
 
@@ -516,3 +516,61 @@ async def test_a_conversation_held_back_by_an_approval_is_ingested_once_it_expir
     await worker._run_cycle(config, now=T0 + 8 * DAY)
 
     assert _answers(store) == ["agent mind: answer r2"]
+
+
+@pytest.mark.asyncio
+async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: Path) -> None:
+    """Dropped pieces stay done, so earlier pieces are not extracted again and the run completes."""
+    config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
+        assert session is not None
+        session.runs[0].tools = [
+            ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
+            for index in range(8)
+        ]
+        storage.upsert_run(run=session.runs[0], session_id="!room:x:$t1", user_id=None)
+    finally:
+        storage.close()
+    store = _FakeStore()
+    first_pieces: list[str] = []
+    real_add = store.add_episode
+
+    async def two_pieces_fail(scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
+        if episode.kind == "tool_results":
+            first_call = episode.body.split("(", 1)[0]
+            if first_call == "call fetch_0":
+                first_pieces.append(first_call)
+            if first_call in {"call fetch_2", "call fetch_4"}:
+                msg = "unusable output"
+                raise ValueError(msg)
+        await real_add(scope, episode, usage)
+
+    worker = _worker(config, paths, store)
+    with patch.object(store, "add_episode", two_pieces_fail):
+        for attempt in range(14):
+            await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+
+    assert first_pieces == ["call fetch_0"]
+    assert any("fetch_7" in episode.body for _, episode, _ in store.episodes)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_waiting_on_a_recent_approval_still_holds_back(tmp_path: Path) -> None:
+    """An approval asked for days into a turn expires counting from when it was asked, not from the turn's start."""
+    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
+        assert session is not None
+        session.runs[0].messages[-1].created_at = T0 + 6 * DAY
+        storage.upsert_run(run=session.runs[0], session_id="!room:x:$t1", user_id=None)
+    finally:
+        storage.close()
+
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 8 * DAY)
+
+    assert store.episodes == []

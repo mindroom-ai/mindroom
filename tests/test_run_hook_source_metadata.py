@@ -48,3 +48,10 @@ async def test_agent_turn_without_hook_source_records_none(tmp_path: Path) -> No
     """A person's message adds no hook source key."""
     turn = await _turn(tmp_path, None)
     assert HOOK_SOURCE_RUN_METADATA_KEY not in (turn.matrix_run_metadata or {})
+
+
+@pytest.mark.asyncio
+async def test_an_exploration_prompt_turn_carries_its_restrictions(tmp_path: Path) -> None:
+    """The runner hands the exploration policy to the agent build; an ordinary turn has none."""
+    assert (await _turn(tmp_path, "automation/exploration")).exploration is not None
+    assert (await _turn(tmp_path / "ordinary", None)).exploration is None

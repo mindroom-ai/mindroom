@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import psutil
 import pytest
 import redislite
 from falkordb.asyncio import FalkorDB
+from redis.asyncio import Redis
+from redis.exceptions import BusyLoadingError
 
 from mindroom.knowledge_graph.embedded_server import start_embedded_server
 
@@ -85,3 +87,15 @@ async def test_server_left_before_an_upgrade_is_stopped_too(tmp_path: Path) -> N
             await successor.stop()
     finally:
         await orphan.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_server_still_loading_its_data_is_waited_for(tmp_path: Path) -> None:
+    """A large database takes a while to load after a restart; the start waits instead of killing it."""
+    loading = BusyLoadingError("Redis is loading the dataset in memory")
+    with patch.object(Redis, "ping", AsyncMock(side_effect=[loading, loading, True])):
+        server = await start_embedded_server(tmp_path)
+    try:
+        assert server.process.returncode is None
+    finally:
+        await server.stop()

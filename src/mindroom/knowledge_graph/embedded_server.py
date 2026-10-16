@@ -28,6 +28,7 @@ _PIDFILE = "server.pid"
 _READY_TIMEOUT_SECONDS = 15.0
 _STOP_TIMEOUT_SECONDS = 10.0
 _POLL_SECONDS = 0.05
+_PING_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass
@@ -93,24 +94,30 @@ async def start_embedded_server(db_dir: Path) -> EmbeddedServer:
 
 async def _wait_until_ready(server: EmbeddedServer, db_dir: Path) -> None:
     from redis.asyncio import Redis  # noqa: PLC0415
+    from redis.exceptions import BusyLoadingError, RedisError  # noqa: PLC0415
+    from redis.exceptions import TimeoutError as RedisTimeoutError  # noqa: PLC0415
 
     deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
+    while True:
         if server.process.returncode is not None:
             msg = f"The embedded knowledge graph database exited at startup; see {db_dir / 'server.log'}"
             raise RuntimeError(msg)
         if Path(server.socket_path).exists():
-            client = Redis(unix_socket_path=server.socket_path)
+            client = Redis(unix_socket_path=server.socket_path, socket_timeout=_PING_TIMEOUT_SECONDS)
             try:
                 if await cast("Awaitable[bool]", client.ping()):
                     return
-            except OSError:
+            except (BusyLoadingError, RedisTimeoutError):
+                # Loading a large database after a restart can take minutes; wait while the server runs.
+                deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
+            except (OSError, RedisError):
                 pass
             finally:
                 await client.aclose()
+        if time.monotonic() >= deadline:
+            msg = f"The embedded knowledge graph database did not start within {_READY_TIMEOUT_SECONDS:.0f} seconds"
+            raise RuntimeError(msg)
         await asyncio.sleep(_POLL_SECONDS)
-    msg = f"The embedded knowledge graph database did not start within {_READY_TIMEOUT_SECONDS:.0f} seconds"
-    raise RuntimeError(msg)
 
 
 def _stop_orphaned_server(db_dir: Path, executable: str) -> None:

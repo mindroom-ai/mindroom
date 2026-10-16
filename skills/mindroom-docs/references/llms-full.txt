@@ -3849,6 +3849,7 @@ Changing the embedder starts a new, empty graph that fills again from conversati
 
 Not added: threads started by other automations such as `dreaming`, calls to the `knowledge_graph` tool itself, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
+A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
 Each fact keeps its sources: `conversation` means someone said it, `tool_results` means a tool returned it.
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.

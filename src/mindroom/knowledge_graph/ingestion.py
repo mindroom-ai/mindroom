@@ -16,7 +16,14 @@ from agno.run.base import RunStatus
 
 from mindroom.automations.threads import automation_threads
 from mindroom.durable_write import write_json_file_durable
-from mindroom.knowledge_graph.episodes import RenderedEpisode, classify_thread, render_episodes, run_key
+from mindroom.knowledge_graph.episodes import (
+    RUN_DONE,
+    Progress,
+    RenderedEpisode,
+    classify_thread,
+    render_episodes,
+    run_key,
+)
 from mindroom.knowledge_graph.scope import graph_scopes
 from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
 from mindroom.knowledge_graph.store import record_knowledge_graph_failure
@@ -120,7 +127,9 @@ def _finished_runs(
     finished: list[RunOutput] = []
     for run in runs:
         if run.status == RunStatus.paused:
-            expires_at = (run.created_at or 0) + approval_window
+            # Its newest message is the call waiting for approval, whose card expires counting from when it was posted.
+            asked_at = max([run.created_at or 0, *((message.created_at or 0) for message in run.messages or [])])
+            expires_at = asked_at + approval_window
             if now < expires_at:
                 return finished, expires_at
             continue
@@ -132,13 +141,13 @@ def _start_after_backfill_window(entry: _SessionState, runs: list[RunOutput], *,
     """Mark the runs before the backfill window as done, so a long conversation adds only its recent turns."""
     older = [run for run in runs if (run.created_at or 0) < cutoff]
     if older:
-        key = list(run_key(older[-1]))
-        entry["markers"] = dict.fromkeys(_EPISODE_KINDS, key)
+        done = [*run_key(older[-1]), RUN_DONE]
+        entry["markers"] = {kind: list(done) for kind in _EPISODE_KINDS}
 
 
-def _marker(entry: _SessionState, kind: str) -> tuple[int, str] | None:
+def _marker(entry: _SessionState, kind: str) -> Progress | None:
     marker = entry["markers"].get(kind)
-    return (int(marker[0]), str(marker[1])) if marker is not None else None
+    return (int(marker[0]), str(marker[1]), int(marker[2])) if marker is not None else None
 
 
 def _report_failure(message: str, exc: Exception, **context: str) -> None:
@@ -197,7 +206,7 @@ class KnowledgeGraphIngestionWorker:
                 break
             # One agent or private instance whose conversations cannot be read must not stop the others.
             try:
-                state = self._load_state(scope.graph_name, now)
+                state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
                 due = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
                 budget -= len(due)
                 outcomes.extend(
@@ -265,16 +274,12 @@ class KnowledgeGraphIngestionWorker:
                 cutoff=state["started_at"] - settings.backfill_days * _DAY_SECONDS,
             )
         thread_kind = classify_thread(session.runs, automation_thread_ids)
-        requester_id = next(
-            (requester for run in reversed(session.runs) if (requester := (run.metadata or {}).get("requester_id"))),
-            None,
-        )
-        usage = UsageTarget(scope.agent_name, session.session_id, scope.execution_identity, requester_id)
         clean = True
-        completed = 0
+        added = 0
         for kind in _EPISODE_KINDS:
             marker = _marker(entry, kind)
-            new_runs = [run for run in finished if marker is None or run_key(run) > marker]
+            # A run whose pieces are partly done is rendered again, and its done pieces are skipped below.
+            new_runs = [run for run in finished if marker is None or (*run_key(run), RUN_DONE) > marker]
             for rendered in render_episodes(
                 new_runs,
                 thread_kind=thread_kind,
@@ -282,16 +287,24 @@ class KnowledgeGraphIngestionWorker:
                 agent_name=scope.agent_name,
                 settings=settings,
             ):
-                added = await self._add(scope, state, entry, kind, rendered, usage, now)
-                if added is None:
+                if marker is not None and rendered.progress <= marker:
+                    continue
+                usage = UsageTarget(
+                    scope.agent_name,
+                    session.session_id,
+                    scope.execution_identity,
+                    rendered.requester_id,
+                )
+                outcome = await self._add(scope, state, entry, kind, rendered, usage, now)
+                if outcome is None:
                     return False
-                clean = clean and added
-                completed += rendered.last_run is not None
+                clean = clean and outcome
+                added += 1
                 # A long backlog spreads over passes; the conversation stays due because its update time is unchanged.
-                if completed >= _MAX_EPISODES_PER_PASS:
+                if added >= _MAX_EPISODES_PER_PASS:
                     return clean
             if new_runs:
-                entry["markers"][kind] = list(run_key(new_runs[-1]))
+                entry["markers"][kind] = [*run_key(new_runs[-1]), RUN_DONE]
         # Held back by a turn waiting for approval, it is looked at again when those approvals expire, even without news.
         entry.update(
             updated_at=session.updated_at,
@@ -301,7 +314,7 @@ class KnowledgeGraphIngestionWorker:
             failing_since=0,
             retry_at=0,
         )
-        self._save_state(scope.graph_name, state)
+        await self._persist(scope.graph_name, state)
         return clean
 
     async def _add(
@@ -327,7 +340,7 @@ class KnowledgeGraphIngestionWorker:
             if entry["bad_outputs"] < _MAX_BAD_OUTPUTS and now - entry["failing_since"] < _MAX_FAILING_SECONDS:
                 backoff = _FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1)
                 entry["retry_at"] = now + min(backoff, _MAX_RETRY_SECONDS)
-                self._save_state(scope.graph_name, state)
+                await self._persist(scope.graph_name, state)
                 return None
             logger.exception(
                 "Knowledge graph dropped an episode it could not extract",
@@ -335,13 +348,14 @@ class KnowledgeGraphIngestionWorker:
                 episode=rendered.episode.name,
             )
             dropped = True
-        # Earlier pieces of a split run succeed again on every retry, so only a finished run or a drop clears failures.
-        if rendered.last_run is not None or dropped:
-            entry.update(failures=0, bad_outputs=0, failing_since=0)
-        if rendered.last_run is not None:
-            entry["markers"][kind] = list(rendered.last_run)
-        self._save_state(scope.graph_name, state)
+        # Every piece records its progress, added or dropped, so a retry never repeats it.
+        entry.update(failures=0, bad_outputs=0, failing_since=0)
+        entry["markers"][kind] = list(rendered.progress)
+        await self._persist(scope.graph_name, state)
         return not dropped
+
+    async def _persist(self, graph_name: str, state: _GraphState) -> None:
+        await asyncio.to_thread(self._save_state, graph_name, state)
 
     def _state_path(self, graph_name: str) -> Path:
         return self.runtime_paths.storage_root / "knowledge_graph" / "ingestion" / f"{graph_name}.json"

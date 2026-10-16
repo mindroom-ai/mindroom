@@ -11,7 +11,7 @@ from agno.run.agent import RunOutput
 
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
-from mindroom.knowledge_graph.episodes import RenderedEpisode, classify_thread, render_episodes
+from mindroom.knowledge_graph.episodes import RUN_DONE, RenderedEpisode, classify_thread, render_episodes
 from mindroom.prompt_message_tags import render_msg_tag
 
 ROOM = "!room:example.test"
@@ -86,7 +86,7 @@ def test_conversation_run_renders_speakers_and_a_separate_tool_episode() -> None
     assert "Issue 42: Atlas launch, owner @bob" in tool_results.body
     assert tool_results.source_description.startswith(f"tool_results: room {ROOM} thread {THREAD}; calls: get_issue ")
     assert conversation.reference_time == datetime.fromtimestamp(1_760_000_000, UTC)
-    assert [item.last_run for item in rendered] == [(1_760_000_000, "r1")] * 2
+    assert [item.progress for item in rendered] == [(1_760_000_000, "r1", RUN_DONE)] * 2
 
 
 def test_several_people_in_one_prompt_are_each_labeled() -> None:
@@ -164,7 +164,7 @@ def test_runs_merge_until_the_cap_and_split_only_at_run_boundaries() -> None:
         settings=settings,
     )
 
-    assert [item.last_run for item in rendered] == [(1_760_000_001, "r1"), (1_760_000_002, "r2")]
+    assert [item.progress for item in rendered] == [(1_760_000_001, "r1", RUN_DONE), (1_760_000_002, "r2", RUN_DONE)]
     assert rendered[0].episode.body.count("agent mind:") == 2
     assert all(len(item.episode.body) <= 1000 for item in rendered)
 
@@ -176,7 +176,7 @@ def test_a_single_message_over_the_cap_is_clipped() -> None:
     rendered = _episodes([_run("r1", answer="b" * 5000)], "conversation", settings)
 
     assert all(len(item.episode.body) <= 1000 for item in rendered)
-    assert rendered[-1].last_run == (1_760_000_000, "r1")
+    assert rendered[-1].progress == (1_760_000_000, "r1", RUN_DONE)
 
 
 def test_classify_thread_uses_the_root_hook_source_then_automation_threads() -> None:
@@ -213,5 +213,47 @@ def test_a_run_larger_than_the_cap_is_split_without_losing_results() -> None:
     assert len(rendered) > 1
     assert all(f"result {index} " in bodies for index in range(10))
     assert all(len(item.episode.body) <= SETTINGS.max_episode_chars for item in rendered)
-    assert [item.last_run for item in rendered[:-1]] == [None] * (len(rendered) - 1)
-    assert rendered[-1].last_run == (1_760_000_000, "r1")
+    assert [item.progress[2] for item in rendered[:-1]] == list(range(len(rendered) - 1))
+    assert rendered[-1].progress == (1_760_000_000, "r1", RUN_DONE)
+
+
+def test_pieces_of_a_split_run_carry_their_progress() -> None:
+    """Each piece records how far into its run it reaches, so a retry can skip finished pieces."""
+    results = [_tool(f"fetch_{index}", f"result {index} " + "x" * 3900) for index in range(10)]
+
+    rendered = render_episodes(
+        [_run("r1", tools=results)],
+        thread_kind="exploration",
+        episode_kind="tool_results",
+        agent_name="mind",
+        settings=SETTINGS,
+    )
+
+    progress = [item.progress for item in rendered]
+    assert all(step[:2] == (1_760_000_000, "r1") for step in progress)
+    assert [step[2] for step in progress[:-1]] == list(range(len(progress) - 1))
+    assert progress[-1][2] > len(progress)
+
+
+def test_turns_on_different_days_go_to_different_episodes() -> None:
+    """Relative dates such as "tomorrow" resolve against the day each turn was said."""
+    monday = _run("r1", created_at=1_760_000_000, answer="The launch is tomorrow.")
+    friday = _run("r2", created_at=1_760_000_000 + 4 * 86_400, answer="Lunch is at noon.")
+
+    rendered = _episodes([monday, friday], "conversation")
+
+    assert [item.episode.reference_time.date() for item in rendered] == [
+        datetime.fromtimestamp(1_760_000_000, UTC).date(),
+        datetime.fromtimestamp(1_760_000_000 + 4 * 86_400, UTC).date(),
+    ]
+
+
+def test_turns_of_different_requesters_go_to_different_episodes() -> None:
+    """Each episode belongs to one requester, so its extraction cost is charged to them."""
+    alice = _run("r1", created_at=1_760_000_000)
+    bob = _run("r2", created_at=1_760_000_060)
+    bob.metadata = {**(bob.metadata or {}), "requester_id": "@bob:example.test"}
+
+    rendered = _episodes([alice, bob], "conversation")
+
+    assert [item.requester_id for item in rendered] == ["@alice:example.test", "@bob:example.test"]

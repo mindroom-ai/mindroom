@@ -40,7 +40,7 @@ Ordinary conversations ingest user, assistant, and tool messages with speaker la
 Exploration threads ingest only tool calls and their results, because the assistant text there is the agent's own synthesis.
 Other automation threads (`dreaming`, `prompt_curation`, plugin automations) are not ingested.
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
-Stored runs do not carry that source today, so the run metadata gains it when the turn starts.
+Each run's metadata records the hook source of the message that started it.
 Calls to the `knowledge_graph` tool and their results are never ingested and never become leads, or extracted claims would return as fresh tool evidence.
 
 Every fact is an attributed claim, not a verified truth.
@@ -134,11 +134,11 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 - Each episode kind has its own marker, so a kind that keeps failing never repeats the other kind's episodes.
 - The marker is the only record of completion: Graphiti's `add_episode(uuid=...)` loads an existing episode and extracts again rather than skipping it, so a crash between the write and the marker re-extracts one episode, which Graphiti's entity and fact resolution merges.
 - An episode is dropped after five unusable model outputs in a row, which the extraction adapter raises as `ValueError`, or after three days of failing, so a request the provider always refuses stops costing calls while a shorter outage loses nothing.
-- A run larger than `max_episode_chars` is split into several episodes, and only its last piece advances the marker, so no tool result is cut away; a tool result is at most half an episode, so a split never cuts one.
-- Failure counts clear only when a run completes or a piece is dropped, because the earlier pieces of a split run succeed again on every retry.
+- A run larger than `max_episode_chars` is split into several episodes, and the marker records each piece, added or dropped, so a retry never repeats a piece and no tool result is cut away; a tool result is at most half an episode, so a split never cuts one.
+- Turns share an episode only with turns of the same day and requester, so relative dates resolve against the day they were said and each episode's extraction is charged to one person.
 - A newly seen conversation starts at the backfill cutoff, and one conversation adds at most twenty completed episodes per pass, so a long history spreads over passes instead of holding up every other conversation.
-- A paused turn stops holding back its conversation once every approval it could still get has expired, and the conversation is looked at again then even without new messages.
-- A database server that died is started again on the next call.
+- A paused turn stops holding back its conversation once the approval it waits for has expired, counted from its newest message, which is the call waiting for approval; the conversation is looked at again then even without new messages.
+- A database server that died is started again on the next call, and a start waits while the server loads a large database, which can take minutes after a restart.
 - A new graph's start is saved when it is first seen, so the backfill window stays anchored even with `backfill_days: 0`.
 - The graph name includes the embedder signature, so another embedder starts a graph that ingestion fills again.
 
