@@ -280,7 +280,7 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
         authorize=authorize,
     )
     try:
-        async with owner._window("outer", stop_after=None):
+        async with owner._window("outer"):
             response = await owner.operation(
                 window="outer",
                 operation=ToolDescribeOperation(operation="tools.describe", toolkit="big", function="huge"),
@@ -367,7 +367,7 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
                 owner.bind_catalog(await catalog_for_window())
             token = tag.set(label)
             try:
-                async with owner._window(label, stop_after=None):
+                async with owner._window(label):
                     admitted = await submit(label)
             finally:
                 tag.reset(token)

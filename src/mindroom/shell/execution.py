@@ -185,12 +185,6 @@ def shell_call_timeout(timeout: float | None) -> float | None:
     return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
 
 
-def requested_shell_timeout(arguments: Mapping[str, Any]) -> float | None:
-    """Return the `timeout` a shell call's arguments set, or None when they set none."""
-    value = arguments.get("timeout")
-    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
-
-
 def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
     """Return how long one worker request outside a job may take for this shell call, or 0 when it has no foreground wait.
 
@@ -198,8 +192,12 @@ def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Map
     """
     if tool_name != "shell" or function_name != "run_shell_command":
         return 0.0
-    timeout = requested_shell_timeout(kwargs)
-    return max(0.0, _DEFAULT_RUN_TIMEOUT_SECONDS if timeout is None else timeout) + _SHELL_REQUEST_GRACE_SECONDS
+    raw_timeout = kwargs.get("timeout")
+    try:
+        timeout = _DEFAULT_RUN_TIMEOUT_SECONDS if raw_timeout is None else max(0.0, float(raw_timeout))
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_RUN_TIMEOUT_SECONDS
+    return timeout + _SHELL_REQUEST_GRACE_SECONDS
 
 
 async def run_command(

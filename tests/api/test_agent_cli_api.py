@@ -118,7 +118,7 @@ async def test_internal_factory_key_error_is_not_client_validation(tmp_path: Pat
             transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
             base_url="http://test",
         ) as client,
-        owner._window("bash", stop_after=None),
+        owner._window("bash"),
     ):
         for toolkit, expected_status in (("missing", 422), ("broken", 500)):
             response = await client.post(
@@ -194,7 +194,7 @@ async def test_live_retry_disconnect_conflict_and_restart_are_owner_scoped(tmp_p
                 "detail": "This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running",
             },
         )
-        async with owner._window("parent-bash", stop_after=None):
+        async with owner._window("parent-bash"):
             lost = asyncio.create_task(
                 client.post("/api/agent-cli/operations", headers=window_headers | {"x-lose-reply": "1"}, json=payload),
             )

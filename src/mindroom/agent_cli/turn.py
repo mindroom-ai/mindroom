@@ -42,7 +42,6 @@ from mindroom.agno_compat_prepared_tools import stop_function_call
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
 from mindroom.response_turn import PausedAttempt
-from mindroom.shell.execution import requested_shell_timeout, shell_call_timeout
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -339,10 +338,8 @@ class LiveTurnTools(TurnToolBridge):
         self._active[task] = window
 
     @asynccontextmanager
-    async def _window(self, window: str, *, stop_after: float | None) -> AsyncIterator[None]:
-        """Run one command's CLI calls, which end by its timeout as its processes do."""
-        loop = asyncio.get_running_loop()
-        deadline = None if stop_after is None else loop.time() + stop_after
+    async def _window(self, window: str) -> AsyncIterator[None]:
+        """Run one command's CLI calls; the command's timeout stops its processes, never the agent's calls it made."""
         async with self._admission:
             self._check_live()
             self._windows[window] = copy_context()
@@ -352,16 +349,11 @@ class LiveTurnTools(TurnToolBridge):
             self._cancel_window(window)
             raise
         finally:
-            # Calls the command left running may finish until its deadline; a command stopped there has none left.
-            expiry = None if deadline is None else loop.call_at(deadline, self._cancel_window, window)
-            try:
-                await wait_for_future_until_complete(
-                    asyncio.create_task(self._drain_window(window), name="agent-cli-window-drain"),
-                    on_cancel=partial(self._cancel_window, window),
-                )
-            finally:
-                if expiry is not None:
-                    expiry.cancel()
+            # A call the command left running, such as one waiting for a person's approval, finishes first.
+            await wait_for_future_until_complete(
+                asyncio.create_task(self._drain_window(window), name="agent-cli-window-drain"),
+                on_cancel=partial(self._cancel_window, window),
+            )
 
     def _cancel_window(self, window: str) -> None:
         """Stop one command's admitted CLI work and refuse its later calls; other running commands keep their CLI."""
@@ -457,7 +449,7 @@ class LiveTurnTools(TurnToolBridge):
         self._media.pop(parent, None)
 
         async def leaf(values: dict[str, object]) -> object:
-            async with self._window(parent, stop_after=shell_call_timeout(requested_shell_timeout(values))):
+            async with self._window(parent):
                 return await self._invoke_shell(binding, values, window=parent)
 
         events = self._execute(
@@ -476,15 +468,15 @@ class LiveTurnTools(TurnToolBridge):
         for media in self._media.pop(parent, []):
             yield AgentToolCallEvent("media", call_id, binding.key, media=media)
 
-    async def run_native_shell(self, run: Callable[[], Awaitable[object]], *, stop_after: float | None) -> object:
-        """Run one standard-mode native shell call inside its own CLI window and environment, until ``stop_after``."""
+    async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
+        """Run one standard-mode native shell call inside its own CLI window and environment."""
         self._check_live()
         if self.shell_env is None:
             msg = "Native shell has no CLI environment"
             raise RuntimeError(msg)
         parent = f"native-{uuid4().hex}"
         try:
-            async with self._window(parent, stop_after=stop_after):
+            async with self._window(parent):
                 with bound_agent_cli_shell_env(self.shell_env, window=parent):
                     result = await run()
         finally:

@@ -22,7 +22,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   A call that is not a job keeps its limits, which the primary checks as lines arrive; persistent browser actions keep one response, because cancelling one closes the shared browser.
 - A request says whether it runs as a job, and the runner binds that job in its own process and in per-request children, so a tool sees the same ownership wherever it runs; a `mindroom-agent` call inherits it from its command's window.
 - Progress is the latest report on the runtime entry, never saved and shown only while the job runs, so a report from a thread that outlived its call cannot change a settled job.
-- A command's `mindroom-agent` calls share its deadline, so the shell call returns by its `timeout` whether the command ended early or was stopped, and nothing has to tell those two apart from the command's output.
+- A command's `mindroom-agent` calls are the agent's own actions, so the command's `timeout` stops its processes but never those calls, and its shell call waits for them; a time limit on them would cancel a call a person approves late, and nothing has to tell a stopped command from one that ended.
 - The response's `mindroom-agent` owner closes through the response's execution resources, so a shell job that outlives its reply keeps the CLI until the last job settles; cancelling one shell window stops only that window's calls.
 - Saved custom generator events replay as fixed SDK subclasses, so saved data never chooses the class or methods that run.
 - Recovery fails on a saved job it cannot read and names that job, instead of dropping it silently.
