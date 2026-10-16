@@ -138,7 +138,7 @@ Matrix sync callback
 | `tool_jobs/control.py` | Newer human messages that release waits, and cancellation checkpoints |
 | `tool_jobs/background_after.py` | The reserved `background_after` argument of managed calls and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
-| `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and how long a reply waits for a job's approval |
+| `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and how long a reply waits for a job and its approval |
 | `tool_jobs/notices.py` | The notice on a tool result and the turn-start note about jobs that ended |
 | `tool_jobs/publication.py` | Each agent's live jobs, published per room as state for the client jobs bar |
 | `tool_jobs/client_cancel.py` | Client cancel events, `!jobs` and `!cancel_job`, and a left room's jobs |

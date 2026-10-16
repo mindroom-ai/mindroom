@@ -31,9 +31,15 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
+from mindroom.dispatch_source import (
+    EXTERNAL_TRIGGER_SOURCE_KIND,
+    HOOK_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+)
 from mindroom.hooks import HookRegistry
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_jobs import agno_execution, results
+from mindroom.tool_jobs import agno_execution, conversation, results
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.consumption import (
@@ -346,6 +352,84 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
                     await parent
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    [SCHEDULED_SOURCE_KIND, HOOK_SOURCE_KIND, EXTERNAL_TRIGGER_SOURCE_KIND, MESSAGE_SOURCE_KIND],
+)
+async def test_an_automation_turn_waits_for_its_jobs_only_so_long(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+) -> None:
+    """Nobody sends the message that would release an automation turn's wait, so its waits end while the work runs on.
+
+    A turn a person started keeps waiting until that person's next message.
+    """
+    monkeypatch.setattr(conversation, "_UNATTENDED_WAIT_SECONDS", 0.05)
+    release = asyncio.Event()
+
+    async def slow_tool() -> str:
+        await release.wait()
+        return "actual result"
+
+    paths = _runtime_paths(tmp_path)
+    context = replace(
+        _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths),
+        source_kind=source_kind,
+    )
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("slow_tool", "exact-call")]), ModelResponse(content="done")],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[assembled_function(slow_tool)])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context), pending_human_messages_context(asyncio.Event()):
+                parent = asyncio.create_task(agent.arun("start", session_id=context.session_id))
+                done, _ = await asyncio.wait(
+                    {parent},
+                    timeout=0.5 if source_kind == MESSAGE_SOURCE_KIND else JOB_TEST_TIMEOUT,
+                )
+                if source_kind == MESSAGE_SOURCE_KIND:
+                    assert not done, "a turn a person started waits for its call until their next message"
+                    release.set()
+                    response = await asyncio.wait_for(parent, JOB_TEST_TIMEOUT)
+                    assert response.tools is not None
+                    assert response.tools[0].result == "actual result"
+                    return
+                assert parent in done, "an automation turn must stop waiting for a call nobody can release"
+                response = parent.result()
+                assert response.tools is not None
+                job_id = json.loads(response.tools[0].result)["job_id"]
+                waited = await asyncio.wait_for(JobTools(paths, owner).job(action="wait", job_id=job_id), 30)
+                assert json.loads(waited)["status"] == "running"
+                release.set()
+                completed = await asyncio.wait_for(runtime.wait(job_id, owner=owner, depth=0), JOB_TEST_TIMEOUT)
+                assert completed.job.result == "actual result"
+                await runtime.release_wait(job_id, completed.claim)
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+def test_an_automation_turn_keeps_a_budget_its_call_sets(tmp_path: Path) -> None:
+    """Only a wait without a budget is bounded in an automation turn, so a model can still wait longer on purpose."""
+    paths = _runtime_paths(tmp_path)
+    context = replace(
+        _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths),
+        source_kind=SCHEDULED_SOURCE_KIND,
+    )
+    with tool_runtime_context(context):
+        assert conversation.current_wait_budget(3600) == 3600
+        assert conversation.current_wait_budget(None) == 120
 
 
 @pytest.mark.asyncio

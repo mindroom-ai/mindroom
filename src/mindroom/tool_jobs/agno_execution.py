@@ -50,7 +50,7 @@ from mindroom.tool_jobs.background_after import (
 )
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
-from mindroom.tool_jobs.conversation import current_approval_wait_timeout
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_wait_budget
 from mindroom.tool_jobs.execution_authority import (
     authorized_tool_call,
     check_current_execution_authority,
@@ -601,7 +601,7 @@ async def _run_managed_call(
                 job_id,
                 owner=owner,
                 depth=depth,
-                timeout=background_after,
+                timeout=current_wait_budget(background_after),
                 claim=claim,
                 # The reply waits this long for a human decision, then goes on while the job waits for it.
                 approval_timeout=current_approval_wait_timeout() if job_approval else None,

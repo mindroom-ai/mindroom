@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -27,6 +27,19 @@ class ConversationKey:
     requester_id: str
     # Work a silent schedule started is reported silently, so visible replies never hear of it, and the reverse.
     silent: bool
+
+
+# Nobody sends the newer message that would release an automation turn's wait, so a wait without a budget ends after
+# this long there and the work continues in the background.
+_UNATTENDED_WAIT_SECONDS = 120.0
+
+
+def current_wait_budget(requested: float | None) -> float | None:
+    """Return how long the reply running now waits for a job: as requested, or a bounded wait in an automation turn."""
+    if requested is not None:
+        return requested
+    context = get_tool_runtime_context()
+    return _UNATTENDED_WAIT_SECONDS if context is not None and is_automation_source_kind(context.source_kind) else None
 
 
 def current_approval_wait_timeout() -> float | None:

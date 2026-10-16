@@ -36,9 +36,11 @@ from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
 from mindroom.delegation.state import DelegationState
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_jobs import conversation
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
@@ -1103,6 +1105,7 @@ async def _drive_background_child(
     run_child: Callable[..., Awaitable[str]],
     *,
     while_waiting: Callable[[], Awaitable[None]] | None = None,
+    source_kind: str | None = None,
 ) -> RunOutput:
     """Drive one parent delegation whose child runs as a managed job, acting once the child starts."""
     paths = _runtime_paths(tmp_path)
@@ -1133,7 +1136,8 @@ async def _drive_background_child(
     )
     parent = Agent(id="leader", name="leader", model=model, db=storage, tools=[toolkit], telemetry=False)
     try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)):
+        context = _delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)
+        with tool_runtime_context(replace(context, source_kind=source_kind)):
             paused = await parent.arun(
                 "Delegate",
                 session_id=_BACKGROUND_PARENT.session_id,
@@ -1282,6 +1286,26 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path)
     state = DelegationState.from_metadata(response.metadata)
     assert state.children == []
     assert all(hook.after_called for hook in state.hooks.values())
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_parent_stops_waiting_for_its_child_while_the_child_works_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nobody sends the message that would release a scheduled reply's wait, so it returns the child's handle."""
+    monkeypatch.setattr(conversation, "_UNATTENDED_WAIT_SECONDS", 0.05)
+    child = _BlockingChild()
+    response = await _drive_background_child(
+        tmp_path,
+        await tool_job_runtime(tmp_path),
+        child,
+        source_kind=SCHEDULED_SOURCE_KIND,
+    )
+    assert response.status == RunStatus.completed
+    result = next(tool.result for tool in response.tools or () if tool.tool_call_id == "waiting")
+    assert json.loads(str(result))["status"] == "running"
+    assert child.started.is_set()
 
 
 @pytest.mark.asyncio
