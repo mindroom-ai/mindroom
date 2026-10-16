@@ -10,6 +10,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, TypedDict
 
 from agno.run.base import RunStatus
@@ -330,14 +331,19 @@ class KnowledgeGraphIngestionWorker:
             marker = _marker(entry, kind)
             # A run whose pieces are partly done is rendered again, and its done pieces are skipped below.
             new_runs = [run for run in finished if marker is None or (*run_key(run), RUN_DONE) > marker]
-            for rendered in render_episodes(
-                new_runs,
-                thread_kind=thread_kind,
-                episode_kind=kind,
-                agent_name=scope.agent_name,
-                settings=settings,
-                agent_for_sender=agent_for_sender,
-            ):
+            # Rendering redacts every tool result of the backlog, which must not stall the event loop.
+            episodes = await asyncio.to_thread(
+                partial(
+                    render_episodes,
+                    new_runs,
+                    thread_kind=thread_kind,
+                    episode_kind=kind,
+                    agent_name=scope.agent_name,
+                    settings=settings,
+                    agent_for_sender=agent_for_sender,
+                ),
+            )
+            for rendered in episodes:
                 if marker is not None and rendered.progress <= marker:
                     continue
                 usage = UsageTarget(

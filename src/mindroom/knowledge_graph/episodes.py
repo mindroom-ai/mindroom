@@ -39,11 +39,13 @@ RUN_DONE = 1 << 30
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
 _GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
-# Agno's reasoning functions return the model's own thoughts, and subagents answer in another model's prose; a
-# subagent's own tool results come in through its own session.
-_PROSE_FUNCTIONS = ("think", "analyze", "run_subagent", "continue_subagent")
+# Agno's reasoning functions return the model's own thoughts, and subagents and Claude Code answer in another model's
+# prose; a subagent's own tool results come in through its own session. A background job's collected result no longer
+# says which tool produced it, so it could be either.
+_PROSE_FUNCTIONS = ("think", "analyze", "run_subagent", "continue_subagent", "claude_send", "job")
 _MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
 _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
+_LINE_BREAK = re.compile(r"\s*\n\s*")
 _CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
 _MAX_LISTED_CALLS = 20
 # A task delegated by another agent runs in a session of its own, named after the delegation.
@@ -220,13 +222,18 @@ def _conversation_lines(
             continue
         if message.role == "user":
             lines.extend(
-                f"{_speaker(sender, agent_for_sender)}: {_clean(body, settings.max_episode_chars)}"
+                f"{_speaker(sender, agent_for_sender)}: {_one_line(_clean(body, settings.max_episode_chars))}"
                 for sender, body in _prompt_messages(message.content, str(requester))
             )
         # A stopped turn's answer is a rendered summary that can quote tool previews, not the agent's words.
         elif message.role == "assistant" and not is_interrupted_replay_run(run):
-            lines.append(f"agent {agent_name}: {_clean(message.content, settings.max_episode_chars)}")
+            lines.append(f"agent {agent_name}: {_one_line(_clean(message.content, settings.max_episode_chars))}")
     return lines
+
+
+def _one_line(text: str) -> str:
+    """Join a message's lines, since Graphiti reads every line of a dialogue as a new speaker's."""
+    return _LINE_BREAK.sub(" ", text)
 
 
 def _speaker(sender: str, agent_for_sender: Callable[[str], str | None]) -> str:

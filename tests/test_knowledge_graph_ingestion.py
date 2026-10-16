@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge_graph.episodes import RenderedEpisode
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import EpisodeInput, GraphFact, _GraphEntity
     from mindroom.knowledge_graph.usage import UsageTarget
@@ -757,3 +759,22 @@ async def test_a_configuration_error_never_counts_as_unusable_output(tmp_path: P
     await worker._run_cycle(config, now=T0 + 40_000)
 
     assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
+
+
+@pytest.mark.asyncio
+async def test_episodes_are_rendered_off_the_event_loop(tmp_path: Path) -> None:
+    """Rendering and redacting a long backlog must not stall every agent's replies."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    rendered_on: list[threading.Thread] = []
+    real = ingestion.render_episodes
+
+    def render(*args: object, **kwargs: object) -> list[RenderedEpisode]:
+        rendered_on.append(threading.current_thread())
+        return real(*args, **kwargs)
+
+    with patch.object(ingestion, "render_episodes", render):
+        await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+
+    assert rendered_on
+    assert all(thread is not threading.main_thread() for thread in rendered_on)
