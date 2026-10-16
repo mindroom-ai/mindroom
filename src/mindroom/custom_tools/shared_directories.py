@@ -9,11 +9,10 @@ from agno.tools import Toolkit
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.requester_identity import is_access_checked_requester_id
-from mindroom.shared_directories.paths import agent_reads_shares_in_worker, shared_directory_view_path
+from mindroom.shared_directories.paths import agent_reads_shares_in_worker, agent_shared_directory_views
 from mindroom.shared_directories.store import (
     SharedDirectoryError,
     add_shared_directory_member,
-    agent_shared_directories,
     create_shared_directory,
     delete_shared_directory,
     is_shareable_agent,
@@ -24,7 +23,6 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from mindroom.shared_directories.store import SharedDirectory
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -70,11 +68,6 @@ class SharedDirectoryTools(Toolkit):
             return _payload("error", message="Private agents cannot share directories.")
         return context, self._agent_name
 
-    @staticmethod
-    def _view_path(context: ToolRuntimeContext, agent_name: str, directory: SharedDirectory) -> str:
-        in_worker = agent_reads_shares_in_worker(context.config, context.runtime_paths, agent_name)
-        return str(shared_directory_view_path(context.runtime_paths, directory, in_worker=in_worker))
-
     def create_shared_directory(self, name: str) -> str:
         """Create a directory you can write and later share read-only with other agents.
 
@@ -93,7 +86,11 @@ class SharedDirectoryTools(Toolkit):
         return _payload(
             "ok",
             name=name,
-            path=self._view_path(context, agent, directory),
+            path=next(
+                str(view.path)
+                for view in agent_shared_directory_views(context.config, context.runtime_paths, agent)
+                if view.directory == directory
+            ),
             message=_changed_message(context, [agent], "Created."),
         )
 
@@ -215,12 +212,12 @@ class SharedDirectoryTools(Toolkit):
         context, agent = resolved
         entries = [
             {
-                "owner": directory.owner,
-                "name": directory.name,
-                "members": list(directory.members),
-                "access": "read-write" if directory.owner == agent else "read-only",
-                "path": self._view_path(context, agent, directory),
+                "owner": view.directory.owner,
+                "name": view.directory.name,
+                "members": list(view.directory.members),
+                "access": "read-write" if view.writable else "read-only",
+                "path": str(view.path),
             }
-            for directory in agent_shared_directories(context.config, context.runtime_paths, agent)
+            for view in agent_shared_directory_views(context.config, context.runtime_paths, agent)
         ]
         return _payload("ok", directories=entries)

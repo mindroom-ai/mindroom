@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.shared_directories import SharedDirectoryTools
 from mindroom.message_target import MessageTarget
-from mindroom.shared_directories.paths import agent_reads_shares_in_worker, shared_directory_view_path
+from mindroom.shared_directories.paths import agent_shared_directory_views
 from mindroom.shared_directories.store import create_shared_directory, load_shared_directories
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -268,15 +268,18 @@ def test_paths_name_the_worker_mount_when_tools_run_in_a_dedicated_worker(
         Config(agents={"alice": AgentConfig(display_name="Alice", worker_tools=["shell"])}),
         runtime_paths,
     )
-    directory = create_shared_directory(runtime_paths, owner="alice", name="report")
+    create_shared_directory(runtime_paths, owner="alice", name="report")
+    in_primary = bind_runtime_paths(
+        Config(agents={"alice": AgentConfig(display_name="Alice", worker_tools=[])}),
+        runtime_paths,
+    )
 
-    assert agent_reads_shares_in_worker(config, runtime_paths, "alice") is True
-    assert shared_directory_view_path(runtime_paths, directory, in_worker=True) == (
-        expected_root / "shared_directories" / "alice" / "report"
-    )
-    assert shared_directory_view_path(runtime_paths, directory, in_worker=False) == (
-        runtime_paths.storage_root / "shared_directories" / "alice" / "report"
-    )
+    assert [view.path for view in agent_shared_directory_views(config, runtime_paths, "alice")] == [
+        expected_root / "shared_directories" / "alice" / "report",
+    ]
+    assert [view.path for view in agent_shared_directory_views(in_primary, runtime_paths, "alice")] == [
+        runtime_paths.storage_root / "shared_directories" / "alice" / "report",
+    ]
 
 
 def test_restart_notice_appears_only_with_dedicated_workers(tmp_path: Path) -> None:

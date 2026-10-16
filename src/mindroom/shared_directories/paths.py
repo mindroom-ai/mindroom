@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.api.sandbox_exec import runner_storage_root
@@ -34,23 +35,47 @@ def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, ag
     )
 
 
-def shared_directory_view_path(runtime_paths: RuntimePaths, directory: SharedDirectory, *, in_worker: bool) -> Path:
+def _shared_directory_view_path(runtime_paths: RuntimePaths, directory: SharedDirectory, *, in_worker: bool) -> Path:
     """Return the path of one shared directory as the agent's tools see it."""
     worker_root = worker_visible_storage_root(runtime_paths) if in_worker else None
     root = worker_root if worker_root is not None else runtime_paths.storage_root
     return root / shared_directory_relative_path(directory.owner, directory.name)
 
 
-def describe_agent_shared_directories(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> tuple[str, ...]:
-    """Describe each shared directory one agent reaches by its path, owner, and access."""
+@dataclass(frozen=True, slots=True)
+class _SharedDirectoryView:
+    """One shared directory as an agent sees it: where its tools find it and whether it may write there."""
+
+    directory: SharedDirectory
+    path: Path
+    writable: bool
+
+
+def agent_shared_directory_views(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> tuple[_SharedDirectoryView, ...]:
+    """Return the shared directories one agent owns, writable, or joined, read-only, at the paths its tools see."""
     directories = agent_shared_directories(config, runtime_paths, agent_name)
     if not directories:
         return ()
     in_worker = agent_reads_shares_in_worker(config, runtime_paths, agent_name)
     return tuple(
-        f"`{shared_directory_view_path(runtime_paths, directory, in_worker=in_worker)}` "
-        + ("(yours, read-write)" if directory.owner == agent_name else f"(from {directory.owner}, read-only)")
+        _SharedDirectoryView(
+            directory=directory,
+            path=_shared_directory_view_path(runtime_paths, directory, in_worker=in_worker),
+            writable=directory.owner == agent_name,
+        )
         for directory in directories
+    )
+
+
+def describe_agent_shared_directories(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> tuple[str, ...]:
+    """Describe each shared directory one agent reaches by its path, owner, and access."""
+    return tuple(
+        f"`{view.path}` " + ("(yours, read-write)" if view.writable else f"(from {view.directory.owner}, read-only)")
+        for view in agent_shared_directory_views(config, runtime_paths, agent_name)
     )
 
 
@@ -88,9 +113,6 @@ def shared_directory_roots(
         # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
         return ()
     return tuple(
-        SharedDirectoryRoot(
-            path=runtime_paths.storage_root / shared_directory_relative_path(directory.owner, directory.name),
-            writable=directory.owner == agent_name,
-        )
-        for directory in agent_shared_directories(config, runtime_paths, agent_name)
+        SharedDirectoryRoot(path=view.path, writable=view.writable)
+        for view in agent_shared_directory_views(config, runtime_paths, agent_name)
     )
