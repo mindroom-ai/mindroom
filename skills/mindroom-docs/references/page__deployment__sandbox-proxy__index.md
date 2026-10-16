@@ -504,6 +504,7 @@ Unsupported resources or oversized results produce a tool error.
 - Dedicated Docker workers share the host kernel, so a kernel bug can let worker code escape its container.
   To keep worker code off the host kernel, install a sandboxed runtime for the Docker daemon and set `MINDROOM_DOCKER_WORKER_RUNTIME` to it, such as `runsc` for gVisor or `io.containerd.kata.v2` for Kata Containers, which runs each worker in its own virtual machine and needs KVM.
   With gVisor 20261005 or earlier, do not register `runsc` with `--oci-seccomp`, because workers then cannot start threads and fail to start.
+  MindRoom sets no CPU or memory limit on Docker workers, so Kata sizes each worker's virtual machine from the `default_vcpus` and `default_memory` settings in its configuration, which default to 1 vCPU and 2 GiB.
   On Kubernetes, set [`workers.kubernetes.runtimeClassName`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) instead.
 
 ## Environment variable reference

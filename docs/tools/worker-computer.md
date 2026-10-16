@@ -238,6 +238,7 @@ An empty `MINDROOM_DOCKER_WORKER_USER` uses the image's default user.
 
 With gVisor as the worker runtime (`MINDROOM_DOCKER_WORKER_RUNTIME=runsc`), Computer needs gVisor 20261005 or later, because gVisor 20260406 crashes Chromium's page loads.
 By default, gVisor does not apply the `computer` seccomp profile inside its sandbox.
+Kata Containers (`MINDROOM_DOCKER_WORKER_RUNTIME=io.containerd.kata.v2`) applies the profile only when its configuration sets `disable_guest_seccomp = false`, which is not the default.
 
 ### Kubernetes
 
