@@ -619,15 +619,18 @@ def _render_tool_tag(entry: ToolTraceEntry) -> str:
 
 
 def body_with_tool_tags(body: str, trace: Sequence[ToolTraceEntry]) -> str:
-    """Replace each marker with its trace entry's tag; a marker without an entry is dropped."""
+    """Replace each marker with its trace entry's tag; a marker without an entry, or repeating one, is dropped."""
     lines: list[str] = []
+    rendered: set[int] = set()
     for line in body.splitlines():
         if not is_visible_tool_marker_line(line):
             lines.append(line)
             continue
         index_match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line)
         index = int(index_match.group()) if index_match is not None else 0
-        if 1 <= index <= len(trace):
+        # Each entry renders once, so repeated markers cannot multiply a large preview.
+        if 1 <= index <= len(trace) and index not in rendered:
+            rendered.add(index)
             lines.append(_render_tool_tag(trace[index - 1]))
     return "\n".join(lines)
 

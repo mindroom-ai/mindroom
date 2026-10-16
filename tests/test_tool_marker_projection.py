@@ -109,6 +109,15 @@ def test_body_with_tool_tags_replaces_markers_in_place() -> None:
     assert body_with_tool_tags(_BODY, _TRACE[:1]).endswith("Fixing.\n")
 
 
+def test_repeated_markers_render_their_entry_once() -> None:
+    """A crafted body repeating one marker cannot multiply that entry's preview into a huge judge input."""
+    trace = [ToolTraceEntry(type="tool_call_completed", tool_name="shell", result_preview="x" * 30_000)]
+    body = "Done.\n" + "🔧 `shell` [1]\n" * 2_500
+    tagged = body_with_tool_tags(body, trace)
+    assert tagged.count("<tool ") == 1
+    assert len(tagged) < 31_000
+
+
 def test_memory_extraction_reads_replies_without_markers() -> None:
     """Memory extraction reads an agent reply's text, not its display markers."""
     message = ResolvedVisibleMessage.synthetic(
