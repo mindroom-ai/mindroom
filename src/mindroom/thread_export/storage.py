@@ -21,7 +21,6 @@ from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import MAX_READ_BYTES, open_directory_within_root, read_regular_file_within_root
-from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -460,7 +459,7 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
         "latest_event_id": message.latest_event_id,
         "sender": message.sender,
         "timestamp": message.timestamp,
-        "body": body_without_tool_markers(message.body, message.content),
+        "body": message.body,
     }
     if timestamp_iso := _timestamp_iso(message.timestamp):
         payload["timestamp_iso"] = timestamp_iso

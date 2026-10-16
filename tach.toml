@@ -4014,7 +4014,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.thread_export.storage"
-depends_on = ["mindroom.path_confinement", "mindroom.atomic_file", "mindroom.tool_system.events"]
+depends_on = ["mindroom.path_confinement", "mindroom.atomic_file"]
 visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
@@ -4055,6 +4055,7 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.path_confinement",
     "mindroom.thread_export.storage",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.thread_export.execution",

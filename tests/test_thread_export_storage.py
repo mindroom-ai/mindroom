@@ -20,7 +20,6 @@ from mindroom.thread_export.models import ThreadExportRoom
 from mindroom.thread_export.storage import (
     _ROOT_MARKER_FILENAME,
     _ROOT_MARKER_TEXT,
-    _message_payload,
     _safe_path_segment,
     _UnsafeThreadExportPathError,
     exported_content,
@@ -34,8 +33,6 @@ from mindroom.thread_export.storage import (
     write_thread_payload,
 )
 from mindroom.thread_summary import _CurrentThreadSummary, _recover_summary_state
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
-from tests.conftest import make_visible_message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -922,18 +919,3 @@ def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: st
             assert thread_export_storage._read_bytes_at(root_fd, "index.yaml", max_bytes=1_024) is None
     finally:
         os.close(root_fd)
-
-
-def test_exported_messages_drop_tool_markers() -> None:
-    """Exports agents grep with file tools hold each reply's text, not its tool display markers."""
-    body = "Checked.\n\n🔧 `shell` [1]\n\nAll good."
-    trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]) or {}
-    message = make_visible_message(
-        event_id="$reply",
-        sender="@mindroom_general:localhost",
-        body=body,
-        content={"msgtype": "m.text", "body": body, **trace},
-    )
-    payload = _message_payload(message)
-    assert "🔧" not in str(payload["body"])
-    assert "All good." in str(payload["body"])
