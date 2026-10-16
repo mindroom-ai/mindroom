@@ -857,6 +857,18 @@ async def _response_typing_indicator(
             await task
 
 
+def _placeholder_after_approval(participation: ParticipationGate | None) -> Callable[[], Awaitable[bool]] | None:
+    """Let a participation-gated reply show its placeholder once it is approved."""
+    if participation is None:
+        return None
+
+    async def approved() -> bool:
+        await participation.decided.wait()
+        return participation.approved
+
+    return approved
+
+
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
     """Return the thread root used for this response's model and delivery context."""
     if _existing_event_id(request) and not _shows_placeholder(request):
@@ -5407,6 +5419,7 @@ class ResponseRunner:
                         allow_new_terminal_message=lambda: (
                             runtime.participation is None or runtime.participation.approved
                         ),
+                        placeholder_ready=_placeholder_after_approval(runtime.participation),
                     ),
                 )
                 if request.pipeline_timing is not None:
