@@ -53,6 +53,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
     plan_scoped_workspace_mounts,
+    plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
@@ -1225,6 +1226,7 @@ class DockerWorkerBackend:
                 read_only=True,
                 tmpfs=_WORKER_TMPFS,
                 extra_hosts=_WORKER_EXTRA_HOSTS,
+                runtime=self.config.runtime,
                 **security_kwargs,
             )
 
@@ -1531,16 +1533,27 @@ class DockerWorkerBackend:
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None = None,
     ) -> list[tuple[Path, str, bool]]:
+        resolved_agent_policies = self._projection_manager.current_resolved_agent_policies()
+        state_scope_key = resolve_state_scope_worker_key(worker_key, state_scope_worker_key)
         mount_specs = [
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
             for workspace_mount in plan_scoped_workspace_mounts(
-                worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
+                worker_key=state_scope_key,
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=private_agent_names,
-                resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
+                resolved_agent_policies=resolved_agent_policies,
             )
         ]
+        mount_specs.extend(
+            (shared_mount.local_path, str(shared_mount.worker_visible_path), shared_mount.read_only)
+            for shared_mount in plan_shared_directory_mounts(
+                worker_key=state_scope_key,
+                runtime_paths=self._runtime_paths,
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+                resolved_agent_policies=resolved_agent_policies,
+            )
+        )
         validate_unique_worker_visible_paths(
             (container_path for _host_path, container_path, _read_only in mount_specs),
             worker_key=worker_key,
@@ -1591,6 +1604,8 @@ class DockerWorkerBackend:
         }
         if self.config.security_policy == "computer":
             config_payload["runtime_security"] = docker_worker_security_policy_signature()
+        if self.config.runtime is not None:
+            config_payload["runtime"] = self.config.runtime
         normalized = json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

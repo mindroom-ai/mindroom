@@ -46,6 +46,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
+    make_matrix_client_mock,
     message_origin,
     runtime_paths_for,
 )
@@ -118,7 +119,6 @@ class TestAgentBot(AgentBotTestBase):
                 context=context,
                 room=room,
                 requester_user_id="@alice:localhost",
-                is_dm=True,
                 availability=bot._turn_policy.responder_availability(),
             )
 
@@ -182,7 +182,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -245,7 +244,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -276,6 +274,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {"calculator": MagicMock()}
         room = _matrix_room(
@@ -305,7 +304,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -335,6 +333,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {
             "alpha": MagicMock(running=False),
@@ -366,7 +365,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -428,7 +426,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -479,7 +476,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bob:localhost", "can someone help?"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -525,7 +521,6 @@ class TestAgentBot(AgentBotTestBase):
         action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "calculator, help"),
             room,
-            False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
@@ -578,7 +573,6 @@ class TestAgentBot(AgentBotTestBase):
                 source_kind=EXTERNAL_TRIGGER_SOURCE_KIND,
             ),
             room,
-            False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
@@ -641,7 +635,6 @@ class TestAgentBot(AgentBotTestBase):
         action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "ops, help"),
             room,
-            False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
@@ -719,7 +712,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -799,7 +791,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -831,6 +822,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {"calculator": MagicMock(running=True)}
         room = _matrix_room(
@@ -859,7 +851,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -915,7 +906,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                True,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1014,7 +1004,6 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1096,7 +1085,6 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1160,7 +1148,6 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1241,7 +1228,6 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1324,7 +1310,6 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1580,7 +1565,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1645,7 +1629,6 @@ class TestAgentBot(AgentBotTestBase):
         action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
             room,
-            False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
@@ -1713,7 +1696,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -1780,7 +1762,6 @@ class TestAgentBot(AgentBotTestBase):
             action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                False,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 

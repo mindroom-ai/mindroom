@@ -5481,17 +5481,18 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
     )
     reached, release = asyncio.Event(), asyncio.Event()
     first = True
+    plan_turn = TurnPolicy.plan_turn
 
-    async def hold_after_strict_authorization(_client: nio.AsyncClient, _room_id: str) -> bool:
+    async def hold_after_strict_authorization(policy: TurnPolicy, *args: object, **kwargs: object) -> object:
         nonlocal first
         if first:
             first = False
             assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
             reached.set()
             await release.wait()
-        return False
+        return await plan_turn(policy, *args, **kwargs)
 
-    monkeypatch.setattr("mindroom.text_ingress_dispatch.is_dm_room", hold_after_strict_authorization)
+    monkeypatch.setattr(TurnPolicy, "plan_turn", hold_after_strict_authorization)
     await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     try:
         await dispatcher.drain_once()

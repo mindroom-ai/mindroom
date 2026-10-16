@@ -22,6 +22,7 @@ import httpx
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
@@ -984,6 +985,20 @@ def _call_proxy_sync(
         if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
             # A minimal response's grant travels with each command to the agent's own worker.
             execution_env = {**(execution_env or {}), **cli_env.env()}
+        if tool_name in EXECUTION_ENV_TOOL_NAMES and egress_broker_enabled(runtime_paths):
+            # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
+            from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
+
+            execution_env = {
+                **(execution_env or {}),
+                **execution_env_for_worker(
+                    runtime_paths,
+                    config=manager_context.runtime_config,
+                    worker_target=worker_target,
+                    routed_worker_key=worker_payload.get("worker_key"),
+                    call_env=execution_env,
+                ),
+            }
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:

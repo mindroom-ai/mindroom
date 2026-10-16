@@ -18,7 +18,6 @@ from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Literal, cast
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from agno.tools import Toolkit
@@ -65,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import BinaryIO
 
-    from playwright.async_api import Download, Request
+    from playwright.async_api import Download
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
@@ -554,33 +553,18 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
     )
 
 
-async def _goto(page: Page, target_url: str, relay: BrowserDestinationProxy | None) -> None:
-    """Load one URL, naming the destination the egress proxy denied instead of Chromium's SOCKS error."""
-    # The last main-document request is the redirect hop that failed, and Chromium's URL for it spells the host
-    # exactly as Chromium names it to the relay.
-    documents: list[str] = []
-
-    def record_document(request: Request) -> None:
-        if request.is_navigation_request() and request.frame is page.main_frame:
-            documents.append(request.url)
-
-    page.on("request", record_document)
+async def _goto(page: Page, target_url: str) -> None:
+    """Load one URL, saying when the relay or egress proxy may have refused its destination."""
     try:
         await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
     except PlaywrightError as exc:
-        # Only Chromium's failure to connect through the relay can be the recorded denial; a timeout stays a timeout.
-        if relay is None or not documents or "ERR_SOCKS_CONNECTION_FAILED" not in exc.message:
+        if "net::ERR_SOCKS_CONNECTION_FAILED" not in exc.message:
             raise
-        url = urlsplit(documents[-1])
-        host = url.hostname or ""
-        port = url.port or (443 if url.scheme == "https" else 80)
-        if not relay.egress_refused(host, port):
-            raise
-        authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-        msg = f"The browser could not reach {authority} because the egress proxy does not allow connections to it."
+        msg = (
+            f"{exc.message}\nThe browser's proxy could not connect to this destination; outbound access to its host "
+            "or port may not be allowed from this browser."
+        )
         raise RuntimeError(msg) from exc
-    finally:
-        page.remove_listener("request", record_document)
 
 
 def _copy_within_limit(source: BinaryIO, output: BinaryIO, max_bytes: int) -> int:
@@ -1351,7 +1335,7 @@ class BrowserTools(Toolkit):
             await page.set_content(html, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
         else:
             assert target_url is not None
-            await _goto(page, target_url, state.destination_proxy)
+            await _goto(page, target_url)
         if self._worker_display is not None:
             await page.bring_to_front()
         state.active_target_id = target_id
@@ -1397,7 +1381,7 @@ class BrowserTools(Toolkit):
     async def _navigate(self, profile_name: str, target_url: str, target_id: str | None) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        await _goto(tab.page, target_url, state.destination_proxy)
+        await _goto(tab.page, target_url)
         state.active_target_id = resolved_target_id
         return {
             "action": "navigate",

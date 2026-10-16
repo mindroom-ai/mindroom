@@ -195,6 +195,9 @@ def _special_tool_names(
         # tools the agent's own request offered.
         tool_names.append("skill_manage")
 
+    if config.agent_uses_knowledge_graph(agent_name):
+        tool_names.append("knowledge_graph")
+
     if enable_dynamic_tools_manager and has_deferred_tools(config, agent_name):
         tool_names.append("dynamic_tools")
 

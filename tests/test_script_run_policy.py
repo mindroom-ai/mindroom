@@ -19,6 +19,7 @@ from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.script_runs.policy import (
     resolve_current_script_tool,
     resolve_script_launch_grants,
+    resolve_script_launch_toolkit_names,
 )
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -29,18 +30,24 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_dynamic_toolkits import _egress_broker_env
+from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.tools import Toolkit
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _context_for_config(tmp_path: Path, config: Config) -> ToolRuntimeContext:
-    runtime_paths = test_runtime_paths(tmp_path)
-    bound_config = bind_runtime_paths(config, runtime_paths)
+def _context_for_config(
+    tmp_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths | None = None,
+) -> ToolRuntimeContext:
+    bound_config = bind_runtime_paths(config, runtime_paths or test_runtime_paths(tmp_path))
     return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -130,6 +137,29 @@ def test_launch_grants_exclude_stateful_browser_toolkit(tmp_path: Path) -> None:
     grants = resolve_script_launch_grants(context)
 
     assert all(grant.toolkit_name != "browser" for grant in grants)
+
+
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_launch_toolkits_include_egress_credentials_only_while_the_broker_is_on(
+    tmp_path: Path,
+    *,
+    broker_on: bool,
+) -> None:
+    """With the broker off a background script is not offered the egress credentials tool its agent lists."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "egress_credentials"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+        _toolkit_runtime_paths(tmp_path, **_egress_broker_env(broker_on=broker_on)),
+    )
+
+    names = resolve_script_launch_toolkit_names(context)
+
+    assert "calculator" in names
+    assert ("egress_credentials" in names) is broker_on
 
 
 def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:

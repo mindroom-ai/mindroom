@@ -28,6 +28,7 @@ from agno.tools import Toolkit
 
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
+from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
 from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
@@ -35,12 +36,16 @@ from mindroom.tools.path_safety import (
     read_resolved_file,
     resolve_base_dir_path,
     resolve_tool_base_dir,
+    spelled_output_path,
     split_search_pattern,
     write_resolved_file,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.models import FileAccess
+    from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 
 _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
@@ -454,7 +459,7 @@ def _list_directory(target: Path, limit: int) -> str:
     entries: list[str] = []
     try:
         for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
-            name = item.name + ("/" if item.is_dir() else "")
+            name = (spelled_output_path(item) or item.name) + ("/" if item.is_dir() else "")
             entries.append(name)
             if len(entries) > limit:
                 break
@@ -498,11 +503,7 @@ def _find_files_in(
     filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
     matches: list[str] = []
     for candidate in filtered:
-        try:
-            rel = candidate.relative_to(base_dir)
-        except ValueError:
-            rel = candidate
-        matches.append(str(rel))
+        matches.append(format_path_for_output(candidate, base_dir))
         if len(matches) > limit:
             break
 
@@ -556,9 +557,11 @@ class CodingTools(Toolkit):
         self,
         base_dir: str | None = None,
         file_access: FileAccess = "workspace",
+        shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]] = no_shared_directory_roots,
     ) -> None:
         self.base_dir = resolve_tool_base_dir(base_dir)
         self.restrict_to_base_dir = file_access == "workspace"
+        self.shared_directory_roots = shared_directory_roots
         super().__init__(
             name="coding",
             tools=[
@@ -571,6 +574,7 @@ class CodingTools(Toolkit):
             ],
         )
 
+    @shared_directory_aware("path", writes=False)
     def read_file(
         self,
         path: str,
@@ -593,6 +597,7 @@ class CodingTools(Toolkit):
             return result
         return _format_read_output(result[1], offset, limit)
 
+    @shared_directory_aware("path", writes=True)
     def edit_file(self, path: str, old_text: str, new_text: str) -> str:
         """Replace a specific text occurrence in a file. Uses fuzzy matching to handle whitespace/Unicode differences.
 
@@ -635,6 +640,7 @@ class CodingTools(Toolkit):
         line_num = content[: match.start].count("\n") + 1
         return f"Applied edit at line {line_num}{fuzzy_note}:\n\n{diff}"
 
+    @shared_directory_aware("path", writes=True)
     def write_file(self, path: str, content: str) -> str:
         """Write content to a file, creating parent directories if needed.
 
@@ -662,6 +668,7 @@ class CodingTools(Toolkit):
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return f"Wrote {byte_count} bytes ({lines} lines) to {path}"
 
+    @shared_directory_aware("path", writes=False)
     def grep(
         self,
         pattern: str,
@@ -730,6 +737,7 @@ class CodingTools(Toolkit):
             )
         return rg_result
 
+    @shared_directory_aware("path", writes=False)
     def find_files(
         self,
         pattern: str,
@@ -774,6 +782,7 @@ class CodingTools(Toolkit):
             restrict_to_base_dir=self.restrict_to_base_dir,
         )
 
+    @shared_directory_aware("path", writes=False)
     def ls(self, path: str | None = None, limit: int = _DEFAULT_LS_LIMIT) -> str:
         """List directory contents with directory indicators.
 
@@ -1002,10 +1011,7 @@ def _grep_file(
     except (OSError, UnicodeDecodeError):
         return match_count
 
-    try:
-        rel = filepath.relative_to(base_dir)
-    except ValueError:
-        rel = filepath
+    rel = format_path_for_output(filepath, base_dir)
 
     lines = text.splitlines()
     emitted_lines: set[int] = set()

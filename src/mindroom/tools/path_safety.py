@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from glob import has_magic
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,11 +19,25 @@ from mindroom.path_confinement import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from typing import BinaryIO
 
     from mindroom.config.models import FileAccess
 
 _BASE_DIR_ESCAPE_HINT = "Set the agent's file_access to 'unrestricted' to allow paths outside the workspace."
+# A toolkit rooted at a shared directory reports paths as the caller spelled that directory, never relative to it,
+# so a listed name is never read back from the workspace instead.
+_output_spelling: ContextVar[tuple[Path, Path] | None] = ContextVar("path_output_spelling", default=None)
+
+
+@contextmanager
+def spell_output_paths(root: Path, spelling: Path) -> Iterator[None]:
+    """Report paths below ``root`` as absolute paths below ``spelling`` while the block runs."""
+    token = _output_spelling.set((root, spelling))
+    try:
+        yield
+    finally:
+        _output_spelling.reset(token)
 
 
 def _blocked_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:
@@ -47,8 +62,21 @@ def blocked_git_metadata_message(action: str, requested_path: str) -> str:
     return f"Error {action}: path '{requested_path}' is inside Git metadata ('.git'), which file tools may not modify."
 
 
+def spelled_output_path(path: str | Path) -> str | None:
+    """Return ``path`` as the caller spelled the shared directory holding it, or ``None`` outside one."""
+    if (spelling := _output_spelling.get()) is None:
+        return None
+    root, spelled = spelling
+    try:
+        return str(spelled / Path(path).relative_to(root))
+    except ValueError:
+        return None
+
+
 def format_path_for_output(path: str | Path, base_dir: Path) -> str:
     """Prefer base-dir-relative output, falling back to absolute paths outside the base dir."""
+    if (spelled := spelled_output_path(path)) is not None:
+        return spelled
     try:
         return str(Path(path).relative_to(base_dir))
     except ValueError:

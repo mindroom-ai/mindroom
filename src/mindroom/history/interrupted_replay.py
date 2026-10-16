@@ -56,6 +56,11 @@ class InterruptedReplaySnapshot:
     original_status: RunStatus = RunStatus.cancelled
 
 
+def is_interrupted_replay_run(run: RunOutput | TeamRunOutput) -> bool:
+    """Return whether a stored run replays a stopped or failed turn, whose answer is a rendered summary of it."""
+    return (run.metadata or {}).get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE
+
+
 def tool_execution_call_id(tool: ToolExecution | None) -> str | None:
     """Return one normalized tool-call identifier when the provider supplies it."""
     if tool is None or not isinstance(tool.tool_call_id, str):

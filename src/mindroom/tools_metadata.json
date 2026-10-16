@@ -7822,6 +7822,32 @@
       "config_fields": [],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "See which API keys and connected accounts this agent can use through the egress broker and where to add them",
+      "display_name": "Egress Credentials",
+      "docs_url": null,
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "list_egress_credentials"
+      ],
+      "helper_text": null,
+      "icon": "KeyRound",
+      "icon_color": "text-amber-600",
+      "name": "egress_credentials",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
@@ -8857,6 +8883,34 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "graphiti-core"
+      ],
+      "description": "Look up facts, entities, and their sources in the agent's knowledge graph",
+      "display_name": "Knowledge Graph",
+      "docs_url": null,
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "graph_entity",
+        "search_graph"
+      ],
+      "helper_text": null,
+      "icon": "Network",
+      "icon_color": "text-teal-500",
+      "name": "knowledge_graph",
+      "requires_conversation": false,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "authored_override": true,
@@ -9397,6 +9451,38 @@
       "icon_color": "text-emerald-500",
       "name": "scheduler",
       "requires_conversation": false,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Create directories that other agents can read from their own workers",
+      "display_name": "Shared Directories",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "create_shared_directory",
+        "invite_to_shared_directory",
+        "remove_from_shared_directory",
+        "delete_shared_directory",
+        "list_shared_directories"
+      ],
+      "helper_text": null,
+      "icon": "FolderOpen",
+      "icon_color": "text-amber-500",
+      "name": "shared_directories",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"

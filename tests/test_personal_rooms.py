@@ -2621,7 +2621,6 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
         room,
         event,
         dispatch,
-        is_dm=False,
         has_active_response_for_target=lambda _target: False,
     )
     assert plan.kind == "respond"

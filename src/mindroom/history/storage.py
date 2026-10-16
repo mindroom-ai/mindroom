@@ -43,11 +43,14 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from agno.db.base import SessionType
+from agno.db.sqlite import SqliteDb
+from agno.db.utils import deserialize_session_json_fields
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from sqlalchemy import JSON, column, inspect, select, table
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
@@ -258,7 +261,44 @@ def consume_pending_force_compaction_scope(
     return True
 
 
-def has_pending_force_compaction_scope(
+def has_queued_force_compaction(storage: BaseDb, session_id: str, scope: HistoryScope) -> bool:
+    """Return whether one scope must compact before its next run.
+
+    Reads only the session row's ``metadata`` and ``session_data``, where both
+    requests live. ``get_session`` would also decode every stored run, which
+    takes seconds on a long session.
+    """
+    if not isinstance(storage, SqliteDb):
+        msg = "Reading queued compaction requires SQLite session storage"
+        raise TypeError(msg)
+    sessions = table(
+        storage.session_table_name,
+        column("session_id"),
+        column("metadata", JSON),
+        column("session_data", JSON),
+    )
+    with storage.db_engine.connect() as connection:
+        if not inspect(connection).has_table(storage.session_table_name):
+            return False
+        row = connection.execute(
+            select(sessions.c.metadata, sessions.c.session_data).where(sessions.c.session_id == session_id),
+        ).first()
+    if row is None:
+        return False
+    fields = deserialize_session_json_fields(dict(row._mapping))
+    # Holds only the two fields the requests are parsed from; it is never saved.
+    session = (TeamSession if scope.kind == "team" else AgentSession)(
+        session_id=session_id,
+        metadata=fields["metadata"],
+        session_data=fields["session_data"],
+    )
+    return read_scope_state(session, scope).force_compact_before_next_run or _has_pending_force_compaction_scope(
+        session,
+        scope,
+    )
+
+
+def _has_pending_force_compaction_scope(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
 ) -> bool:
@@ -273,6 +313,11 @@ def has_pending_force_compaction_scope(
     if not isinstance(raw_scope_keys, list):
         return False
     return scope.key in {scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key}
+
+
+def load_archived_runs(storage: BaseDb, session_id: str) -> list[RunOutput | TeamRunOutput]:
+    """Return the runs compaction moved out of a session's live history, in archive order."""
+    return archive.archived_runs(storage, session_id=session_id)
 
 
 def read_scope_seen_event_ids(
@@ -314,7 +359,7 @@ def _read_scope_history_event_ids(
     return event_ids
 
 
-def _run_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
+def run_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
     """Return every Matrix event id one run consumed or answered, as redaction matches them."""
     if not is_model_history_visible_run(run):
         return set()
@@ -704,7 +749,7 @@ def archive_compaction_chunk(
         summary=summary.summary,
         summary_model=summary_model,
         runs=archived_runs,
-        event_ids={run.run_id: _run_event_ids(run) for run in archived_runs if run.run_id},
+        event_ids={run.run_id: run_event_ids(run) for run in archived_runs if run.run_id},
         seen_event_ids={
             run.run_id: _run_seen_event_ids(run)
             for run in archived_runs

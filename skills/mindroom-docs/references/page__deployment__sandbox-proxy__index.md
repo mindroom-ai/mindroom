@@ -194,12 +194,12 @@ This is the default `static_runner` mode of both Helm charts; see [Kubernetes De
 
 The sidecar mounts only these parts of the storage PVC:
 
-- The `agents` and `private_instances` directories, read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
+- The `agents`, `private_instances`, and `shared_directories` directories, read-write at their usual paths, so agent workspaces and [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) persist and stay shared with the primary runtime.
 - Its own `sandbox-runner` directory as its storage root, for worker-local files, virtualenvs, and caches.
 
 It gets no config file and resolves agents from the [live config snapshot](#live-config-snapshots), so agents added or changed after the pod started work immediately.
 It cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and it never receives the credentials-encryption key.
-The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner`, because the sidecar can write those directories.
+The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, `shared_directories`, or `sandbox-runner`, because the sidecar can write those directories.
 
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
@@ -302,8 +302,9 @@ It changes how tool runtimes are isolated, not where agent data lives.
 | `user` | One per user, shared across that user's agents | The workspaces of every non-private agent on `worker_scope: user`, plus that user's own private workspaces of `private.per: user` agents |
 | `user_agent` | One per user and agent pair | That agent's workspace |
 
+Dedicated workers also mount the [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) of the agents they serve, read-write for directories those agents own and read-only for directories they joined.
 Use `user_agent` when you need per-agent filesystem isolation.
-Treat `user` as a shared workstation: it mounts every `worker_scope: user` agent's workspace, including files other requesters leave there, but never agents on other scopes.
+Treat `user` as a shared workstation: it mounts every `worker_scope: user` agent's workspace and shared directories, including files other requesters leave there, but never agents on other scopes.
 A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside a visible workspace or the worker root`).
 
 ### Filesystem isolation and agent data
@@ -315,14 +316,14 @@ Worker runtimes also keep their own virtualenvs, caches, and scratch files, whic
 What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
-- **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
-- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
+- **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
+- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
 When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
-Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
+Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
 Kubernetes knowledge mounts are described in [Knowledge Source Visibility](https://docs.mindroom.chat/deployment/kubernetes/#knowledge-source-visibility).
 Any change to a dedicated worker's launch configuration, mounts, environment, or tool and plugin config recreates the worker on its next use, which ends its tmux sessions, background shells, and computer sessions.
 Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so those workers are recreated too.
@@ -402,19 +403,22 @@ Every worker-routed call leases the called tool's saved settings, because runner
 Values in a dedicated worker's own credential store apply only inside that worker and only where no lease sets a value, so clear worker credential stores if older values there should stop applying.
 
 Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
-For shell authentication, use [environment passthrough](#shell-environment-and-path), the [workspace env hook](#workspace-env-hook-mindroomworker-envsh), or [brokered egress](#brokered-worker-egress).
+For shell authentication, use [environment passthrough](#shell-environment-and-path), the [workspace env hook](#workspace-env-hook-mindroomworker-envsh), or [Agent Keys](#agent-keys-egress-broker).
 
-## Brokered worker egress
+## Agent Keys (egress broker)
 
 To let worker-routed `shell` and `python` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
 This works at the network layer, so it covers URLs inside scripts, package CLIs, and subprocesses.
-There are two supported shapes:
+There are three supported shapes:
 
-- **Per-worker Agent Vault egress** (Kubernetes backend), which gives each worker its own vault for per-user or per-agent isolation, described below.
+- **Native egress broker** runs inside the primary runtime and injects secrets from primary-only credential stores that workers never read.
+  See [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) for configuration, secret management, and deployment.
+  This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values; for hosted instances, see [Hosted instances](https://docs.mindroom.chat/deployment/egress-broker/#hosted-instances-sandbox-runner-sidecar).
+- **Per-worker Agent Vault egress** (Kubernetes backend), the legacy path, which gives each worker its own vault for per-user or per-agent isolation, described below.
 - **A shared credential-injecting proxy** that you run, configured through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`, the chart's `egressProxy` integration, or the worker proxy environment on other backends.
   The proxy holds the real credential and workers receive only its URL.
 
-[Approved egress](https://docs.mindroom.chat/deployment/approved-egress/) and the `mindroom-egress-proxy` image restrict which hosts workers can reach but do not inject credentials; to combine them with Agent Vault, see [Agent Vault Chaining](https://docs.mindroom.chat/deployment/approved-egress/#agent-vault-chaining).
+[Approved egress](https://docs.mindroom.chat/deployment/approved-egress/) and the `mindroom-egress-proxy` image restrict which hosts workers can reach but do not inject credentials; to combine them with the egress broker, see [Egress Broker Chaining](https://docs.mindroom.chat/deployment/approved-egress/#egress-broker-chaining), or with Agent Vault, see [Agent Vault Chaining](https://docs.mindroom.chat/deployment/approved-egress/#agent-vault-chaining).
 
 Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intend the worker process to receive them.
 
@@ -501,6 +505,11 @@ Unsupported resources or oversized results produce a tool error.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and use the pod's `RuntimeDefault` seccomp profile.
   Runtimes that block Chromium's namespace sandbox need the profile described in [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).
 - Dedicated Docker workers can use the hardened `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, which Worker Computer requires; see [Browser and container sandboxing](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).
+- Dedicated Docker workers share the host kernel, so a kernel bug can let worker code escape its container.
+  To keep worker code off the host kernel, install a sandboxed runtime for the Docker daemon and set `MINDROOM_DOCKER_WORKER_RUNTIME` to it, such as `runsc` for gVisor or `io.containerd.kata.v2` for Kata Containers, which runs each worker in its own virtual machine and needs KVM.
+  With gVisor 20261005 or earlier, do not register `runsc` with `--oci-seccomp`, because workers then cannot start threads and fail to start.
+  MindRoom sets no CPU or memory limit on Docker workers, so Kata sizes each worker's virtual machine from the `default_vcpus` and `default_memory` settings in its configuration, which default to 1 vCPU and 2 GiB.
+  On Kubernetes, set [`workers.kubernetes.runtimeClassName`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) instead.
 
 ## Environment variable reference
 
@@ -530,6 +539,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 |----------|-------------|---------|
 | `MINDROOM_DOCKER_WORKER_IMAGE` | Container image for dedicated Docker workers | _(required for `docker`)_ |
 | `MINDROOM_DOCKER_WORKER_SECURITY_POLICY` | `runtime_default` or `computer`; Worker Computer requires `computer` | `runtime_default` |
+| `MINDROOM_DOCKER_WORKER_RUNTIME` | Docker runtime for every worker container: a runtime name from the Docker daemon config, or a containerd runtime type such as `io.containerd.kata.v2` whose shim binary is on the daemon's `PATH`; changing it recreates each worker the next time it is used | Docker daemon default |
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the container | `/app/config-host/config.yaml` |

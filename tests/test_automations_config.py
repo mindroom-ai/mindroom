@@ -168,7 +168,10 @@ def test_invalid_entries_fail_config_load(entry: object) -> None:
 
 def test_a_misspelled_built_in_names_the_built_ins() -> None:
     """Any other name is read as a plugin automation, so a typo's error says which names are built in."""
-    with pytest.raises(ValidationError, match=r"'dreamng' is not a built-in automation \(prompt_curation, dreaming\)"):
+    with pytest.raises(
+        ValidationError,
+        match=r"'dreamng' is not a built-in automation \(prompt_curation, dreaming, exploration\)",
+    ):
         _mind(automations=["dreamng"])
 
 

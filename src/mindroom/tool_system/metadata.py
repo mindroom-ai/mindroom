@@ -16,8 +16,10 @@ from typing import TYPE_CHECKING, Any, cast
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.egress_broker.env import egress_tool_unavailable
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
+from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -675,6 +677,13 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
+        # Shared directories change during a response, so path tools resolve them on each call.
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: functools.partial(
+            shared_directory_roots,
+            runtime_config,
+            runtime_paths,
+            worker_target.routing_agent_name if worker_target is not None else None,
+        ),
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
 
@@ -1202,6 +1211,23 @@ def resolved_tool_metadata_for_runtime(
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
     return resolved_state.tool_metadata
+
+
+def listable_tool_metadata(runtime_paths: RuntimePaths, config: Config) -> dict[str, ToolMetadata]:
+    """Return the tools a tool listing offers for one runtime config: the visible ones that can run here.
+
+    The egress credentials tool cannot run while the egress broker is off. A plugin that fails to load drops its own
+    tools, never the listing.
+    """
+    return {
+        name: metadata
+        for name, metadata in resolved_tool_metadata_for_runtime(
+            runtime_paths,
+            config,
+            tolerate_plugin_load_errors=True,
+        ).items()
+        if not egress_tool_unavailable(name, runtime_paths)
+    }
 
 
 def _tool_validation_snapshot_from_state(

@@ -74,7 +74,9 @@ from mindroom.logging_config import get_logger
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.providers.agno_compat_claude import (
     BEDROCK_MAX_INLINE_MEDIA_BYTES,
+    MAX_INLINE_IMAGE_BYTES,
     MAX_INLINE_MEDIA_BYTES,
+    PARTNER_MAX_INLINE_IMAGE_BYTES,
     request_kwargs_with_leading_tool_results,
     request_kwargs_with_replay_safe_tool_search_results,
     request_kwargs_with_supported_inline_media,
@@ -123,6 +125,7 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
 
 _ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
 _BEDROCK_CLAUDE_CLASS = ("mindroom.providers.bedrock_claude", "MindRoomBedrockClaude")
+_VERTEX_CLAUDE_CLASS = ("mindroom.providers.vertex_claude_compat", "MindroomVertexAIClaude")
 logger = get_logger(__name__)
 
 
@@ -632,6 +635,11 @@ def prepare_claude_request_kwargs(
             BEDROCK_MAX_INLINE_MEDIA_BYTES
             if isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS)
             else MAX_INLINE_MEDIA_BYTES
+        ),
+        max_image_bytes=(
+            PARTNER_MAX_INLINE_IMAGE_BYTES
+            if isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS, _VERTEX_CLAUDE_CLASS)
+            else MAX_INLINE_IMAGE_BYTES
         ),
     )
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from xml.sax.saxutils import quoteattr as xml_quoteattr
 
+_CDATA_END = "]]>"
+_CDATA_END_ESCAPED = "]]]]><![CDATA[>"
+
 
 def _cdata_body(body: str) -> str:
     """Render body text inside CDATA without entity-escaping normal message text."""
-    return body.replace("]]>", "]]]]><![CDATA[>")
+    return body.replace(_CDATA_END, _CDATA_END_ESCAPED)
+
+
+def cdata_body_text(rendered: str) -> str:
+    """Return the message text a rendered CDATA body holds."""
+    return rendered.replace(_CDATA_END_ESCAPED, _CDATA_END)
 
 
 def render_msg_tag(

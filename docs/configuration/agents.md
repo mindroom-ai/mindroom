@@ -83,6 +83,7 @@ agents:
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `learning` | bool | `null` | Enable [Agno Learning](../memory.md#agno-learning), a persistent profile of user preferences |
 | `learning_mode` | string | `null` | `always` learns after every turn; `agentic` lets the agent decide through a tool call |
+| `knowledge_graph` | bool | `null` | Build a [knowledge graph](../knowledge-graph.md) from this agent's conversations and give it the `knowledge_graph` tool |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory but not `learning`. See [Memory](../memory.md) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](../memory.md#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](../scheduling.md#automations) |
@@ -95,7 +96,7 @@ agents:
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages; see [Tool Calls During Streaming](../streaming.md#tool-calls-during-streaming) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](../deployment/sandbox-proxy.md#execution-modes) decides. See [Worker Routing](../deployment/sandbox-proxy.md#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](../deployment/sandbox-proxy.md#worker-scopes) |
-| `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments; `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](../architecture/security-posture.md#file-access) |
+| `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `file` and `coding` also use the agent's [shared directories](../tools/execution-and-coding.md#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](../architecture/security-posture.md#file-access) |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](../tools/agent-orchestration.md#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](../tools/agent-orchestration.md#agent-delegation) |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](../thread-exports.md#thread-exports) |
@@ -208,6 +209,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `learning` | `true` |
 | `learning_mode` | `always` |
 | `cheap_model` | `null`; ignored for an agent whose `model` is the same. See [Cold-Cache Model](models.md#cold-cache-model) |
+| `knowledge_graph` | `false` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compress_tool_results` | `false` |
 | `compaction` | enabled; see [Agent Compaction Settings](history.md#agent-compaction-settings) |

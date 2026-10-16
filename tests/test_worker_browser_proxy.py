@@ -37,7 +37,6 @@ from tests.browser_egress_helpers import SQUID_DEFAULT_CONNECT_PORTS, SquidLikeU
 from tests.browser_lifecycle_helpers import LifecycleBrowser
 
 _WORKER = _UpstreamProxy(host="worker", port=3128, tls=False)
-_DENIED = b"403 Forbidden"
 _OTHER = _UpstreamProxy(host="other", port=3128, tls=False)
 
 
@@ -118,8 +117,8 @@ def test_primary_egress_follows_curl_proxy_precedence(
     """Scheme proxies win over all_proxy, which applies only to schemes without one."""
     egress = browser_egress({}, env, egress_control=False)
     assert (egress.http, egress.https, egress.by_hostname) == (expected_http, expected_https, False)
-    assert egress._upstream_for(80) == expected_http
-    assert egress._upstream_for(443) == egress._upstream_for(8443) == expected_https
+    assert egress.upstream_for(80) == expected_http
+    assert egress.upstream_for(443) == egress.upstream_for(8443) == expected_https
 
 
 @pytest.mark.parametrize(
@@ -173,16 +172,16 @@ def test_runner_egress_fails_closed_on_unsupported_or_ambiguous_proxies(
 def test_no_proxy_matches_names_by_suffix_and_addresses_by_range(host: str, address: str, expected: bool) -> None:
     """NO_PROXY decides only whether an already validated destination skips the upstream proxy."""
     egress = BrowserEgress(no_proxy=(".corp.example", "printer", "10.0.0.0/8", "192.168.1.5", "[fd00::5]"))
-    assert egress._bypasses(host, ipaddress.ip_address(address)) is expected
-    assert BrowserEgress(no_proxy=("*",))._bypasses(host, ipaddress.ip_address(address)) is True
+    assert egress.bypasses(host, ipaddress.ip_address(address)) is expected
+    assert BrowserEgress(no_proxy=("*",)).bypasses(host, ipaddress.ip_address(address)) is True
 
 
 class _RecordingUpstream:
-    """An HTTP proxy that records CONNECT requests and echoes tunneled bytes unless it answers with ``refusal``."""
+    """An HTTP proxy that records CONNECT requests and echoes tunneled bytes when it accepts one."""
 
-    def __init__(self, *, refusal: bytes | None = None) -> None:
+    def __init__(self, *, accept: bool = True) -> None:
         self.requests: list[bytes] = []
-        self.refusal = refusal
+        self._accept = accept
         self._server: asyncio.Server | None = None
 
     async def __aenter__(self) -> _UpstreamProxy:
@@ -197,8 +196,8 @@ class _RecordingUpstream:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             self.requests.append((await reader.readuntil(b"\r\n\r\n")).split(b"\r\n", 1)[0])
-            if self.refusal is not None:
-                writer.write(b"HTTP/1.1 " + self.refusal + b"\r\nContent-Length: 0\r\n\r\n")
+            if not self._accept:
+                writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
                 return
             writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -568,7 +567,7 @@ async def test_upstream_refusal_fails_the_connection_without_a_direct_fallback(m
         return await original_open(host, port, **kwargs)
 
     monkeypatch.setattr(asyncio, "open_connection", open_connection)
-    recorder = _RecordingUpstream(refusal=_DENIED)
+    recorder = _RecordingUpstream(accept=False)
     async with recorder as upstream_proxy:
         proxy = BrowserDestinationProxy(egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy))
         await proxy.start()
@@ -578,36 +577,6 @@ async def test_upstream_refusal_fails_the_connection_without_a_direct_fallback(m
             await proxy.close()
     assert recorder.requests == [b"CONNECT 8.8.8.8:443 HTTP/1.1"]
     assert dialed == []
-
-
-@pytest.mark.asyncio
-async def test_relay_remembers_destinations_whose_latest_connection_the_egress_proxy_denied(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only a policy denial is remembered, the next connection to a destination replaces it, and pages cannot grow it."""
-    _resolve_as(monkeypatch, {"public.example": "8.8.8.8", "other.example": "8.8.4.4", "third.example": "1.1.1.1"})
-    monkeypatch.setattr(browser_proxy, "_MAX_REMEMBERED_REFUSALS", 2)
-    recorder = _RecordingUpstream()
-    async with recorder as upstream_proxy:
-        proxy = BrowserDestinationProxy(egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy))
-        await proxy.start()
-        try:
-            for refusal, denied in [(_DENIED, True), (b"407 Proxy Authentication Required", False), (_DENIED, True)]:
-                recorder.refusal = refusal
-                assert await _relay_reply(proxy, "public.example", 443) != 0
-                assert proxy.egress_refused("public.example", 443) is denied
-            assert not proxy.egress_refused("public.example", 80)
-            recorder.refusal = None
-            assert await _relay_reply(proxy, "public.example", 443) == 0
-            assert not proxy.egress_refused("public.example", 443)
-            recorder.refusal = _DENIED
-            for host in ["public.example", "other.example", "third.example"]:
-                assert await _relay_reply(proxy, host, 443) != 0
-            assert not proxy.egress_refused("public.example", 443)
-            assert proxy.egress_refused("other.example", 443)
-            assert proxy.egress_refused("third.example", 443)
-        finally:
-            await proxy.close()
 
 
 @pytest.mark.asyncio
@@ -1025,7 +994,7 @@ async def test_address_that_drops_connections_falls_back_to_the_next_validated_a
 @pytest.mark.asyncio
 async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     """A runner's egress proxy gets the name once and picks the address itself, so its slow tunnel is not cut short."""
-    original_tunnel = browser_proxy._open_upstream_tunnel
+    original_tunnel = browser_proxy.open_upstream_tunnel
 
     def validate(_host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
         return [ipaddress.IPv4Address("8.8.8.8"), ipaddress.IPv4Address("8.8.4.4")]
@@ -1040,7 +1009,7 @@ async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: p
         return await original_tunnel(upstream, target, port, tls)
 
     monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
-    monkeypatch.setattr(browser_proxy, "_open_upstream_tunnel", slow_tunnel)
+    monkeypatch.setattr(browser_proxy, "open_upstream_tunnel", slow_tunnel)
     monkeypatch.setattr(browser_proxy, "_ATTEMPT_DEADLINE", 0.05)
     recorder = _RecordingUpstream()
     async with recorder as upstream_proxy:

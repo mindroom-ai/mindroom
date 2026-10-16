@@ -90,6 +90,7 @@ Optional features:
 - [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
 - [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, the Agent Vault server's `extraEnv` and `envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
 - [Approved Egress](approved-egress.md) gives workers human-approved temporary hostname grants.
+- [Egress broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) (`egressBroker`) injects stored credentials into workers' outbound HTTPS requests, so workers never hold the secret.
 - [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
 - Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
 - The client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy the MatrixRTC chart's call backend.
@@ -112,6 +113,7 @@ Deploy the runtime chart in a namespace of its own when an instance needs dedica
 
 The primary runtime reaches the sidecar over `localhost`, and all proxied tool calls share one runner process.
 The sidecar shares agent workspaces with the primary but cannot read the credential store, Matrix state, or the credentials encryption key, and it is not an isolation boundary between agents.
+For brokered credentials on hosted instances, see [Hosted instances](egress-broker.md#hosted-instances-sandbox-runner-sidecar).
 To enable encrypted credential storage, set `workers.sandbox.credentialsEncryptionKey.existingSecret`; only the primary runtime receives that key.
 See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-workerbackend-static_runner) for its mounts and limits.
 
@@ -181,6 +183,12 @@ Listed quantities replace the global values for that requester's `user` and `use
 `workers.kubernetes.extraEnv` drops MindRoom's own control variables and vendor telemetry variables, except `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, which tunes runner subprocess timeouts.
 Workers do not inherit the runtime's `.env` or provider keys; for per-workspace variables such as `PATH` entries or package indexes, use the [workspace env hook](sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh), which takes effect without redeploying.
 
+### Brokered Egress
+
+Set `egressBroker.enabled: true` in the runtime chart to let workers call authenticated HTTP APIs without holding the credential.
+The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section lists the [trusted upstream auth](trusted-upstream-auth.md) and gateway settings that users without dashboard access need.
+[Agent Keys](egress-broker.md) covers how the broker works, the users' Connections pages, and the migration from Agent Vault.
+
 ### Knowledge Source Visibility
 
 Dedicated workers can read the knowledge-base source directories assigned to the agents they serve, mounted read-only at the same path relative to the worker storage mount.
@@ -193,8 +201,8 @@ A `user` worker sees the knowledge of every `worker_scope: user` agent; other wo
 
 The worker sees the complete source directory, including files excluded from indexing, and MindRoom does not copy or clone it per agent.
 Only sources inside the shared storage root are mounted.
-A source inside a workspace the worker already mounts stays reachable through that writable workspace mount.
-Sources that are missing, reached through a link, or inside another agent's workspace, a private instance, or a worker directory are skipped with a logged warning or error.
+A source inside a workspace or shared directory the worker already mounts stays reachable through that mount.
+Sources that are missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker directory are skipped with a logged warning or error.
 A knowledge source that overlaps another knowledge source or another worker mount prevents the worker from starting.
 Changing knowledge assignments recreates the affected workers.
 
@@ -212,6 +220,8 @@ With `workers.backend: kubernetes`, the runtime chart creates:
 - A Role and RoleBinding that manage worker Deployments and Services in the worker namespace.
 - Access to worker auth Secrets: one chart-created Secret in the release namespace, or per-worker Secrets when `workers.kubernetes.namespace` names a separate namespace.
 - NetworkPolicy rules that let the primary reach the worker port and deny worker-to-worker runner traffic.
+
+With `egressBroker.enabled`, it also creates the `<fullname>-egress-broker` Service and, when `networkPolicy.create` is true, a NetworkPolicy that admits workers (or, with approved egress, the proxy pods) to the broker port on the primary.
 
 That Role reaches every Deployment and Service in its namespace, so give each runtime release a namespace of its own.
 Label that namespace with `pod-security.kubernetes.io/enforce=baseline` so admission rejects privileged containers, host namespaces, and `hostPath` volumes; the chart's runtime and worker pods satisfy that profile.
@@ -278,6 +288,7 @@ For the Tuwunel volume, use an offline snapshot or Tuwunel's own database backup
   A missing index is rebuilt in the background the next time the base is used, repeating every embedding call, and agents report the base as initializing meanwhile.
   The sources, including files uploaded through the dashboard, are not rebuildable unless they come from Git, in which case they are cloned again from the configured repository.
 - `logs/` only holds runtime log files.
+- `egress_broker/` holds the broker's CA, token signing key, and request log; deleting it loses the log, and the broker generates the rest again (see [Resetting broker state](egress-broker.md#resetting-broker-state)).
 - The approved egress volume only holds temporary grants, which expire after at most `approvedEgress.maxTtlSeconds`.
 
 Everything else on the storage, sessions, state, and journal volumes is not rebuildable.

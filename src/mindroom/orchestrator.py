@@ -32,6 +32,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.embeddings.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
@@ -57,6 +58,7 @@ from mindroom.hooks import (
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
 from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
@@ -416,6 +418,7 @@ class _MultiAgentOrchestrator:
     _automations: AutomationRunner = field(init=False, repr=False)
     _budgets: BudgetMonitor = field(init=False, repr=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
+    _knowledge_graph: KnowledgeGraphRuntime = field(init=False, repr=False)
     _tool_job_runtime: ToolJobRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
@@ -483,6 +486,11 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
         )
         self._budgets = BudgetMonitor(runtime_paths=self.runtime_paths, config_provider=lambda: self.config)
+        self._knowledge_graph = KnowledgeGraphRuntime(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            redacted_event_ids=self.redacted_event_ids,
+        )
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -1069,6 +1077,7 @@ class _MultiAgentOrchestrator:
         ensure_default_agent_workspaces(config, self.storage_path)
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
+        await self._knowledge_graph.sync()
         await self._todo_poke_runtime.sync()
         await self._tool_job_runtime.sync()
         self._automations.start()
@@ -1525,6 +1534,18 @@ class _MultiAgentOrchestrator:
         if bot is None or not bot.running:
             return None
         return await bot.journal_principal().replies.open_event_id(room_id, thread_id)
+
+    async def redacted_event_ids(
+        self,
+        entity_name: str,
+        room_id: str,
+        event_ids: tuple[str, ...],
+    ) -> frozenset[str] | None:
+        """Return which of a room's events one running managed entity's journal saw redacted, or None when not running."""
+        bot = self.agent_bots.get(entity_name)
+        if bot is None or not bot.running:
+            return None
+        return await bot.journal_principal().redacted_event_ids(room_id, event_ids)
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
@@ -2499,6 +2520,7 @@ class _MultiAgentOrchestrator:
         await _run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
         await _run_shutdown_step("thread_exports", self._thread_export_runner.stop())
         await _run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
+        await _run_shutdown_step("knowledge_graph", self._knowledge_graph.stop())
         await _run_shutdown_step("skill_reviews", self._skill_reviews.stop())
         await _run_shutdown_step("automations", self._automations.stop())
         await _run_shutdown_step("budgets", self._budgets.stop())
@@ -2691,7 +2713,7 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway listener share one lifecycle
+async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-facing listeners share one lifecycle
     host: str,
     port: int,
     log_level: str,
@@ -2713,6 +2735,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     from mindroom.api import main as api_main  # noqa: PLC0415
     from mindroom.api.agent_cli import bind_agent_cli_registry  # noqa: PLC0415
     from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
+    from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
@@ -2752,12 +2775,21 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
         try:
-            async with serve_script_gateway_listener(
-                runtime_paths,
-                host=host,
-                broker=None if script_runtime is None else script_runtime.broker,
-                log_level=log_level,
-                agent_cli_registry=agent_cli_registry,
+            async with (
+                # The broker reads the API's committed config, so service edits apply without a restart.
+                serve_egress_broker(
+                    runtime_paths,
+                    config_provider=lambda: api_main.config_lifecycle.read_app_committed_runtime_config(
+                        api_main.app,
+                    )[0],
+                ),
+                serve_script_gateway_listener(
+                    runtime_paths,
+                    host=host,
+                    broker=None if script_runtime is None else script_runtime.broker,
+                    log_level=log_level,
+                    agent_cli_registry=agent_cli_registry,
+                ),
             ):
                 await server.serve()
         except SystemExit as exc:
@@ -3207,6 +3239,11 @@ async def _run_runtime(  # noqa: PLR0915
                     budget_monitor=orchestrator.budgets,
                 ),
                 name="api_server",
+            )
+        elif egress_broker_enabled(runtime_paths):
+            logger.warning(
+                "egress_broker_not_started",
+                reason="the egress broker runs with the embedded API server, which is disabled",
             )
 
         orchestrator_task = asyncio.create_task(orchestrator.start(), name="orchestrator")

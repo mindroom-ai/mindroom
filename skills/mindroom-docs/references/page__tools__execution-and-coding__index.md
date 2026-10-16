@@ -13,6 +13,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 - [`shell`] - Shell commands with background handles, environment passthrough, and PATH prepends.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
+- [`shared_directories`] - Directories an agent creates and invites other agents to read.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
 - [`reasoning`] - `think` and `analyze` scratchpad steps.
@@ -31,6 +32,7 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
+With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, worker-routed `shell` and `python` calls can use stored API keys and connected accounts that the worker never sees.
 Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
 ### Workspace and tool output files
@@ -73,7 +75,7 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 ## [`file`]
 
 `file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): `workspace` (the default) rejects paths outside the workspace, and `unrestricted` allows any path the tool's process can reach.
+Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): `workspace` (the default) rejects paths outside the workspace and the agent's [shared directories](#shared_directories), and `unrestricted` allows any path the tool's process can reach.
 `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse paths inside a `.git` directory.
 `read_file()` refuses files over `max_file_length` characters or `max_file_lines` lines and asks for `read_file_chunk()` instead.
 `search_files()` matches glob patterns; use `search_content()` to search inside text files.
@@ -238,6 +240,68 @@ edit_file("docs/example.md", "old text", "new text")
 write_file("scratch/todo.txt", "first line\nsecond line\n")
 ls("src")
 ```
+
+## [`shared_directories`]
+
+`shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
+It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, and `list_shared_directories()`, and has no configuration fields.
+
+### Setup
+
+1. Run tools in dedicated Docker or Kubernetes workers.
+   Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
+   Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
+2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell`, `file`, or `coding`.
+3. Give each reading agent `shell`, `python`, `file`, or `coding`; it does not need `shared_directories`.
+4. Make sure the user who asks for the invitation can use each reading agent outside the current room, as described under [Rules](#rules); in the example below, every member of `lobby` can.
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    rooms: [lobby]
+    tools:
+      - shell
+      - shared_directories
+  writer:
+    display_name: Writer
+    rooms: [lobby]
+    tools:
+      - file
+```
+
+Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
+It calls `create_shared_directory("report")` and `invite_to_shared_directory("report", "writer")`, and from then on both agents see the directory's path in their prompts.
+`list_shared_directories()` shows each directory an agent owns or joined, with its path and access.
+
+### Rules
+
+Only the agent that created a directory can invite, remove, or delete, and deleting a directory removes every file in it.
+Names use 1 to 64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit.
+Private agents can neither create nor join shared directories.
+Creating or deleting a directory, and inviting or removing an agent, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
+
+The user who asks for an invitation must be allowed to use the invited agent outside the current room.
+Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default grant to members of the agent's managed `rooms` counts, but `access.current_room_members` does not; see [Responder access](https://docs.mindroom.chat/authorization/#responder-access).
+Otherwise the invitation fails with "The user you act for has no access to writer outside the current room, so it cannot be invited".
+
+Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
+When MindRoom uses workers but an agent's `file` or `coding` runs in the primary process, `workspace` keeps those tools out of shared directories; add them to the agent's `worker_tools`.
+Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
+
+### Access by deployment
+
+Where tools run decides who reaches a shared directory:
+
+| Where tools run | Owner | Invited agents | Other agents |
+|---|---|---|---|
+| Dedicated Docker or Kubernetes workers | Read and write | Read only | No access |
+| Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
+| No workers, through `file` and `coding` under `file_access: workspace` | Read and write | Read only | No access |
+
+`shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
+The documented Compose and host-container `static_runner` setups mount only scratch storage, so tools running there cannot reach shared directories; use dedicated Docker workers instead.
+A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
 
 ## [`docker`]
 

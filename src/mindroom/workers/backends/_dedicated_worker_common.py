@@ -13,8 +13,14 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.private_storage.alias_paths import private_scope_alias_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.shared_directories.store import (
+    load_shared_directories,
+    shared_directory_access,
+    shared_directory_relative_path,
+)
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
+    normalize_worker_key_part,
     private_instance_scope_root_path,
     private_instances_root_path,
     resolved_worker_key_scope,
@@ -34,9 +40,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ScopedWorkspaceMount",
+    "SharedDirectoryMount",
+    "agent_names_addressed_by_worker_key",
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
     "plan_scoped_workspace_mounts",
+    "plan_shared_directory_mounts",
     "resolve_state_scope_worker_key",
     "resolved_agent_policies_from_config_data",
     "stable_signature_json",
@@ -340,6 +349,98 @@ def plan_scoped_workspace_mounts(
             )
             for alias in aliases
             for mount in private_mounts
+        )
+    return tuple(mounts)
+
+
+def agent_names_addressed_by_worker_key(
+    worker_key: str,
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
+) -> tuple[str, ...]:
+    """Return the configured agents whose tool calls one worker key serves."""
+    scope = resolved_worker_key_scope(worker_key)
+    if scope == "user":
+        return tuple(
+            agent_name
+            for agent_name, policy in resolved_agent_policies.items()
+            if policy.effective_execution_scope == "user"
+        )
+
+    encoded_agent_name = worker_key_agent_name(worker_key)
+    if encoded_agent_name is None:
+        return ()
+    if scope == "user_agent":
+        matches = tuple(
+            agent_name
+            for agent_name in resolved_agent_policies
+            if normalize_worker_key_part(agent_name) == encoded_agent_name
+        )
+    else:
+        expected_scope = None if scope == "unscoped" else scope
+        matches = tuple(
+            agent_name
+            for agent_name, policy in resolved_agent_policies.items()
+            if policy.effective_execution_scope == expected_scope
+            and normalize_worker_key_part(agent_name) == encoded_agent_name
+        )
+    if len(matches) > 1:
+        msg = f"Worker '{worker_log_id(worker_key)}' has an ambiguous normalized agent name."
+        raise WorkerBackendError(msg)
+    return matches
+
+
+@dataclass(frozen=True, slots=True)
+class SharedDirectoryMount:
+    """One shared directory a dedicated worker mounts at its canonical path."""
+
+    local_path: Path
+    worker_visible_path: Path
+    read_only: bool
+
+
+def plan_shared_directory_mounts(
+    *,
+    worker_key: str,
+    runtime_paths: RuntimePaths,
+    worker_visible_shared_storage_root: Path,
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
+) -> tuple[SharedDirectoryMount, ...]:
+    """Return the shared directories one dedicated worker mounts.
+
+    A directory mounts read-write when its owner is an agent the worker serves and
+    read-only when only a member is. Private agents neither own nor join one, and a
+    directory is mounted only when it is a real directory reached without links,
+    because container runtimes follow links in mount sources.
+    """
+    served = agent_names_addressed_by_worker_key(worker_key, resolved_agent_policies)
+
+    def is_shareable(agent_name: str) -> bool:
+        policy = resolved_agent_policies.get(agent_name)
+        return policy is not None and not policy.is_private
+
+    storage_root = runtime_paths.storage_root
+    mounts: list[SharedDirectoryMount] = []
+    for directory in load_shared_directories(runtime_paths):
+        writable = shared_directory_access(directory, served, is_shareable)
+        if writable is None:
+            continue
+        relative_path = shared_directory_relative_path(directory.owner, directory.name)
+        try:
+            with open_directory_within_root(storage_root, relative_path):
+                pass
+        except OSError:
+            logger.warning(
+                "Not mounting a shared directory that is missing or reached through a link",
+                worker=worker_log_id(worker_key),
+                directory=f"{directory.owner}/{directory.name}",
+            )
+            continue
+        mounts.append(
+            SharedDirectoryMount(
+                local_path=storage_root / relative_path,
+                worker_visible_path=worker_visible_shared_storage_root / relative_path,
+                read_only=not writable,
+            ),
         )
     return tuple(mounts)
 

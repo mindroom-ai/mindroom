@@ -1356,9 +1356,8 @@ class TestAgentBot(AgentBotTestBase):
             },
         )
 
-        with patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         generate_response.assert_awaited_once()
         generate_kwargs = generate_response.await_args.kwargs
@@ -1421,9 +1420,8 @@ class TestAgentBot(AgentBotTestBase):
             },
         )
 
-        with patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         generate_response.assert_awaited_once()
         generate_kwargs = generate_response.await_args.kwargs
@@ -2529,7 +2527,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
         ):

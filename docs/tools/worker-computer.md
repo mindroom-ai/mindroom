@@ -236,6 +236,10 @@ Computer workers must also run as a non-root user.
 `MINDROOM_DOCKER_WORKER_USER=root` or UID 0, including a runtime that itself runs as root and passes its UID to workers, fails configuration, and a worker that starts as root refuses requests.
 An empty `MINDROOM_DOCKER_WORKER_USER` uses the image's default user.
 
+With gVisor as the worker runtime (`MINDROOM_DOCKER_WORKER_RUNTIME=runsc`), Computer needs gVisor 20261005 or later, because gVisor 20260406 crashes Chromium's page loads.
+By default, gVisor does not apply the `computer` seccomp profile inside its sandbox.
+Kata Containers (`MINDROOM_DOCKER_WORKER_RUNTIME=io.containerd.kata.v2`) applies the profile only when its configuration sets `disable_guest_seccomp = false`, which is not the default.
+
 ### Kubernetes
 
 Kubernetes workers use the pod's `RuntimeDefault` seccomp policy.

@@ -25,7 +25,7 @@ from sqlalchemy.dialects.sqlite import insert
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.legacy_compaction_state import migrate_compaction_database
 from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage import (
     agno_compat_run_messages,
     agno_compat_session_metrics,
@@ -288,15 +288,17 @@ def _create_agent_session_db(
     prompt_roles: frozenset[str] | None = None,
 ) -> BaseDb:
     """Create persistent session storage for one agent."""
-    session_state_root = resolve_agent_storage(
+    resolved_storage = resolve_agent_storage(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-    ).session_state_root
+    )
+    # A turn can read its session before it builds the agent, which is the other place this record is written.
+    record_private_instance_owner(agent_name, resolved_storage.execution, runtime_paths)
     return create_state_storage(
         storage_name=agent_name,
-        state_root=session_state_root,
+        state_root=resolved_storage.session_state_root,
         subdir="sessions",
         session_table=session_table,
         prompt_roles=prompt_roles,

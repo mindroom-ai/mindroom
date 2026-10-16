@@ -434,6 +434,7 @@ class DefaultsConfig(BaseModel):
         ),
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
+    knowledge_graph: bool = Field(default=False, description="Default knowledge graph setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     cheap_model: str | None = Field(
         default=None,

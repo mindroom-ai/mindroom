@@ -12,6 +12,7 @@ type IndependentUsageKind = Literal[
     "compaction_summary",
     "memory_auto_flush",
     "dynamic_workflow",
+    "knowledge_graph",
     "live_voice",
     "realtime_voice",
     "skill_learning",

@@ -340,6 +340,14 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 200
 
 
+def _error_detail(response: Any) -> str:  # noqa: ANN401
+    """Return a refusal's text, whether the route answered JSON (an API call) or a page (a browser step)."""
+    if response.headers["content-type"].startswith("application/json"):
+        return response.json()["detail"]
+    assert response.headers["content-type"].startswith("text/html")
+    return response.text
+
+
 def _state_from_auth_url(auth_url: str) -> str:
     parsed = urlparse(auth_url)
     state = parse_qs(parsed.query)["state"][0]
@@ -1046,7 +1054,7 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
             response = client.request(method, path)
 
     assert response.status_code == 503
-    assert "available only when MindRoom is opened on localhost" in response.json()["detail"]
+    assert "available only when MindRoom is opened on localhost" in _error_detail(response)
 
 
 @pytest.mark.parametrize(
@@ -1219,7 +1227,7 @@ def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
             response = client.request(method, path)
 
     assert response.status_code == 503
-    assert "available only when MindRoom is opened on localhost" in response.json()["detail"]
+    assert "available only when MindRoom is opened on localhost" in _error_detail(response)
 
 
 @pytest.mark.parametrize("response_scope", [None, "scope.write"])
@@ -2314,12 +2322,281 @@ def test_success_page_signals_oauth_completion_to_popup_opener(tmp_path: Path) -
             response = client.get(f"/api/oauth/{provider.id}/success")
 
     assert response.status_code == 200
-    assert "mindroom:oauth-complete" in response.text
-    assert f'"provider": "{provider.id}"' in response.text
-    assert '"status": "connected"' in response.text
-    assert "window.opener.postMessage" in response.text
-    assert 'postMessage(message, "*")' in response.text
+    _expect_opener_notice(response, provider_id=provider.id, status="connected")
+
+
+def _expect_opener_notice(
+    response: Any,  # noqa: ANN401
+    *,
+    provider_id: str,
+    status: str,
+    opener_origin: str | None = None,
+) -> None:
+    """The page posts its outcome to the recorded opener origin, else its own, never `*`, then closes after a moment.
+
+    On its own origin it posts only to a same-origin opener.
+    """
+    message = json.dumps({"type": "mindroom-oauth", "status": status, "provider": provider_id})
+    assert f"const mindroomTarget = {json.dumps(opener_origin)} || window.location.origin;" in response.text
+    assert f"mindroomOpener.postMessage({message}, mindroomTarget);" in response.text
+    assert (
+        "(mindroomTarget !== window.location.origin || window.opener.location.origin === window.location.origin)"
+    ) in response.text
+    assert "window.setTimeout(() => window.close(), 1500);" in response.text
+    assert '"*"' not in response.text
+
+
+_SPLIT_ORIGIN = "https://dashboard.example.test"
+# A dashboard on another origin authenticates with the API key, as cookies would fail the same-origin check.
+_DASHBOARD_BEARER = {"Authorization": "Bearer test-key"}
+
+
+def _split_origin_app(tmp_path: Path) -> FastAPI:
+    """Serve the API on its default origin while the dashboard, an allowed CORS origin, runs on another one."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": _SPLIT_ORIGIN,
+        },
+    )
+    return _make_test_app(runtime_paths, _config_payload())
+
+
+@pytest.mark.parametrize(
+    ("origin", "recorded"),
+    [(_SPLIT_ORIGIN, _SPLIT_ORIGIN), ("https://evil.example", None), (None, None)],
+    ids=["allowed-split-origin", "origin-outside-the-allowed-set", "no-origin"],
+)
+def test_callback_pages_post_to_the_validated_origin_that_started_the_flow(
+    tmp_path: Path,
+    origin: str | None,
+    recorded: str | None,
+) -> None:
+    """A dashboard on another allowed origin hears how its popup ended; an origin outside the set is never targeted."""
+    api_app = _split_origin_app(tmp_path)
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, headers=_DASHBOARD_BEARER) as client:
+            headers = {} if origin is None else {"Origin": origin}
+            connected = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general", headers=headers)
+            assert connected.status_code == 200, connected.text
+            state = _state_from_auth_url(connected.json()["auth_url"])
+            cancelled = client.get(f"/api/oauth/{provider.id}/callback?error=access_denied&state={state}")
+
+    _expect_opener_notice(cancelled, provider_id=provider.id, status="cancelled", opener_origin=recorded)
+    assert "evil.example" not in cancelled.text
+
+
+def test_dashboard_callback_carries_the_opener_origin_to_the_success_page(tmp_path: Path) -> None:
+    """The callback's redirect names the recorded origin, and the success page posts there only if it is allowed."""
+    api_app = _split_origin_app(tmp_path)
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, headers=_DASHBOARD_BEARER) as client:
+            connected = client.post(
+                f"/api/oauth/{provider.id}/connect?agent_name=general",
+                headers={"Origin": _SPLIT_ORIGIN},
+            )
+            state = _state_from_auth_url(connected.json()["auth_url"])
+            with patch("mindroom.api.oauth._complete_oauth_callback", return_value=True):
+                redirected = client.get(
+                    f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                    follow_redirects=False,
+                )
+            location = urlparse(redirected.headers["location"])
+            success = client.get(f"{location.path}?{location.query}")
+            forged = client.get(f"/api/oauth/{provider.id}/success?opener_origin=https://evil.example")
+
+    assert redirected.status_code == 307
+    assert parse_qs(location.query) == {"opener_origin": [_SPLIT_ORIGIN]}
+    _expect_opener_notice(success, provider_id=provider.id, status="connected", opener_origin=_SPLIT_ORIGIN)
+    _expect_opener_notice(forged, provider_id=provider.id, status="connected")
+    assert "evil.example" not in forged.text
+
+
+def test_cors_wildcard_never_becomes_a_message_target(tmp_path: Path) -> None:
+    """Allowing every origin for CORS does not let any of them receive the popup's message."""
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS": "true"})
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            response = client.get(f"/api/oauth/{provider.id}/success?opener_origin=https://anywhere.example")
+
+    _expect_opener_notice(response, provider_id=provider.id, status="connected")
+    assert "anywhere.example" not in response.text
+
+
+def _expect_styled_oauth_page(response: Any, *, status: int, message: str) -> None:  # noqa: ANN401
+    """A browser-facing OAuth page: HTML, the readable message, a close button, and no raw API payload."""
+    assert response.status_code == status, response.text
+    assert response.headers["content-type"].startswith("text/html")
+    assert "no-store" in response.headers["cache-control"]
+    assert message in response.text
+    assert '"detail"' not in response.text
+    assert "<style>" in response.text
+    assert '<button type="button" id="close-window">Close window</button>' in response.text
     assert "window.close()" in response.text
+
+
+def test_success_page_is_styled_with_a_close_button(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            response = client.get(f"/api/oauth/{provider.id}/success")
+
+    _expect_styled_oauth_page(response, status=200, message=f"{provider.display_name} is connected.")
+    assert "You can close this window." in response.text
+
+
+@pytest.mark.parametrize("scenario", ["provider_error", "stale_state", "foreign_connect_token", "unknown_provider"])
+def test_oauth_browser_errors_are_html(tmp_path: Path, scenario: str) -> None:
+    """The popup shows a styled page with the message and a close button, never raw JSON, and keeps its status."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider()
+    bob = trusted_upstream_headers(user_id="bob", email="bob@example.com", matrix_user_id="@bob:example.org")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    connect_token = oauth_service._issue_oauth_connect_token(
+        provider,
+        runtime_paths,
+        resolve_worker_target("user_agent", "general", execution_identity=identity),
+    )
+    assert connect_token is not None
+    requests = {
+        "provider_error": (f"/api/oauth/{provider.id}/callback?error=access_denied", 400),
+        "stale_state": (f"/api/oauth/{provider.id}/callback?code=test-code&state=missing", 400),
+        "foreign_connect_token": (
+            f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+            f"&connect_token={connect_token}",
+            403,
+        ),
+        "unknown_provider": ("/api/oauth/no_such_provider/callback?code=test-code&state=missing", 404),
+    }
+    messages = {
+        "provider_error": "You cancelled. Nothing was connected.",
+        "stale_state": "OAuth state is invalid or expired",
+        "foreign_connect_token": "OAuth link does not belong to the current user",
+        "unknown_provider": "Unknown OAuth provider.",
+    }
+    url, status = requests[scenario]
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(url, headers=bob, follow_redirects=False)
+
+    _expect_styled_oauth_page(response, status=status, message=messages[scenario])
+    assert "no_such_provider" not in response.text
+    if scenario == "unknown_provider":
+        # Only a registered provider is named to the opener, so no URL text reaches the page.
+        assert "postMessage" not in response.text
+    else:
+        _expect_opener_notice(
+            response,
+            provider_id=provider.id,
+            status="cancelled" if scenario == "provider_error" else "error",
+        )
+    # The foreign link stays redeemable for its owner: the page changes the presentation, never the decision.
+    assert oauth_service.lookup_oauth_connect_token(provider, runtime_paths, connect_token) is not None
+
+
+def test_only_an_unknown_provider_gets_the_fixed_text_not_every_404(tmp_path: Path) -> None:
+    """The fixed "Unknown OAuth provider." text belongs to the provider lookup, so another 404 keeps its own message."""
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider()
+    elsewhere = HTTPException(status_code=404, detail="The agent for this connection no longer exists.")
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            with (
+                patch("mindroom.api.oauth.pending_oauth_state_requires_browser_user", return_value=False),
+                patch("mindroom.api.oauth._complete_oauth_callback", side_effect=elsewhere),
+            ):
+                other = client.get(f"/api/oauth/{provider.id}/callback?code=test-code&state=any-state")
+            unknown = client.get("/api/oauth/no_such_provider/callback?code=test-code&state=any-state")
+
+    _expect_styled_oauth_page(other, status=404, message="The agent for this connection no longer exists.")
+    assert "Unknown OAuth provider." not in other.text
+    _expect_styled_oauth_page(unknown, status=404, message="Unknown OAuth provider.")
+    assert "no_such_provider" not in unknown.text
+
+
+def test_cancelled_authorization_page_says_so(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(f"/api/oauth/{provider.id}/callback?error=access_denied")
+
+    _expect_styled_oauth_page(response, status=400, message="You cancelled. Nothing was connected.")
+    assert "<h1>Authorization cancelled</h1>" in response.text
+    assert "access_denied" not in response.text
+    _expect_opener_notice(response, provider_id=provider.id, status="cancelled")
+
+
+def test_other_provider_errors_tell_the_opener_the_connection_failed(tmp_path: Path) -> None:
+    """A provider error other than a cancel keeps its code on the page and posts an error to the opener."""
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(f"/api/oauth/{provider.id}/callback?error=server_error")
+
+    _expect_styled_oauth_page(
+        response,
+        status=400,
+        message="OAuth provider returned an error: server_error. Nothing was connected.",
+    )
+    assert "<h1>Account connection failed</h1>" in response.text
+    _expect_opener_notice(response, provider_id=provider.id, status="error")
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    ["Call+555-0100+to+fix+your+account", "%3Cscript%3Ealert(1)%3C/script%3E", "access_denied%0Aextra", "A" * 80],
+)
+def test_provider_error_text_is_never_echoed_into_the_page(tmp_path: Path, provider_error: str) -> None:
+    """Only a plain OAuth error code appears on the page, so a crafted callback link cannot show its own text."""
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(f"/api/oauth/{provider.id}/callback?error={provider_error}")
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("text/html")
+    assert "555-0100" not in response.text
+    assert "alert(1)" not in response.text
+    assert "extra" not in response.text
+    assert "A" * 80 not in response.text
+    assert "OAuth provider returned an error" in response.text
 
 
 def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
@@ -3177,6 +3454,7 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
+    monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3196,6 +3474,7 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
     assert response.status_code == 409
     assert response.media_type == "text/html"
     assert "Start the connection again from the dashboard" in response.body.decode()
+    _expect_opener_notice(SimpleNamespace(text=response.body.decode()), provider_id=provider.id, status="error")
 
 
 @pytest.mark.asyncio
@@ -3228,6 +3507,7 @@ async def test_callback_hides_provider_controlled_exchange_error(
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
+    monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3242,12 +3522,11 @@ async def test_callback_hides_provider_controlled_exchange_error(
         },
     )
 
-    with pytest.raises(HTTPException) as raised:
-        await oauth_api.callback(provider.id, request)
+    response = await oauth_api.callback(provider.id, request)
 
-    assert raised.value.status_code == 400
-    assert raised.value.detail == "OAuth callback could not be completed"
-    assert "provider-controlled-callback-secret" not in str(raised.value.detail)
+    assert response.status_code == 400
+    assert "OAuth callback could not be completed" in bytes(response.body).decode()
+    assert "provider-controlled-callback-secret" not in bytes(response.body).decode()
 
 
 @pytest.mark.parametrize(
@@ -4074,6 +4353,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", allow_request)
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
+    monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -4147,6 +4427,7 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
+    monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", verify)
@@ -4679,7 +4960,7 @@ def test_agent_connect_token_rejects_generation_changed_after_link_issuance(tmp_
             )
 
     assert response.status_code == 409
-    assert "fresh connection link from the conversation" in response.json()["detail"]
+    assert "fresh connection link from the conversation" in _error_detail(response)
 
 
 def test_agent_connect_token_callback_rejects_generation_changed_after_authorize(tmp_path: Path) -> None:
@@ -5385,7 +5666,7 @@ def test_connect_token_binding_setup_error_returns_503(
             )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "OAuth authorization could not be started"}
+    assert "OAuth authorization could not be started" in _error_detail(response)
     assert "provider-controlled-connect-secret" not in response.text
 
 
@@ -5412,7 +5693,7 @@ def test_connect_token_rejects_tampered_agent_name(tmp_path: Path) -> None:
             )
 
     assert response.status_code == 400
-    assert "target" in response.json()["detail"]
+    assert "target" in _error_detail(response)
 
 
 def test_connect_token_rejects_tampered_execution_scope(tmp_path: Path) -> None:
@@ -5438,7 +5719,7 @@ def test_connect_token_rejects_tampered_execution_scope(tmp_path: Path) -> None:
             )
 
     assert response.status_code == 400
-    assert "target" in response.json()["detail"]
+    assert "target" in _error_detail(response)
 
 
 def test_connect_token_rejects_omitted_target_params(tmp_path: Path) -> None:
@@ -5463,7 +5744,7 @@ def test_connect_token_rejects_omitted_target_params(tmp_path: Path) -> None:
             )
 
     assert response.status_code == 400
-    assert "target" in response.json()["detail"]
+    assert "target" in _error_detail(response)
 
 
 def test_agent_connect_token_rejects_different_authenticated_requester(tmp_path: Path) -> None:
@@ -5579,7 +5860,7 @@ def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
             )
 
     assert callback_response.status_code == 400
-    assert "does not match" in callback_response.json()["detail"]
+    assert "does not match" in _error_detail(callback_response)
 
 
 @pytest.mark.parametrize("binding", ["changed", "missing"])
@@ -5619,7 +5900,7 @@ def test_callback_exchanges_code_only_at_token_endpoint_bound_during_connect(tmp
         callback_response = client.get(f"/api/oauth/{provider.id}/callback?code=test-code&state={state}")
 
     assert callback_response.status_code == 400
-    assert callback_response.json()["detail"] == "OAuth callback could not be completed"
+    assert "OAuth callback could not be completed" in _error_detail(callback_response)
     assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
 
 
@@ -5713,7 +5994,7 @@ def test_callback_rejects_unverified_email_domain_claim(tmp_path: Path) -> None:
             )
 
     assert callback_response.status_code == 400
-    assert "email ownership" in callback_response.json()["detail"]
+    assert "email ownership" in _error_detail(callback_response)
 
 
 def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
