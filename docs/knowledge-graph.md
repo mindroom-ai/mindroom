@@ -7,7 +7,7 @@ icon: lucide/network
 A knowledge graph gives an agent a model of the people, projects, documents, and events its conversations and tools reveal, with when each fact held and where it came from.
 MindRoom builds it with [Graphiti](https://github.com/getzep/graphiti) in the background from the agent's finished conversations, and the agent looks facts up with the `knowledge_graph` tool.
 To have the agent also explore its data sources on a schedule, add the [`exploration`](scheduling.md#exploration) automation.
-[Memory](memory.md) keeps what is worth remembering as text and a [knowledge base](knowledge.md) searches your documents; the graph links the entities they mention, so an agent can answer who owns what, how things connect, and what changed.
+[Memory](memory.md) keeps what is worth remembering as text and a [knowledge base](knowledge.md) searches your documents; the graph links the entities that conversations and tool results reveal, with dated facts, so an agent can answer who owns what, how things connect, and what changed.
 
 ## Enable It
 
@@ -42,7 +42,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
-With the defaults, a conversation's new turns reach the graph within about 12 minutes after it goes quiet, plus the time extraction takes.
+With the defaults, expect a conversation's new turns in the graph about 12 minutes after it goes quiet, plus extraction time; a busy graph takes longer, because each pass adds at most `max_sessions_per_cycle` conversations.
 Facts are embedded with [`memory.embedder`](memory.md#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read but keeps its memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory.
@@ -69,7 +69,7 @@ search_graph("who owns Project Atlas", limit=10)   # limit 1 to 50
 graph_entity("Project Atlas")
 ```
 
-The agent looks facts up when a question needs them; ask it to cite each fact's source and date when you want to check them.
+The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
 An agent reads only its own graph; a [private agent](configuration/agents.md#private-instances) has one graph per requester.
 
@@ -80,6 +80,6 @@ Use a private agent when requesters must not see each other's facts.
 
 ## Cost and Health
 
-Extraction is reported as `knowledge_graph` in [usage tracking](usage.md#token-usage); in a live run it made about 15 model calls and 35,000 input tokens per piece of conversation and took 20 seconds to 2 minutes with GPT-6 Luna or Gemini 3.8 Flash.
+Extraction is reported as `knowledge_graph` in [usage tracking](usage.md#token-usage); in a live run it made about 15 model calls and 35,000 input tokens per piece of a conversation and took about 20 seconds to 2 minutes with GPT-6 Luna or Gemini 3.8 Flash.
 Each lookup makes one embedding request.
 When ingestion fails, `/api/health` includes a `knowledge_graph` block naming the kind of failure until a later pass succeeds with no failed episode still waiting for its retry, and the MindRoom log has the details.
