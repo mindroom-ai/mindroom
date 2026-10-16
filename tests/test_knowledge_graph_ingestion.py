@@ -514,6 +514,17 @@ async def test_an_abandoned_approval_stops_holding_back_the_conversation(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_turn_resuming_right_after_its_approval_expires_is_still_waited_for(tmp_path: Path) -> None:
+    """An expired approval resumes its turn a little after the window, so the turns after it wait a while longer."""
+    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
+
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 7 * DAY + 600)
+
+    assert store.episodes == []
+
+
+@pytest.mark.asyncio
 async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
     """A rejection that never clears, such as a request the provider always refuses, stops costing calls."""
     config, paths = _config(), _paths(tmp_path)

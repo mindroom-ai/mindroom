@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
+from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.knowledge_graph.store import EpisodeInput
 from mindroom.prompt_message_tags import cdata_body_text
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -221,7 +222,8 @@ def _conversation_lines(
                 f"{_speaker(sender, agent_for_sender)}: {_clean(body, settings.max_episode_chars)}"
                 for sender, body in _prompt_messages(message.content, str(requester))
             )
-        elif message.role == "assistant":
+        # A stopped turn's answer is a rendered summary that can quote tool previews, not the agent's words.
+        elif message.role == "assistant" and not is_interrupted_replay_run(run):
             lines.append(f"agent {agent_name}: {_clean(message.content, settings.max_episode_chars)}")
     return lines
 

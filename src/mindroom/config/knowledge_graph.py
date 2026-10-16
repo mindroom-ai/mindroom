@@ -22,7 +22,7 @@ class KnowledgeGraphIngestConfig(BaseModel):
         default=24000,
         ge=1000,
         le=60000,
-        description="Largest episode sent for extraction, in characters; turns are split into episodes at turn boundaries",
+        description="Largest episode sent for extraction, in characters; a longer turn is split into several episodes",
     )
     max_tool_result_chars: int = Field(
         default=4000,

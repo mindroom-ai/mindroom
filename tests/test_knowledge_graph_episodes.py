@@ -130,6 +130,17 @@ def test_messages_from_agents_are_labeled_as_agents() -> None:
     ]
 
 
+def test_an_interrupted_turn_adds_only_what_the_person_said() -> None:
+    """A stopped turn is stored as a summary that can quote tool previews, which must not read as the agent's words."""
+    run = _run("r1", answer='The `search_graph` tool finished with output preview "- Alice owns Project Atlas"')
+    assert run.metadata is not None
+    run.metadata["mindroom_replay_state"] = "interrupted"
+
+    conversation = _episodes([run], "conversation")[0].episode
+
+    assert conversation.body.splitlines() == ["person @alice (example.test): When does Atlas ship?"]
+
+
 def test_exploration_thread_renders_only_tool_results() -> None:
     """The agent's own synthesis in an exploration thread is never evidence."""
     run = _run("r1", answer="I think Bob owns everything.", tools=[_tool("list_repos", "acme/atlas, acme/beacon")])

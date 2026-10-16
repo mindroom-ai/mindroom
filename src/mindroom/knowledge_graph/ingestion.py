@@ -53,6 +53,7 @@ _DAY_SECONDS = 86_400
 _IDLE_POLL_SECONDS = 30
 _FIRST_RETRY_SECONDS = 60
 _MAX_RETRY_SECONDS = 3600
+_APPROVAL_GRACE_SECONDS = 3600
 # An episode whose extraction output is unusable this often, or that has failed for this long, is dropped, so it
 # cannot cost model calls forever; an outage shorter than that loses nothing.
 _MAX_BAD_OUTPUTS = 5
@@ -116,10 +117,11 @@ def _new_session_state() -> _SessionState:
 
 
 def _approval_window_seconds(config: Config) -> float:
-    """Return how long a turn can wait for approval before every approval it could get has expired."""
+    """Return how long a turn can wait for approval before every approval it could get has expired and resumed it."""
     approval = config.tool_approval
     days = max([approval.timeout_days, *(rule.timeout_days for rule in approval.rules if rule.timeout_days)])
-    return days * _DAY_SECONDS
+    # The card's expiry counts from when it was posted, a little after the newest message, and then resumes the turn.
+    return days * _DAY_SECONDS + _APPROVAL_GRACE_SECONDS
 
 
 def _finished_runs(

@@ -2621,6 +2621,7 @@ visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.ai",
     "mindroom.history.turn_recorder",
+    "mindroom.knowledge_graph.episodes",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
@@ -6760,6 +6761,7 @@ from = ["mindroom.oauth.credential_lifecycle"]
 expose = [
     "InterruptedReplaySnapshot",
     "build_interrupted_replay_snapshot",
+    "is_interrupted_replay_run",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
     "render_stopped_attempt",
@@ -9018,6 +9020,7 @@ path = "mindroom.knowledge_graph.episodes"
 depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
+    "mindroom.history.interrupted_replay",
     "mindroom.knowledge_graph.store",
     "mindroom.prompt_message_tags",
     "mindroom.redaction",
