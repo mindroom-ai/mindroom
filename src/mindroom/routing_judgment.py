@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.agent_descriptions import describe_agent
+from mindroom.judgment.conversation import message_judgment_text
 from mindroom.judgment.evaluator import create_choice_evaluator
 from mindroom.judgment.state import ChoiceQuestion, JudgmentMessage, build_judgment_request
 
@@ -52,8 +53,11 @@ async def judge_responder(
     aliases: dict[str, str] = {}
     messages: list[JudgmentMessage] = []
     for item in (thread_context or ())[-3:]:
+        text = message_judgment_text(item)
+        if text is None:
+            continue
         sender = aliases.setdefault(item.sender, f"speaker_{len(aliases) + 1}")
-        messages.append(JudgmentMessage("user", f"Recent conversation ({sender}):\n{item.body}"))
+        messages.append(JudgmentMessage("user", f"Recent conversation ({sender}):\n{text}"))
     messages.append(JudgmentMessage("user", f"Current request:\n{message}"))
     request = build_judgment_request(question, tuple(messages), instructions="Select only a supplied option.")
     evaluate = create_choice_evaluator(

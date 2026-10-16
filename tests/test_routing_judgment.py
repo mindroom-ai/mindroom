@@ -20,6 +20,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.providers import model_loading
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -198,6 +199,28 @@ async def test_router_judge_sees_complete_recent_text_and_aliased_speakers(
     assert "Current question" in state
     assert "@person:example.org" not in state
     assert "speaker_1" in state
+
+
+@pytest.mark.asyncio
+async def test_router_judge_sees_tool_calls_as_tags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An earlier agent reply reaches the router judge with its tool calls, not display markers."""
+    _providers(monkeypatch)
+    posted = _choice_provider(monkeypatch, "candidate_0")
+    trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="cmd=ls", result_preview="a.py"),
+    ]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom_code:localhost",
+            body="Listing.\n\n🔧 `shell` [1]",
+            event_id="$reply",
+            content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+        ),
+    ]
+    await routing.suggest_responder("Current question", ["code", "research"], _config(), _paths(tmp_path), history)
+    state = json.dumps(posted[0]["state"])
+    assert "🔧" not in state
+    assert '<tool name=\\"shell\\"' in state
 
 
 @pytest.mark.asyncio

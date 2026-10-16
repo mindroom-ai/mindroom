@@ -18,12 +18,14 @@ from mindroom.judgment.state import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.events import body_with_tool_tags
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
+    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
@@ -100,9 +102,9 @@ class MidTurnGate:
         self._checked = None
         self._finish = False
 
-    def record_visible_response(self, text: str) -> None:
-        """Keep the latest Matrix-acknowledged text for subsequent queue snapshots."""
-        self.visible_response_text = text
+    def record_visible_response(self, text: str, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        """Keep the latest Matrix-acknowledged text, with its tool calls as tags, for later queue snapshots."""
+        self.visible_response_text = body_with_tool_tags(text, tool_trace)
 
     async def _acknowledge_deferred(self, message: QueuedMessage) -> None:
         """Attempt one acknowledgement per message after the caller accepts the decision."""

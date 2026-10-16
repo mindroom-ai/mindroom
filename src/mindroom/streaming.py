@@ -588,7 +588,7 @@ class StreamingResponse:
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
-    visible_progress_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     # How the terminal edit reaches Matrix, when the caller wants it durable.
     # A streamed answer becomes visible through edits, so the last one is the
@@ -1298,7 +1298,7 @@ class StreamingResponse:
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
         if self.visible_progress_callback is not None:
-            self.visible_progress_callback(committed_state.rendered_body)
+            self.visible_progress_callback(committed_state.rendered_body, tuple(committed_state.tool_trace))
 
     def _committed_terminal_snapshot(
         self,
@@ -2131,7 +2131,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
-    visible_progress_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     latest_thread_event_id: str | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
     terminal_edit: TerminalEdit | None = None,
@@ -2438,7 +2438,7 @@ async def stream_progress_edits(
     event_id: str,
     show_tool_calls: bool,
     extra_content: dict[str, Any] | None = None,
-    visible_progress_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
     progress_write_ahead: ProgressWriteAhead | None = None,
     progress_delivered: Callable[[ProgressState, str], None] | None = None,

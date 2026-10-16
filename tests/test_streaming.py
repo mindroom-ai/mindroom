@@ -67,7 +67,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.final_delivery import StreamTransportOutcome
@@ -153,7 +153,7 @@ async def _run_stream(
     config: Config,
     response_stream: AsyncIterator[object],
     *,
-    visible_progress_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -338,7 +338,7 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
         target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        visible_progress_callback=visible.append,
+        visible_progress_callback=lambda body, _trace: visible.append(body),
     )
     streaming.tool_trace = [ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")]
     client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
@@ -372,7 +372,7 @@ async def test_stream_driver_publishes_only_visible_text_to_progress_callback(co
     published = asyncio.Event()
     gateway = _FakeGateway()
 
-    def note_progress(text: str) -> None:
+    def note_progress(text: str, _tool_trace: object) -> None:
         visible.append(text)
         published.set()
 

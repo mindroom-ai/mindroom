@@ -20,7 +20,7 @@ from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator, Sequence
 
     from agno.db.base import BaseDb
     from structlog.stdlib import BoundLogger
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _LockedResponseResult = TypeVar("_LockedResponseResult")
@@ -385,7 +386,10 @@ class ResponseLifecycleCoordinator:
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
 
-    def visible_progress_callback(self, target: MessageTarget) -> Callable[[str], None] | None:
+    def visible_progress_callback(
+        self,
+        target: MessageTarget,
+    ) -> Callable[[str, Sequence[ToolTraceEntry]], None] | None:
         """Bind acknowledged Matrix text to the active response's opted-in judge."""
         signal = self._thread_queued_signals.get(target.lifecycle_key)
         if signal is None or signal.mid_turn_gate is None:

@@ -22,13 +22,15 @@ from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
-from mindroom.mid_turn_judgment import conversation_context_before_sources, create_mid_turn_gate
+from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.providers import model_loading
 from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
 from tests.participation_helpers import ParticipationModel
@@ -299,13 +301,22 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     state = _QueuedMessageState(mid_turn_gate=gate)
-    gate.record_visible_response("I found the file.\n🔧 `read_file` [1]")
+    read = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="read_file",
+        args_preview="path=a.py",
+        result_preview="ok",
+    )
+    gate.record_visible_response("I found the file.\n🔧 `read_file` [1]", (read,))
     state.add_waiting_human_message("$first", text="Use that file")
     first = state.pending_message_snapshot()
-    gate.record_visible_response("I found the file. Now editing it.")
+    gate.record_visible_response("I found the file. Now editing it.", ())
     assert await gate.defers(first, current=lambda: True)
     assert evidence[0]["queued_messages"] == [
-        {"text": "Use that file", "visible_response": "I found the file.\n🔧 `read_file` [1]"},
+        {
+            "text": "Use that file",
+            "visible_response": 'I found the file.\n<tool name="read_file" input="path=a.py" output="ok"/>',
+        },
     ]
     assert await gate.defers(first, current=lambda: True)
     assert len(evidence) == 1
@@ -433,7 +444,10 @@ async def test_real_tool_loop_judges_before_next_provider_request(
     evidence: list[dict] = []
 
     def queue_followup() -> str:
-        gate.record_visible_response("Work started.\n🔧 `queue_followup` [1]")
+        gate.record_visible_response(
+            "Work started.\n🔧 `queue_followup` [1]",
+            (ToolTraceEntry(type="tool_call_started", tool_name="queue_followup"),),
+        )
         state.add_waiting_human_message("$new", text="Thanks for doing this")
         return "Private tool result must not reach the judge"
 
@@ -846,6 +860,43 @@ async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget(
     assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]
 
 
+def test_traced_agent_reply_reaches_the_judge_with_tool_tags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Judges read what each tool call did, never the bare display markers."""
+    monkeypatch.setattr(
+        "mindroom.judgment.conversation.current_internal_sender_ids",
+        lambda *_: frozenset({"@mindroom_code:localhost"}),
+    )
+    trace = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="shell",
+            args_preview="cmd=pytest",
+            result_preview="3 failed",
+        ),
+    ]
+    history = [
+        make_visible_message(body="Fix the tests", event_id="$root"),
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="Running them.\n\n🔧 `shell` [1]\n\nThree fail.",
+            event_id="$reply",
+            content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+        ),
+        make_visible_message(body="Continue", event_id="$source"),
+    ]
+    context = conversation_context_before_sources(
+        history,
+        source_event_ids=("$source",),
+        thread_id="$root",
+        config=Config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+    )
+    assert context is not None
+    assert (
+        context[1].text == 'Running them.\n\n<tool name="shell" input="cmd=pytest" output="3 failed"/>\n\nThree fail.'
+    )
+
+
 def test_earlier_media_reaches_the_judge_as_a_placeholder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A thread holding files or images is still judged, each shown only by its file name and caption."""
     history = [
@@ -864,7 +915,7 @@ def test_earlier_media_reaches_the_judge_as_a_placeholder(tmp_path: Path, monkey
         make_visible_message(body="Continue", event_id="$source"),
     ]
     monkeypatch.setattr(
-        "mindroom.mid_turn_judgment.current_internal_sender_ids",
+        "mindroom.judgment.conversation.current_internal_sender_ids",
         lambda *_: frozenset({"@mindroom_helper:localhost"}),
     )
 
@@ -947,7 +998,7 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
         ),
     )
     state = _QueuedMessageState(mid_turn_gate=gate)
-    gate.record_visible_response("Progress start. " + "z" * 50_000 + " Progress end.")
+    gate.record_visible_response("Progress start. " + "z" * 50_000 + " Progress end.", ())
     queued = "Is this still running? " + "q" * 3_000
     state.add_waiting_human_message("$queued", text=queued)
     with capture_logs() as logs:
@@ -1023,7 +1074,7 @@ async def test_megabyte_texts_cost_only_what_the_judge_sees(*, reply: bool) -> N
         conversation_context=() if reply else tuple(JudgmentMessage("user", body) for _ in range(7)),
     )
     state = _QueuedMessageState(mid_turn_gate=gate)
-    gate.record_visible_response(body if reply else "")
+    gate.record_visible_response(body if reply else "", ())
     state.add_waiting_human_message("$queued", text="Thanks")
     with cpu_budget(0.25):
         assert await gate.defers(state.pending_message_snapshot(), current=lambda: True)

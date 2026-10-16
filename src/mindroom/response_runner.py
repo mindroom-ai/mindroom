@@ -68,6 +68,7 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
+from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     replace_visible_message,
@@ -80,7 +81,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.mid_turn_judgment import conversation_context_before_sources, create_mid_turn_gate
+from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
