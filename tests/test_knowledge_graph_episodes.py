@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from itertools import accumulate
 from typing import Literal
 
+import pytest
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
@@ -20,6 +21,7 @@ THREAD = "$thread"
 SETTINGS = KnowledgeGraphIngestConfig()
 # Matrix IDs of configured agents, as the entity registry resolves them.
 AGENTS = {"@mindroom_research:example.test": "research", "@mindroom_mind:example.test": "mind"}
+type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
 
 
 def _run(
@@ -50,22 +52,31 @@ def _run(
 
 def _episodes(
     runs: list[RunOutput],
-    thread_kind: Literal["conversation", "exploration", "delegation", "automation"],
+    thread_kind: _ThreadKind,
     settings: KnowledgeGraphIngestConfig = SETTINGS,
 ) -> list[RenderedEpisode]:
     """Render both episode kinds, conversation first, as ingestion does."""
     return [
         rendered
         for episode_kind in ("conversation", "tool_results")
-        for rendered in render_episodes(
-            runs,
-            thread_kind=thread_kind,
-            episode_kind=episode_kind,
-            agent_name="mind",
-            settings=settings,
-            agent_for_sender=AGENTS.get,
-        )
+        for rendered in _render(runs, episode_kind, settings, thread_kind)
     ]
+
+
+def _render(
+    runs: list[RunOutput],
+    episode_kind: Literal["conversation", "tool_results"],
+    settings: KnowledgeGraphIngestConfig = SETTINGS,
+    thread_kind: _ThreadKind = "conversation",
+) -> list[RenderedEpisode]:
+    return render_episodes(
+        runs,
+        thread_kind=thread_kind,
+        episode_kind=episode_kind,
+        agent_name="mind",
+        settings=settings,
+        agent_for_sender=AGENTS.get,
+    )
 
 
 def _tool(name: str, result: str, **args: object) -> ToolExecution:
@@ -168,9 +179,36 @@ def test_automation_thread_renders_nothing() -> None:
     assert _episodes([_run("r1")], "automation") == []
 
 
-def test_knowledge_graph_calls_are_never_rendered() -> None:
-    """Graph lookups returned to the graph would read as fresh evidence."""
-    run = _run("r1", tools=[_tool("search_graph", "Alice leads Atlas", query="Atlas")])
+@pytest.mark.parametrize(
+    "tools",
+    [
+        # Graph lookups returned to the graph would read as fresh evidence.
+        pytest.param([_tool("search_graph", "Alice leads Atlas", query="Atlas")], id="graph"),
+        # `think` and `analyze` return the model's own thoughts, not anything a tool observed.
+        pytest.param([_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")], id="reasoning"),
+        # A subagent's answer is another model's prose; its own tool results come in through its own session.
+        pytest.param([_tool("run_subagent", "Bob owns Atlas, I think.", task="Who owns Atlas?")], id="subagent"),
+        # A job's collected result no longer says whether it was a graph lookup or a subagent's prose.
+        pytest.param(
+            [
+                _tool("job", "Job `j2` (run_subagent subagent) succeeded:\nI think Bob owns Atlas.", action="collect"),
+                _tool("claude_send", "Bob owns it", prompt="who"),
+            ],
+            id="jobs-and-claude",
+        ),
+        # A dynamic workflow's outputs are its participants' prose, whose own sessions are never added either.
+        pytest.param(
+            [
+                _tool("run_workflow", '{"outputs": {"research": "Alice leads Project Atlas"}}', plan="..."),
+                _tool("get_workflow_run", '{"outputs": {"research": "Alice leads Project Atlas"}}', run_id="w1"),
+            ],
+            id="workflow",
+        ),
+    ],
+)
+def test_graph_lookups_and_model_prose_are_never_rendered(tools: list[ToolExecution]) -> None:
+    """Only tools that observed something are evidence."""
+    run = _run("r1", tools=tools)
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 
@@ -193,20 +231,6 @@ def test_a_graph_lookup_late_in_a_long_shell_command_is_never_rendered() -> None
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 
 
-def test_reasoning_scratchpads_are_never_rendered() -> None:
-    """`think` and `analyze` return the model's own thoughts, not anything a tool observed."""
-    run = _run("r1", tools=[_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")])
-
-    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
-
-
-def test_subagent_answers_are_never_rendered() -> None:
-    """A subagent's answer is another model's prose; its own tool results come in through its own session."""
-    run = _run("r1", tools=[_tool("run_subagent", "Bob owns Atlas, I think.", task="Who owns Atlas?")])
-
-    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
-
-
 def test_long_tool_arguments_never_cut_off_the_result() -> None:
     """Arguments are clipped too, so a call with many large fields still fits its whole result in an episode."""
     fields = {f"field_{index}": "y" * 400 for index in range(80)}
@@ -215,28 +239,6 @@ def test_long_tool_arguments_never_cut_off_the_result() -> None:
     [rendered] = _episodes([run], "exploration")
 
     assert "decisive tail" in rendered.episode.body
-
-
-def test_results_collected_from_background_jobs_are_never_rendered() -> None:
-    """A job's result can be a graph lookup or a subagent's prose, and the collected result no longer says which."""
-    collected = "Job `j2` (run_subagent subagent) succeeded:\nI think Bob owns Atlas."
-    run = _run(
-        "r1",
-        tools=[_tool("job", collected, action="collect"), _tool("claude_send", "Bob owns it", prompt="who")],
-    )
-
-    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
-
-
-def test_workflow_outputs_are_never_rendered() -> None:
-    """A dynamic workflow's outputs are its participants' prose, whose own sessions are never added either."""
-    outputs = '{"outputs": {"research": "Per the knowledge graph, Alice leads Project Atlas"}}'
-    run = _run(
-        "r1",
-        tools=[_tool("run_workflow", outputs, plan="..."), _tool("get_workflow_run", outputs, run_id="w1")],
-    )
-
-    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 
 
 def test_a_message_with_line_breaks_stays_one_speaker_line() -> None:
@@ -277,14 +279,7 @@ def test_runs_merge_until_the_cap_and_split_only_at_run_boundaries() -> None:
     settings = KnowledgeGraphIngestConfig(max_episode_chars=1000, max_tool_result_chars=400)
     runs = [_run(f"r{index}", created_at=1_760_000_000 + index, answer="a" * 400) for index in range(3)]
 
-    rendered = render_episodes(
-        runs,
-        thread_kind="conversation",
-        episode_kind="conversation",
-        agent_name="mind",
-        settings=settings,
-        agent_for_sender=AGENTS.get,
-    )
+    rendered = _render(runs, "conversation", settings)
 
     assert [item.progress for item in rendered] == [(1_760_000_001, "r1", RUN_DONE), (1_760_000_002, "r2", RUN_DONE)]
     assert rendered[0].episode.body.count("agent mind:") == 2
@@ -323,40 +318,18 @@ def test_a_run_larger_than_the_cap_is_split_without_losing_results() -> None:
     results = [_tool(f"fetch_{index}", f"result {index} " + "x" * 3900) for index in range(10)]
     run = _run("r1", tools=results)
 
-    rendered = render_episodes(
-        [run],
-        thread_kind="exploration",
-        episode_kind="tool_results",
-        agent_name="mind",
-        settings=SETTINGS,
-        agent_for_sender=AGENTS.get,
-    )
+    rendered = _render([run], "tool_results", thread_kind="exploration")
 
     bodies = "\n".join(item.episode.body for item in rendered)
     assert len(rendered) > 1
     assert all(f"result {index} " in bodies for index in range(10))
     assert all(len(item.episode.body) <= SETTINGS.max_episode_chars for item in rendered)
-    assert rendered[-1].progress == (1_760_000_000, "r1", RUN_DONE)
-
-
-def test_pieces_of_a_split_run_carry_their_progress() -> None:
-    """Each piece records how many of its run's lines it reaches, so a retry can skip finished pieces."""
-    results = [_tool(f"fetch_{index}", f"result {index} " + "x" * 3900) for index in range(10)]
-
-    rendered = render_episodes(
-        [_run("r1", tools=results)],
-        thread_kind="exploration",
-        episode_kind="tool_results",
-        agent_name="mind",
-        settings=SETTINGS,
-        agent_for_sender=AGENTS.get,
-    )
-
+    # Each piece records how many of its run's lines it reaches, so a retry can skip finished pieces.
     progress = [item.progress for item in rendered]
     assert all(step[:2] == (1_760_000_000, "r1") for step in progress)
     lines_per_piece = [len(item.episode.body.splitlines()) for item in rendered[:-1]]
     assert [step[2] for step in progress[:-1]] == list(accumulate(lines_per_piece))
-    assert progress[-1][2] == RUN_DONE
+    assert progress[-1] == (1_760_000_000, "r1", RUN_DONE)
 
 
 def test_turns_on_different_days_go_to_different_episodes() -> None:
@@ -388,14 +361,10 @@ def test_a_split_run_resumes_without_loss_after_the_cap_changes() -> None:
     run = _run("r1", tools=[_tool(f"fetch_{index}", "x" * 340 + f" result {index}") for index in range(8)])
 
     def pieces(cap: int) -> list[RenderedEpisode]:
-        settings = KnowledgeGraphIngestConfig(max_episode_chars=cap, max_tool_result_chars=400)
-        return render_episodes(
+        return _render(
             [run],
-            thread_kind="conversation",
-            episode_kind="tool_results",
-            agent_name="mind",
-            settings=settings,
-            agent_for_sender=AGENTS.get,
+            "tool_results",
+            KnowledgeGraphIngestConfig(max_episode_chars=cap, max_tool_result_chars=400),
         )
 
     first = pieces(1000)[0]

@@ -13,7 +13,7 @@ from agno.session.agent import AgentSession
 
 from mindroom.history import archive
 from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -96,9 +96,6 @@ def test_updated_sessions_lists_sessions_changed_after_the_cursor(storage: Sqlit
     """Sessions are listed with their last update, oldest first, and workflow participant sessions are skipped."""
     _seed(storage, [_run("r1", 100)], session_id="!a:x:$t1")
     _seed(storage, [_run("r2", 100)], session_id="!a:x:$t1:dynamic_workflow:w:p")
-    first = get_agent_session(storage, "!a:x:$t1")
-    assert first is not None
-    assert first.updated_at is not None
 
     listed = updated_sessions(storage, "mind", since=0)
 

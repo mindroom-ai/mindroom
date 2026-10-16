@@ -77,6 +77,7 @@ def _seed(
     *,
     created_at: int,
     hook_source: str | None = None,
+    updated_at: int | None = None,
 ) -> None:
     metadata: dict[str, object] = {"room_id": "!room:x", "thread_id": session_id.rsplit(":", 1)[-1]}
     if hook_source is not None:
@@ -94,11 +95,11 @@ def _seed(
     storage = create_session_storage("mind", config, paths, execution_identity=None)
     try:
         seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=[run]))
-        # The conversation was last active when its turn was made.
+        # The conversation was last active when its turn was made, unless a later reply updated it.
         with storage.db_engine.begin() as connection:
             connection.exec_driver_sql(
                 f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (created_at, session_id),
+                (updated_at or created_at, session_id),
             )
     finally:
         storage.close()
@@ -258,9 +259,9 @@ def test_lead_arguments_mention_nobody(tmp_path: Path) -> None:
 def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> None:
     """A text-only reply in an old thread does not bring back the thread's earlier tool calls."""
     config, paths = _config(), _paths(tmp_path)
-    _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=100)
+    _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=100, updated_at=200)
 
-    assert _collect_leads(_context(config, paths, tmp_path), since=150, limit=10)[0] == []
+    assert _collect_leads(_context(config, paths, tmp_path), since=150, limit=10) == ([], True)
 
 
 def test_a_prompt_that_was_never_answered_keeps_its_leads(tmp_path: Path) -> None:

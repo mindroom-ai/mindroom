@@ -38,6 +38,7 @@ def test_agent_inherits_knowledge_graph_from_defaults() -> None:
     )
     assert config.agent_uses_knowledge_graph("mind")
     assert not config.agent_uses_knowledge_graph("scratch")
+    assert config.knowledge_graph_agents() == ["mind"]
 
 
 def test_knowledge_graph_is_off_by_default() -> None:
@@ -80,17 +81,6 @@ def test_max_episode_chars_stays_below_the_redaction_limit() -> None:
     """Episodes are redacted whole, so their cap stays under the redaction input limit."""
     with pytest.raises(ValidationError, match="max_episode_chars"):
         _config(knowledge_graph={"model": "luna", "ingest": {"max_episode_chars": 70000}})
-
-
-def test_knowledge_graph_agents_lists_enabled_agents_only() -> None:
-    """Only agents with the graph enabled are listed."""
-    config = _config(
-        agents={
-            "mind": AgentConfig(display_name="Mind", knowledge_graph=True),
-            "coder": AgentConfig(display_name="Coder"),
-        },
-    )
-    assert config.knowledge_graph_agents() == ["mind"]
 
 
 def test_tool_result_cap_stays_below_the_redaction_limit() -> None:

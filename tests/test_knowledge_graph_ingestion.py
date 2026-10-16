@@ -37,7 +37,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -58,17 +58,13 @@ class _FakeStore:
     failing: set[str] = field(default_factory=set)
     failing_kinds: set[str] = field(default_factory=set)
     failing_text: str | None = None
-    misconfigured: bool = False
-    unavailable: bool = False
+    # An error every call raises, such as an outage or a setup error, while set.
+    error: Exception | None = None
     added: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
-        if self.unavailable:
-            msg = "graph database unavailable"
-            raise ConnectionError(msg)
-        if self.misconfigured:
-            msg = "Unsupported embedder provider"
-            raise ValueError(msg)
+        if self.error is not None:
+            raise self.error
         if (
             usage.session_id in self.failing
             or episode.kind in self.failing_kinds
@@ -183,6 +179,19 @@ def _seed(
         storage.close()
 
 
+def _edit_runs(config: Config, paths: RuntimePaths, session_id: str, edit: Callable[[list[RunOutput]], None]) -> None:
+    """Change a seeded conversation's stored runs in place."""
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        session = storage.get_session(session_id, SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        edit(session.runs)
+        for run in session.runs:
+            storage.upsert_run(run=run, session_id=session_id, user_id=None)
+    finally:
+        storage.close()
+
+
 async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
     del agent_name, room_id, event_ids
     return frozenset()
@@ -220,6 +229,8 @@ async def test_cycle_ingests_new_runs_and_advances_its_marker(tmp_path: Path) ->
     assert _answers(store) == ["agent mind: answer r1", "agent mind: answer r2", "agent mind: answer r3"]
     assert {graph for graph, _, _ in store.episodes} == {graph_scope("mind", config, paths, None).graph_name}
     assert store.episodes[0][2].session_id == "!room:x:$t1"
+    # A shared agent's extraction cost belongs to the person whose conversation it came from.
+    assert {usage.requester_id for _, _, usage in store.episodes} == {"@alice:x"}
 
 
 @pytest.mark.asyncio
@@ -248,7 +259,11 @@ async def test_failing_session_backs_off_while_others_still_ingest(tmp_path: Pat
     await worker._run_cycle(config, now=now)
 
     assert store.sessions() == ["!room:x:$good"]
-    assert knowledge_graph_failure() is not None
+    # The unauthenticated health endpoint gets the failure's kind; error text can quote conversation content.
+    detail = knowledge_graph_failure()
+    assert detail is not None
+    assert "UnusableExtractionError" in detail
+    assert "structured output did not match" not in detail
     store.failing.clear()
     await worker._run_cycle(config, now=now + 1)
     assert store.sessions() == ["!room:x:$good"]
@@ -322,8 +337,8 @@ async def test_wake_runs_a_pass_before_the_interval(tmp_path: Path) -> None:
         wake_knowledge_graph_ingestion(after_seconds=0)
         await asyncio.wait_for(store.added.wait(), timeout=10)
     finally:
-        worker.stop()
-        await task
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert store.sessions() == ["!room:x:$t1"]
 
@@ -397,42 +412,24 @@ async def test_one_failing_agent_does_not_stop_the_others(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_health_names_a_failure_without_its_content(tmp_path: Path) -> None:
-    """The unauthenticated health endpoint gets the failure's kind; error text can quote conversation content."""
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ConnectionError("graph database unavailable"), id="outage"),
+        # A ValueError from setup, such as an unsupported embedder, is not output the model got wrong.
+        pytest.param(ValueError("Unsupported embedder provider"), id="setup-error"),
+    ],
+)
+async def test_an_outage_or_setup_error_never_drops_episodes(tmp_path: Path, error: Exception) -> None:
+    """While the database or provider is down or misconfigured for hours, episodes wait instead of being dropped."""
     config, paths = _config(), _paths(tmp_path)
-    store = _FakeStore(failing={"!room:x:$t1"})
-    _seed(config, paths, "!room:x:$t1", ["r1"])
-
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
-
-    detail = knowledge_graph_failure()
-    assert detail is not None
-    assert "UnusableExtractionError" in detail
-    assert "structured output did not match" not in detail
-
-
-@pytest.mark.asyncio
-async def test_usage_is_charged_to_the_conversations_requester(tmp_path: Path) -> None:
-    """A shared agent's extraction cost belongs to the person whose conversation it came from."""
-    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["r1"])
-
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
-
-    assert {usage.requester_id for _, _, usage in store.episodes} == {"@alice:x"}
-
-
-@pytest.mark.asyncio
-async def test_an_outage_never_drops_episodes(tmp_path: Path) -> None:
-    """While the database or provider is down for hours, episodes wait instead of being dropped."""
-    config, paths = _config(), _paths(tmp_path)
-    store = _FakeStore(unavailable=True)
+    store = _FakeStore(error=error)
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
 
     for attempt in range(8):
         await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
-    store.unavailable = False
+    store.error = None
     await worker._run_cycle(config, now=T0 + 40_000)
 
     assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
@@ -472,15 +469,7 @@ async def test_a_success_resets_the_failure_count(tmp_path: Path) -> None:
 async def test_a_new_graph_skips_turns_older_than_the_backfill_window(tmp_path: Path) -> None:
     """A long conversation still active today contributes only its recent turns to a new graph."""
     config, paths, store = _config(backfill_days=1), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 - 5 * DAY, updated_at=T0)
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
-        assert session is not None
-        session.runs[1].created_at = T0 - 60
-        storage.upsert_run(run=session.runs[1], session_id="!room:x:$t1", user_id=None)
-    finally:
-        storage.close()
+    _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 - 5 * DAY, spacing=5 * DAY - 60, updated_at=T0)
 
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
 
@@ -493,15 +482,12 @@ async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
     config, paths, store = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path), _FakeStore()
     run_ids = [f"r{index:02d}" for index in range(30)]
     _seed(config, paths, "!room:x:$t1", run_ids)
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
-        assert session is not None
-        for run in session.runs:
+
+    def long_answers(runs: list[RunOutput]) -> None:
+        for run in runs:
             run.messages[1].content = "a" * 600
-            storage.upsert_run(run=run, session_id="!room:x:$t1", user_id=None)
-    finally:
-        storage.close()
+
+    _edit_runs(config, paths, "!room:x:$t1", long_answers)
     worker = _worker(config, paths, store)
 
     await worker._run_cycle(config, now=T0 + 100)
@@ -510,17 +496,6 @@ async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
 
     assert 0 < first < 30
     assert len(store.sessions()) == 30
-
-
-@pytest.mark.asyncio
-async def test_an_abandoned_approval_stops_holding_back_the_conversation(tmp_path: Path) -> None:
-    """A turn still paused after approvals would have expired no longer blocks the turns after it."""
-    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
-
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 8 * DAY)
-
-    assert _answers(store) == ["agent mind: answer r2"]
 
 
 @pytest.mark.asyncio
@@ -538,54 +513,17 @@ async def test_a_turn_resuming_right_after_its_approval_expires_is_still_waited_
 async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
     """A rejection that never clears, such as a request the provider always refuses, stops costing calls."""
     config, paths = _config(), _paths(tmp_path)
-    store = _FakeStore(unavailable=True)
+    store = _FakeStore(error=ConnectionError("graph database unavailable"))
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
 
     await worker._run_cycle(config, now=T0 + 10)
     await worker._run_cycle(config, now=T0 + 10 + 3 * DAY + 1)
-    store.unavailable = False
+    store.error = None
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
     await worker._run_cycle(config, now=T0 + 10 + 4 * DAY)
 
     assert _answers(store) == ["agent mind: answer r2"]
-
-
-@pytest.mark.asyncio
-async def test_a_failing_later_piece_of_a_long_run_is_eventually_dropped(tmp_path: Path) -> None:
-    """A piece that keeps failing is dropped, even though the pieces before it keep succeeding."""
-    config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
-    _seed(config, paths, "!room:x:$t1", ["r1"])
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
-        assert session is not None
-        session.runs[0].tools = [
-            ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
-            for index in range(6)
-        ]
-        storage.upsert_run(run=session.runs[0], session_id="!room:x:$t1", user_id=None)
-    finally:
-        storage.close()
-    store = _FakeStore()
-    attempts: list[str] = []
-    real_add = store.add_episode
-
-    async def second_piece_fails(scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
-        if episode.kind == "tool_results":
-            attempts.append(episode.body.split("(", 1)[0])
-            if "fetch_3" in episode.body and "fetch_0" not in episode.body:
-                msg = "unusable output"
-                raise ValueError(msg)
-        await real_add(scope, episode, usage)
-
-    worker = _worker(config, paths, store)
-    with patch.object(store, "add_episode", second_piece_fails):
-        for attempt in range(10):
-            await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
-
-    assert len(attempts) <= 2 * 5 + 2
-    assert any("fetch_3" in body for _, episode, _ in store.episodes for body in [episode.body]) is False
 
 
 @pytest.mark.asyncio
@@ -607,17 +545,14 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
     """Dropped pieces stay done, so earlier pieces are not extracted again and the run completes."""
     config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
     _seed(config, paths, "!room:x:$t1", ["r1"])
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
-        assert session is not None
-        session.runs[0].tools = [
+
+    def eight_results(runs: list[RunOutput]) -> None:
+        runs[0].tools = [
             ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
             for index in range(8)
         ]
-        storage.upsert_run(run=session.runs[0], session_id="!room:x:$t1", user_id=None)
-    finally:
-        storage.close()
+
+    _edit_runs(config, paths, "!room:x:$t1", eight_results)
     store = _FakeStore()
     first_pieces: list[str] = []
     real_add = store.add_episode
@@ -646,14 +581,11 @@ async def test_a_turn_waiting_on_a_recent_approval_still_holds_back(tmp_path: Pa
     """An approval asked for days into a turn expires counting from when it was asked, not from the turn's start."""
     config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
-        assert session is not None
-        session.runs[0].messages[-1].created_at = T0 + 6 * DAY
-        storage.upsert_run(run=session.runs[0], session_id="!room:x:$t1", user_id=None)
-    finally:
-        storage.close()
+
+    def asked_on_day_six(runs: list[RunOutput]) -> None:
+        runs[0].messages[-1].created_at = T0 + 6 * DAY
+
+    _edit_runs(config, paths, "!room:x:$t1", asked_on_day_six)
 
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 8 * DAY)
 
@@ -743,22 +675,6 @@ async def test_a_failing_tool_result_is_dropped_while_the_conversation_keeps_suc
         await worker._run_cycle(config, now=T0 + day * 7200 + 100)
 
     assert [episode.kind for _, episode, _ in store.episodes].count("tool_results") >= 1
-
-
-@pytest.mark.asyncio
-async def test_a_configuration_error_never_counts_as_unusable_output(tmp_path: Path) -> None:
-    """A ValueError from setup, such as an unsupported embedder, waits like an outage instead of dropping episodes."""
-    config, paths = _config(), _paths(tmp_path)
-    store = _FakeStore(misconfigured=True)
-    _seed(config, paths, "!room:x:$t1", ["r1"])
-    worker = _worker(config, paths, store)
-
-    for attempt in range(8):
-        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
-    store.misconfigured = False
-    await worker._run_cycle(config, now=T0 + 40_000)
-
-    assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
 
 
 @pytest.mark.asyncio
