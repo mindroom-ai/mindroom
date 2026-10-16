@@ -18,6 +18,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.memory import (
     MemoryAutoFlushWorker,
     add_agent_memory,
+    auto_flush,
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
@@ -37,6 +38,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+
+
+def _entry(storage_path: Path, session_id: str) -> dict:
+    state = json.loads((storage_path / "memory_flush_state.json").read_text())
+    return next(entry for entry in state["sessions"].values() if entry["session_id"] == session_id)
 
 
 @dataclass
@@ -657,27 +663,68 @@ async def _fake_extract_memory_summary(**_: object) -> str:
 
 
 @pytest.mark.asyncio
-async def test_worker_keeps_running_after_a_cycle_fails(tmp_path: Path, config: Config) -> None:
+async def test_worker_keeps_running_after_a_cycle_fails(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cycle that fails, for example on an unwritable state file, is logged and the next one still runs."""
     worker = MemoryAutoFlushWorker(
         storage_path=tmp_path,
         runtime_paths=runtime_paths_for(config),
         config_provider=lambda: config,
     )
-    cycles = 0
+    real_write = auto_flush._write_state_unlocked
+    writes = 0
 
-    async def failing_then_stopping_cycle(_config: Config) -> None:
-        nonlocal cycles
-        cycles += 1
-        if cycles == 1:
+    def write_fails_once(storage_path: Path, state: object) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
             msg = "state file is not writable"
             raise OSError(msg)
-        worker.stop()
+        real_write(storage_path, state)
 
-    worker._run_cycle = failing_then_stopping_cycle  # type: ignore[method-assign]
+    monkeypatch.setattr(auto_flush, "_write_state_unlocked", write_fails_once)
+    real_cycle = worker._run_cycle
+    cycles = 0
+
+    async def counted_cycle(cycle_config: Config) -> None:
+        nonlocal cycles
+        cycles += 1
+        if cycles == 2:
+            worker.stop()
+        await real_cycle(cycle_config)
+
+    monkeypatch.setattr(worker, "_run_cycle", counted_cycle)
     await asyncio.wait_for(worker.run(), timeout=10)
 
     assert cycles == 2
+    assert writes > 1
+
+
+@pytest.mark.asyncio
+async def test_stopping_during_a_cycle_ends_the_worker_without_waiting_an_interval(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown and a reload that turns auto-flush off wait for the worker, so a stop mid-cycle must not sleep 30 min."""
+    config.memory.auto_flush.flush_interval_seconds = 1800
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    real_cycle = worker._run_cycle
+
+    async def stopped_mid_cycle(cycle_config: Config) -> None:
+        worker.stop()
+        await real_cycle(cycle_config)
+
+    monkeypatch.setattr(worker, "_run_cycle", stopped_mid_cycle)
+
+    await asyncio.wait_for(worker.run(), timeout=5)
 
 
 @pytest.mark.asyncio
@@ -708,15 +755,21 @@ async def test_a_session_that_cannot_be_read_does_not_block_the_others(
         runtime_paths=runtime_paths_for(config),
         config_provider=lambda: config,
     )
+    now = auto_flush._now_ts()
+    monkeypatch.setattr(auto_flush, "_now_ts", lambda: now)
 
     await worker._run_cycle(config)
 
     assert writes == ["general:[auto_flush:fine:100] important decision"]
-    state = json.loads((tmp_path / "memory_flush_state.json").read_text())
-    broken = next(entry for entry in state["sessions"].values() if entry["session_id"] == "broken")
-    assert broken["dirty"] is True
-    assert broken["consecutive_failures"] == 1
-    assert broken["next_attempt_at"] > 0
+    cooldown = config.memory.auto_flush.retry_cooldown_seconds
+    broken = _entry(tmp_path, "broken")
+    assert (broken["dirty"], broken["consecutive_failures"], broken["next_attempt_at"]) == (True, 1, now + cooldown)
+
+    # The next failure waits twice as long.
+    monkeypatch.setattr(auto_flush, "_now_ts", lambda: now + cooldown)
+    await worker._run_cycle(config)
+    broken = _entry(tmp_path, "broken")
+    assert (broken["consecutive_failures"], broken["next_attempt_at"]) == (2, now + 3 * cooldown)
 
 
 @pytest.mark.asyncio

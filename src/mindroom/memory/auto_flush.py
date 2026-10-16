@@ -514,6 +514,8 @@ class MemoryAutoFlushWorker:
         _WAKE_EVENTS.add(self._wake_event)
         try:
             while not self._stop_event.is_set():
+                # Cleared before the cycle, so a stop or new activity during it starts the next wait at once.
+                self._wake_event.clear()
                 config = self.config_provider()
                 interval = 30
                 if config is not None and auto_flush_enabled(config):
@@ -523,7 +525,6 @@ class MemoryAutoFlushWorker:
                         # A failed cycle, such as an unwritable state file, must not end flushing until a restart.
                         logger.exception("Memory auto-flush cycle failed")
                     interval = config.memory.auto_flush.flush_interval_seconds
-                self._wake_event.clear()
                 try:
                     await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
                 except TimeoutError:
@@ -713,7 +714,7 @@ class MemoryAutoFlushWorker:
                 execution_identity=entry_execution_identity,
             )
         except Exception:
-            # The memory is already written, so the flush still counts as done; only a requeue check is lost.
+            # The flush still counts as done; only the reread's update time is lost, and dirty marks decide a requeue.
             logger.exception(
                 "Memory auto-flush could not reread a conversation",
                 agent=agent_name,
