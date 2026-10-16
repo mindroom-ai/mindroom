@@ -166,7 +166,7 @@ Update that page in the same PR when a change alters the trust model or anything
 ### Running MindRoom Live
 
 - Use the `live-test` skill (`.claude/skills/live-test/`) to boot a local Matrix stack and backend, use a local OpenAI-compatible model server, create disposable Matrix accounts, talk to agents with Matty, and take dashboard or platform screenshots.
-- `docs/dev/ops/README.md` lists the main `just` recipes (`just --list` shows all), including the destructive `just local-matrix-reset`; read its warning before resetting.
+- `docs/dev/ops.md` lists the main `just` recipes (`just --list` shows all), including the destructive `just local-matrix-reset`; read its warning before resetting.
 - For hosted Matrix with pairing (`uvx mindroom config init --matrix-server mindroom.chat`, then `uvx mindroom run`), see `docs/getting-started.md` and `docs/deployment/hosted-matrix.md`.
 - SaaS platform deployment, staging values, release deploys, and Supabase migrations are documented in `docs/deployment/saas-platform.md`.
 - `docs/cli.md` documents every `mindroom` command, including `mindroom doctor`, `mindroom run --log-level DEBUG`, and `mindroom local-stack-setup`.
@@ -313,7 +313,7 @@ The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mi
 ## 6. Releases
 
 Pushes to `main` publish a CalVer release automatically through `.github/workflows/calver-auto-release.yml`.
-Read the Releases section of `docs/dev/ops/README.md` before retrying a failed publication.
+Read the Releases section of `docs/dev/ops.md` before retrying a failed publication.
 
 # Important Instruction Reminders
 Do what has been asked; nothing more, nothing less.

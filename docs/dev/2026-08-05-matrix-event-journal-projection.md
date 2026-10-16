@@ -2,7 +2,7 @@
 
 Archived record of the cutover that made the event journal the single durable owner of Matrix events (PR #1800).
 It keeps the reasons, rejected designs, refuted theories, external behaviour, and measurements from that work; several mechanisms it names were later replaced, so check the code before quoting any of them as current.
-What the journal guarantees today, including the decisions that still hold and the homeserver behaviour it relies on, is in [`docs/architecture/matrix-event-journal-contracts.md`](../../architecture/matrix-event-journal-contracts.md).
+What the journal guarantees today, including the decisions that still hold and the homeserver behaviour it relies on, is in [`docs/architecture/matrix-event-journal-contracts.md`](../architecture/matrix-event-journal-contracts.md).
 
 ## Why
 

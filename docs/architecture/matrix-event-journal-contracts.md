@@ -3,7 +3,7 @@
 The decisions behind the event journal that its code does not record, and the homeserver behaviour it relies on that you would otherwise rediscover by debugging.
 Invariants whose reasons are visible where they are enforced are explained in the docstrings of `src/mindroom/event_journal/` and the Matrix ingestion and hydration modules, not here.
 Which plaintext the journal keeps and which principal owns it is on [the security page](matrix-event-journal-security.md).
-The history of how the design got here, including the theories that turned out wrong, is archived in `docs/dev/archive/2026-08-05-matrix-event-journal-projection.md`.
+The history of how the design got here, including the theories that turned out wrong, is recorded in `docs/dev/2026-08-05-matrix-event-journal-projection.md`.
 
 ## Decisions
 
