@@ -15,7 +15,7 @@ const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status });
 const tokenFor = (name: string) => ({ access_token: name, expires_in: 3600 });
 
-let opener: { postMessage: ReturnType<typeof vi.fn> } | null;
+let opener: { postMessage: ReturnType<typeof vi.fn>; closed?: boolean } | null;
 
 // Fake backend: GET reports `get`, POST signs in the token's user unless `post` says otherwise.
 // Like a real fetch, requests whose signal is aborted are rejected.
@@ -330,6 +330,16 @@ describe("ConnectionsSignIn without an opener", () => {
     expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(sessionCalls("POST")).toHaveLength(0);
+  });
+
+  it("uses the session when the Chat tab that opened the portal has closed", async () => {
+    setOpener({ postMessage: vi.fn(), closed: true });
+    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
+    renderGate();
+    expect(await screen.findByText("Portal content")).toBeInTheDocument();
+    expect(opener!.postMessage).not.toHaveBeenCalled();
+    expect(sessionCalls("POST")).toHaveLength(0);
+    expect(await sentUser()).toBe("@alice:example.org");
   });
 
   it("renders the page as is when the portal is off", async () => {

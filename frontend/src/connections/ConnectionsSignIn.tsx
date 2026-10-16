@@ -65,8 +65,8 @@ function askOpener(opener: Window, signal: AbortSignal) {
 
 async function signIn(signal: AbortSignal): Promise<Gate> {
   const opener: Window | null = window.opener;
-  if (!opener) {
-    // Trusted-upstream deployments and direct visits with a live session have no handshake to run.
+  if (!opener || opener.closed) {
+    // Trusted-upstream deployments, direct visits, and reloads after Chat's tab closed have no handshake to run.
     const response = await fetch(SESSION_PATH, {
       signal,
       credentials: "same-origin",
@@ -99,8 +99,9 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
 /**
  * Render a Connections page for the Matrix user signed in to MindRoom Chat.
  *
- * When MindRoom Chat opened the portal, it ignores any existing session and only renders after Chat's OpenID handshake
- * succeeds. Without an opener, the page shows the session the server reports, or renders as is when the portal is off.
+ * When MindRoom Chat opened the portal and its tab is still open, it ignores any existing session and only renders after
+ * Chat's OpenID handshake succeeds. Otherwise the page shows the session the server reports, or renders as is when the
+ * portal is off.
  *
  * @param children - Page content shown only after sign-in succeeds.
  */
