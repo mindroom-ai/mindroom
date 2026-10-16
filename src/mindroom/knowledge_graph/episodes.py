@@ -39,10 +39,19 @@ RUN_DONE = 1 << 30
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
 _GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
-# Agno's reasoning functions return the model's own thoughts, and subagents and Claude Code answer in another model's
-# prose; a subagent's own tool results come in through its own session. A background job's collected result no longer
-# says which tool produced it, so it could be either.
-_PROSE_FUNCTIONS = ("think", "analyze", "run_subagent", "continue_subagent", "claude_send", "job")
+# Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
+# in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
+# result no longer says which tool produced it, so it could be either.
+_PROSE_FUNCTIONS = (
+    "think",
+    "analyze",
+    "run_subagent",
+    "continue_subagent",
+    "run_workflow",
+    "get_workflow_run",
+    "claude_send",
+    "job",
+)
 _MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
 _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
 _LINE_BREAK = re.compile(r"\s*\n\s*")

@@ -43,14 +43,14 @@ Extraction needs a model with reliable structured output; small local models oft
 
 Facts are embedded with [`memory.embedder`](memory.md#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
-Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
+Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read but keeps its memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory.
 
 ## What Goes Into the Graph
 
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](scheduling.md#exploration) threads and tasks another agent delegated to it, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, and team conversations.
+Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 

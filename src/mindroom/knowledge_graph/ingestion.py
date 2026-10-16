@@ -212,10 +212,11 @@ class KnowledgeGraphIngestionWorker:
     async def _run_cycle(self, config: Config, *, now: float) -> None:
         """Ingest up to ``max_sessions_per_cycle`` idle conversations with new turns."""
         budget = config.knowledge_graph.ingest.max_sessions_per_cycle
-        automation_thread_ids = automation_threads(self.runtime_paths)
+        # These read files, including every private instance's records, so they stay off the event loop.
+        automation_thread_ids = await asyncio.to_thread(automation_threads, self.runtime_paths)
         entity_names = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
         outcomes: list[bool] = []
-        scopes = graph_scopes(config, self.runtime_paths)
+        scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
         # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
         start = self._passes % len(scopes) if scopes else 0
         self._passes += 1
