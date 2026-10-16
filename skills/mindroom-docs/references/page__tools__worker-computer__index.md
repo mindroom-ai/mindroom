@@ -227,6 +227,10 @@ If the sandbox cannot start, the browser call fails instead of running unsandbox
 It applies to every dedicated Docker worker, whether or not Computer is enabled or the agent uses a browser.
 Changing the policy replaces existing workers.
 
+With gVisor as the worker runtime (`MINDROOM_DOCKER_WORKER_RUNTIME=runsc`), Computer needs gVisor 20261005 or later, because gVisor 20260406 crashes Chromium's page loads.
+gVisor keeps worker system calls off the host kernel itself and does not apply the `computer` seccomp profile inside its sandbox.
+Do not register `runsc` with `--oci-seccomp`: workers then cannot start threads and fail to start.
+
 Configuration fails with `MINDROOM_WORKER_COMPUTER_ENABLED=true requires MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer.` when Computer is enabled under `runtime_default`.
 Computer workers must also run as a non-root user.
 `MINDROOM_DOCKER_WORKER_USER=root` or UID 0, including a runtime that itself runs as root and passes its UID to workers, fails configuration, and a worker that starts as root refuses requests.
