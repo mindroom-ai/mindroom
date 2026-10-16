@@ -384,8 +384,7 @@ agents:
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
 2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
 3. The agent answers the prompt like any message, with its own tools and [approval rules](tool-approval.md); a shared agent's call that needs approval is denied, because no person asked for the run, while a private agent's call waits in the thread until its requester answers or the request expires.
-4. When the run finishes, its tool results are added to the graph; the agent's own summary is not, and an interrupted run adds nothing.
-5. When the run ends, MindRoom marks the thread resolved.
+4. When the run ends, MindRoom marks the thread resolved and adds its tool results to the graph; the agent's own summary is not added, and an interrupted run adds nothing.
 
 The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.

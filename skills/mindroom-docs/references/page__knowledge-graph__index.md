@@ -58,8 +58,6 @@ Redacting a message later does not remove facts already extracted from it; to fo
 
 ## The `knowledge_graph` Tool
 
-Agents with the graph enabled receive it automatically.
-
 ```python
 search_graph("who owns Project Atlas", limit=10)   # limit 1 to 50
 graph_entity("Project Atlas")

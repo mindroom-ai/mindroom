@@ -40,7 +40,6 @@ Ordinary conversations ingest user, assistant, and tool messages with speaker la
 Exploration threads and delegated tasks ingest only tool calls and their results, because their prompts come from an agent, not a person, and their answers are the agent's own synthesis.
 Other automation threads (`dreaming`, `prompt_curation`, plugin automations) are not ingested.
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
-Each run's metadata records the hook source of the message that started it.
 Calls to the `knowledge_graph` tool and their results, including lookups through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze`, subagents', workflow participants', and Claude Code's answers, and results collected from background jobs, which no longer name the tool that produced them, are left out because they are or can be a model's prose.
 Each message is joined onto one line, because Graphiti reads every dialogue line as a new speaker's, so a line break in someone's message cannot put words in another person's mouth.
 
@@ -50,7 +49,6 @@ Graphiti records which episodes support a fact, so provenance is per episode, an
 - `conversation`: the run's user and assistant messages as a Graphiti `message` episode, each line prefixed with its speaker (`person <Matrix ID>` or `agent <name>`), so extraction attributes assertions to whoever made them.
 - `tool_results`: the run's tool calls and results as a `text` episode, an observation of the sources the model chose to query.
 
-Each episode's `source_description` starts with its kind and names its origin: the room and thread, and for tool results the function name and an argument digest for each call, plus the time of the run.
 Search results return the kinds and origins of each fact's episodes, so the agent can tell an observation from something it or a person said.
 
 Rejected: a `record_evidence` tool the agent calls during exploration.
@@ -59,7 +57,6 @@ It lets a model paraphrase, omit, or invent evidence, and its own summaries woul
 ### Exploration runs as a visible automation turn
 
 Exploration reuses the automation runner: the check in code decides whether to run, and the run is a normal turn in a new thread, so tool execution keeps worker routing, credentials, file access, tool hooks, usage tracking, and the stop control.
-Operators point it at a dedicated room; private agents post in the requester's personal room, as other automations do.
 
 Rejected: a silent out-of-band agent run, like the skill-learning reviewer.
 Building an agent's full live toolset outside a turn would duplicate worker routing, credentials, and hooks; the delegation-child machinery is bound to a parent tool call.
@@ -70,7 +67,6 @@ Approval cards and the stop control need a visible thread, and the thread is the
 
 An exploration turn is an ordinary turn started by a trusted automation prompt: the agent has its usual tools, and approval rules apply as in any turn, so a call that needs approval waits in the exploration thread for a private agent's requester, and a shared agent's is denied because no person asked for its run, which a live run on 2026-10-16 confirmed.
 The prompt asks the agent to only read and to stay within `max_tool_calls`; the agent's `max_tool_calls_per_turn` is the enforced limit, and approval rules are what stop writes, as for any turn that reads untrusted content.
-Observed tool calls are leads: the prompt lists them, and the agent follows them with its own tools.
 
 Rejected: restricting exploration turns in code with an operator allowlist, hidden approval-gated functions, and a per-thread call cap.
 Every capability that runs or defers work beside a turn's own tool list became a way around the allowlist: background jobs, skills, knowledge search, delegation, and the OAuth MCP `call_tool` dispatcher, which reaches any remote tool by name.
@@ -98,7 +94,6 @@ The server persists with an append-only file, so a kill loses at most a second o
 
 ### Graphiti's models come from MindRoom config
 
-`knowledge_graph.model` names a `models` entry.
 Graphiti's `LLMClient` and `EmbedderClient` are thin adapters over MindRoom's own model and embedder construction (`get_model_instance` with a structured-output Agno run, and `create_configured_embedder` for `memory.embedder`), so every provider, credential rule, and base URL MindRoom supports works without a second mapping.
 Each extraction call is an Agno run, so its tokens are recorded through the same helper-usage path as auto-flush.
 
@@ -106,8 +101,6 @@ Rejected: mapping MindRoom providers onto Graphiti's own provider clients.
 It duplicates key precedence and base-URL rules per provider, covers fewer providers, and gives no usage accounting.
 Search uses Graphiti's hybrid search with reciprocal-rank fusion and no cross-encoder, so a query costs no LLM call.
 Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI key, so MindRoom passes a reranker that is never called by the search recipes it uses.
-Extraction tokens are recorded as helper usage of kind `knowledge_graph`, attributed to the agent and the conversation's requester.
-`GRAPHITI_TELEMETRY_ENABLED=false` joins the vendor telemetry opt-outs.
 
 Graphiti needs structured output; small local models may fail extraction, which the ingestion worker reports and retries rather than hides.
 
@@ -132,9 +125,7 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 - Turns share an episode only with turns of the same day and requester, so relative dates resolve against the day they were said and each episode's extraction is charged to one person.
 - A newly seen conversation starts at the backfill cutoff, and one conversation adds at most twenty completed episodes per pass, so a long history spreads over passes instead of holding up every other conversation.
 - A paused turn stops holding back its conversation once the approval it waits for has expired, counted from its newest message, which is the call waiting for approval; the conversation is looked at again then even without new messages.
-- A database server that died is started again on the next call, and a start waits while the server loads a large database, which can take minutes after a restart.
 - A new graph's start is saved when it is first seen, so the backfill window stays anchored even with `backfill_days: 0`.
-- The graph name includes the embedder signature, so another embedder starts a graph that ingestion fills again.
 
 ## Exploration invariants
 
@@ -145,13 +136,12 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 ## Security
 
 - The graph is a primary-side store fed by worker-produced text (tool results); it is data, never executed, and extraction prompt injection can at worst add wrong facts, which carry their source.
-- A shared agent's graph holds what it saw in every requester's conversations, including tool results, and any requester of that agent can query it; this matches shared-agent memory and must be stated on the user page and in `security-posture.md`.
+- A shared agent's graph holds what it saw in every requester's conversations, including tool results, and any requester of that agent can query it; this matches shared-agent memory.
 - Exploration prompts list redacted arguments of recent tool calls from the agent's conversations, so everyone who can read the exploration room sees them; a shared agent's operator must choose that room, and private agents post in the requester's own personal room.
 - Ingestion skips turns derived from events the agent's journal saw redacted, because stored history drops a redacted turn only when the agent next replies there; it waits while the agent's bot is not running, since it cannot tell then.
   Exploration's lead check runs in a thread without the journal, so a redacted turn's calls can be listed until that reply.
 - Only top-level, completed Matrix runs are ingested: runs with a `room_id`, not OpenAI-compatible API sessions, dynamic-workflow participant sessions, or team-member runs.
 - Private agents get one graph per requester instance and explore as that requester, with that requester's credentials, as automations already do.
-- Exploration has the agent's own tools and approval rules; its prompt's instruction to only read bounds nothing.
 - Credential-like values are redacted best-effort before ingestion with the shared `redact_sensitive_text`, the single redaction implementation.
 
 ## Error handling
@@ -175,4 +165,5 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 
 ## Open questions
 
-- Whether default Graphiti extraction on a cheap model is accurate enough on real transcripts; the live evaluation decides the default `knowledge_graph.model` and whether custom entity types are needed.
+- Whether default Graphiti extraction on a cheap model is accurate enough on real transcripts; a labeled evaluation decides the default `knowledge_graph.model` and whether custom entity types are needed.
+  A live run on 2026-10-16 with GPT-6 Luna, Gemini 3.8 Flash, and GPT-6 Luna through Codex extracted release, pull request, and author facts that matched their GitHub sources and superseded a changed owner, but missed a moved deadline and stored an agent's restatement of graph lookups as new conversation facts; extraction made about 15 model calls per episode.
