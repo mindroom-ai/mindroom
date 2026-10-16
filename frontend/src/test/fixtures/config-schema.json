@@ -106,7 +106,7 @@
             }
           ],
           "default": null,
-          "description": "Opt-in switch to cheap_model for turns whose prompt cache has expired"
+          "description": "Opt-in switch of an idle thread to cheap_model for the rest of the thread"
         },
         "access": {
           "anyOf": [
@@ -213,7 +213,7 @@
             }
           ],
           "default": null,
-          "description": "Cheaper model alias this agent may switch to, such as on cold-cache turns",
+          "description": "Cheaper model alias this agent may switch to, used by cold_cache",
           "title": "Cheap Model",
           "x-mindroom": {
             "reference": "model"
@@ -1033,8 +1033,15 @@
     },
     "ColdCacheConfig": {
       "additionalProperties": false,
-      "description": "Let a judge move cold-cache turns to the agent's cheap model.",
+      "description": "Let a judge move a thread to the agent's cheap model once its prompt cache went cold.",
       "properties": {
+        "idle_seconds": {
+          "default": 3600,
+          "description": "Seconds since the agent's last reply in a thread after which its prompt cache counts as cold",
+          "minimum": 1,
+          "title": "Idle Seconds",
+          "type": "integer"
+        },
         "judgment": {
           "anyOf": [
             {
@@ -1388,7 +1395,7 @@
             }
           ],
           "default": null,
-          "description": "Cheaper model key for agents without their own cheap_model, such as on cold-cache turns",
+          "description": "Cheaper model key for agents without their own cheap_model, used by cold_cache",
           "title": "Cheap Model",
           "x-mindroom": {
             "reference": "model"

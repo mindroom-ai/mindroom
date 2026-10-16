@@ -6,10 +6,15 @@ from mindroom.config.judgment import JudgmentConfig, LLMJudgmentConfig
 
 
 class ColdCacheConfig(BaseModel):
-    """Let a judge move cold-cache turns to the agent's cheap model."""
+    """Let a judge move a thread to the agent's cheap model once its prompt cache went cold."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    idle_seconds: int = Field(
+        default=3600,
+        ge=1,
+        description="Seconds since the agent's last reply in a thread after which its prompt cache counts as cold",
+    )
     judgment: JudgmentConfig | None = Field(
         default=None,
         description="LLM model alias, TypeSafe, or OpenAI Decisions backend; unset asks the cheap model itself",

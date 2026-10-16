@@ -978,7 +978,6 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
     "mindroom.tool_jobs.consumption",
-    "mindroom.response_runner",
 ]
 
 [[modules]]
@@ -1146,7 +1145,6 @@ depends_on = [
 ]
 visibility = ["mindroom.judgment.llm",
     "mindroom.ai",
-    "mindroom.judgment.cold_cache",
     "mindroom.api.provider_setup",
     "mindroom.cli.config",
     "mindroom.cli.doctor",
@@ -2511,7 +2509,7 @@ visibility = ["mindroom.providers.openai_models"]
 [[modules]]
 path = "mindroom.providers.openrouter_prompt_cache"
 depends_on = ["mindroom.providers.claude_prompt_cache", "mindroom.hooks.enrichment"]
-visibility = ["mindroom.providers.openai_models", "mindroom.judgment.cold_cache"]
+visibility = ["mindroom.providers.openai_models"]
 
 [[modules]]
 path = "mindroom.providers.claude_native_compaction"
@@ -2884,6 +2882,7 @@ path = "mindroom.response_runner"
 depends_on = [
     "mindroom.agent_modes",
     "mindroom.judgment.cold_cache",
+    "mindroom.thread_models",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.follow_ups",
@@ -2943,7 +2942,6 @@ depends_on = [
     "mindroom.user_turn_time",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.skill_learning.capture",
-    "mindroom.session_storage.agent_storage",
 ]
 
 [[modules]]
@@ -5928,14 +5926,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = [
-    "CLAUDE_CACHE_PROVIDERS",
-    "canonical_provider",
-    "effective_model_id",
-    "get_model_instance",
-    "missing_model_api_key_provider",
-    "model_uses_own_credential",
-]
+expose = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
 from = ["mindroom.providers.model_loading"]
 
 [[interfaces]]
@@ -8566,12 +8557,7 @@ depends_on = ["mindroom.judgment.client", "mindroom.model_defaults"]
 
 [[modules]]
 path = "mindroom.judgment.cold_cache"
-depends_on = [
-    "mindroom.judgment.evaluator",
-    "mindroom.judgment.state",
-    "mindroom.providers.model_loading",
-    "mindroom.providers.openrouter_prompt_cache",
-]
+depends_on = ["mindroom.judgment.evaluator", "mindroom.judgment.state"]
 visibility = ["mindroom.response_runner"]
 
 [[modules]]

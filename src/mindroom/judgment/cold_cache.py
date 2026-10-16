@@ -1,4 +1,4 @@
-"""Move cold-cache turns to the agent's cheap model when a judge accepts the request."""
+"""Move a thread whose prompt cache went cold to the agent's cheap model when a judge accepts."""
 
 from __future__ import annotations
 
@@ -7,24 +7,17 @@ from typing import TYPE_CHECKING
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, fit_judgment_request
 from mindroom.logging_config import get_logger
-from mindroom.providers.model_loading import CLAUDE_CACHE_PROVIDERS, canonical_provider, effective_model_id
-from mindroom.providers.openrouter_prompt_cache import routes_to_anthropic
 
 if TYPE_CHECKING:
-    from agno.session.agent import AgentSession
+    from collections.abc import Sequence
 
     from mindroom.config.cold_cache import ColdCacheConfig
     from mindroom.config.main import Config
-    from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 
-# Anthropic's TTLs, refreshed on every cache hit.
-_EXTENDED_CACHE_TTL_SECONDS = 3600
-_DEFAULT_CACHE_TTL_SECONDS = 300
-# OpenAI's extended retention, the default for GPT-5.5 and earlier outside Zero Data Retention.
-_LONGEST_PROVIDER_CACHE_TTL_SECONDS = 24 * 3600
 # The cheap model takes over the whole thread, so the judge sees as much of it as the request budget fits.
 _MAX_CONTEXT_MESSAGES = 63
 
@@ -53,36 +46,22 @@ def _cold_cache_question(agent_model_id: str, cheap_model_id: str) -> JudgmentQu
     )
 
 
-def _prompt_cache_ttl_seconds(model_config: ModelConfig) -> int:
-    """Return how long an idle thread's prompt cache lives, erring long when the provider is not exact."""
-    provider = canonical_provider(model_config.provider)
-    if provider not in CLAUDE_CACHE_PROVIDERS and not (
-        provider == "openrouter" and routes_to_anthropic(model_config.id)
-    ):
-        # Other providers' retention is not known exactly, so only their longest lifetime counts as expired.
-        return _LONGEST_PROVIDER_CACHE_TTL_SECONDS
-    extra_kwargs = model_config.extra_kwargs or {}
-    if extra_kwargs.get("cache_system_prompt") is False:
-        # Without cache breakpoints Claude caches nothing, so every turn is cold.
-        return 0
-    if extra_kwargs.get("extended_cache_time") is False:
-        return _DEFAULT_CACHE_TTL_SECONDS
-    # MindRoom enables the 1h TTL for Claude, direct or through OpenRouter, by default.
-    return _EXTENDED_CACHE_TTL_SECONDS
-
-
-def _is_thread_cache_warm(session: AgentSession | None, model_config: ModelConfig, *, now: float) -> bool:
-    """Whether the agent model served this thread's newest run within its cache TTL."""
-    if session is None or not session.runs:
-        return False
-    # Interrupted-turn replays carry no model, so the newest run that names one decides.
-    # Timestamps are whole seconds, so on a tie the later stored run wins.
-    served = max((run for run in reversed(session.runs) if run.model), key=lambda run: run.created_at, default=None)
-    if served is not None and served.model != effective_model_id(model_config):
-        return False
-    # The session is written at or after the last provider request, so this errs toward warm.
-    ttl = _prompt_cache_ttl_seconds(model_config)
-    return ttl > 0 and (session.updated_at is None or now - session.updated_at < ttl)
+def idle_seconds_before_turn(
+    history: Sequence[ResolvedVisibleMessage],
+    *,
+    agent_user_id: str,
+    source_event_ids: tuple[str, ...],
+    now: float,
+) -> float | None:
+    """Return how long the agent's last reply before this turn has been idle, or None when it never replied."""
+    last_ms = None
+    for message in history:
+        if message.event_id in source_event_ids:
+            break
+        if message.sender == agent_user_id:
+            # A streamed reply's final edit marks its last provider request.
+            last_ms = max(message.timestamp, message.edited_timestamp or 0)
+    return None if last_ms is None else now - last_ms / 1000
 
 
 async def select_cold_cache_model(
@@ -93,12 +72,11 @@ async def select_cold_cache_model(
     agent_name: str,
     agent_model: str,
     cheap_model: str,
-    session: AgentSession | None,
+    idle_seconds: float | None,
     context: tuple[JudgmentMessage, ...] | None,
     prompt: str,
-    now: float,
 ) -> str:
-    """Return the cheap model only when the agent model's cache is cold and the judge accepts."""
+    """Return the cheap model only when the thread has been idle past the cache lifetime and the judge accepts."""
     decision, reason = await _judge(
         settings,
         config=config,
@@ -106,10 +84,9 @@ async def select_cold_cache_model(
         agent_name=agent_name,
         agent_model=agent_model,
         cheap_model=cheap_model,
-        session=session,
+        idle_seconds=idle_seconds,
         context=context,
         prompt=prompt,
-        now=now,
     )
     chosen = cheap_model if decision is True else agent_model
     logger.info(
@@ -117,7 +94,7 @@ async def select_cold_cache_model(
         agent=agent_name,
         agent_model=agent_model,
         chosen_model=chosen,
-        cache_age_seconds=None if session is None or session.updated_at is None else now - session.updated_at,
+        idle_seconds=idle_seconds,
         decision=decision,
         reason=reason,
     )
@@ -132,20 +109,20 @@ async def _judge(
     agent_name: str,
     agent_model: str,
     cheap_model: str,
-    session: AgentSession | None,
+    idle_seconds: float | None,
     context: tuple[JudgmentMessage, ...] | None,
     prompt: str,
-    now: float,
 ) -> tuple[bool | None, str]:
     """Return the judgment decision, or None, with why it was or was not made."""
-    model_config = config.models[agent_model]
-    cheap_config = config.models[cheap_model]
-    if _is_thread_cache_warm(session, model_config, now=now):
+    if idle_seconds is None:
+        # A new thread has no cache yet, and its first request says little about the rest.
+        return None, "no_earlier_reply"
+    if idle_seconds < settings.idle_seconds:
         return None, "warm"
     if context is None:
         return None, "history_unavailable"
     request = fit_judgment_request(
-        _cold_cache_question(model_config.id, cheap_config.id),
+        _cold_cache_question(config.models[agent_model].id, config.models[cheap_model].id),
         context,
         JudgmentMessage("user", prompt),
         instructions="",

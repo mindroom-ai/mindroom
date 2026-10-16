@@ -267,7 +267,7 @@ class AgentConfig(BaseModel):
     )
     cold_cache: ColdCacheConfig | None = Field(
         default=None,
-        description="Opt-in switch to cheap_model for turns whose prompt cache has expired",
+        description="Opt-in switch of an idle thread to cheap_model for the rest of the thread",
     )
     access: ResponderAccessConfig | None = Field(
         default=None,
@@ -305,7 +305,7 @@ class AgentConfig(BaseModel):
     )
     cheap_model: str | None = Field(
         default=None,
-        description="Cheaper model alias this agent may switch to, such as on cold-cache turns",
+        description="Cheaper model alias this agent may switch to, used by cold_cache",
         json_schema_extra=dashboard_hint(reference="model"),
     )
     memory_backend: MemoryBackend | None = Field(

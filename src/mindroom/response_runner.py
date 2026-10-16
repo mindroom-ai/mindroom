@@ -67,7 +67,7 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
-from mindroom.judgment.cold_cache import select_cold_cache_model
+from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
@@ -136,7 +136,6 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
-from mindroom.session_storage.agent_storage import load_agent_session
 from mindroom.session_storage.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
@@ -158,6 +157,7 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
+from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
@@ -5844,10 +5844,9 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         runtime_model: ResolvedRuntimeModel,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity,
+        thread_id: str | None,
     ) -> str:
-        """Let a judge move a turn whose prompt cache expired to the agent's cheap model."""
+        """Let a judge move a thread whose prompt cache went cold to the agent's cheap model."""
         resolved_model = runtime_model.model_name
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
@@ -5856,30 +5855,15 @@ class ResponseRunner:
             agent is None
             or agent.cold_cache is None
             or cheap_model is None
-            # Scheduled, thread, and room choices are explicit, even when they name the agent's own model.
+            # Scheduled, thread, and room choices are explicit, and an earlier switch is a thread choice.
             or runtime_model.overridden
             or resolved_model != agent.model
+            # Only a thread can be switched for good.
+            or thread_id is None
             # The judge cannot see media, and the cheap model may not read it.
             or _request_has_media(request)
         ):
             return resolved_model
-        context = self._judgment_context(request)
-        session = None
-        # Without thread history the judge cannot run, so the session is not worth reading.
-        if context is not None:
-            try:
-                session = await asyncio.to_thread(
-                    load_agent_session,
-                    self.deps.agent_name,
-                    config,
-                    self.deps.runtime_paths,
-                    session_id,
-                    execution_identity=execution_identity,
-                )
-            except Exception:
-                # The switch is an optimization, so an unreadable session must not fail the reply.
-                self.deps.logger.warning("cold_cache_session_read_failed", session_id=session_id, exc_info=True)
-                return resolved_model
         selected = await select_cold_cache_model(
             agent.cold_cache,
             config=config,
@@ -5887,21 +5871,25 @@ class ResponseRunner:
             agent_name=self.deps.agent_name,
             agent_model=resolved_model,
             cheap_model=cheap_model,
-            session=session,
-            context=context,
+            idle_seconds=idle_seconds_before_turn(
+                request.thread_history,
+                agent_user_id=self.deps.matrix_full_id,
+                source_event_ids=request.sources.logical_source_event_ids,
+                now=time.time(),
+            ),
+            context=self._judgment_context(request),
             prompt=request.prompt,
-            now=time.time(),
         )
-        # A config reload during the judgment may have disabled the switch or replaced the cheap model.
-        live = self.deps.runtime.config
-        live_agent = live.agents.get(self.deps.agent_name)
-        if selected == resolved_model or (
-            live_agent is not None
-            and live_agent.cold_cache is not None
-            and live.get_agent_cheap_model(self.deps.agent_name) == selected
-        ):
-            return selected
-        return resolved_model
+        if selected != resolved_model:
+            # The thread stays on the cheap model, like a `!model` choice, until someone changes it.
+            set_thread_model_override(
+                self.deps.runtime_paths,
+                thread_id=thread_id,
+                model_name=selected,
+                entity_names=(self.deps.agent_name,),
+                config=config,
+            )
+        return selected
 
     async def _generate_response_with_participation_locked(
         self,
@@ -5986,8 +5974,7 @@ class ResponseRunner:
         active_model_name = await self._cold_cache_model(
             request,
             runtime_model=runtime_model,
-            session_id=session_id,
-            execution_identity=execution_identity,
+            thread_id=response_thread_id,
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")

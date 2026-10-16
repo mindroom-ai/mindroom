@@ -1,22 +1,21 @@
-"""Cold-cache switch to the cheap model: configuration, cache expiry, and the judged switch."""
+"""Cold-cache switch to the cheap model: configuration, idle threads, and the judged switch."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
 from mindroom.judgment.answers import JudgmentResult
-from mindroom.judgment.cold_cache import _is_thread_cache_warm, _prompt_cache_ttl_seconds, select_cold_cache_model
+from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -130,84 +129,50 @@ def test_cheap_model_context_window_must_not_shrink(agent_model: str, cheap_mode
 _NOW = 1_800_000_000.0
 
 
-def _model(**overrides: object) -> ModelConfig:
-    return ModelConfig.model_validate({**_MODELS["opus"], **overrides})
+_AGENT = "@mindroom_assistant:localhost"
 
 
-def _session(*runs: tuple[str | None, float], updated_at: float | None) -> AgentSession:
-    return AgentSession(
-        session_id="session",
-        runs=[RunOutput(model=model, created_at=int(created_at)) for model, created_at in runs],
-        updated_at=None if updated_at is None else int(updated_at),
+def _message(
+    event_id: str,
+    sender: str,
+    seconds_ago: float,
+    *,
+    edited_seconds_ago: float | None = None,
+) -> ResolvedVisibleMessage:
+    message = ResolvedVisibleMessage.synthetic(
+        sender=sender,
+        body=event_id,
+        event_id=event_id,
+        timestamp=int((_NOW - seconds_ago) * 1000),
+    )
+    if edited_seconds_ago is None:
+        return message
+    return replace(message, edited_timestamp=int((_NOW - edited_seconds_ago) * 1000))
+
+
+def _idle(*history: ResolvedVisibleMessage) -> float | None:
+    return idle_seconds_before_turn(history, agent_user_id=_AGENT, source_event_ids=("$source",), now=_NOW)
+
+
+def test_idle_counts_from_the_agents_last_reply_before_the_turn() -> None:
+    """The newest reply's final edit marks the last cache write; later messages are this turn's."""
+    assert (
+        _idle(
+            _message("$root", "@alice:localhost", 9000),
+            _message("$old", _AGENT, 8000),
+            _message("$reply", _AGENT, 7300, edited_seconds_ago=7000),
+            _message("$other", "@alice:localhost", 100),
+            _message("$source", "@alice:localhost", 5),
+            _message("$placeholder", _AGENT, 1),
+        )
+        == 7000
     )
 
 
-def test_ttl_claude_default_is_one_hour() -> None:
-    """MindRoom enables Anthropic's 1h cache TTL for Claude providers by default."""
-    assert _prompt_cache_ttl_seconds(_model()) == 3600
-
-
-def test_ttl_claude_without_extended_cache_is_five_minutes() -> None:
-    """Turning off the extended cache leaves Anthropic's 5m TTL."""
-    assert _prompt_cache_ttl_seconds(_model(extra_kwargs={"extended_cache_time": False})) == 300
-
-
-def test_ttl_other_providers_is_one_day() -> None:
-    """Providers without an exact TTL use OpenAI's 24h extended retention, erring toward warm."""
-    assert _prompt_cache_ttl_seconds(_model(provider="openai", id="gpt-5.5")) == 86400
-    assert _prompt_cache_ttl_seconds(_model(provider="openrouter", id="openai/gpt-5.5")) == 86400
-
-
-def test_ttl_openrouter_anthropic_routes_match_claude() -> None:
-    """MindRoom sets the cache TTL on OpenRouter models that route to Anthropic, as for direct Claude."""
-    assert _prompt_cache_ttl_seconds(_model(provider="openrouter", id="anthropic/claude-opus-5.5")) == 3600
-    disabled = _model(
-        provider="openrouter",
-        id="anthropic/claude-opus-5.5",
-        extra_kwargs={"extended_cache_time": False},
-    )
-    assert _prompt_cache_ttl_seconds(disabled) == 300
-
-
-@pytest.mark.parametrize("route", [{}, {"provider": "openrouter", "id": "anthropic/claude-opus-5.5"}])
-def test_disabled_claude_cache_is_always_cold(route: dict[str, str]) -> None:
-    """Without cache breakpoints nothing is cached, so even a fresh agent-model turn counts as cold."""
-    model = _model(**route, extra_kwargs={"cache_system_prompt": False})
-    assert _prompt_cache_ttl_seconds(model) == 0
-    for updated_at in (_NOW - 10, None):
-        assert not _is_thread_cache_warm(_session((model.id, _NOW - 20), updated_at=updated_at), model, now=_NOW)
-
-
-@pytest.mark.parametrize(
-    ("session", "warm"),
-    [
-        (None, False),
-        (_session(updated_at=_NOW - 10), False),
-        (_session(("claude-haiku-5-5", _NOW - 20), updated_at=_NOW - 10), False),
-        (_session(("claude-opus-5-5", _NOW - 3700), updated_at=_NOW - 3599), True),
-        (_session(("claude-opus-5-5", _NOW - 3700), updated_at=_NOW - 3601), False),
-        (_session(("claude-opus-5-5", _NOW - 3700), updated_at=None), True),
-        (_session(("claude-opus-5-5", _NOW - 20), ("claude-haiku-5-5", _NOW - 30), updated_at=_NOW - 10), True),
-        (_session(("claude-haiku-5-5", _NOW - 20), ("claude-opus-5-5", _NOW - 20), updated_at=_NOW - 10), True),
-        (_session(("claude-opus-5-5", _NOW - 20), ("claude-haiku-5-5", _NOW - 20), updated_at=_NOW - 10), False),
-        (_session(("claude-opus-5-5", _NOW - 40), (None, _NOW - 10), updated_at=_NOW - 5), True),
-        (_session(("claude-haiku-5-5", _NOW - 40), (None, _NOW - 10), updated_at=_NOW - 5), False),
-        (_session(("claude-opus-5-5", _NOW - 7300), (None, _NOW - 7250), updated_at=_NOW - 7200), False),
-    ],
-)
-def test_warmth(session: AgentSession | None, warm: bool) -> None:
-    """Only the agent model serving the newest run within the TTL keeps the cache warm."""
-    assert _is_thread_cache_warm(session, _model(), now=_NOW) is warm
-
-
-@pytest.mark.parametrize(
-    ("provider", "configured_id", "stored_id"),
-    [("codex", "openai-codex/gpt-5.6", "gpt-5.6-sol"), ("kimi", "kimi-code/kimi-k3", "kimi-k3")],
-)
-def test_warmth_matches_rewritten_model_ids(provider: str, configured_id: str, stored_id: str) -> None:
-    """Codex and Kimi store the endpoint id they rewrite, which must still count as the agent model."""
-    session = _session((stored_id, _NOW - 20), updated_at=_NOW - 10)
-    assert _is_thread_cache_warm(session, _model(provider=provider, id=configured_id), now=_NOW)
+def test_idle_is_unknown_until_the_agent_replied() -> None:
+    """A new thread, or one the agent never answered, has no cache to have gone cold."""
+    assert _idle(_message("$root", "@alice:localhost", 60), _message("$source", "@alice:localhost", 5)) is None
+    assert _idle(_message("$source", "@alice:localhost", 5), _message("$late", _AGENT, 1)) is None
 
 
 class _FakeJudge:
@@ -235,7 +200,7 @@ async def _select(
     monkeypatch: pytest.MonkeyPatch,
     judge: _FakeJudge | None,
     *,
-    session: AgentSession | None = None,
+    idle_seconds: float | None = 7200,
     context: tuple[JudgmentMessage, ...] | None = (),
     prompt: str = "What time is it in Tokyo?",
     cold_cache: dict[str, Any] | None = None,
@@ -251,20 +216,31 @@ async def _select(
         agent_name="assistant",
         agent_model="opus",
         cheap_model="haiku",
-        session=session,
+        idle_seconds=idle_seconds,
         context=context,
         prompt=prompt,
-        now=_NOW,
     )
 
 
 @pytest.mark.asyncio
-async def test_select_warm_skips_judgment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A warm agent-model cache is cheaper than any cold write, so no judgment runs."""
+@pytest.mark.parametrize(
+    ("idle_seconds", "cold_cache", "reason"),
+    [(None, {}, "no_earlier_reply"), (3599, {}, "warm"), (600, {"idle_seconds": 900}, "warm")],
+)
+async def test_select_without_a_cold_cache_skips_judgment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    idle_seconds: float | None,
+    cold_cache: dict[str, Any],
+    reason: str,
+) -> None:
+    """A warm cache is cheaper than any cold write, and a new thread is not judged on its first request."""
     judge = _FakeJudge()
-    warm = _session(("claude-opus-5-5", _NOW - 70), updated_at=_NOW - 60)
-    assert await _select(tmp_path, monkeypatch, judge, session=warm) == "opus"
+    with capture_logs() as logs:
+        chosen = await _select(tmp_path, monkeypatch, judge, idle_seconds=idle_seconds, cold_cache=cold_cache)
+    assert chosen == "opus"
     assert judge.requests == []
+    assert [log["reason"] for log in logs if log["event"] == "Cold cache model selected"] == [reason]
 
 
 @pytest.mark.asyncio
@@ -273,7 +249,7 @@ async def test_select_cold_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     judge = _FakeJudge(decision=True)
     context = tuple(JudgmentMessage("user" if index % 2 else "assistant", f"turn {index}") for index in range(40))
     with capture_logs() as logs:
-        chosen = await _select(tmp_path, monkeypatch, judge, session=None, context=context)
+        chosen = await _select(tmp_path, monkeypatch, judge, context=context)
     assert chosen == "haiku"
     body = judge.requests[0].body
     assert body is not None
@@ -295,7 +271,7 @@ async def test_select_cold_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             "agent": "assistant",
             "agent_model": "opus",
             "chosen_model": "haiku",
-            "cache_age_seconds": None,
+            "idle_seconds": 7200,
             "decision": True,
             "reason": "judged",
         },
@@ -322,8 +298,7 @@ async def test_select_cold_falls_back(
     failure: str | None,
 ) -> None:
     """Anything short of an accepting judgment keeps the agent model."""
-    stale = _session(("claude-opus-5-5", _NOW - 7300), updated_at=_NOW - 7200)
-    assert await _select(tmp_path, monkeypatch, _FakeJudge(decision, failure), session=stale) == "opus"
+    assert await _select(tmp_path, monkeypatch, _FakeJudge(decision, failure)) == "opus"
 
 
 @pytest.mark.asyncio

@@ -437,7 +437,7 @@ class DefaultsConfig(BaseModel):
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     cheap_model: str | None = Field(
         default=None,
-        description="Cheaper model key for agents without their own cheap_model, such as on cold-cache turns",
+        description="Cheaper model key for agents without their own cheap_model, used by cold_cache",
         json_schema_extra=dashboard_hint(reference="model"),
     )
     compaction: CompactionConfig | None = Field(

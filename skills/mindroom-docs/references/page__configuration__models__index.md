@@ -485,7 +485,7 @@ A shared key still needs identical prefixes and tools, and provider routing can 
 
 Claude providers read a cached prompt for a small fraction of the normal input price and charge more than the normal price to write a new cache; the exact rates vary by model and provider.
 Switching models mid-thread therefore usually costs money, because the new model starts without a cache.
-Once the agent model's cache for a thread has expired, the next turn pays for a full write either way, and a cheaper model can answer a simple request for a fraction of the cost.
+Once the agent model's cache for a thread has expired, the next turn pays for a full write either way, and a cheaper model can continue a simple conversation for a fraction of the cost.
 Set `agents.<name>.cheap_model` to the agent's cheaper alternative and `agents.<name>.cold_cache` to let a judge switch to it:
 
 ```yaml
@@ -505,13 +505,12 @@ Set `defaults.cheap_model` to give every agent the same cheap model; an agent's 
 
 | `cold_cache` field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `idle_seconds` | integer | `3600` | Seconds since the agent's last reply in a thread after which its prompt cache counts as cold |
 | `judgment` | object or null | `null` | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends). Unset asks `cheap_model` itself |
 
-A thread's cache counts as cold when its newest run used a different model, or when its session was last written longer ago than the cache lifetime:
-
-- Claude providers, and `openrouter` model IDs that route to Anthropic: one hour, or five minutes with `extra_kwargs.extended_cache_time: false`. Anthropic refreshes the lifetime on every cache hit, and the session's last write stands in for the last hit, so the estimate errs toward warm.
-  With `extra_kwargs.cache_system_prompt: false` nothing is cached, so every turn counts as cold.
-- Other providers: 24 hours, OpenAI's extended retention and its default for GPT-5.5 and earlier, so a warm cache is not mistaken for a cold one. The switch therefore mainly helps Claude agents.
+A thread counts as cold once the agent's last reply in it, timed from that reply's final edit, is older than `idle_seconds`.
+The default of one hour matches the cache lifetime MindRoom sets for Claude; set it to your provider's, for example `300` with `extra_kwargs.extended_cache_time: false`.
+A thread the agent has not replied in yet keeps the agent model, so no thread is decided by its first request.
 
 On a cold turn, the judge sees the thread and the new request, and decides whether the cheap model can continue the whole conversation as well as the agent model; the question names both by their configured model `id`.
 Tool calls in the thread reach it as `<tool>` tags with the short input and output previews the chat shows.
@@ -519,13 +518,15 @@ A simple request in a thread about coding, planning, or other demanding work cou
 Long threads reach the judge as their newest messages that fit its 16 KB request, with long messages shortened to their start and end.
 Only an accepting decision switches; a decline, abstention, timeout, or missing credential keeps the agent model.
 Warm turns make no judgment call.
-After a switch the agent model's cache stays cold, so each later turn is judged again, and a harder request returns to the agent model.
+
+An accepted switch is saved as the agent's thread override, like `!model`, so the thread stays on the cheap model without further judgments, even after the cheap model's own cache expires.
+`!model` shows it, and `!model reset` or another `!model` choice ends it.
 
 The switch never happens when a scheduled model, a `!model` or `!room_model` override (even one naming the agent's own model), or a `room_models` entry that selects a different model applies, or when the request carries images, audio, video, or files.
 Earlier attachments reach the judge only as placeholders, so pick a cheap model that supports the same media as the agent model.
-Agents in `thread_mode: room` keep their model, because room mode has no thread history for the judge to read.
+Agents in `thread_mode: room` keep their model, because a room has no thread to switch.
 Teams and the router keep their models.
-Each decision logs `Cold cache model selected` with a `reason`: `warm`, `history_unavailable`, `request_incomplete`, `judgment_unavailable`, or `judged`.
+Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_reply`, `warm`, `history_unavailable`, `request_incomplete`, `judgment_unavailable`, or `judged`.
 
 ## Stalled Streams
 

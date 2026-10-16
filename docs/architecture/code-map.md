@@ -57,7 +57,7 @@ Matrix sync callback
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
 | `mid_turn_judgment.py` | Bind the active request and agent settings to the shared LLM, TypeSafe, or OpenAI Decisions judgment backend |
 | `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
-| `judgment/cold_cache.py` | Decide from the prompt-cache lifetime and an opt-in judge whether a turn moves to the agent's cheap model |
+| `judgment/cold_cache.py` | Decide from a thread's idle time and an opt-in judge whether the thread moves to the agent's cheap model |
 | `config/cold_cache.py` | Opt-in agent settings for the cold-cache judgment backend |
 | `providers/tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `providers/groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |

@@ -32,18 +32,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = [
-    "CLAUDE_CACHE_PROVIDERS",
-    "canonical_provider",
-    "effective_model_id",
-    "get_model_instance",
-    "missing_model_api_key_provider",
-    "model_uses_own_credential",
-]
+__all__ = ["canonical_provider", "get_model_instance", "missing_model_api_key_provider", "model_uses_own_credential"]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
-# Claude providers default to Anthropic prompt caching with the 1h TTL.
-CLAUDE_CACHE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER})
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past
 # 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
 # ceiling for non-streaming operations.
@@ -58,20 +49,6 @@ _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 def canonical_provider(provider: str) -> str:
     """Return the normalized provider key used for model dispatch and identity checks."""
     return provider.strip().lower().replace("-", "_")
-
-
-def effective_model_id(model_config: ModelConfig) -> str:
-    """Return the id a loaded model reports, since Codex and Kimi rewrite configured ids."""
-    provider = canonical_provider(model_config.provider)
-    if provider in {"codex", "openai_codex"}:
-        from mindroom.providers.codex_model import normalize_codex_model_id  # noqa: PLC0415
-
-        return normalize_codex_model_id(model_config.id)
-    if provider in {"kimi", "kimi_code"}:
-        from mindroom.providers.kimi_model import normalize_kimi_model_id  # noqa: PLC0415
-
-        return normalize_kimi_model_id(model_config.id)
-    return model_config.id
 
 
 def _populate_azure_openai_runtime_kwargs(
@@ -248,7 +225,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths, shared_api_key=shared_api_key)
 
-    if canonical_provider_key in CLAUDE_CACHE_PROVIDERS:
+    if canonical_provider_key in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
         extra_kwargs.setdefault("cache_system_prompt", True)
         extra_kwargs.setdefault("extended_cache_time", True)
         extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
@@ -301,7 +278,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return MindRoomOpenAILike(id=model_id, **zai_kwargs)
 
     if canonical_provider_key in {"codex", "openai_codex"}:
-        from mindroom.providers.codex_model import CodexResponses  # noqa: PLC0415
+        from mindroom.providers.codex_model import (  # noqa: PLC0415
+            CodexResponses,
+            normalize_codex_model_id,
+        )
 
         extra_kwargs.pop("api_key", None)
         _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
@@ -310,14 +290,14 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 execution_identity,
                 storage_root=runtime_paths.storage_root,
             )
-        return CodexResponses(id=model_id, **extra_kwargs)
+        return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
 
     if canonical_provider_key in {"kimi", "kimi_code"}:
-        from mindroom.providers.kimi_model import KimiChat  # noqa: PLC0415
+        from mindroom.providers.kimi_model import KimiChat, normalize_kimi_model_id  # noqa: PLC0415
 
         extra_kwargs.pop("api_key", None)
         _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
-        return KimiChat(id=model_id, **extra_kwargs)
+        return KimiChat(id=normalize_kimi_model_id(model_id), **extra_kwargs)
 
     if canonical_provider_key == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)
@@ -494,7 +474,7 @@ def get_model_instance(
 
     model_config = config.models[model_name]
     provider = model_config.provider
-    model_id = effective_model_id(model_config)
+    model_id = model_config.id
 
     # Providers may write into authored nested values, such as an Agno Gemini generation_config dict.
     extra_kwargs = deepcopy(model_config.extra_kwargs or {})
@@ -520,7 +500,7 @@ def get_model_instance(
         "Using AI model",
         model=model_name,
         provider=provider,
-        configured_id=model_config.id,
+        configured_id=model_id,
         effective_id=model.id,
     )
     install_llm_request_logging(

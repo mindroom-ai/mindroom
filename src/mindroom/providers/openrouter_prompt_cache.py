@@ -37,11 +37,6 @@ _SYSTEM_ROLES = frozenset({"system", "developer"})
 _RUNG_ROLES = frozenset({"user", "assistant", "tool"})
 
 
-def routes_to_anthropic(model_id: str) -> bool:
-    """Whether an OpenRouter model ID routes to Anthropic, which caches only at MindRoom's breakpoints."""
-    return model_id.startswith(_ANTHROPIC_MODEL_PREFIXES)
-
-
 def openrouter_prompt_cache_control(
     model_id: str,
     *,
@@ -49,7 +44,7 @@ def openrouter_prompt_cache_control(
     extended_cache_time: bool,
 ) -> dict[str, str] | None:
     """Return the breakpoint marker for an Anthropic-routed model, or None when caching does not apply."""
-    if not cache_system_prompt or not routes_to_anthropic(model_id):
+    if not cache_system_prompt or not model_id.startswith(_ANTHROPIC_MODEL_PREFIXES):
         return None
     return prompt_cache_control(extended_cache_time=extended_cache_time)
 

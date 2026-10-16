@@ -7960,10 +7960,10 @@ async def _cold_cache_reply_model(
     room_model: str | None = None,
     media: MediaInputs | None = None,
     inherit_cheap_model: bool = False,
-    reload_update: dict[str, object] | None = None,
     thread_id: str | None = "$event",
+    replies: int = 1,
 ) -> tuple[list[str | None], list[dict[str, object]]]:
-    """Run one reply for a cold-cache agent and return the model it used and the selector calls."""
+    """Run replies for a cold-cache agent and return the models they used and the selector calls."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
@@ -7981,9 +7981,6 @@ async def _cold_cache_reply_model(
 
     async def fake_select(_settings: ColdCacheConfig, *, cheap_model: str, **kwargs: object) -> str:
         selector_calls.append({"cheap_model": cheap_model, **kwargs})
-        if reload_update is not None:
-            # A config reload lands while the judge runs.
-            config.agents["general"] = config.agents["general"].model_copy(update=reload_update)
         return cheap_model
 
     async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
@@ -8009,7 +8006,8 @@ async def _cold_cache_reply_model(
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator.generate_response(request)
+        for _ in range(replies):
+            await coordinator.generate_response(request)
     return active_models, selector_calls
 
 
@@ -8023,9 +8021,17 @@ async def test_cold_cache_model_used_for_reply(tmp_path: Path) -> None:
     assert call["agent_name"] == "general"
     assert call["agent_model"] == "default"
     assert call["cheap_model"] == "cheap"
-    assert call["session"] is None
+    assert call["idle_seconds"] is None
     assert call["context"] == ()
     assert call["prompt"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_switch_stays_with_the_thread(tmp_path: Path) -> None:
+    """An accepted switch is saved as the thread's model, so later turns stay on it without another judgment."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, replies=2)
+    assert active_models == ["cheap", "cheap"]
+    assert len(selector_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -8037,26 +8043,9 @@ async def test_cold_cache_uses_default_cheap_model(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reload_update", [{"cheap_model": "cheap2"}, {"cold_cache": None}])
-async def test_cold_cache_choice_dropped_after_reload(tmp_path: Path, reload_update: dict[str, object]) -> None:
-    """A judgment that finishes after a reload replaced the cheap model or disabled the switch keeps the agent model."""
-    active_models, _selector_calls = await _cold_cache_reply_model(tmp_path, reload_update=reload_update)
-    assert active_models == ["default"]
-
-
-@pytest.mark.asyncio
-async def test_cold_cache_skips_session_read_without_thread_history(tmp_path: Path) -> None:
-    """Without thread history the judge cannot run, so the session is never read."""
-    with patch("mindroom.response_runner.load_agent_session", side_effect=AssertionError("session read")):
-        _active_models, selector_calls = await _cold_cache_reply_model(tmp_path, thread_id=None)
-    assert [(call["session"], call["context"]) for call in selector_calls] == [(None, None)]
-
-
-@pytest.mark.asyncio
-async def test_cold_cache_session_read_failure_keeps_agent_model(tmp_path: Path) -> None:
-    """An unreadable session skips the optional switch instead of failing the reply."""
-    with patch("mindroom.response_runner.load_agent_session", side_effect=RuntimeError("storage unavailable")):
-        active_models, selector_calls = await _cold_cache_reply_model(tmp_path)
+async def test_cold_cache_skipped_in_room_mode(tmp_path: Path) -> None:
+    """Without a thread there is nothing to switch for good, so room-mode replies keep the agent model."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, thread_id=None)
     assert selector_calls == []
     assert active_models == ["default"]
 

@@ -247,6 +247,11 @@ class CodexResponses(MindRoomOpenAIResponses):
     session_id: str | None = None
     default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS
 
+    def __post_init__(self) -> None:
+        """Normalize LLM-plugin-style model IDs before Agno uses the model id."""
+        self.id = normalize_codex_model_id(self.id)
+        super().__post_init__()
+
     def _get_client_params(self) -> dict[str, Any]:
         token, account_id = _borrow_codex_key(codex_home=self.codex_home)
         headers = dict(self.default_headers or {})
