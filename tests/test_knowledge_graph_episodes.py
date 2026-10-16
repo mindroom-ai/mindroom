@@ -183,6 +183,16 @@ def test_graph_lookups_through_a_shell_are_never_rendered() -> None:
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 
 
+def test_a_graph_lookup_late_in_a_long_shell_command_is_never_rendered() -> None:
+    """The lookup is found in the whole command, not only the part kept for the episode."""
+    command = (
+        "cd /work && " + "echo setup; " * 60 + "mindroom-agent tools call knowledge_graph search_graph --json '{}'"
+    )
+    run = _run("r1", tools=[_tool("bash", "Alice leads Atlas", command=command)])
+
+    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
 def test_reasoning_scratchpads_are_never_rendered() -> None:
     """`think` and `analyze` return the model's own thoughts, not anything a tool observed."""
     run = _run("r1", tools=[_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")])

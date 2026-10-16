@@ -378,7 +378,7 @@ agents:
 ```
 
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
-2. When there are such calls, or `revisit_days` have passed since the last run, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
+2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
 3. The agent answers the prompt like any message, with its own tools and [approval rules](https://docs.mindroom.chat/tool-approval/); a call that needs approval waits in the thread until someone answers or the request expires.
 4. When the run finishes, its tool results are added to the graph; the agent's own summary is not, and an interrupted run adds nothing.
 5. When the run ends, MindRoom marks the thread resolved.
@@ -393,7 +393,7 @@ A turn whose message was redacted can still be listed until the agent next repli
 | `room` | required for a shared agent | Where the prompt is posted |
 | `max_tool_calls` | `40` (1 to 1000) | Tool calls the prompt asks one run to stay within |
 | `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
-| `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run |
+| `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
 | `model` | the agent's model | A key of `models` to run the exploration with |
 
 Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.

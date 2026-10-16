@@ -64,8 +64,9 @@ def is_evidence(execution: ToolExecution) -> bool:
     """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
     if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
         return False
-    # A shell or `mindroom-agent` call can look the graph up too, and returns its facts as the command's output.
-    arguments = tool_arguments(execution)
+    # A shell or `mindroom-agent` call can look the graph up too, and returns its facts as the command's output; the
+    # whole arguments are searched, since the rendered ones are clipped.
+    arguments = json.dumps(execution.tool_args or {}, default=str)
     return not any(name in arguments for name in _GRAPH_FUNCTIONS)
 
 

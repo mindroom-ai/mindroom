@@ -94,6 +94,12 @@ def _seed(
     storage = create_session_storage("mind", config, paths, execution_identity=None)
     try:
         seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=[run]))
+        # The conversation was last active when its turn was made.
+        with storage.db_engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+                (created_at, session_id),
+            )
     finally:
         storage.close()
 
@@ -110,8 +116,9 @@ def _paths(tmp_path: Path) -> RuntimePaths:
 
 
 def test_first_check_explores_even_without_leads(tmp_path: Path) -> None:
-    """A newly enabled exploration starts by exploring what its tools reach."""
+    """A newly enabled exploration of an agent people talk to starts by exploring what its tools reach."""
     config, paths = _config(), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$a", [], created_at=int(time.time()) - 60)
 
     ask = check_exploration(_context(config, paths, tmp_path))
 
@@ -124,6 +131,7 @@ def test_first_check_explores_even_without_leads(tmp_path: Path) -> None:
 def test_no_leads_and_a_recent_run_post_nothing(tmp_path: Path) -> None:
     """Between revisits, a check without new leads costs nothing."""
     config, paths = _config(), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$talk", [], created_at=int(time.time()) - 60)
     context = _context(config, paths, tmp_path)
     _finish(check_exploration(context), config)
 
@@ -131,18 +139,34 @@ def test_no_leads_and_a_recent_run_post_nothing(tmp_path: Path) -> None:
 
 
 def test_revisit_runs_without_leads_once_due(tmp_path: Path) -> None:
-    """After revisit_days, exploration runs again to catch changes in known sources."""
+    """After revisit_days, exploration runs again to catch changes in known sources while people use the agent."""
     config, paths = _config(revisit_days=2), _paths(tmp_path)
     context = _context(config, paths, tmp_path)
+    _seed(config, paths, "!room:x:$a", [], created_at=int(time.time()) - 60)
     _finish(check_exploration(context), config)
+    _seed(config, paths, "!room:x:$b", [], created_at=int(time.time()) + DAY)
 
     with patch.object(exploration.time, "time", return_value=time.time() + 3 * DAY):
         assert check_exploration(context) is not None
 
 
+def test_an_agent_nobody_talks_to_is_not_explored(tmp_path: Path) -> None:
+    """Without any conversation, or none since the last run, a revisit costs nothing, such as for an idle requester."""
+    config, paths = _config(revisit_days=2), _paths(tmp_path)
+    context = _context(config, paths, tmp_path)
+    assert check_exploration(context) is None
+
+    _seed(config, paths, "!room:x:$a", [], created_at=int(time.time()) - 60)
+    _finish(check_exploration(context), config)
+
+    with patch.object(exploration.time, "time", return_value=time.time() + 3 * DAY):
+        assert check_exploration(context) is None
+
+
 def test_new_leads_start_a_run_before_the_revisit(tmp_path: Path) -> None:
     """A conversation that used a tool since the last run is a lead worth following."""
     config, paths = _config(), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$talk", [], created_at=int(time.time()) - 60)
     context = _context(config, paths, tmp_path)
     _finish(check_exploration(context), config)
     _seed(config, paths, "!room:x:$t1", [_tool("get_repository", repo="acme/atlas")], created_at=int(time.time()) + 5)
@@ -162,7 +186,7 @@ def test_leads_are_distinct_counted_newest_first_and_capped(tmp_path: Path) -> N
     _seed(config, paths, "!room:x:$c", [_tool("list_issues", repo="acme/beacon")], created_at=300)
     _seed(config, paths, "!room:x:$d", [_tool("search", query="atlas")], created_at=50)
 
-    leads = _collect_leads(_context(config, paths, tmp_path), since=0, limit=2)
+    leads, _ = _collect_leads(_context(config, paths, tmp_path), since=0, limit=2)
 
     assert [(lead.function, lead.count, lead.last_seen) for lead in leads] == [
         ("list_issues", 1, 300),
@@ -183,7 +207,7 @@ def test_leads_skip_graph_lookups_and_exploration_threads(tmp_path: Path) -> Non
         hook_source="automation/exploration",
     )
 
-    assert _collect_leads(_context(config, paths, tmp_path), since=0, limit=10) == []
+    assert _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)[0] == []
 
 
 def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
@@ -192,7 +216,7 @@ def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
     _seed(config, paths, "!room:x:$a", [_tool("call_api", token=token)], created_at=100)
 
-    [lead] = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
+    [lead], _ = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
 
     assert token not in lead.arguments
 
@@ -200,6 +224,7 @@ def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
 def test_follow_up_resolves_the_thread_and_schedules_ingestion(tmp_path: Path) -> None:
     """When the run ends, the thread is resolved and its tool results are ingested soon after."""
     config, paths = _config(), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$talk", [], created_at=int(time.time()) - 60)
     ask = check_exploration(_context(config, paths, tmp_path))
     assert ask is not None
     assert ask.then is not None
@@ -235,7 +260,7 @@ def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> No
     config, paths = _config(), _paths(tmp_path)
     _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=100)
 
-    assert _collect_leads(_context(config, paths, tmp_path), since=150, limit=10) == []
+    assert _collect_leads(_context(config, paths, tmp_path), since=150, limit=10)[0] == []
 
 
 def test_a_prompt_that_was_never_answered_keeps_its_leads(tmp_path: Path) -> None:
@@ -266,6 +291,6 @@ def test_an_unreadable_conversation_does_not_stop_exploration(tmp_path: Path) ->
         return real(storage, session_id)
 
     with patch.object(exploration, "session_runs", runs):
-        leads = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
+        leads, _ = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
 
     assert [lead.arguments for lead in leads] == ['{"repo": "acme/atlas"}']

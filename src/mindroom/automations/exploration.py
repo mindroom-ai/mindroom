@@ -49,8 +49,11 @@ class _Lead:
     last_seen: int
 
 
-def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_Lead]:
-    """Return distinct tool calls from conversations updated after ``since``, newest first, at most ``limit``."""
+def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> tuple[list[_Lead], bool]:
+    """Return distinct tool calls from conversations updated after ``since``, newest first, at most ``limit``.
+
+    Also return whether any conversation was updated after ``since``.
+    """
     storage = create_session_storage(
         ctx.agent_name,
         ctx.config,
@@ -59,6 +62,7 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_L
     )
     automation_thread_ids = automation_threads(ctx.runtime_paths)
     seen: dict[tuple[str, str], tuple[int, int]] = {}
+    active = False
     try:
         for session_id, _updated_at in updated_sessions(storage, ctx.agent_name, since=since):
             try:
@@ -69,6 +73,7 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_L
                 continue
             if classify_thread(runs, automation_thread_ids) != "conversation":
                 continue
+            active = True
             for run in runs:
                 # An updated conversation's earlier turns were listed by an earlier run.
                 if run.status != RunStatus.completed or (run.created_at or 0) <= since:
@@ -83,7 +88,7 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_L
         storage.close()
     leads = [_Lead(function, arguments, count, last_seen) for (function, arguments), (count, last_seen) in seen.items()]
     leads.sort(key=lambda lead: lead.last_seen, reverse=True)
-    return leads[:limit]
+    return leads[:limit], active
 
 
 def _render_leads(leads: list[_Lead]) -> str:
@@ -111,7 +116,7 @@ def _last_run_at(ctx: AutomationContext) -> float | None:
 
 @automation("exploration")
 def check_exploration(ctx: AutomationContext) -> Ask | None:
-    """Return the exploration prompt when conversations used tools since the last run or a revisit is due.
+    """Return the exploration prompt when conversations used tools since the last run, or a revisit is due after any.
 
     Raises ``OSError`` or ``ValueError`` when the conversations or the state cannot be read.
     """
@@ -123,8 +128,9 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
     revisit_due = last_run_at is None or now - last_run_at >= entry.revisit_days * _DAY_SECONDS
     # Update times are whole seconds, so the second of the last check is listed again rather than missed.
     since = int(last_run_at) - 1 if last_run_at is not None else int(now) - entry.revisit_days * _DAY_SECONDS
-    leads = _collect_leads(ctx, since=since, limit=entry.max_leads) if entry.max_leads else []
-    if not leads and not revisit_due:
+    leads, active = _collect_leads(ctx, since=since, limit=entry.max_leads)
+    # A revisit catches changes in the sources people use; an agent or instance nobody talked to since needs none.
+    if not leads and not (revisit_due and active):
         return None
     prompt = ctx.config.render_prompt(
         "EXPLORATION_PROMPT_TEMPLATE",
