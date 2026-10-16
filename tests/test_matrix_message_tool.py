@@ -2312,7 +2312,13 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
                 event_id="$reply",
                 sender="@mindroom_general:localhost",
                 body=body,
-                content={"msgtype": "m.text", "body": body, **trace},
+                content={
+                    "msgtype": "m.text",
+                    "body": body,
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": "<p>Checked.</p><p>🔧 <code>shell</code> [1]</p><p>All good.</p>",
+                    **trace,
+                },
             ),
         ],
     )
@@ -2320,6 +2326,5 @@ async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read"))
 
-    assert "🔧" not in payload["messages"][0]["body"]
     assert "All good." in payload["messages"][0]["body"]
-    assert "🔧" not in payload["edit_options"][0]["body_preview"]
+    assert "🔧" not in json.dumps(payload, ensure_ascii=False)
