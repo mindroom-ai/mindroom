@@ -1,112 +1,47 @@
-"""Tests for the in-memory Connections portal session store."""
+"""Tests for signed Connections portal sessions."""
 
-from fastapi import FastAPI
+import pytest
 
-from mindroom.api.config_lifecycle import app_state, ensure_app_state
+from mindroom.api import connections_sessions
 from mindroom.api.connections_sessions import (
     CONNECTIONS_SESSION_SECONDS,
-    ConnectionsSessionStore,
+    connections_session_user,
+    issue_connections_session,
 )
 
 ALICE = "@alice:example.org"
+NOW = 1000.0
 
 
-class _Clock:
-    """Advanceable fake monotonic clock."""
-
-    def __init__(self) -> None:
-        self.now = 1000.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-def test_create_then_resolve_returns_user() -> None:
-    """A freshly created token resolves to its Matrix user; unknown tokens do not."""
-    store = ConnectionsSessionStore()
-
-    assert store.resolve(store.create(ALICE)) == ALICE
-    assert store.resolve("unknown") is None
+def test_issued_session_resolves_to_its_user() -> None:
+    """A session this process issued names its user."""
+    token = issue_connections_session(ALICE, now=NOW)
+    assert connections_session_user(token, now=NOW) == ALICE
 
 
 def test_session_expires_after_one_hour() -> None:
-    """The lifetime is fixed: live just before one hour, gone at one hour."""
-    clock = _Clock()
-    store = ConnectionsSessionStore(clock=clock)
-    token = store.create(ALICE)
-
-    clock.now += CONNECTIONS_SESSION_SECONDS - 1
-    assert store.resolve(token) == ALICE
-    clock.now += 1
-    assert store.resolve(token) is None
+    """The lifetime is fixed from issue and never renewed."""
+    token = issue_connections_session(ALICE, now=NOW)
+    assert connections_session_user(token, now=NOW + CONNECTIONS_SESSION_SECONDS - 1) == ALICE
+    assert connections_session_user(token, now=NOW + CONNECTIONS_SESSION_SECONDS) is None
 
 
-def test_per_user_cap_evicts_oldest() -> None:
-    """A user holds at most 16 live sessions; the earliest-created one is evicted."""
-    store = ConnectionsSessionStore()
-    tokens = [store.create(ALICE) for _ in range(17)]
-
-    assert store.resolve(tokens[0]) is None
-    assert all(store.resolve(token) == ALICE for token in tokens[1:])
-
-
-def test_per_user_cap_does_not_evict_other_users() -> None:
-    """The per-user cap only counts the creating user's sessions."""
-    store = ConnectionsSessionStore(max_per_user=1)
-    bob_token = store.create("@bob:example.org")
-    store.create(ALICE)
-    store.create(ALICE)
-
-    assert store.resolve(bob_token) == "@bob:example.org"
+def test_session_naming_another_user_is_rejected() -> None:
+    """Swapping the user or the expiry in the payload breaks the signature."""
+    _payload, _, signature = issue_connections_session(ALICE, now=NOW).rpartition(".")
+    for forged in (f"{int(NOW) + CONNECTIONS_SESSION_SECONDS}|@mallory:example.org", f"{int(NOW) + 10**9}|{ALICE}"):
+        payload = forged.encode().hex()
+        assert connections_session_user(f"{payload}.{signature}", now=NOW) is None
 
 
-def test_global_cap_evicts_oldest() -> None:
-    """The store holds at most max_sessions live sessions; the earliest-created is evicted."""
-    store = ConnectionsSessionStore(max_sessions=2)
-    first = store.create("@a:example.org")
-    second = store.create("@b:example.org")
-    third = store.create("@c:example.org")
-
-    assert store.resolve(first) is None
-    assert store.resolve(second) == "@b:example.org"
-    assert store.resolve(third) == "@c:example.org"
+def test_session_from_another_process_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each process signs with its own key, so a restart signs every portal user out."""
+    token = issue_connections_session(ALICE, now=NOW)
+    monkeypatch.setattr(connections_sessions, "_SESSION_KEY", b"another process")
+    assert connections_session_user(token, now=NOW) is None
 
 
-def test_expired_sessions_do_not_count_toward_caps() -> None:
-    """Expired sessions are pruned before caps are enforced, so live ones survive."""
-    clock = _Clock()
-    store = ConnectionsSessionStore(max_sessions=2, max_per_user=2, clock=clock)
-    store.create(ALICE)
-    store.create(ALICE)
-    clock.now += CONNECTIONS_SESSION_SECONDS
-    survivor = store.create("@bob:example.org")
-    newest = store.create(ALICE)
-
-    assert store.resolve(survivor) == "@bob:example.org"
-    assert store.resolve(newest) == ALICE
-
-
-def test_tokens_are_unique_and_unguessable_length() -> None:
-    """Every session gets a distinct URL-safe token with real entropy."""
-    store = ConnectionsSessionStore()
-    tokens = {store.create(ALICE) for _ in range(8)}
-
-    assert len(tokens) == 8
-    assert all(len(token) >= 32 for token in tokens)
-
-
-def test_tokens_are_not_stored_in_plaintext() -> None:
-    """The store keeps only token digests so a memory dump does not leak live cookies."""
-    store = ConnectionsSessionStore()
-    token = store.create(ALICE)
-
-    assert token not in repr(store.__dict__)
-
-
-def test_each_app_gets_its_own_session_store() -> None:
-    """App state carries a store per app, so sessions never leak between apps."""
-    first, second = FastAPI(), FastAPI()
-    token = ensure_app_state(first).connections_sessions.create(ALICE)
-
-    assert app_state(first).connections_sessions.resolve(token) == ALICE
-    assert ensure_app_state(second).connections_sessions.resolve(token) is None
+@pytest.mark.parametrize("token", ["", "garbage", ".", "a.b.c", "é.é"])
+def test_malformed_session_is_rejected(token: str) -> None:
+    """A cookie value this process did not issue names nobody."""
+    assert connections_session_user(token, now=NOW) is None

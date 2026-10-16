@@ -1548,7 +1548,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
-    "mindroom.api.connections_sessions",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.config.reload_status",

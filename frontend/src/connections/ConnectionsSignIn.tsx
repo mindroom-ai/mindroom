@@ -14,7 +14,7 @@ const RELOAD = "Could not sign in. Reload this page to try again.";
 
 type Gate =
   | { state: "checking" }
-  | { state: "signed-in"; user: string }
+  | { state: "signed-in" }
   | { state: "blocked"; message: string };
 
 const blocked = (message: string): Gate => ({ state: "blocked", message });
@@ -34,7 +34,7 @@ async function signedIn(response: Response): Promise<Gate> {
   const { matrix_user_id: user } = await readBody(response);
   if (typeof user !== "string" || !user) return blocked(RELOAD);
   setSignedInUser(user);
-  return { state: "signed-in", user };
+  return { state: "signed-in" };
 }
 
 /** Ask the window that opened the portal for a Matrix OpenID token; `null` means no answer in time or aborted. */
@@ -115,17 +115,7 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
     return () => controller.abort();
   }, []);
 
-  if (gate.state === "signed-in")
-    return (
-      <>
-        <div className="bg-muted/20 px-4 pt-4 sm:px-6">
-          <p className="mx-auto max-w-6xl text-sm text-muted-foreground">
-            Signed in as {gate.user}
-          </p>
-        </div>
-        {children}
-      </>
-    );
+  if (gate.state === "signed-in") return children;
   return (
     <main className="min-h-screen bg-muted/20 px-4 py-8 sm:px-6 sm:py-12">
       <div className="mx-auto max-w-6xl">

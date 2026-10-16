@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -16,8 +17,12 @@ from aiohttp import web
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
-from mindroom.api import auth, config_lifecycle, connections_session, frontend, main
-from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE, ConnectionsSessionStore
+from mindroom.api import auth, connections_session, frontend, main
+from mindroom.api.connections_sessions import (
+    CONNECTIONS_SESSION_COOKIE,
+    connections_session_user,
+    issue_connections_session,
+)
 from mindroom.matrix_openid import MatrixOpenIDError, verify_matrix_openid
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
@@ -151,19 +156,16 @@ def test_sign_in_sets_portal_session_cookie(signin: dict[str, Any]) -> None:
     assert response.headers["referrer-policy"] == "no-referrer"
     token = signin["client"].cookies.get(CONNECTIONS_SESSION_COOKIE)
     assert token is not None
-    assert config_lifecycle.app_state(main.app).connections_sessions.resolve(token) == "@alice:example.org"
+    assert connections_session_user(token, now=time.time()) == "@alice:example.org"
     assert signin["verifier"].await_args.args[0].access_token == "alice"  # noqa: S105
     assert signin["verifier"].await_args.args[1] == signin["paths"]
 
 
 def test_sign_in_refuses_user_without_visible_agents(signin: dict[str, Any]) -> None:
-    """Any homeserver user has a valid token, so one without portal access gets no session slot."""
-    store = config_lifecycle.app_state(main.app).connections_sessions
-    sessions_before = dict(store._sessions)
+    """Any homeserver user has a valid token, so one without portal access gets no session."""
     response = sign_in(signin["client"], "mallory")
     assert response.status_code == 403, response.text
     assert "set-cookie" not in response.headers
-    assert store._sessions == sessions_before
 
 
 def test_sign_in_rejects_client_origin_not_allowlisted(signin: dict[str, Any]) -> None:
@@ -379,14 +381,12 @@ def test_session_ignored_on_non_portal_oauth_and_credential_routes(
     assert response.status_code == 401
 
 
-def test_live_session_ignored_once_portal_is_disabled(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_session_ignored_once_portal_is_disabled(signin: dict[str, Any]) -> None:
     """Disabling the portal stops honoring live sessions, even on the OAuth completion routes."""
     client = signin["client"]
     assert sign_in(client, "alice").status_code == 200
     assert client.get("/api/oauth/google_drive/success").status_code == 200
-    store = config_lifecycle.app_state(main.app).connections_sessions
     _serve(signin, MINDROOM_CONNECTIONS_AGENT="")
-    monkeypatch.setattr(config_lifecycle.app_state(main.app), "connections_sessions", store)
     assert client.get("/api/oauth/google_drive/success").status_code == 401
 
 
@@ -421,16 +421,13 @@ def test_session_cookie_ignored_for_admin_on_dashboard_routes(
     assert client.get("/api/config/agents", headers=upstream).status_code == 200
 
 
-def test_expired_session_is_rejected(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_expired_session_is_rejected(signin: dict[str, Any]) -> None:
     """A session stops authenticating once its fixed lifetime ends."""
-    now = [1000.0]
-    store = ConnectionsSessionStore(clock=lambda: now[0])
-    monkeypatch.setattr(config_lifecycle.app_state(main.app), "connections_sessions", store)
     client = signin["client"]
-    assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/connections").status_code == 200
-    now[0] += 3600
-    assert client.get("/api/connections").status_code == 401
+    for issued_at, status in ((time.time(), 200), (time.time() - 3600, 401)):
+        token = issue_connections_session("@alice:example.org", now=issued_at)
+        client.cookies.set(CONNECTIONS_SESSION_COOKIE, token)
+        assert client.get("/api/connections").status_code == status
 
 
 def test_connections_shell_served_without_auth(

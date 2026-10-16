@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionsSignIn } from "./ConnectionsSignIn";
-import { requestConnection } from "./request";
+import { requestConnection, setSignedInUser } from "./request";
 
 const SESSION = "/api/connections/session";
 const OPEN_FROM_CHAT =
@@ -82,12 +82,24 @@ function setOpener(value: typeof opener) {
   Object.defineProperty(window, "opener", { configurable: true, value });
 }
 
+// The account the portal's later API requests prove they show, read from one request.
+async function sentUser() {
+  vi.mocked(fetch).mockClear();
+  vi.mocked(fetch).mockImplementation(async () => json({}));
+  await requestConnection("/api/connections", new AbortController().signal);
+  const [, init] = vi.mocked(fetch).mock.calls[0];
+  return (init?.headers as Record<string, string>)[
+    "X-MindRoom-Connections-User"
+  ];
+}
+
 const messageListeners = (spy: { mock: { calls: unknown[][] } }) =>
   spy.mock.calls.filter(([type]) => type === "message").length;
 
 beforeEach(() => setOpener({ postMessage: vi.fn() }));
 afterEach(() => {
   cleanup();
+  setSignedInUser(null);
   vi.useRealTimers();
   vi.restoreAllMocks();
   setOpener(null);
@@ -106,9 +118,6 @@ describe("ConnectionsSignIn with an opener", () => {
     );
     answerFromOpener();
     expect(await screen.findByText("Portal content")).toBeInTheDocument();
-    expect(screen.getByText("Signed in as @alice:example.org")).toHaveClass(
-      "text-muted-foreground",
-    );
     expect(sessionCalls("GET")).toHaveLength(0);
     const posts = sessionCalls("POST");
     expect(posts).toHaveLength(1);
@@ -121,7 +130,7 @@ describe("ConnectionsSignIn with an opener", () => {
     answerFromOpener("bob");
     await act(() => Promise.resolve());
     expect(sessionCalls("POST")).toHaveLength(1);
-    expect(screen.queryByText(/@bob/)).not.toBeInTheDocument();
+    expect(await sentUser()).toBe("@alice:example.org");
   });
 
   it("sends the signed-in user on every request after sign-in", async () => {
@@ -155,11 +164,9 @@ describe("ConnectionsSignIn with an opener", () => {
     renderGate();
     expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
     answerFromOpener("bob");
-    expect(
-      await screen.findByText("Signed in as @bob:example.org"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/@alice/)).not.toBeInTheDocument();
+    expect(await screen.findByText("Portal content")).toBeInTheDocument();
     expect(sessionCalls("GET")).toHaveLength(0);
+    expect(await sentUser()).toBe("@bob:example.org");
   });
 
   it("shows the open-from-Chat copy and no content when Chat never answers", async () => {
@@ -240,10 +247,9 @@ describe("ConnectionsSignIn with an opener", () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
     answerFromOpener("alice");
-    expect(
-      await screen.findByText("Signed in as @alice:example.org"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Portal content")).toBeInTheDocument();
     expect(sessionCalls("POST")).toHaveLength(1);
+    expect(await sentUser()).toBe("@alice:example.org");
   });
 
   it("uses the origin of the answering message as the client origin", async () => {
@@ -305,14 +311,12 @@ describe("ConnectionsSignIn without an opener", () => {
     installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
     renderGate();
     expect(await screen.findByText("Portal content")).toBeInTheDocument();
-    expect(screen.getByText("Signed in as @alice:example.org")).toHaveClass(
-      "text-muted-foreground",
-    );
     expect(sessionCalls("POST")).toHaveLength(0);
     expect(fetch).toHaveBeenCalledWith(
       SESSION,
       expect.objectContaining({ credentials: "same-origin" }),
     );
+    expect(await sentUser()).toBe("@alice:example.org");
   });
 
   it.each([

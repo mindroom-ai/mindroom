@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -17,7 +18,11 @@ from mindroom.api.connection_agents import (
     require_connections_same_origin,
     resolve_connection_user,
 )
-from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE, CONNECTIONS_SESSION_SECONDS
+from mindroom.api.connections_sessions import (
+    CONNECTIONS_SESSION_COOKIE,
+    CONNECTIONS_SESSION_SECONDS,
+    issue_connections_session,
+)
 from mindroom.constants import RuntimePaths
 from mindroom.matrix_openid import (
     MatrixOpenIDError,
@@ -93,7 +98,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
         matrix_user_id = await verify_matrix_openid(body.openid_token, paths)
     except MatrixOpenIDError as error:
         raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
-    # Any homeserver user can obtain a valid token, so only users with portal access may take a session slot.
+    # Any homeserver user can obtain a valid token, so only users with portal access get a session.
     app_state = config_lifecycle.app_state(request.app)
     user = resolve_connection_user(
         config_lifecycle.bind_current_request_snapshot(request),
@@ -102,7 +107,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     )
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
-    token = app_state.connections_sessions.create(matrix_user_id)
+    token = issue_connections_session(matrix_user_id, now=time.time())
     response.headers.update(CONNECTIONS_HEADERS)
     response.set_cookie(
         CONNECTIONS_SESSION_COOKIE,
