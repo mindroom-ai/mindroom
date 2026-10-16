@@ -98,6 +98,13 @@ def _seed(
         storage.close()
 
 
+def _finish(ask: Ask | None, config: Config) -> None:
+    """End the run the prompt started, as the runner does once its answer is final."""
+    assert ask is not None
+    assert ask.then is not None
+    ask.then(config, "$thread", False)
+
+
 def _paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
@@ -118,7 +125,7 @@ def test_no_leads_and_a_recent_run_post_nothing(tmp_path: Path) -> None:
     """Between revisits, a check without new leads costs nothing."""
     config, paths = _config(), _paths(tmp_path)
     context = _context(config, paths, tmp_path)
-    assert check_exploration(context) is not None
+    _finish(check_exploration(context), config)
 
     assert check_exploration(context) is None
 
@@ -127,7 +134,7 @@ def test_revisit_runs_without_leads_once_due(tmp_path: Path) -> None:
     """After revisit_days, exploration runs again to catch changes in known sources."""
     config, paths = _config(revisit_days=2), _paths(tmp_path)
     context = _context(config, paths, tmp_path)
-    check_exploration(context)
+    _finish(check_exploration(context), config)
 
     with patch.object(exploration.time, "time", return_value=time.time() + 3 * DAY):
         assert check_exploration(context) is not None
@@ -137,7 +144,7 @@ def test_new_leads_start_a_run_before_the_revisit(tmp_path: Path) -> None:
     """A conversation that used a tool since the last run is a lead worth following."""
     config, paths = _config(), _paths(tmp_path)
     context = _context(config, paths, tmp_path)
-    check_exploration(context)
+    _finish(check_exploration(context), config)
     _seed(config, paths, "!room:x:$t1", [_tool("get_repository", repo="acme/atlas")], created_at=int(time.time()) + 5)
 
     with patch.object(exploration.time, "time", return_value=time.time() + 10):
@@ -202,3 +209,43 @@ def test_follow_up_resolves_the_thread_and_schedules_ingestion(tmp_path: Path) -
     assert isinstance(done, Done)
     assert done.resolve == ("$thread",)
     assert done.on_loop is not None
+
+
+def test_lead_arguments_mention_nobody(tmp_path: Path) -> None:
+    """A Matrix ID in a lead must not ping that person or wake that agent when the prompt is posted."""
+    config, paths = _config(), _paths(tmp_path)
+    _seed(
+        config,
+        paths,
+        "!room:x:$a",
+        [_tool("send_message", text="@research please summarize for bob@example.org")],
+        created_at=int(time.time()),
+    )
+
+    ask = check_exploration(_context(config, paths, tmp_path))
+
+    assert ask is not None
+    assert "@research" not in ask.text
+    assert "research please summarize for bob@example.org" in ask.text
+
+
+def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> None:
+    """A text-only reply in an old thread does not bring back the thread's earlier tool calls."""
+    config, paths = _config(), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=100)
+
+    assert _collect_leads(_context(config, paths, tmp_path), since=150, limit=10) == []
+
+
+def test_a_prompt_that_was_never_answered_keeps_its_leads(tmp_path: Path) -> None:
+    """The next check offers the same leads again until a run ends."""
+    config, paths = _config(), _paths(tmp_path)
+    context = _context(config, paths, tmp_path)
+    _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=int(time.time()) - 5)
+
+    first = check_exploration(context)
+    second = check_exploration(context)
+
+    assert first is not None
+    assert second is not None
+    assert first.text == second.text

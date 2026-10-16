@@ -42,8 +42,9 @@ _DAY_SECONDS = 86_400
 _IDLE_POLL_SECONDS = 30
 _FIRST_RETRY_SECONDS = 60
 _MAX_RETRY_SECONDS = 3600
-# An episode that fails this often is dropped, so one unextractable episode cannot cost model calls forever.
-_MAX_EPISODE_ATTEMPTS = 5
+# An episode whose extraction output is unusable this often is dropped, so it cannot cost model calls forever.
+# Outages never count: a failure other than unusable output waits however long the outage lasts.
+_MAX_BAD_OUTPUTS = 5
 _EPISODE_KINDS = ("conversation", "tool_results")
 _WAKE_EVENTS: set[asyncio.Event] = set()
 
@@ -52,7 +53,10 @@ class _SessionState(TypedDict):
     updated_at: int
     # The last run each episode kind has ingested, so a failing kind never repeats the other.
     markers: dict[str, list[int | str]]
+    # Consecutive failures, which set the backoff.
     failures: int
+    # Consecutive failures of the current episode whose model output could not be used, which drop it.
+    bad_outputs: int
     retry_at: float
 
 
@@ -195,7 +199,7 @@ class KnowledgeGraphIngestionWorker:
         """Ingest one conversation's new turns and return whether every episode was added."""
         entry = state["sessions"].setdefault(
             session.session_id,
-            {"updated_at": 0, "markers": {}, "failures": 0, "retry_at": 0},
+            {"updated_at": 0, "markers": {}, "failures": 0, "bad_outputs": 0, "retry_at": 0},
         )
         thread_kind = classify_thread(session.runs, automation_thread_ids)
         # A turn waiting for approval finishes in place later, so nothing from it on is ingested yet.
@@ -220,8 +224,10 @@ class KnowledgeGraphIngestionWorker:
                     await self.store.add_episode(scope, rendered.episode, usage)
                 except Exception as exc:
                     entry["failures"] += 1
+                    # Unusable model output, such as JSON that does not match the schema, raises ValueError.
+                    entry["bad_outputs"] = entry["bad_outputs"] + 1 if isinstance(exc, ValueError) else 0
                     _report_failure("Knowledge graph ingestion failed", exc, agent=scope.agent_name)
-                    if entry["failures"] < _MAX_EPISODE_ATTEMPTS:
+                    if entry["bad_outputs"] < _MAX_BAD_OUTPUTS:
                         backoff = _FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1)
                         entry["retry_at"] = now + min(backoff, _MAX_RETRY_SECONDS)
                         self._save_state(scope.graph_name, state)
@@ -231,13 +237,13 @@ class KnowledgeGraphIngestionWorker:
                         agent=scope.agent_name,
                         episode=rendered.episode.name,
                     )
-                    entry["failures"] = 0
                     clean = False
+                entry.update(failures=0, bad_outputs=0)
                 entry["markers"][kind] = list(rendered.last_run)
                 self._save_state(scope.graph_name, state)
             if new_runs:
                 entry["markers"][kind] = list(run_key(new_runs[-1]))
-        entry.update(updated_at=session.updated_at, failures=0, retry_at=0)
+        entry.update(updated_at=session.updated_at, failures=0, bad_outputs=0, retry_at=0)
         self._save_state(scope.graph_name, state)
         return clean
 

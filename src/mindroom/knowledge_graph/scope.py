@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature
 from mindroom.logging_config import get_logger
@@ -35,19 +36,29 @@ class GraphScope:
     graph_name: str
 
 
-def _graph_name(scope_key: str, embedder_signature: Sequence[str]) -> str:
-    """Return the graph name for a scope and embedder, which reveals neither."""
-    digest = hashlib.sha256("|".join((scope_key, *embedder_signature)).encode()).hexdigest()
+def _graph_name(scope_key: str, signature: Sequence[str]) -> str:
+    """Return the graph name for a scope, database, and embedder, which reveals none of them."""
+    digest = hashlib.sha256("|".join((scope_key, *signature)).encode()).hexdigest()
     return f"kg_{digest[:24]}"
 
 
-def _embedder_signature(config: Config) -> tuple[str, str, str, str]:
+def _graph_signature(config: Config) -> tuple[str, ...]:
+    """Return what makes a graph's contents differ: the database it lives in and the embedder of its vectors.
+
+    The database is named by backend, host, and port without credentials, so rotating a password keeps the graph.
+    """
+    settings = config.knowledge_graph
+    url = urlsplit(settings.url or "")
+    destination = (settings.backend, url.hostname or "", str(url.port or ""))
     embedder = config.memory.embedder
-    return effective_mem0_embedder_signature(
-        embedder.provider,
-        embedder.config.model,
-        host=embedder.config.host,
-        dimensions=embedder.config.dimensions,
+    return (
+        *destination,
+        *effective_mem0_embedder_signature(
+            embedder.provider,
+            embedder.config.model,
+            host=embedder.config.host,
+            dimensions=embedder.config.dimensions,
+        ),
     )
 
 
@@ -65,7 +76,7 @@ def graph_scope(
     return GraphScope(
         agent_name=agent_name,
         execution_identity=execution_identity if is_private else None,
-        graph_name=_graph_name(scope_key, _embedder_signature(config)),
+        graph_name=_graph_name(scope_key, _graph_signature(config)),
     )
 
 

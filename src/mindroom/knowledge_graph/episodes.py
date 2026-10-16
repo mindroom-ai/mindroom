@@ -19,6 +19,7 @@ from mindroom.automations.exploration_policy import EXPLORATION_HOOK_SOURCE
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.knowledge_graph.store import EpisodeInput
+from mindroom.prompt_message_tags import cdata_body_text
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -156,7 +157,7 @@ def _conversation_lines(run: RunOutput, agent_name: str, settings: KnowledgeGrap
 def _prompt_messages(content: str, requester: str) -> list[tuple[str, str]]:
     """Return each ``<msg>`` tag's sender and body, or the whole prompt as the requester's."""
     tagged = [
-        (sender.group(2) if (sender := _FROM_ATTR.search(attrs)) else requester, body.replace("]]]]><![CDATA[>", "]]>"))
+        (sender.group(2) if (sender := _FROM_ATTR.search(attrs)) else requester, cdata_body_text(body))
         for attrs, body in _MSG_TAG.findall(content)
     ]
     if tagged:

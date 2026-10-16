@@ -384,12 +384,13 @@ agents:
 4. When the run ends, MindRoom marks the thread resolved.
 
 During an exploration run the agent can call only the toolkits or `toolkit.function` entries in `tools`, plus `knowledge_graph`, and never a function that needs [approval](https://docs.mindroom.chat/tool-approval/), so nothing waits for a person.
+Skills, knowledge base search, and background jobs are off during exploration, and an OAuth-backed MCP server is reachable only through its listed tools, not its `call_tool` function.
 It is told to only read, but only `tools` limits what it can do, so leave out tools that change things, or add an [approval rule](https://docs.mindroom.chat/tool-approval/) for their writing functions.
-`tools` cannot name `delegate`, `dynamic_tools`, `dynamic_workflow`, `scheduler`, `matrix_message`, `invite_router`, `self_config`, `skill_manage`, `memory`, `compact_context`, `thread_model`, or `script`, because those start other runs or change the agent.
+`tools` cannot name `callback_manager`, `compact_context`, `config_manager`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `external_trigger_manager`, `invite_router`, `matrix_api`, `matrix_message`, `memory`, `scheduler`, `script`, `self_config`, `skill_manage`, `thread_model`, or `todo`, because those start other runs or change agents.
 Allowing a code-executing tool such as `shell` gives exploration everything that tool can reach.
 A person who replies in an exploration thread gets the agent's ordinary tools.
 
-The prompt lists recent tool calls with their arguments, credential-like values removed, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+The prompt lists recent tool calls with their arguments, credential-like values removed and the `@` before names dropped so it mentions nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 
 | Field | Default | Description |
 |---|---|---|

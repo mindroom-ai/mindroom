@@ -76,7 +76,20 @@ def test_exploration_tools_must_be_the_agents_own() -> None:
     assert config.agent_exploration("mind") is not None
 
 
-@pytest.mark.parametrize("toolkit", ["scheduler", "delegate.delegate_task", "matrix_message", "self_config"])
+@pytest.mark.parametrize(
+    "toolkit",
+    [
+        "scheduler",
+        "delegate.delegate_task",
+        "matrix_message",
+        "self_config",
+        "config_manager",
+        "callback_manager",
+        "external_trigger_manager",
+        "todo",
+        "matrix_api.send_event",
+    ],
+)
 def test_exploration_rejects_toolkits_that_act_beyond_it(toolkit: str) -> None:
     """Tools that start other runs or change the agent would act outside the allowlist."""
     with pytest.raises(ValidationError, match="cannot be used by exploration"):

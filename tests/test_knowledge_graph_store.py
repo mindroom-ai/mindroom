@@ -168,3 +168,30 @@ assert "PYTHON_DOTENV_DISABLED" not in os.environ
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_graph_operations_install_graphiti_before_importing_it() -> None:
+    """Every operation reaches the installing, guarded client before it imports anything from Graphiti."""
+    script = """
+import asyncio
+import sys
+from mindroom.knowledge_graph.store import GraphitiStore
+
+class ClientReached(Exception):
+    pass
+
+async def client(self):
+    raise ClientReached
+
+GraphitiStore._graphiti_client = client
+store = GraphitiStore.__new__(GraphitiStore)
+for call in (store.search_facts(None, "q", 1), store.entity(None, "n"), store.add_episode(None, None, None)):
+    try:
+        asyncio.run(call)
+    except ClientReached:
+        pass
+assert "graphiti_core" not in sys.modules, "Graphiti was imported before its client was built"
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr

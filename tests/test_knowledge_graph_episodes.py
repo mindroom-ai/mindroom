@@ -184,3 +184,12 @@ def test_classify_thread_uses_the_root_hook_source_then_automation_threads() -> 
     assert classify_thread([_run("r1", hook_source="automation/dreaming")], set()) == "automation"
     assert classify_thread([_run("r1")], {THREAD}) == "automation"
     assert classify_thread([_run("r1")], set()) == "conversation"
+
+
+def test_message_text_that_ends_a_cdata_section_survives() -> None:
+    """A message containing `]]>` is read back as the person wrote it."""
+    prompt = render_msg_tag(sender="@alice:x", body="Use a[b[0]]> c")
+
+    conversation = _episodes([_run("r1", prompt=prompt)], "conversation")[0].episode
+
+    assert conversation.body.splitlines()[0] == "person @alice:x: Use a[b[0]]> c"

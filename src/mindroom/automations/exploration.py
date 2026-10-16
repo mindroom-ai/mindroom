@@ -8,6 +8,7 @@ graph through ingestion, never through anything the agent writes.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,11 +28,15 @@ from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
 from mindroom.session_storage.agent_storage import create_session_storage
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
 
 _DAY_SECONDS = 86_400
 _STATE_FILE = "exploration.json"
 _MAX_ARGUMENT_CHARS = 300
+# An `@` that starts a word, as in `@alice:example.org` or `@research`; one inside an email address stays.
+_MENTION_SIGN = re.compile(r"(?<![\w.+-])@")
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,8 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_L
             if classify_thread(runs, automation_thread_ids) != "conversation":
                 continue
             for run in runs:
-                if run.status != RunStatus.completed:
+                # An updated conversation's earlier turns were listed by an earlier run.
+                if run.status != RunStatus.completed or (run.created_at or 0) <= since:
                     continue
                 for execution in run.tools or []:
                     if not execution.tool_name or execution.tool_name in KNOWLEDGE_GRAPH_FUNCTIONS:
@@ -79,10 +85,15 @@ def _render_leads(leads: list[_Lead]) -> str:
     if not leads:
         return "No tool calls in conversations since the last exploration; revisit the sources the graph already knows."
     return "\n".join(
-        f"- {lead.function}({lead.arguments}): {lead.count} times, last "
+        f"- {lead.function}({_without_mentions(lead.arguments)}): {lead.count} times, last "
         f"{datetime.fromtimestamp(lead.last_seen, UTC).date().isoformat()}"
         for lead in leads
     )
+
+
+def _without_mentions(text: str) -> str:
+    """Drop the `@` that starts a name, so posting the prompt mentions no person and wakes no other agent."""
+    return _MENTION_SIGN.sub("", text)
 
 
 def _last_run_at(ctx: AutomationContext) -> float | None:
@@ -110,18 +121,21 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
     leads = _collect_leads(ctx, since=since, limit=entry.max_leads) if entry.max_leads else []
     if not leads and not revisit_due:
         return None
-    ctx.state_dir.mkdir(parents=True, exist_ok=True)
-    write_json_file_durable(ctx.state_dir / _STATE_FILE, {"last_run_at": now})
     prompt = ctx.config.render_prompt(
         "EXPLORATION_PROMPT_TEMPLATE",
         max_tool_calls=entry.max_tool_calls,
         leads=_render_leads(leads),
     )
-    return Ask(prompt, new_thread=True, then=_after_run)
+    return Ask(prompt, new_thread=True, then=partial(_after_run, ctx.state_dir, now))
 
 
-def _after_run(config: Config, thread_id: str, timed_out: bool) -> Done:
-    """Resolve the thread and ingest its tool results once the conversation counts as idle."""
+def _after_run(state_dir: Path, checked_at: float, config: Config, thread_id: str, timed_out: bool) -> Done:
+    """Record the run, resolve its thread, and ingest its tool results once the conversation counts as idle.
+
+    The run is recorded only once it ends, so a prompt that never posted offers the same leads next time.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    write_json_file_durable(state_dir / _STATE_FILE, {"last_run_at": checked_at})
     notice = (
         "⚠️ Exploration did not finish within an hour; what it read so far still joins the knowledge graph."
         if timed_out

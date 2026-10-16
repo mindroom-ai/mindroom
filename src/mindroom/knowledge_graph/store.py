@@ -227,9 +227,10 @@ class GraphitiStore:
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
         """Extract an episode into the scope's graph, charging extraction to ``usage``."""
+        # The client installs and imports Graphiti first, so the imports below find it loaded.
+        graphiti = await self._graphiti_client()
         from graphiti_core.nodes import EpisodeType  # noqa: PLC0415
 
-        graphiti = await self._graphiti_client()
         with usage_target(usage):
             await graphiti.add_episode(
                 name=episode.name,
@@ -242,9 +243,9 @@ class GraphitiStore:
 
     async def search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:
         """Return the scope's facts most relevant to ``query``, without an LLM call."""
+        graphiti = await self._graphiti_client()
         from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF  # noqa: PLC0415
 
-        graphiti = await self._graphiti_client()
         results = await graphiti.search_(
             query,
             config=EDGE_HYBRID_SEARCH_RRF.model_copy(update={"limit": limit}),
@@ -254,10 +255,10 @@ class GraphitiStore:
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
         """Return the scope's entity best matching ``name`` with the facts that touch it."""
+        graphiti = await self._graphiti_client()
         from graphiti_core.edges import EntityEdge  # noqa: PLC0415
         from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF  # noqa: PLC0415
 
-        graphiti = await self._graphiti_client()
         results = await graphiti.search_(
             name,
             config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": 1}),

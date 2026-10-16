@@ -46,9 +46,13 @@ class _FakeStore:
     episodes: list[tuple[str, EpisodeInput, UsageTarget]] = field(default_factory=list)
     failing: set[str] = field(default_factory=set)
     failing_kinds: set[str] = field(default_factory=set)
+    unavailable: bool = False
     added: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
+        if self.unavailable:
+            msg = "graph database unavailable"
+            raise ConnectionError(msg)
         if usage.session_id in self.failing or episode.kind in self.failing_kinds:
             msg = "structured output did not match"
             raise ValueError(msg)
@@ -342,3 +346,49 @@ async def test_usage_is_charged_to_the_conversations_requester(tmp_path: Path) -
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
 
     assert {usage.requester_id for _, _, usage in store.episodes} == {"@alice:x"}
+
+
+@pytest.mark.asyncio
+async def test_an_outage_never_drops_episodes(tmp_path: Path) -> None:
+    """While the database or provider is down, episodes wait however long it lasts."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(unavailable=True)
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+
+    for attempt in range(8):
+        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+    store.unavailable = False
+    await worker._run_cycle(config, now=T0 + 40_000)
+
+    assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
+
+
+@pytest.mark.asyncio
+async def test_a_success_resets_the_failure_count(tmp_path: Path) -> None:
+    """Failures of one episode never count against the next."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing_kinds={"conversation"})
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+    for attempt in range(4):
+        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+    store.failing_kinds = {"tool_results"}
+    real_add = store.add_episode
+    calls: list[str] = []
+
+    async def conversation_then_tool_failure(scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
+        calls.append(episode.kind)
+        if episode.kind == "conversation":
+            store.failing_kinds = set()
+            await real_add(scope, episode, usage)
+            store.failing_kinds = {"tool_results"}
+            return
+        await real_add(scope, episode, usage)
+
+    with patch.object(store, "add_episode", conversation_then_tool_failure):
+        await worker._run_cycle(config, now=T0 + 20_000)
+    store.failing_kinds = set()
+    await worker._run_cycle(config, now=T0 + 40_000)
+
+    assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]

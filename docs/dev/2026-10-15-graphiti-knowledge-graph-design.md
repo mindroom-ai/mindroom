@@ -123,73 +123,27 @@ Graphiti needs structured output; small local models may fail extraction, which 
 
 ## Configuration
 
-```yaml
-knowledge_graph:
-  backend: falkordb_lite        # or falkordb
-  url: null                     # falkordb only, e.g. redis://graph:6379
-  model: luna                   # a models key; required when any agent enables the graph
-  ingest:
-    interval_seconds: 600
-    idle_seconds: 120
-    max_sessions_per_cycle: 10
-    max_episode_chars: 24000
-    max_tool_result_chars: 4000
-    backfill_days: 7
+Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `exploration` section of `docs/scheduling.md`.
 
-agents:
-  mind:
-    knowledge_graph: true       # passive ingestion and the knowledge_graph tool
-    automations:
-      - name: exploration
-        cron: "0 */6 * * *"         # default "30 2 * * *"
-        room: "#mind-exploration"
-        tools: [mcp_github, mcp_linear.list_issues, web_search]
-        max_tool_calls: 40
-        max_leads: 20
-        revisit_days: 7
-        model: luna
-```
+## Ingestion invariants
 
-- `agents.<name>.knowledge_graph` (bool, default `false`, inheritable from `defaults`) turns on ingestion and gives the agent the `knowledge_graph` tool.
-- `exploration` requires `knowledge_graph: true`; `tools` entries are toolkit names or `toolkit.function`, must be on the agent's own tool list, and must be non-empty.
-- `max_tool_calls` (default `40`, min 1) caps one run, and the agent's own `max_tool_calls_per_turn` still applies when lower.
-- `ingest.backfill_days` (default `7`) limits a newly enabled graph, or a graph rebuilt after an embedder change, to sessions active in that many days, as dreaming does for its first run.
-- `max_leads` (default `20`) caps observed tool calls listed in one prompt; `revisit_days` (default `7`) runs a pass without new leads once that long has passed since the last run.
+- Only finished turns are ingested, and a turn waiting for approval holds back every later turn of its conversation, because it finishes in place with its original, earlier creation time and a marker past it would skip it.
+- Runs are read from the live session and the compaction archive, because compaction can move runs before ingestion reaches them.
+- Episodes are rendered from full messages and tool results, not the skill-learning digest, which shortens older messages and drops older tool results.
+- Each episode kind has its own marker, so a kind that keeps failing never repeats the other kind's episodes.
+- The marker is the only record of completion: Graphiti's `add_episode(uuid=...)` loads an existing episode and extracts again rather than skipping it, so a crash between the write and the marker re-extracts one episode, which Graphiti's entity and fact resolution merges.
+- An episode is dropped only after five unusable model outputs in a row, which Graphiti and the extraction adapter raise as `ValueError`; an outage of the database or the provider never counts, so evidence waits however long the outage lasts.
+- A new graph's start is saved when it is first seen, so the backfill window stays anchored even with `backfill_days: 0`.
+- The graph name includes the database destination (backend, host, and port, without credentials) and the embedder signature, so moving to another server or embedder starts a graph that ingestion fills again, while rotating a password does not.
+- Ingestion spend per pass is bounded by `max_sessions_per_cycle` conversations, each split into episodes of at most `max_episode_chars`; a long conversation's backlog spreads over passes rather than being capped.
 
-## Data flow
+## Exploration invariants
 
-### Ingestion worker
-
-1. Every `interval_seconds`, for each graph-enabled agent and private instance, list sessions updated since that scope's cursor.
-2. Skip sessions active within `idle_seconds`, and threads that automations other than `exploration` started.
-3. For each session, up to `max_sessions_per_cycle`, read its finished and approval-waiting top-level runs from both the live session and the compaction archive, because compaction can move runs before ingestion reaches them, and stop at the first run that waits for approval, because it finishes in place later with its original, earlier creation time and a marker past it would skip it.
-4. Render them with a dedicated episode renderer, not the skill-learning digest, which shortens older messages and drops older tool results: every message in full with its speaker, tool calls with arguments, each tool result clipped to `max_tool_result_chars`, credential-like values redacted with the shared `redact_sensitive_text`, and consecutive runs merged into `conversation` and `tool_results` episodes of at most `max_episode_chars`, split only at run boundaries; a single run larger than the cap is clipped.
-5. Call `add_episode` for each episode with `reference_time` from its last run and the scope's `group_id`, then advance that episode kind's marker past its runs; each kind has its own marker, so a kind that keeps failing never repeats the other kind's episodes.
-6. The marker is the only record of completion; Graphiti's `add_episode(uuid=...)` loads an existing episode and extracts again rather than skipping it, so no UUID is passed, and a crash between the write and the marker update re-extracts one episode, whose entities and facts Graphiti's resolution merges with the first copy.
-7. A failure keeps the marker, logs, and retries the session next cycle with a growing cooldown; after five failures in a row the episode is dropped with an error in the log, so one episode the model cannot extract does not cost calls forever.
-8. A new graph's start time is saved when the graph is first seen, so the backfill window stays anchored even with `backfill_days: 0`.
-
-Ingestion spend is bounded by `max_sessions_per_cycle` sessions of at most `max_episode_chars` per episode each `interval_seconds`, independent of exploration's `max_tool_calls`.
-
-The exploration automation's final step wakes the worker so an exploration thread is ingested without waiting a full interval.
-
-### Exploration automation
-
-1. The check, in code, collects leads: distinct `(function, arguments)` calls in the agent's conversations since the last run, excluding `knowledge_graph` calls and exploration threads, arguments redacted, with counts and last-seen times, newest first, capped at `max_leads`.
-2. With no leads and `revisit_days` not elapsed, it returns `None` and costs nothing.
-3. Otherwise it asks the agent, in a new thread, to: check what the graph knows with `knowledge_graph`, re-read the sources behind the leads for changes, follow references into containers not yet seen, and look for owners, dates, and links the graph lacks, using only read operations, then end with a short report of what it checked and what remains unknown.
-4. When the run ends, the step posts a notice, resolves the thread, and wakes ingestion once the thread has been idle for `idle_seconds`, since an immediate pass would still find it active.
-
-`exploration` does not require file memory, unlike the other built-ins.
-
-### Queries
-
-`knowledge_graph` functions, all scoped to the caller's graph:
-
-- `search_graph(query, limit=10)` returns facts with `valid_at`, `invalid_at` when superseded, and their source episodes' provenance, descriptions, and times.
-- `graph_entity(name)` returns the best-matching entity's summary and its current and superseded facts.
-
-The tool runs in the primary process and touches no files.
+- Leads come only from completed conversation turns created after the last run, so a reply in an old thread does not bring back that thread's earlier calls.
+- The `@` that starts a name is removed from lead arguments, because the posted prompt is parsed for mentions and a mentioned agent would answer the trusted automation prompt with its ordinary tools.
+- The last-run time is saved only when a run ends, so a prompt that never posted offers the same leads again.
+- An exploration build has no skills, no generated knowledge search, no background jobs or job controls, and no MCP `call_tool` dispatcher: skill scripts can run code, a call that became a job would finish in a later turn without the exploration restrictions, and a dispatcher reaches remote tools that approval rules see only by their own names.
+- An allowlisted toolkit that fails to load leaves exploration with the others instead of failing the run.
 
 ## Security
 
@@ -207,15 +161,14 @@ The tool runs in the primary process and touches no files.
 - An extraction call the provider rejects raises with the provider's message, so health shows the cause rather than a JSON parse error.
 - An agent or private instance whose conversations cannot be read is reported and skipped, so it does not stop ingestion for the others, and stopping the runtime cancels a pass in progress instead of waiting for its extraction calls.
 
-- Missing optional dependency: install on first use, as other extras do; failure disables ingestion and the tool for that runtime with one logged error and a `/api/health` entry.
-- Extraction failure or timeout: the session keeps its marker and retries later; repeated failure appears in health, not in rooms.
-- Database unavailable: tool calls return a readable error; ingestion pauses and retries.
+- Missing optional dependency: installed on first use, as other extras are; a failed install fails that pass or lookup and is retried on the next one, with the cause in `/api/health`.
+- Extraction failure, timeout, or unavailable database: the conversation keeps its marker and retries later with a growing cooldown; the cause appears in health, not in rooms, and tool lookups return a readable error.
 - Exploration check that cannot read sessions posts the standard automation warning.
 
 ## Testing
 
-- Unit: lead collection from a seeded session DB (allowlist filtering, `knowledge_graph` exclusion, dedup, caps), episode rendering (episode kinds and speakers, conversation vs exploration threads, archived runs, splitting at run boundaries, redaction), marker advance and retry, scope derivation, graph-name hashing, and the embedder fingerprint.
-- Seam: exploration turns build with only allowlisted functions and no gated functions, and ordinary turns of the same agent are unchanged; the per-thread cap holds across a continuation.
+- Unit: lead collection from a seeded session DB (`knowledge_graph` and exploration-thread exclusion, dedup, caps, cursor, mention removal), episode rendering (episode kinds and speakers, conversation vs exploration threads, archived runs, splitting at run boundaries, redaction), markers, retries, drops, outages, and graph naming.
+- Seam: an exploration build's whole callable surface is the allowlist plus `knowledge_graph`, with no gated functions, skills, knowledge search, jobs, or dispatchers, while ordinary turns of the same agent are unchanged; the per-thread cap holds across a continuation.
 - Integration: a fake store for the worker loop, and real FalkorDB Lite for the store, server lifecycle, and scope isolation, with seeded nodes and edges instead of model extraction.
 - Live: the success scenario above with two real sources, checked for correct facts and source links.
 

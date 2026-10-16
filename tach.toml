@@ -900,6 +900,7 @@ depends_on = [
     "mindroom.tools",
     "mindroom.workers.runtime",
     "mindroom.workspaces",
+    "mindroom.custom_tools.knowledge_graph",
 ]
 
 [[modules]]
@@ -978,6 +979,10 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
     "mindroom.tool_jobs.consumption",
+    "mindroom.knowledge_graph.clients",
+    "mindroom.knowledge_graph.session_runs",
+    "mindroom.knowledge_graph.ingestion",
+    "mindroom.automations.exploration",
 ]
 
 [[modules]]
@@ -998,6 +1003,7 @@ visibility = [
     "mindroom.voice.handler",
     "mindroom.skill_learning.reviewer",
     "mindroom.matrix_rtc.call_tools",
+    "mindroom.knowledge_graph.clients",
 ]
 
 [[modules]]
@@ -1158,6 +1164,7 @@ visibility = ["mindroom.judgment.llm",
     "mindroom.topic_generator",
     "mindroom.voice.handler",
     "mindroom.skill_learning.reviewer",
+    "mindroom.knowledge_graph.clients",
 ]
 
 [[modules]]
@@ -1834,6 +1841,7 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.workers.runtime",
     "mindroom.api.config_schema",
+    "mindroom.knowledge_graph.store",
 ]
 
 [[modules]]
@@ -2871,6 +2879,7 @@ depends_on = [
     "mindroom.workers.runtime",
     "mindroom.automations.runner",
     "mindroom.skill_learning.runner",
+    "mindroom.knowledge_graph.runtime",
 ]
 
 [[modules]]
@@ -2935,6 +2944,7 @@ depends_on = [
     "mindroom.user_turn_time",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.skill_learning.capture",
+    "mindroom.automations.exploration_policy",
 ]
 
 [[modules]]
@@ -3149,6 +3159,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
     "mindroom.config.schema_hints",
+    "mindroom.config.knowledge_graph",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -3192,6 +3203,7 @@ visibility = [
     "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
+    "mindroom.knowledge_graph.episodes",
 ]
 
 [[modules]]
@@ -5064,6 +5076,7 @@ depends_on = [
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_jobs.execution_authority",
+    "mindroom.automations.exploration_policy",
 ]
 
 [[modules]]
@@ -8688,12 +8701,13 @@ visibility = [
     "mindroom.config.main",
     "mindroom.config.models",
     "mindroom.response_runner",
+    "mindroom.automations.exploration",
 ]
 
 [[modules]]
 path = "mindroom.automations.threads"
 depends_on = ["mindroom.constants", "mindroom.path_confinement"]
-visibility = ["mindroom.automations", "mindroom.automations.dreaming", "mindroom.automations.runner"]
+visibility = ["mindroom.automations", "mindroom.automations.dreaming", "mindroom.automations.runner", "mindroom.knowledge_graph.ingestion", "mindroom.automations.exploration"]
 
 [[modules]]
 path = "mindroom.automations.steps"
@@ -8704,6 +8718,8 @@ visibility = [
     "mindroom.automations.prompt_curation",
     "mindroom.automations.runner",
     "mindroom.response_runner",
+    "mindroom.knowledge_graph.episodes",
+    "mindroom.automations.exploration",
 ]
 
 [[modules]]
@@ -8713,6 +8729,7 @@ depends_on = [
     "mindroom.automations.prompt_curation",
     "mindroom.config.automations",
     "mindroom.logging_config",
+    "mindroom.automations.exploration",
 ]
 
 [[modules]]
@@ -8856,3 +8873,124 @@ visibility = [
     "mindroom.teams",
     "mindroom.tool_jobs.agno_execution",
 ]
+
+# Knowledge graph: one store per runtime, fed by background ingestion and read by the knowledge_graph tool.
+[[modules]]
+path = "mindroom.config.knowledge_graph"
+depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge_graph"
+depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge_graph.usage"
+depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge_graph.embedded_server"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.knowledge_graph.store"]
+
+[[modules]]
+path = "mindroom.knowledge_graph.clients"
+depends_on = [
+    "mindroom.helper_usage",
+    "mindroom.knowledge_graph.usage",
+    "mindroom.providers.model_loading",
+    "mindroom.session_storage.agent_storage",
+]
+visibility = ["mindroom.knowledge_graph.store"]
+
+[[modules]]
+path = "mindroom.knowledge_graph.scope"
+depends_on = [
+    "mindroom.embeddings.signatures",
+    "mindroom.logging_config",
+    "mindroom.requester_identity",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.knowledge_graph.store"
+depends_on = [
+    "mindroom.embeddings.factory",
+    "mindroom.knowledge_graph.clients",
+    "mindroom.knowledge_graph.embedded_server",
+    "mindroom.knowledge_graph.usage",
+    "mindroom.logging_config",
+    "mindroom.tool_system.dependencies",
+]
+
+[[modules]]
+path = "mindroom.knowledge_graph.episodes"
+depends_on = [
+    "mindroom.automations.exploration_policy",
+    "mindroom.automations.steps",
+    "mindroom.constants",
+    "mindroom.knowledge_graph.store",
+    "mindroom.prompt_message_tags",
+    "mindroom.redaction",
+]
+
+[[modules]]
+path = "mindroom.knowledge_graph.session_runs"
+depends_on = [
+    "mindroom.history.storage",
+    "mindroom.knowledge_graph.episodes",
+    "mindroom.session_storage.agent_storage",
+]
+visibility = ["mindroom.automations.exploration", "mindroom.knowledge_graph.ingestion"]
+
+[[modules]]
+path = "mindroom.knowledge_graph.ingestion"
+depends_on = [
+    "mindroom.automations.threads",
+    "mindroom.durable_write",
+    "mindroom.knowledge_graph.episodes",
+    "mindroom.knowledge_graph.scope",
+    "mindroom.knowledge_graph.session_runs",
+    "mindroom.knowledge_graph.store",
+    "mindroom.knowledge_graph.usage",
+    "mindroom.logging_config",
+    "mindroom.session_storage.agent_storage",
+]
+
+[[modules]]
+path = "mindroom.knowledge_graph.runtime"
+depends_on = ["mindroom.knowledge_graph.ingestion", "mindroom.knowledge_graph.store"]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.custom_tools.knowledge_graph"
+depends_on = [
+    "mindroom.knowledge_graph.scope",
+    "mindroom.knowledge_graph.store",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.agents"]
+
+[[modules]]
+path = "mindroom.tools.knowledge_graph"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+# Exploration: the automation that explores unattended, and the restrictions on the turns it starts.
+[[modules]]
+path = "mindroom.automations.exploration_policy"
+depends_on = []
+
+[[modules]]
+path = "mindroom.automations.exploration"
+depends_on = [
+    "mindroom.automations.registry",
+    "mindroom.automations.steps",
+    "mindroom.automations.threads",
+    "mindroom.config.automations",
+    "mindroom.durable_write",
+    "mindroom.knowledge_graph.episodes",
+    "mindroom.knowledge_graph.ingestion",
+    "mindroom.knowledge_graph.session_runs",
+    "mindroom.session_storage.agent_storage",
+]
+visibility = ["mindroom.automations.registry"]

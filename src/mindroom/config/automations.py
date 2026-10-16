@@ -115,11 +115,15 @@ class DreamingAutomation(_ScheduledAutomation):
 # Toolkits that start other agent runs or change the agent itself, so a call to one would act outside the allowlist.
 _EXPLORATION_RESTRICTED_TOOLKITS = frozenset(
     {
+        "callback_manager",
         "compact_context",
+        "config_manager",
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",
+        "external_trigger_manager",
         "invite_router",
+        "matrix_api",
         "matrix_message",
         "memory",
         "scheduler",
@@ -127,6 +131,7 @@ _EXPLORATION_RESTRICTED_TOOLKITS = frozenset(
         "self_config",
         "skill_manage",
         "thread_model",
+        "todo",
     },
 )
 

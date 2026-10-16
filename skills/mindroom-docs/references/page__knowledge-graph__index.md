@@ -40,7 +40,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
-Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
+Changing the embedder, the backend, or the server's host or port starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read.
 
 ## What Goes Into the Graph
 
