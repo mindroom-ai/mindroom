@@ -23,7 +23,9 @@ from mindroom.agent_cli.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.agno_compat_prepared_tools import OwnedAgentFunctionCall, prepare_agent_tools, temporary_tool_instructions
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
+from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import (
     ToolDescriptor,
@@ -458,7 +460,8 @@ async def _execute_agent_tool_call(  # noqa: C901 - one canonical execution and 
             function.entrypoint = pinned_leaf
         call = OwnedAgentFunctionCall(function=function, call_id=call_id, arguments=arguments)
         messages: list[Message] = []
-        tracker = SyncToolCompletionTracker()
+        # A job's call has no time limit, so what it offloads must not hold a shared pool's thread.
+        tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else None)
 
         @contextmanager
         def context() -> Iterator[None]:

@@ -2006,6 +2006,7 @@ depends_on = []
 visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_system.agent_tool_calls",
 ]
 
 [[modules]]
@@ -8169,6 +8170,7 @@ visibility = [
     "mindroom.tool_jobs.approvals",
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.agent_tool_calls",
 ]
 
 [[modules]]
@@ -8322,7 +8324,9 @@ depends_on = [
     "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.agno_compat_prepared_tools",
     "mindroom.background_tasks",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
     "mindroom.tool_system.tool_hooks",
