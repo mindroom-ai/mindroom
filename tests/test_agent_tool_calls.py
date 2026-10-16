@@ -129,6 +129,29 @@ async def test_a_cli_call_inside_a_job_blocks_on_its_own_thread(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("in_job", [False, True])
+async def test_a_failed_offloaded_cli_call_ends_as_that_calls_failure(tmp_path: Path, *, in_job: bool) -> None:
+    """A worker request that raises fails only its own call, so the shell command that made it keeps its output."""
+    shared = ThreadPoolExecutor(thread_name_prefix="shared-pool")
+
+    def blocking() -> str:
+        message = "runner refused the call"
+        raise RuntimeError(message)
+
+    async def offloading() -> str:
+        return await run_async_entrypoint_blocking_call(blocking, executor=shared)
+
+    catalog = await _catalog(tmp_path, [Toolkit(name="threads", tools=[offloading])])
+    try:
+        with job_control_context(JobControl()) if in_job else nullcontext():
+            events = await _events(catalog, "threads", "offloading")
+        assert events[-1].kind == "failed"
+        assert "runner refused the call" in str(events[-1].execution.result)
+    finally:
+        shared.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
 async def test_prepared_call_preserves_real_owner_context_and_hooks(tmp_path: Path) -> None:
     """Execution retains owner identity and runs existing hooks once."""
     seen = []

@@ -398,9 +398,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             ``timeout`` seconds is stopped with the processes it started, and its
             output so far is returned. Without ``timeout``, a call that runs as part
             of a background job has no time limit, even while you wait for it; that
-            includes every call that accepts ``background_after`` and a subagent's
-            calls for a task delegated in the background. Any other call stops after
-            120 seconds. Set ``timeout`` on a command that might not end on its own,
+            includes every call that accepts ``background_after`` and, with background
+            jobs on, a subagent's calls for its delegated task, whether or not its
+            caller waits for it. Any other call stops after 120 seconds. Set ``timeout`` on a command that might not end on its own,
             such as a watcher or a test run that can hang. Start a server or anything
             else meant to keep running with ``nohup cmd > out.log 2>&1 &``, which
             keeps running after the command ends; in the foreground it would keep the

@@ -503,6 +503,7 @@ async def _settle_call(
             await call.close_result()
             pending = tracker.started_task()
             if pending is not None:
-                await pending
+                # Its failure was already reported as this call's own; waiting must not raise it again.
+                await asyncio.gather(pending, return_exceptions=True)
 
     await wait_for_future_until_complete(asyncio.create_task(settle(), name="agent-tool-call-cleanup"))
