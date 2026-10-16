@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.api.sandbox_exec import runner_storage_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.shared_directories.store import agent_shared_directories, shared_directory_relative_path
+from mindroom.shared_directories.store import (
+    is_shareable_agent,
+    load_shared_directories,
+    shared_directory_access,
+    shared_directory_relative_path,
+)
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
@@ -57,17 +63,22 @@ def agent_shared_directory_views(
     agent_name: str,
 ) -> tuple[_SharedDirectoryView, ...]:
     """Return the shared directories one agent owns, writable, or joined, read-only, at the paths its tools see."""
-    directories = agent_shared_directories(config, runtime_paths, agent_name)
-    if not directories:
+    reachable = [
+        (directory, access)
+        for directory in load_shared_directories(runtime_paths)
+        if (access := shared_directory_access(directory, (agent_name,), partial(is_shareable_agent, config)))
+        is not None
+    ]
+    if not reachable:
         return ()
     in_worker = agent_reads_shares_in_worker(config, runtime_paths, agent_name)
     return tuple(
         _SharedDirectoryView(
             directory=directory,
             path=_shared_directory_view_path(runtime_paths, directory, in_worker=in_worker),
-            writable=directory.owner == agent_name,
+            writable=access,
         )
-        for directory in directories
+        for directory, access in reachable
     )
 
 

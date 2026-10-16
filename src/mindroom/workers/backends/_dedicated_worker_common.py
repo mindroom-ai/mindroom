@@ -13,7 +13,11 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.private_storage.alias_paths import private_scope_alias_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
-from mindroom.shared_directories.store import load_shared_directories, shared_directory_relative_path
+from mindroom.shared_directories.store import (
+    load_shared_directories,
+    shared_directory_access,
+    shared_directory_relative_path,
+)
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     normalize_worker_key_part,
@@ -408,22 +412,17 @@ def plan_shared_directory_mounts(
     directory is mounted only when it is a real directory reached without links,
     because container runtimes follow links in mount sources.
     """
-    served = {
-        agent_name
-        for agent_name in agent_names_addressed_by_worker_key(worker_key, resolved_agent_policies)
-        if not resolved_agent_policies[agent_name].is_private
-    }
+    served = agent_names_addressed_by_worker_key(worker_key, resolved_agent_policies)
+
+    def is_shareable(agent_name: str) -> bool:
+        policy = resolved_agent_policies.get(agent_name)
+        return policy is not None and not policy.is_private
+
     storage_root = runtime_paths.storage_root
     mounts: list[SharedDirectoryMount] = []
     for directory in load_shared_directories(runtime_paths):
-        owner_policy = resolved_agent_policies.get(directory.owner)
-        if owner_policy is None or owner_policy.is_private:
-            continue
-        if directory.owner in served:
-            read_only = False
-        elif served.intersection(directory.members):
-            read_only = True
-        else:
+        writable = shared_directory_access(directory, served, is_shareable)
+        if writable is None:
             continue
         relative_path = shared_directory_relative_path(directory.owner, directory.name)
         try:
@@ -440,7 +439,7 @@ def plan_shared_directory_mounts(
             SharedDirectoryMount(
                 local_path=storage_root / relative_path,
                 worker_visible_path=worker_visible_shared_storage_root / relative_path,
-                read_only=read_only,
+                read_only=not writable,
             ),
         )
     return tuple(mounts)

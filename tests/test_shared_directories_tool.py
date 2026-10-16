@@ -216,7 +216,7 @@ def test_invite_and_remove_are_idempotent(tmp_path: Path) -> None:
     assert "restart" not in str(removed_again["message"])
 
 
-def test_delete_removes_the_directory_and_names_every_restart(tmp_path: Path) -> None:
+def test_delete_empties_the_directory_and_names_every_restart(tmp_path: Path) -> None:
     """Deleting forgets the directory, removes every file in it, and names the owner and members."""
     context = _context(_config(tmp_path))
     created = _call(context, "create_shared_directory", "report")

@@ -167,7 +167,7 @@ def test_malformed_records_are_dropped(tmp_path: Path) -> None:
     ledger.write_text(
         ledger.read_text(encoding="utf-8").replace(
             "{",
-            '{"bob/x": {"owner": "bob", "name": "../x", "members": [], "created_at": ""}, ',
+            '{"bob/x": {"owner": "bob", "name": "../x", "members": []}, ',
             1,
         ),
         encoding="utf-8",

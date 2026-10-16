@@ -24,7 +24,7 @@ from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -128,19 +128,23 @@ def is_shareable_agent(config: Config, agent_name: str) -> bool:
     return agent is not None and agent.private is None
 
 
-def agent_shared_directories(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-) -> tuple[SharedDirectory, ...]:
-    """Return the directories one agent owns or joined, skipping any whose owner can no longer share."""
-    if not is_shareable_agent(config, agent_name):
-        return ()
-    return tuple(
-        directory
-        for directory in load_shared_directories(runtime_paths)
-        if is_shareable_agent(config, directory.owner) and agent_name in {directory.owner, *directory.members}
-    )
+def shared_directory_access(
+    directory: SharedDirectory,
+    agent_names: Iterable[str],
+    is_shareable: Callable[[str], bool],
+) -> bool | None:
+    """Return ``True`` when the agents own a directory, ``False`` when one only joined it, ``None`` without access.
+
+    Agents that cannot share, such as private ones, neither own nor join a directory.
+    """
+    if not is_shareable(directory.owner):
+        return None
+    agents = {agent_name for agent_name in agent_names if is_shareable(agent_name)}
+    if directory.owner in agents:
+        return True
+    if agents.intersection(directory.members):
+        return False
+    return None
 
 
 def _existing(directories: dict[str, SharedDirectory], owner: str, name: str) -> SharedDirectory:
