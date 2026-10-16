@@ -976,6 +976,49 @@ async def test_saved_result_reread_preserves_later_session_state(
 
 
 @pytest.mark.asyncio
+async def test_job_list_skips_a_call_that_returned_inline_earlier_in_the_same_turn(tmp_path: Path) -> None:
+    """A call that returned its result inline is no job, even before the reply that got it is saved."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    async def report(topic: str) -> str:
+        return f"report on {topic}"
+
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("report", "report-call", topic="alpha", background_after=None)]),
+            ModelResponse(tool_calls=[_call("job", "list-call", action="list")]),
+            ModelResponse(content="done"),
+        ],
+    )
+    install_tool_job_execution(model)
+    storage = storage_factory()
+    agent = Agent(id="leader", model=model, tools=[assembled_function(report), JobTools(paths, owner)], db=storage)
+
+    @owned_tool_execution()
+    async def run() -> RunOutput:
+        set_consumption_storage(storage_factory)
+        with tool_runtime_context(context):
+            return await agent.arun("Report on alpha", session_id=context.session_id, user_id=context.requester_id)
+
+    try:
+        result = await run()
+        assert [message.content for message in result.messages if message.tool_call_id == "list-call"] == ["[]"]
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_later_consumption_merges_only_changed_state_and_reports_conflicts(tmp_path: Path) -> None:
     """Background mutation stays isolated, and later consumption preserves newer keys."""
     started, release = asyncio.Event(), asyncio.Event()

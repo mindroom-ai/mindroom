@@ -790,6 +790,65 @@ class TestAgentBot(AgentBotTestBase):
         assert api_config_lifecycle.app_state(api_main.app).budget_monitor is None
 
     @pytest.mark.asyncio
+    async def test_run_api_server_runs_the_egress_broker_on_the_committed_config(self, tmp_path: Path) -> None:
+        """The egress broker runs while the API server serves, and reads the API's committed config."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+        runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+        providers: list[Callable[[], Config | None]] = []
+        read_while_serving: list[tuple[Config | None, Config]] = []
+
+        @asynccontextmanager
+        async def recording_broker(
+            paths: object,
+            *,
+            config_provider: Callable[[], Config | None],
+        ) -> AsyncIterator[None]:
+            assert paths is runtime_paths
+            providers.append(config_provider)
+            yield
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+            received_signal_name = None
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                del on_started
+
+            async def serve(self) -> None:
+                [provider] = providers
+                # The API's lifespan loads the config when it serves; this fake server has none.
+                assert api_config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+                committed = api_config_lifecycle.read_app_committed_runtime_config(api_main.app)[0]
+                read_while_serving.append((provider(), committed))
+
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.egress_broker.service.serve_egress_broker", recording_broker),
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                runtime_paths,
+                shutdown_requested=shutdown_requested,
+                budget_monitor=MagicMock(),
+            )
+
+        [(provided, committed)] = read_while_serving
+        assert provided is committed
+
+    @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
         """The API gateway and its dedicated listener must receive the lifecycle-owned broker without replacing it."""
 

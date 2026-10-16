@@ -33,7 +33,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import seed_session
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
-from tests.test_dynamic_toolkits import _base_config_data, _validated_config
+from tests.test_dynamic_toolkits import _base_config_data, _egress_broker_env, _validated_config
 from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
 
 if TYPE_CHECKING:
@@ -508,6 +508,23 @@ def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
 
     assert "file" in names
     assert "dynamic_tools" not in names
+
+
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_caller_toolkits_include_egress_credentials_only_while_the_broker_is_on(
+    tmp_path: Path,
+    *,
+    broker_on: bool,
+) -> None:
+    """With the broker off a subagent cannot name the egress credentials tool its caller lists."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["sleep", "egress_credentials"]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw, **_egress_broker_env(broker_on=broker_on))
+
+    names = caller_toolkit_names("code", config, delegation_depth=0)
+
+    assert "sleep" in names
+    assert ("egress_credentials" in names) is broker_on
 
 
 def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

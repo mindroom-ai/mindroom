@@ -41,6 +41,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.automations import Automation  # noqa: TC001
 from mindroom.config.budgets import BudgetsConfig  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
+from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.judgment import LLMJudgmentConfig
@@ -399,12 +400,17 @@ class Config(BaseModel):
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _source_fingerprint: str | None = PrivateAttr(default=None)
     _uses_includes: bool = PrivateAttr(default=False)
-    _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
+    _unavailable_tool_names: set[str] = PrivateAttr(default_factory=set)
     _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
     _runtime_approved_egress_inherited_default_tools: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
+
+    egress_broker: EgressBrokerConfig = Field(
+        default_factory=EgressBrokerConfig,
+        description="Credential-injecting egress broker for worker shell and python traffic",
+    )
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -1521,7 +1527,7 @@ class Config(BaseModel):
                     tool_name=entry.name,
                     unresolved_plugin_sources=sorted(self._unresolved_plugin_tool_sources),
                 )
-                self._unavailable_plugin_tool_names.add(entry.name)
+                self._unavailable_tool_names.add(entry.name)
                 return
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
@@ -1549,6 +1555,7 @@ class Config(BaseModel):
         """Validate authored tool references against one resolved validation snapshot."""
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import (  # noqa: PLC0415
+            egress_tool_unavailable,
             resolved_tool_validation_snapshot_for_runtime,
             unresolved_plugin_tool_sources_for_runtime,
         )
@@ -1563,10 +1570,11 @@ class Config(BaseModel):
             self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
-        self._unavailable_plugin_tool_names = {
+        # The config stays valid with these tools, but no agent tool list offers them here.
+        self._unavailable_tool_names = {
             tool_name
             for tool_name, validation_info in tool_validation_snapshot.items()
-            if validation_info.unavailable_due_to_plugin_load_error
+            if validation_info.unavailable_due_to_plugin_load_error or egress_tool_unavailable(tool_name, runtime_paths)
         }
         self._validate_authored_tool_entries_with_snapshot(
             tool_validation_snapshot=tool_validation_snapshot,
@@ -1649,8 +1657,8 @@ class Config(BaseModel):
         return effective_authored_entries
 
     def _tool_name_is_available(self, tool_name: str) -> bool:
-        """Return whether an authored tool survived tolerant plugin-load validation."""
-        return tool_name not in self._unavailable_plugin_tool_names
+        """Return whether an authored tool can run here; failed plugin tools and a broker-off egress tool cannot."""
+        return tool_name not in self._unavailable_tool_names
 
     def _agent_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
         """Return effective runtime tool config entries for each authored owner."""
@@ -1672,7 +1680,7 @@ class Config(BaseModel):
                     )
                 )
                 for tool_name in self.expand_tool_names([authored_entry.name])
-                if tool_name not in self._unavailable_plugin_tool_names
+                if tool_name not in self._unavailable_tool_names
             )
         return effective_entries
 

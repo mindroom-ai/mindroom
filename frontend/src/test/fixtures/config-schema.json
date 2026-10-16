@@ -1627,6 +1627,226 @@
         "name"
       ]
     },
+    "EgressAuth": {
+      "additionalProperties": false,
+      "description": "Authentication configuration for an egress rule.",
+      "properties": {
+        "type": {
+          "description": "Authentication type",
+          "enum": [
+            "bearer",
+            "basic",
+            "header",
+            "query"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Username for basic auth; required when type=basic",
+          "title": "Username"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Header or query param name; required for header/query types",
+          "title": "Name"
+        },
+        "template": {
+          "default": "{secret}",
+          "description": "Template for header/query value; must contain {secret} exactly once",
+          "title": "Template",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "EgressAuth",
+      "type": "object"
+    },
+    "EgressBrokerConfig": {
+      "additionalProperties": false,
+      "description": "Top-level egress broker configuration.",
+      "properties": {
+        "unmatched_hosts": {
+          "default": "passthrough",
+          "description": "Action for hosts with no matching rules",
+          "enum": [
+            "passthrough",
+            "deny"
+          ],
+          "title": "Unmatched Hosts",
+          "type": "string"
+        },
+        "services": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EgressService"
+          },
+          "default": {},
+          "description": "Service configurations by name",
+          "title": "Services",
+          "type": "object"
+        }
+      },
+      "title": "EgressBrokerConfig",
+      "type": "object"
+    },
+    "EgressRule": {
+      "additionalProperties": false,
+      "description": "One egress routing rule.",
+      "properties": {
+        "host": {
+          "description": "Host to match (exact, IP, or *.domain.com)",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Port to match; None matches any port",
+          "title": "Port"
+        },
+        "path_prefix": {
+          "default": "/",
+          "description": "Path prefix to match by segment: one ending in / matches every path under it; otherwise the exact path or that path followed by / (/repos/o/r never matches /repos/o/r-old)",
+          "title": "Path Prefix",
+          "type": "string"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Authentication config for this rule; required unless the service is restrict_only, which ignores it"
+        }
+      },
+      "required": [
+        "host"
+      ],
+      "title": "EgressRule",
+      "type": "object"
+    },
+    "EgressService": {
+      "additionalProperties": false,
+      "description": "One egress service configuration.",
+      "properties": {
+        "preset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Built-in service preset that supplies display_name, description, rules, placeholder_env, and oauth_provider; fields set explicitly here replace the preset's values",
+          "title": "Preset"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable service name",
+          "title": "Display Name"
+        },
+        "description": {
+          "default": "",
+          "description": "Service description",
+          "title": "Description",
+          "type": "string"
+        },
+        "rules": {
+          "default": [],
+          "description": "Routing rules for this service; at least one is required unless a preset supplies them",
+          "items": {
+            "$ref": "#/$defs/EgressRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "placeholder_env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Placeholder environment variables",
+          "title": "Placeholder Env",
+          "type": "object"
+        },
+        "oauth_provider": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored; checked against the provider registry at runtime",
+          "title": "Oauth Provider"
+        },
+        "oauth_on_shared_workers": {
+          "default": false,
+          "description": "Use a requester's own connected account (GitHub, Atlassian) in shared sandboxes too: shared and unscoped agents, and any agent on the static runner. Every user of such a sandbox can act with another user's connected account until that user's proxy token expires; presets never set this",
+          "title": "Oauth On Shared Workers",
+          "type": "boolean"
+        },
+        "restrict_to_rules": {
+          "default": false,
+          "description": "Refuse requests to this service's hosts whose path matches no rule of the same party's services on that host (the administrator's for a config service, the requester's own for a user service; 403 path_not_allowed) instead of forwarding them without credentials. GraphQL (/graphql) is then refused unless a rule lists it; a listed GraphQL endpoint reaches everything the credential can. Presets never set this",
+          "title": "Restrict To Rules",
+          "type": "boolean"
+        },
+        "restrict_only": {
+          "default": false,
+          "description": "Only limit paths, for a service a user adds; a config service is refused with it and uses restrict_to_rules. The rules take part in the path check like restrict_to_rules (which this implies), but never choose a credential, so an allowed path still uses the credential of the most specific other service on the host. Such a service has no key, OAuth login, or placeholders, its rules need no auth, and a preset contributes only its display_name, description, and rules. Presets never set this",
+          "title": "Restrict Only",
+          "type": "boolean"
+        }
+      },
+      "title": "EgressService",
+      "type": "object"
+    },
     "EmbedderConfig": {
       "description": "Configuration for memory embedder.",
       "properties": {
@@ -4580,6 +4800,14 @@
   "additionalProperties": false,
   "description": "Complete configuration from YAML.",
   "properties": {
+    "egress_broker": {
+      "$ref": "#/$defs/EgressBrokerConfig",
+      "default": {
+        "unmatched_hosts": "passthrough",
+        "services": {}
+      },
+      "description": "Credential-injecting egress broker for worker shell and python traffic"
+    },
     "administrators": {
       "default": [],
       "description": "Concrete Matrix user IDs with platform-wide administrative authority",

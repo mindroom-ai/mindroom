@@ -452,7 +452,18 @@ cp -a "$1/." "$2/"
 /etc/squid/mindroom-egress-chain.conf
 {{- end -}}
 
+{{- /* Whether Squid chains token-bearing requests to a parent: the operator's Agent Vault parent or, in chain mode, the egress broker. */ -}}
+{{- define "mindroom-runtime.approvedEgressParentEnabled" -}}
+{{- if or .Values.approvedEgress.parentProxy.enabled (include "mindroom-runtime.egressBrokerChainMode" .) -}}true{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.approvedEgressSquidConfig" -}}
+{{- $parentHost := .Values.approvedEgress.parentProxy.host -}}
+{{- $parentPort := .Values.approvedEgress.parentProxy.port -}}
+{{- if include "mindroom-runtime.egressBrokerChainMode" . -}}
+{{- $parentHost = include "mindroom-runtime.egressBrokerHost" . -}}
+{{- $parentPort = .Values.egressBroker.port -}}
+{{- end -}}
 include /etc/squid/squid.conf
 
 acl egress_has_token req_header Proxy-Authorization .
@@ -460,12 +471,12 @@ acl egress_has_token req_header Proxy-Authorization .
 acl egress_bypass_parent dstdomain -n {{ join " " . }}
 {{- end }}
 dns_defnames on
-cache_peer {{ .Values.approvedEgress.parentProxy.host }} parent {{ .Values.approvedEgress.parentProxy.port }} 0 no-query no-digest login=PASSTHRU
+cache_peer {{ $parentHost }} parent {{ $parentPort }} 0 no-query no-digest login=PASSTHRU
 {{- if .Values.approvedEgress.parentProxy.bypassDomains }}
-cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny egress_bypass_parent
+cache_peer_access {{ $parentHost }} deny egress_bypass_parent
 {{- end }}
-cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} allow egress_has_token
-cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny all
+cache_peer_access {{ $parentHost }} allow egress_has_token
+cache_peer_access {{ $parentHost }} deny all
 nonhierarchical_direct off
 {{- if .Values.approvedEgress.parentProxy.bypassDomains }}
 always_direct allow egress_bypass_parent
@@ -624,6 +635,28 @@ matchLabels:
 
 {{- define "mindroom-runtime.scriptGatewayName" -}}
 {{- printf "%s-script-gateway" (include "mindroom-runtime.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressBrokerName" -}}
+{{- printf "%s-egress-broker" (include "mindroom-runtime.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressBrokerHost" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "mindroom-runtime.egressBrokerName" .) .Release.Namespace -}}
+{{- end -}}
+
+{{- /* Whether Squid fronts the broker, so workers keep Squid as their first hop instead of reaching the broker directly. */ -}}
+{{- define "mindroom-runtime.egressBrokerChainMode" -}}
+{{- if and .Values.egressBroker.enabled .Values.approvedEgress.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{- /* The worker-facing first hop: Squid in the approved-egress chain, else the broker Service itself. */ -}}
+{{- define "mindroom-runtime.egressBrokerWorkerUrl" -}}
+{{- if include "mindroom-runtime.egressBrokerChainMode" . -}}
+{{- include "mindroom-runtime.egressProxyUrl" . -}}
+{{- else -}}
+{{- printf "http://%s:%v" (include "mindroom-runtime.egressBrokerHost" .) .Values.egressBroker.port -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerPodLabels" -}}

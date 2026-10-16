@@ -264,7 +264,7 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 
 | Action | Behavior |
 | --- | --- |
-| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes, including collected ones. A call that returned its result before its wait ended never became a job and is not listed once its reply is saved. |
+| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes, including collected ones. A call that returned its result before its wait ended never became a job and is not listed, unless its reply could not be saved. |
 | `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget. |
 | `cancel` | Ask one job to stop and return at once; the next notice reports how it ended. |
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |

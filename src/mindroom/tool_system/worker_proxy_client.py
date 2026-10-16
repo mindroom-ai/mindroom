@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 import httpx
 
 from mindroom.credentials.manager import load_scoped_credentials
+from mindroom.credentials.policy import is_egress_broker_service
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
@@ -442,6 +443,10 @@ def _collect_credential_overrides(
 
     merged_overrides: dict[str, object] = {}
     for service in services:
+        # The one place that loads leased credentials, so it alone keeps egress broker secrets out of workers.
+        if is_egress_broker_service(service):
+            continue
+
         credentials = load_scoped_credentials(
             service,
             credentials_manager=credentials_manager,

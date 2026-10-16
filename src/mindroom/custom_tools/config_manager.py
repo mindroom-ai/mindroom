@@ -36,7 +36,12 @@ from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
-from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
+from mindroom.tool_system.catalog import (
+    ToolCategory,
+    ToolStatus,
+    listable_tool_metadata,
+    resolved_tool_metadata_for_runtime,
+)
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
@@ -792,6 +797,7 @@ class ConfigManagerTools(Toolkit):
             )
 
         config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(
+            listing=False,
             footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
         )
         if load_error is not None:
@@ -908,20 +914,23 @@ class ConfigManagerTools(Toolkit):
     def _load_config_and_tool_metadata_or_error(
         self,
         *,
+        listing: bool,
         footer: str | None = None,
     ) -> tuple[Config | None, dict[str, ToolMetadata] | None, str | None]:
-        """Load config and resolve one runtime-aware tool metadata snapshot."""
+        """Load config and one runtime-aware tool metadata snapshot.
+
+        With `listing`, only the tools this runtime offers, for the tool lists, details, and templates. The agent checks
+        get every tool the config accepts, so a config naming `egress_credentials` stays valid while the broker is off.
+        """
         config, load_error = self._load_config_or_error(footer=footer)
         if load_error:
             return None, None, load_error
         assert config is not None
+        if listing:
+            return config, listable_tool_metadata(self.runtime_paths, config), None
         return (
             config,
-            resolved_tool_metadata_for_runtime(
-                self.runtime_paths,
-                config,
-                tolerate_plugin_load_errors=True,
-            ),
+            resolved_tool_metadata_for_runtime(self.runtime_paths, config, tolerate_plugin_load_errors=True),
             None,
         )
 
@@ -1121,7 +1130,7 @@ class ConfigManagerTools(Toolkit):
 
     def _list_available_tools(self) -> str:
         """List all available tools that can be used by agents."""
-        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
+        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(listing=True)
         if load_error:
             return load_error
         assert tool_metadata is not None
@@ -1146,7 +1155,7 @@ class ConfigManagerTools(Toolkit):
 
     def _get_tool_details(self, tool_name: str) -> str:
         """Get detailed information about a specific tool."""
-        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
+        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(listing=True)
         if load_error:
             return load_error
         assert tool_metadata is not None
@@ -1438,7 +1447,7 @@ class ConfigManagerTools(Toolkit):
 
     def _validate_agent_config(self, agent_name: str) -> str:  # noqa: C901, PLR0912
         """Validate an agent's configuration."""
-        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
+        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(listing=False)
         if load_error:
             return load_error
         assert config is not None
@@ -1516,7 +1525,7 @@ class ConfigManagerTools(Toolkit):
 
     def _generate_agent_template(self, agent_type: str) -> str:
         """Generate a template configuration for common agent types."""
-        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error()
+        _, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(listing=True)
         if load_error:
             return load_error
         assert tool_metadata is not None

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
-import { useConfigStore } from "./configStore";
+import { readConfigRoot, useConfigStore } from "./configStore";
+import type { ConfigPath } from "@/lib/configSchema";
 import type { Agent, AgentPoliciesByAgent, Team, Config } from "@/types/config";
 
 // Mock fetch globally
@@ -6273,6 +6274,212 @@ describe("configStore", () => {
         "scheduler",
         "shell",
       ]);
+    });
+  });
+
+  describe("restoreConfigValue", () => {
+    const authored = {
+      agents: {},
+      models: { default: { provider: "ollama", id: "test-model" } },
+      router: { model: "default" },
+      egress_broker: { services: { github: { preset: "github" } } },
+    };
+    const path: ConfigPath = ["egress_broker", "services", "extra"];
+
+    async function loadAuthored(config: object = authored) {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => structuredClone(config),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: {} }),
+      });
+      await useConfigStore.getState().loadConfig();
+    }
+
+    function mark() {
+      const { isDirty, dirtyRoots, draftVersion } = useConfigStore.getState();
+      return { isDirty, dirtyRoots, draftVersion };
+    }
+
+    it("puts the value back and leaves a clean draft clean", async () => {
+      await loadAuthored();
+      const before = mark();
+      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
+      expect(useConfigStore.getState().isDirty).toBe(true);
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(false);
+      expect(state.dirtyRoots).toEqual([]);
+      expect(state.syncStatus).toBe("synced");
+      expect(state.config).toEqual(state.loadedConfig);
+      expect(state.rooms).toEqual([]);
+    });
+
+    it("restores an earlier value of an existing entry", async () => {
+      await loadAuthored();
+      const githubPath: ConfigPath = ["egress_broker", "services", "github"];
+      const before = mark();
+      useConfigStore.getState().updateConfigValue(githubPath, {
+        preset: "github",
+        restrict_to_rules: true,
+      });
+
+      useConfigStore
+        .getState()
+        .restoreConfigValue(githubPath, { preset: "github" }, before);
+
+      const { config, isDirty } = useConfigStore.getState();
+      expect(readConfigRoot(config!, "egress_broker")).toEqual(
+        authored.egress_broker,
+      );
+      expect(isDirty).toBe(false);
+    });
+
+    it("keeps changes made elsewhere before the write dirty", async () => {
+      await loadAuthored();
+      useConfigStore
+        .getState()
+        .updateConfigValue(["router"], { model: "fast" });
+      const before = mark();
+      expect(before).toMatchObject({ isDirty: true, dirtyRoots: ["router"] });
+      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
+      expect(useConfigStore.getState().dirtyRoots).toEqual([
+        "router",
+        "egress_broker",
+      ]);
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toEqual(["router"]);
+      expect(state.config?.router).toEqual({ model: "fast" });
+      expect(state.syncStatus).toBe("error");
+    });
+
+    it("leaves edits made after the write dirty and in the draft", async () => {
+      await loadAuthored();
+      const before = mark();
+      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
+      // The user edits something else while the write is being saved.
+      useConfigStore
+        .getState()
+        .updateConfigValue(["router"], { model: "fast" });
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toEqual(["egress_broker", "router"]);
+      expect(state.config?.router).toEqual({ model: "fast" });
+      expect(readConfigRoot(state.config!, "egress_broker")).toEqual(
+        authored.egress_broker,
+      );
+      expect(state.syncStatus).toBe("error");
+    });
+
+    it("does not reset the dirty state when a later edit made a clean draft dirty", async () => {
+      await loadAuthored();
+      const before = mark();
+      expect(before.isDirty).toBe(false);
+      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
+      useConfigStore.getState().updateConfigValue(["models"], {
+        default: { provider: "ollama", id: "other-model" },
+      });
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      expect(useConfigStore.getState().dirtyRoots).toContain("models");
+      expect(useConfigStore.getState().isDirty).toBe(true);
+    });
+
+    it("drops the validation errors that were about the restored path only", async () => {
+      await loadAuthored();
+      const before = mark();
+      useConfigStore.getState().updateConfigValue(path, { preset: "nope" });
+      useConfigStore.setState({
+        diagnostics: [
+          {
+            kind: "global",
+            message: "Configuration validation failed",
+            blocking: false,
+          },
+          {
+            kind: "validation",
+            issue: {
+              loc: [...path],
+              msg: "unknown preset",
+              type: "value_error",
+            },
+          },
+        ],
+      });
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      expect(useConfigStore.getState().diagnostics).toEqual([]);
+    });
+
+    it("keeps other roots' validation errors and a configuration conflict", async () => {
+      await loadAuthored();
+      const before = mark();
+      useConfigStore.getState().updateConfigValue(path, { preset: "nope" });
+      const conflict = {
+        kind: "global" as const,
+        code: "config_conflict" as const,
+        message: "Configuration changed elsewhere.",
+        blocking: false,
+      };
+      const other = {
+        kind: "validation" as const,
+        issue: {
+          loc: ["router", "model"],
+          msg: "unknown",
+          type: "value_error",
+        },
+      };
+      useConfigStore.setState({
+        diagnostics: [conflict, other],
+        syncStatus: "error",
+      });
+
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      const state = useConfigStore.getState();
+      expect(state.diagnostics).toEqual([conflict, other]);
+      expect(state.syncStatus).toBe("error");
+    });
+
+    it("saves nothing different from what was loaded afterwards", async () => {
+      await loadAuthored();
+      const before = mark();
+      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
+      useConfigStore.getState().restoreConfigValue(path, undefined, before);
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await useConfigStore.getState().saveConfig();
+      const saveCall = (global.fetch as any).mock.calls.find(
+        ([url]: [string]) => url === "/api/config/save",
+      );
+      expect(JSON.parse(saveCall[1].body).egress_broker).toEqual(
+        authored.egress_broker,
+      );
+    });
+
+    it("does nothing before a config is loaded", () => {
+      useConfigStore.getState().restoreConfigValue(path, undefined, {
+        isDirty: false,
+        dirtyRoots: [],
+        draftVersion: 0,
+      });
+      expect(useConfigStore.getState().config).toBeNull();
     });
   });
 
