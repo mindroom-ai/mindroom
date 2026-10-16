@@ -9013,7 +9013,6 @@ depends_on = [
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.embedded_server",
     "mindroom.knowledge_graph.usage",
-    "mindroom.logging_config",
     "mindroom.tool_system.dependencies",
 ]
 

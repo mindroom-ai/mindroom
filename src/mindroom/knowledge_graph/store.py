@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge_graph.usage import usage_target
-from mindroom.logging_config import get_logger
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -31,9 +30,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.usage import UsageTarget
 
-logger = get_logger(__name__)
-
-type _EpisodeKind = Literal["conversation", "tool_results"]
+type EpisodeKind = Literal["conversation", "tool_results"]
 
 _DOTENV_DISABLED = "PYTHON_DOTENV_DISABLED"
 # Facts listed for one entity, current ones first.
@@ -44,7 +41,7 @@ _MAX_ENTITY_FACTS = 30
 class EpisodeInput:
     """One episode for Graphiti to extract entities and facts from."""
 
-    kind: _EpisodeKind
+    kind: EpisodeKind
     name: str
     body: str
     source_description: str

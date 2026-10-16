@@ -122,7 +122,8 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
     """
     entry = ctx.entry
     if not isinstance(entry, ExplorationAutomation):
-        return None
+        msg = f"exploration cannot run the {entry.name} entry"
+        raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     now = time.time()
     last_run_at = _last_run_at(ctx)
     revisit_due = last_run_at is None or now - last_run_at >= entry.revisit_days * _DAY_SECONDS
@@ -145,7 +146,6 @@ def _after_run(state_dir: Path, checked_at: float, config: Config, thread_id: st
 
     The run is recorded only once it ends, so a prompt that never posted offers the same leads next time.
     """
-    state_dir.mkdir(parents=True, exist_ok=True)
     write_json_file_durable(state_dir / _STATE_FILE, {"last_run_at": checked_at})
     notice = "⚠️ Exploration did not finish within an hour." if timed_out else "🔭 Exploration ended."
     return Done(

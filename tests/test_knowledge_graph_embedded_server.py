@@ -28,7 +28,7 @@ async def _query(socket_path: str, query: str) -> list[list[object]]:
 async def test_server_answers_and_stops_cleanly(tmp_path: Path) -> None:
     """A started server answers graph queries; stopping it ends the process and removes its socket."""
     server = await start_embedded_server(tmp_path)
-    pid = server.pid
+    pid = server.process.pid
     try:
         assert await _query(server.socket_path, "RETURN 1") == [[1]]
         assert Path(server.socket_path).parent.stat().st_mode & 0o777 == 0o700
@@ -61,7 +61,10 @@ async def test_server_left_by_a_crashed_runtime_is_stopped_before_the_next_start
     try:
         successor = await start_embedded_server(tmp_path)
         try:
-            assert not psutil.pid_exists(orphan.pid) or psutil.Process(orphan.pid).status() == psutil.STATUS_ZOMBIE
+            assert (
+                not psutil.pid_exists(orphan.process.pid)
+                or psutil.Process(orphan.process.pid).status() == psutil.STATUS_ZOMBIE
+            )
             assert await _query(successor.socket_path, "RETURN 1") == [[1]]
         finally:
             await successor.stop()
@@ -82,7 +85,10 @@ async def test_server_left_before_an_upgrade_is_stopped_too(tmp_path: Path) -> N
     try:
         successor = await start_embedded_server(db_dir)
         try:
-            assert not psutil.pid_exists(orphan.pid) or psutil.Process(orphan.pid).status() == psutil.STATUS_ZOMBIE
+            assert (
+                not psutil.pid_exists(orphan.process.pid)
+                or psutil.Process(orphan.process.pid).status() == psutil.STATUS_ZOMBIE
+            )
         finally:
             await successor.stop()
     finally:

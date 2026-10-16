@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
-from mindroom.knowledge_graph.store import EpisodeInput
+from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.prompt_message_tags import cdata_body_text
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -113,7 +113,7 @@ def render_episodes(
     runs: Sequence[RunOutput],
     *,
     thread_kind: _ThreadKind,
-    episode_kind: Literal["conversation", "tool_results"],
+    episode_kind: EpisodeKind,
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
     agent_for_sender: Callable[[str], str | None],
@@ -133,7 +133,7 @@ def render_episodes(
 
     def flush() -> None:
         if lines and newest is not None and progress is not None:
-            episode = _episode(episode_kind, lines, newest, settings, calls=calls)
+            episode = _episode(episode_kind, lines, newest, settings, calls)
             rendered.append(RenderedEpisode(episode, progress, _requester(newest)))
         lines.clear()
         calls.clear()
@@ -181,7 +181,7 @@ def _requester(run: RunOutput) -> str | None:
 
 def _episode_items(
     run: RunOutput,
-    episode_kind: Literal["conversation", "tool_results"],
+    episode_kind: EpisodeKind,
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
     agent_for_sender: Callable[[str], str | None],
@@ -196,12 +196,11 @@ def _episode_items(
 
 
 def _episode(
-    kind: Literal["conversation", "tool_results"],
+    kind: EpisodeKind,
     lines: list[str],
     last_run: RunOutput,
     settings: KnowledgeGraphIngestConfig,
-    *,
-    calls: Sequence[str] = (),
+    calls: Sequence[str],
 ) -> EpisodeInput:
     metadata = last_run.metadata or {}
     description = f"{kind}: room {metadata.get('room_id')} thread {metadata.get('thread_id')}"
@@ -224,7 +223,7 @@ def _conversation_lines(
     settings: KnowledgeGraphIngestConfig,
     agent_for_sender: Callable[[str], str | None],
 ) -> list[str]:
-    requester = (run.metadata or {}).get("requester_id") or run.user_id or "unknown"
+    requester = _requester(run) or "unknown"
     lines: list[str] = []
     for message in run.messages or []:
         if message.from_history or not isinstance(message.content, str) or not message.content.strip():
@@ -232,7 +231,7 @@ def _conversation_lines(
         if message.role == "user":
             lines.extend(
                 f"{_speaker(sender, agent_for_sender)}: {_one_line(_clean(body, settings.max_episode_chars))}"
-                for sender, body in _prompt_messages(message.content, str(requester))
+                for sender, body in _prompt_messages(message.content, requester)
             )
         # A stopped turn's answer is a rendered summary that can quote tool previews, not the agent's words.
         elif message.role == "assistant" and not is_interrupted_replay_run(run):

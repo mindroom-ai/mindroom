@@ -31,7 +31,7 @@ def _render_fact(fact: GraphFact) -> str:
     if fact.invalid_at is not None:
         validity = f"valid {_date(fact.valid_at)} until {_date(fact.invalid_at)} (superseded)"
     else:
-        validity = f"valid since {_date(fact.valid_at)}" if fact.valid_at is not None else "valid since unknown"
+        validity = f"valid since {_date(fact.valid_at)}"
     sources = "; ".join(f"{source.description} ({_date(source.observed_at)})" for source in fact.sources) or "unknown"
     if (earlier := fact.source_count - len(fact.sources)) > 0:
         sources = f"{sources}; and {earlier} earlier"

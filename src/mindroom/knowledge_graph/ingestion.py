@@ -10,7 +10,6 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from functools import partial
 from typing import TYPE_CHECKING, TypedDict
 
 from agno.run.base import RunStatus
@@ -175,17 +174,11 @@ class KnowledgeGraphIngestionWorker:
     config_provider: Callable[[], Config | None]
     store: GraphStore
     redacted_event_ids: RedactedEventIds
-    _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _passes: int = field(default=0, init=False)
 
-    def stop(self) -> None:
-        """Ask the loop to end after the current pass."""
-        self._stop_event.set()
-        self._wake_event.set()
-
     async def run(self) -> None:
-        """Run ingestion passes until stopped."""
+        """Run ingestion passes until cancelled."""
         _WAKE_EVENTS.add(self._wake_event)
         try:
             await self._loop()
@@ -193,7 +186,7 @@ class KnowledgeGraphIngestionWorker:
             _WAKE_EVENTS.discard(self._wake_event)
 
     async def _loop(self) -> None:
-        while not self._stop_event.is_set():
+        while True:
             # Cleared before the pass, so a wake that arrives during it starts the next one at once.
             self._wake_event.clear()
             config = self.config_provider()
@@ -334,15 +327,13 @@ class KnowledgeGraphIngestionWorker:
             new_runs = [run for run in finished if marker is None or (*run_key(run), RUN_DONE) > marker]
             # Rendering redacts every tool result of the backlog, which must not stall the event loop.
             episodes = await asyncio.to_thread(
-                partial(
-                    render_episodes,
-                    new_runs,
-                    thread_kind=thread_kind,
-                    episode_kind=kind,
-                    agent_name=scope.agent_name,
-                    settings=settings,
-                    agent_for_sender=agent_for_sender,
-                ),
+                render_episodes,
+                new_runs,
+                thread_kind=thread_kind,
+                episode_kind=kind,
+                agent_name=scope.agent_name,
+                settings=settings,
+                agent_for_sender=agent_for_sender,
             )
             for rendered in episodes:
                 if marker is not None and rendered.progress <= marker:
@@ -453,6 +444,4 @@ class KnowledgeGraphIngestionWorker:
         return state
 
     def _save_state(self, graph_name: str, state: _GraphState) -> None:
-        path = self._state_path(graph_name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_json_file_durable(path, state)
+        write_json_file_durable(self._state_path(graph_name), state)

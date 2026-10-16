@@ -38,11 +38,6 @@ class EmbeddedServer:
     process: asyncio.subprocess.Process
     socket_path: str
 
-    @property
-    def pid(self) -> int:
-        """Return the server's process ID."""
-        return self.process.pid
-
     async def stop(self) -> None:
         """Stop the server, waiting for its final write, and remove its socket directory."""
         if self.process.returncode is None:
@@ -52,7 +47,7 @@ class EmbeddedServer:
                 await asyncio.wait_for(self.process.wait(), _STOP_TIMEOUT_SECONDS)
             except TimeoutError:
                 # Redis refuses to exit when its final save fails; the append-only file already holds every write.
-                logger.warning("Embedded knowledge graph database did not stop; killing it", pid=self.pid)
+                logger.warning("Embedded knowledge graph database did not stop; killing it", pid=self.process.pid)
                 self.process.kill()
                 await self.process.wait()
         shutil.rmtree(Path(self.socket_path).parent, ignore_errors=True)

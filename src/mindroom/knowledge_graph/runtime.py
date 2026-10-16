@@ -25,7 +25,6 @@ class KnowledgeGraphRuntime:
     config_provider: Callable[[], Config | None]
     redacted_event_ids: RedactedEventIds
     _store: GraphitiStore | None = field(default=None, init=False)
-    _worker: KnowledgeGraphIngestionWorker | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
 
     async def sync(self) -> None:
@@ -44,16 +43,14 @@ class KnowledgeGraphRuntime:
             store=store,
             redacted_event_ids=self.redacted_event_ids,
         )
-        self._store, self._worker = store, worker
+        self._store = store
         set_knowledge_graph_store(store)
         self._task = asyncio.create_task(worker.run(), name="knowledge_graph_ingestion")
 
     async def stop(self) -> None:
         """Stop the worker, then close the store and its embedded database."""
-        store, worker, task = self._store, self._worker, self._task
-        self._store, self._worker, self._task = None, None, None
-        if worker is not None:
-            worker.stop()
+        store, task = self._store, self._task
+        self._store, self._task = None, None
         if task is not None:
             # A pass can wait minutes on extraction calls; its marker records progress, so cancelling loses none.
             task.cancel()
