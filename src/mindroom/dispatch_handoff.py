@@ -163,11 +163,7 @@ def dispatch_prompt_for_event(event: DispatchEvent) -> str:
         return extract_media_caption(event, default="[Attached video]")
     if is_file_message_event(event):
         return extract_media_caption(event, default="[Attached file]")
-    return dispatch_event_text(event)
-
-
-def dispatch_event_text(event: DispatchEvent) -> str:
-    """Return an event's body without the tool display markers a MindRoom reply carries."""
+    # A finished MindRoom reply can wake another agent; its tool display markers never reach a prompt.
     content = event.source.get("content") if isinstance(event.source, dict) else None
     return body_without_tool_markers(event.body, content) if isinstance(content, dict) else event.body
 
