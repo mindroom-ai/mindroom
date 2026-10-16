@@ -1466,6 +1466,7 @@ async def run_delegated_child_response(
                 attempt_model_runtime=ToolRuntimeModelBinding(),
                 supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
                 collect_streamed_response=True,
+                show_tool_calls=False,
                 turn_recorder=TurnRecorder(user_message=prompt),
             ),
         )

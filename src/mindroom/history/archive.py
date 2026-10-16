@@ -234,6 +234,22 @@ def archived_run_ids(storage: BaseDb, *, session_id: str, run_ids: Collection[st
     return found
 
 
+def archived_runs(storage: BaseDb, *, session_id: str) -> list[RunOutput | TeamRunOutput]:
+    """Return every archived run of a session that still has content, in archive order."""
+    db = _sqlite(storage)
+    _, compacted_runs = _table_names(db)
+    with db.db_engine.begin() as connection:
+        _ensure_tables(connection, db)
+        return [
+            deserialize_run(run_type, run_data)
+            for run_type, run_data in connection.exec_driver_sql(
+                f"SELECT run_type, run_data FROM {compacted_runs} "  # noqa: S608
+                "WHERE session_id = ? AND run_data IS NOT NULL ORDER BY id",
+                (session_id,),
+            )
+        ]
+
+
 def compacted_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> set[str]:
     """Return the Matrix event ids the scope's replayed summary represents.
 

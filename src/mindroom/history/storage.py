@@ -315,6 +315,11 @@ def _has_pending_force_compaction_scope(
     return scope.key in {scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key}
 
 
+def load_archived_runs(storage: BaseDb, session_id: str) -> list[RunOutput | TeamRunOutput]:
+    """Return the runs compaction moved out of a session's live history, in archive order."""
+    return archive.archived_runs(storage, session_id=session_id)
+
+
 def read_scope_seen_event_ids(
     storage: BaseDb,
     session: AgentSession | TeamSession,
@@ -354,7 +359,7 @@ def _read_scope_history_event_ids(
     return event_ids
 
 
-def _run_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
+def run_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
     """Return every Matrix event id one run consumed or answered, as redaction matches them."""
     if not is_model_history_visible_run(run):
         return set()
@@ -744,7 +749,7 @@ def archive_compaction_chunk(
         summary=summary.summary,
         summary_model=summary_model,
         runs=archived_runs,
-        event_ids={run.run_id: _run_event_ids(run) for run in archived_runs if run.run_id},
+        event_ids={run.run_id: run_event_ids(run) for run in archived_runs if run.run_id},
         seen_event_ids={
             run.run_id: _run_seen_event_ids(run)
             for run in archived_runs

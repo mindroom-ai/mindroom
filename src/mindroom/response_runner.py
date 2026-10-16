@@ -38,6 +38,7 @@ from mindroom.background_tasks import create_background_task, run_coroutine_unti
 from mindroom.budgets.monitor import budget_model
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -65,6 +66,8 @@ from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
+from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
+from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     replace_visible_message,
@@ -77,7 +80,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
+from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -142,7 +145,6 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
     clean_partial_reply_text,
-    strip_visible_tool_markers,
 )
 from mindroom.teams import (
     TeamMode,
@@ -154,11 +156,13 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
+from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.events import body_without_tool_markers, strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -215,7 +219,7 @@ if TYPE_CHECKING:
     from agno.run.requirement import RunRequirement
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -223,6 +227,7 @@ if TYPE_CHECKING:
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.event_journal import JournalEvent, PrincipalStore
     from mindroom.history.types import HistoryScope
+    from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.identity import MatrixID
@@ -452,6 +457,13 @@ def _split_delivery_tool_trace(
         else:
             interrupted.append(trace_entry)
     return completed, interrupted
+
+
+def _run_metadata_with_hook_source(metadata: dict[str, Any] | None, hook_source: str | None) -> dict[str, Any] | None:
+    """Record the trusted hook source that started this turn, so stored runs show which automation asked."""
+    if hook_source is None:
+        return metadata
+    return {**(metadata or {}), HOOK_SOURCE_RUN_METADATA_KEY: hook_source}
 
 
 def _materialize_matrix_run_metadata(
@@ -698,16 +710,10 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
-def _mid_turn_for_request(
-    request: ResponseRequest,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    on_defer: Callable[[str, str], Awaitable[None]],
-) -> MidTurnGate | None:
-    """Treat deferred attachment registration as incomplete judgment context too."""
+def _request_has_media(request: ResponseRequest) -> bool:
+    """Count deferred attachment registration as media too."""
     preparation = request.payload_preparation
-    has_media = bool(
+    return bool(
         request.attachment_ids
         or (request.media is not None and request.media.has_any())
         or (
@@ -720,6 +726,17 @@ def _mid_turn_for_request(
             )
         ),
     )
+
+
+def _mid_turn_for_request(
+    request: ResponseRequest,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    on_defer: Callable[[str, str], Awaitable[None]],
+) -> MidTurnGate | None:
+    """Treat deferred attachment registration as incomplete judgment context too."""
+    has_media = _request_has_media(request)
     gate = create_mid_turn_gate(
         config,
         runtime_paths,
@@ -1678,7 +1695,11 @@ class ResponseRunner:
                 origin=request.response_envelope.origin,
                 memory_prompt=request.prompt,
                 memory_thread_history=tuple(
-                    ApprovalMemoryTurn(sender=message.sender, body=message.body) for message in request.thread_history
+                    ApprovalMemoryTurn(
+                        sender=message.sender,
+                        body=body_without_tool_markers(message.body, message.content),
+                    )
+                    for message in request.thread_history
                 ),
                 thread_summary_message_count_hint=thread_summary_message_count_hint(
                     request.thread_history,
@@ -3805,18 +3826,18 @@ class ResponseRunner:
 
     def _bind_mid_turn_context(self, request: ResponseRequest) -> None:
         """Only successfully refreshed public history may authorize continuing tools."""
-        bind_mid_turn_conversation_context(
-            lambda: (
-                None
-                if request.requires_model_history_refresh
-                else conversation_context_for_mid_turn(
-                    request.thread_history,
-                    source_event_ids=request.sources.logical_source_event_ids,
-                    thread_id=request.thread_id,
-                    config=self.deps.runtime.config,
-                    runtime_paths=self.deps.runtime_paths,
-                )
-            ),
+        bind_mid_turn_conversation_context(lambda: self._judgment_context(request))
+
+    def _judgment_context(self, request: ResponseRequest) -> tuple[JudgmentMessage, ...] | None:
+        """Return the public thread text judges read, or None until the history is refreshed."""
+        if request.requires_model_history_refresh:
+            return None
+        return conversation_context_before_sources(
+            request.thread_history,
+            source_event_ids=request.sources.logical_source_event_ids,
+            thread_id=request.thread_id,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
         )
 
     async def _prepare_request_after_lock(
@@ -3913,7 +3934,10 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_run_metadata_with_hook_source(
+                _materialize_matrix_run_metadata(request.matrix_run_metadata),
+                request.response_envelope.hook_source,
+            ),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
@@ -5819,6 +5843,67 @@ class ResponseRunner:
                 await request.on_no_response_handled()
             return None
 
+    async def _cold_cache_model(
+        self,
+        request: ResponseRequest,
+        *,
+        runtime_model: ResolvedRuntimeModel,
+        thread_id: str | None,
+    ) -> str:
+        """Let a judge move a thread whose prompt cache went cold to the agent's cheap model."""
+        resolved_model = runtime_model.model_name
+        config = self.deps.runtime.config
+        agent = config.agents.get(self.deps.agent_name)
+        cheap_model = config.get_agent_cheap_model(self.deps.agent_name) if agent is not None else None
+        if (
+            agent is None
+            or agent.cold_cache is None
+            or cheap_model is None
+            # Scheduled, thread, and room choices are explicit, and an earlier switch is a thread choice.
+            or runtime_model.overridden
+            or resolved_model != agent.model
+            # Only a thread can be switched for good.
+            or thread_id is None
+            # A regenerated or resumed answer follows one the agent model just gave.
+            or request.edit_regeneration
+            or _resumed_reply() is not None
+            # The judge cannot see media, and the cheap model may not read it.
+            or _request_has_media(request)
+        ):
+            return resolved_model
+        selected = await select_cold_cache_model(
+            agent.cold_cache,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            agent_name=self.deps.agent_name,
+            agent_model=resolved_model,
+            cheap_model=cheap_model,
+            idle_seconds=idle_seconds_before_turn(
+                request.thread_history,
+                agent_user_id=self.deps.matrix_full_id,
+                source_event_ids=request.sources.logical_source_event_ids,
+                now=time.time(),
+            ),
+            context=self._judgment_context(request),
+            prompt=request.prompt,
+        )
+        if selected == resolved_model:
+            return selected
+        try:
+            # The thread stays on the cheap model, like a `!model` choice, until someone changes it.
+            set_thread_model_override(
+                self.deps.runtime_paths,
+                thread_id=thread_id,
+                model_name=selected,
+                entity_names=(self.deps.agent_name,),
+                config=config,
+            )
+        except OSError:
+            # The switch is an optimization, so a failed save must not fail the reply.
+            self.deps.logger.warning("cold_cache_switch_save_failed", thread_id=thread_id, exc_info=True)
+            return resolved_model
+        return selected
+
     async def _generate_response_with_participation_locked(
         self,
         request: ResponseRequest,
@@ -5853,13 +5938,13 @@ class ResponseRunner:
         request = admitted_request
         _approve_continued_reply(participation, request)
         response_thread_id = _response_thread_id(request, resolved_target)
-        active_model_name = self.deps.runtime.config.resolve_runtime_model(
+        runtime_model = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,
             active_model_name=request.scheduled_model,
             room_id=resolved_target.room_id,
             thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,
-        ).model_name
+        )
         prepared_request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -5899,6 +5984,11 @@ class ResponseRunner:
             execution_identity=execution_identity,
         )
 
+        active_model_name = await self._cold_cache_model(
+            request,
+            runtime_model=runtime_model,
+            thread_id=response_thread_id,
+        )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_response_runtime(

@@ -22,7 +22,7 @@ from mindroom.egress_broker._relay import (
     upstream_request_headers,
 )
 from mindroom.egress_broker.messages import refusal_body
-from mindroom.egress_broker.rules import RuleMatch, inject_credentials
+from mindroom.egress_broker.rules import EgressRules, RuleMatch, inject_credentials
 from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
@@ -185,9 +185,10 @@ class TlsInterceptor:
             # Forwarding another Host to the same address is domain fronting: it could carry the secret elsewhere.
             await self._relay.deny(client, entry, refusal_body("host_mismatch"))
             return False
-        route = await self._relay.route(client, entry, tunnel.port)
-        if route is None:
+        routed = await self._relay.route(client, entry, tunnel.port)
+        if routed is None:
             return False
+        rules, route = routed
         headers = upstream_request_headers(list(request.headers), host=host_header or tunnel.authority)
         if _is_websocket_upgrade(list(request.headers)):
             if client.close_after_response:
@@ -205,7 +206,7 @@ class TlsInterceptor:
                 logger.warning("egress_broker_secret_unusable", service=match.service)
                 await self._relay.reject(client, entry, 502, refusal_body("broker_error"))
                 return False
-        return await self._forward(client, entry, tunnel, upstream_request, strip_cookies=route.host_has_rules)
+        return await self._forward(client, entry, tunnel, upstream_request, rules, strip_cookies=route.host_has_rules)
 
     async def _secret(self, client: Peer, entry: AuditEntry, match: RuleMatch) -> str | None:
         """Return the worker scope's secret for the matched service; otherwise answer the client, audit, and return None.
@@ -288,6 +289,7 @@ class TlsInterceptor:
         entry: AuditEntry,
         tunnel: _Tunnel,
         request: h11.Request,
+        rules: EgressRules,
         *,
         strip_cookies: bool,
     ) -> bool:
@@ -303,6 +305,7 @@ class TlsInterceptor:
                 client,
                 entry,
                 tunnel.port,
+                rules,
                 ssl_context=self._upstream_ssl_context,
             )
             if tunnel.upstream is None:

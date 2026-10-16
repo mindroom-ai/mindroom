@@ -63,6 +63,7 @@ from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.knowledge_graph.store import knowledge_graph_failure
 from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
@@ -775,6 +776,9 @@ async def health_check(request: Request) -> JSONResponse:
         # Additive diagnostic only: a broken embedder degrades semantic search
         # but must not flip liveness and restart an otherwise usable runtime.
         response["embedder"] = {"status": "failing", "detail": embedder_failure}
+    if (knowledge_graph_failure_detail := knowledge_graph_failure()) is not None:
+        # Additive diagnostic only, like the embedder block: a failing graph must not flip liveness.
+        response["knowledge_graph"] = {"status": "failing", "detail": knowledge_graph_failure_detail}
 
     if runtime_state.phase == "ready" and not sync_health.is_healthy:
         response["status"] = "unhealthy"

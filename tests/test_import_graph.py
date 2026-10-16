@@ -47,6 +47,8 @@ _HEAVY_OPTIONAL_RUNTIME_ROOTS = (
     # Storage engines.
     "agno.vectordb.chroma",
     "chromadb",
+    "falkordb",
+    "graphiti_core",
     "mem0",
     # ML and data stacks.
     "numpy",

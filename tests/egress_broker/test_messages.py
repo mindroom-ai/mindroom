@@ -88,7 +88,7 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
         (
             "destination_blocked",
             {"host": "metadata.internal"},
-            "metadata.internal resolves to a private or internal address, which agents may not reach.",
+            "metadata.internal resolves to a private or internal address that the administrator's egress policy does not let agents reach.",
         ),
         ("request_body_too_large", {}, "The request body is larger than the broker accepts."),
         ("upstream_unreachable", {"host": "api.github.com"}, "api.github.com could not be reached."),

@@ -36,6 +36,7 @@ nav = [
   { "Features" = [
     { "Memory" = "memory.md" },
     { "Knowledge Bases" = "knowledge.md" },
+    { "Knowledge Graph" = "knowledge-graph.md" },
     { "Skills" = "skills.md" },
     { "Scheduling" = "scheduling.md" },
     { "Chat Commands" = "chat-commands.md" },

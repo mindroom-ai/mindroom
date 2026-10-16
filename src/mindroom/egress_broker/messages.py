@@ -37,7 +37,7 @@ _MESSAGES = {
     "tls_required": "Credentials are only added over HTTPS. Use https:// for {host}.",
     "host_mismatch": "The Host header does not match the host this connection was opened for.",
     "host_not_allowed": "{host} is not allowed by the administrator's egress policy.",
-    "destination_blocked": "{host} resolves to a private or internal address, which agents may not reach.",
+    "destination_blocked": "{host} resolves to a private or internal address that the administrator's egress policy does not let agents reach.",
     "request_body_too_large": "The request body is larger than the broker accepts.",
     "upstream_unreachable": "{host} could not be reached.",
     "upstream_timeout": "{host} did not answer in time.",

@@ -17,7 +17,9 @@ from mindroom.entity_resolution import (
     configured_call_agent_name_for_room,
     entity_identity_registry,
     persisted_bot_user_ids,
+    prepared_entity_names_by_user_id,
 )
+from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -313,3 +315,15 @@ def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_pat
 
     with pytest.raises(DuplicateManagedEntityIdentityError, match="shared_bot"):
         entity_identity_registry(config, runtime_paths)
+
+
+def test_prepared_entity_names_skip_entities_without_accounts(tmp_path: Path) -> None:
+    """Entities whose Matrix accounts are prepared are named by their user ID; one not prepared yet is left out."""
+    config = Config(agents={"mind": AgentConfig(display_name="Mind"), "pal": AgentConfig(display_name="Pal")})
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    domain = config.get_domain(runtime_paths)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account(managed_account_key("mind"), "mindroom_mind", "pw", domain=domain)
+    state.save(runtime_paths=runtime_paths)
+
+    assert prepared_entity_names_by_user_id(config, runtime_paths) == {f"@mindroom_mind:{domain}": "mind"}

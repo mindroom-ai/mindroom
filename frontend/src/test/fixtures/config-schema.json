@@ -96,6 +96,18 @@
           "default": null,
           "description": "Opt-in judgments for messages queued during this agent's response across all rooms"
         },
+        "cold_cache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColdCacheConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in switch of an idle thread to cheap_model for the rest of the thread"
+        },
         "access": {
           "anyOf": [
             {
@@ -165,6 +177,19 @@
           "description": "Enable Agno Learning (defaults to true when omitted)",
           "title": "Learning"
         },
+        "knowledge_graph": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
+          "title": "Knowledge Graph"
+        },
         "learning_mode": {
           "anyOf": [
             {
@@ -187,6 +212,22 @@
           "description": "Configured model alias used for this agent's replies",
           "title": "Model",
           "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "cheap_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cheaper model alias this agent may switch to, used by cold_cache",
+          "title": "Cheap Model",
           "x-mindroom": {
             "reference": "model"
           }
@@ -457,6 +498,9 @@
                   },
                   {
                     "$ref": "#/$defs/DreamingAutomation"
+                  },
+                  {
+                    "$ref": "#/$defs/ExplorationAutomation"
                   },
                   {
                     "$ref": "#/$defs/PluginAutomation"
@@ -1001,6 +1045,33 @@
       "title": "CoalescingConfig",
       "type": "object"
     },
+    "ColdCacheConfig": {
+      "additionalProperties": false,
+      "description": "Let a judge move a thread to the agent's cheap model once its prompt cache went cold.",
+      "properties": {
+        "idle_seconds": {
+          "default": 3600,
+          "description": "Seconds since the agent's last reply in a thread after which its prompt cache counts as cold",
+          "minimum": 1,
+          "title": "Idle Seconds",
+          "type": "integer"
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgmentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "LLM model alias, TypeSafe, or OpenAI Decisions backend; unset asks the cheap model itself"
+        }
+      },
+      "title": "ColdCacheConfig",
+      "type": "object"
+    },
     "CompactionConfig": {
       "description": "Concrete text compaction configuration.",
       "properties": {
@@ -1318,6 +1389,12 @@
           "title": "Learning",
           "type": "boolean"
         },
+        "knowledge_graph": {
+          "default": false,
+          "description": "Default knowledge graph setting",
+          "title": "Knowledge Graph",
+          "type": "boolean"
+        },
         "learning_mode": {
           "default": "always",
           "description": "Default Agno Learning mode",
@@ -1327,6 +1404,22 @@
           ],
           "title": "Learning Mode",
           "type": "string"
+        },
+        "cheap_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cheaper model key for agents without their own cheap_model, used by cold_cache",
+          "title": "Cheap Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "compaction": {
           "anyOf": [
@@ -1496,6 +1589,9 @@
               },
               {
                 "$ref": "#/$defs/DreamingAutomation"
+              },
+              {
+                "$ref": "#/$defs/ExplorationAutomation"
               },
               {
                 "$ref": "#/$defs/PluginAutomation"
@@ -1692,6 +1788,15 @@
           ],
           "title": "Unmatched Hosts",
           "type": "string"
+        },
+        "private_networks": {
+          "default": [],
+          "description": "Private address ranges (CIDR) agents may reach through the broker; loopback and cloud metadata stay blocked",
+          "items": {
+            "type": "string"
+          },
+          "title": "Private Networks",
+          "type": "array"
         },
         "services": {
           "additionalProperties": {
@@ -1953,6 +2058,82 @@
       },
       "title": "EventJournalConfig",
       "type": "object"
+    },
+    "ExplorationAutomation": {
+      "additionalProperties": false,
+      "description": "A scheduled prompt asking the agent to explore the sources its tools reach, feeding its knowledge graph.",
+      "properties": {
+        "cron": {
+          "default": "30 2 * * *",
+          "description": "When to check, in the configured timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "name": {
+          "const": "exploration",
+          "default": "exploration",
+          "description": "Built-in automation name",
+          "title": "Name",
+          "type": "string"
+        },
+        "max_tool_calls": {
+          "default": 40,
+          "description": "Tool calls the exploration prompt asks the agent to stay within",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "max_leads": {
+          "default": 20,
+          "description": "Most tool calls seen in conversations that one exploration prompt lists",
+          "maximum": 200,
+          "minimum": 0,
+          "title": "Max Leads",
+          "type": "integer"
+        },
+        "revisit_days": {
+          "default": 7,
+          "description": "Explore without new leads once this many days have passed since the last run",
+          "minimum": 1,
+          "title": "Revisit Days",
+          "type": "integer"
+        }
+      },
+      "title": "ExplorationAutomation",
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "ExternalTriggerPolicyConfig": {
       "additionalProperties": false,
@@ -2282,6 +2463,90 @@
         "repo_url"
       ],
       "title": "KnowledgeGitConfig",
+      "type": "object"
+    },
+    "KnowledgeGraphConfig": {
+      "additionalProperties": false,
+      "description": "The Graphiti knowledge graph that graph-enabled agents build from their conversations and exploration.",
+      "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model alias that extracts entities and facts; required when any agent enables the graph",
+          "title": "Model"
+        },
+        "ingest": {
+          "$ref": "#/$defs/KnowledgeGraphIngestConfig",
+          "default": {
+            "interval_seconds": 600,
+            "idle_seconds": 120,
+            "max_sessions_per_cycle": 10,
+            "max_episode_chars": 24000,
+            "max_tool_result_chars": 4000,
+            "backfill_days": 7
+          },
+          "description": "Conversation ingestion settings"
+        }
+      },
+      "title": "KnowledgeGraphConfig",
+      "type": "object"
+    },
+    "KnowledgeGraphIngestConfig": {
+      "additionalProperties": false,
+      "description": "How the background worker turns finished conversation turns into graph episodes.",
+      "properties": {
+        "interval_seconds": {
+          "default": 600,
+          "description": "Seconds between ingestion passes",
+          "minimum": 30,
+          "title": "Interval Seconds",
+          "type": "integer"
+        },
+        "idle_seconds": {
+          "default": 120,
+          "description": "Seconds a conversation must be idle before its new turns are ingested",
+          "minimum": 1,
+          "title": "Idle Seconds",
+          "type": "integer"
+        },
+        "max_sessions_per_cycle": {
+          "default": 10,
+          "description": "Conversations ingested per pass",
+          "minimum": 1,
+          "title": "Max Sessions Per Cycle",
+          "type": "integer"
+        },
+        "max_episode_chars": {
+          "default": 24000,
+          "description": "Largest episode sent for extraction, in characters; a longer turn is split into several episodes",
+          "maximum": 60000,
+          "minimum": 1000,
+          "title": "Max Episode Chars",
+          "type": "integer"
+        },
+        "max_tool_result_chars": {
+          "default": 4000,
+          "description": "Characters kept from each tool result",
+          "minimum": 100,
+          "title": "Max Tool Result Chars",
+          "type": "integer"
+        },
+        "backfill_days": {
+          "default": 7,
+          "description": "A new graph starts from conversations active within this many days",
+          "minimum": 0,
+          "title": "Backfill Days",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgeGraphIngestConfig",
       "type": "object"
     },
     "LLMJudgmentConfig": {
@@ -3596,7 +3861,8 @@
           "not": {
             "enum": [
               "prompt_curation",
-              "dreaming"
+              "dreaming",
+              "exploration"
             ]
           },
           "pattern": "^[a-z][a-z0-9_]*$",
@@ -4802,6 +5068,7 @@
       "$ref": "#/$defs/EgressBrokerConfig",
       "default": {
         "unmatched_hosts": "passthrough",
+        "private_networks": [],
         "services": {}
       },
       "description": "Credential-injecting egress broker for worker shell and python traffic"
@@ -4923,7 +5190,9 @@
         "show_stop_button": true,
         "max_consecutive_agent_replies": 50,
         "learning": true,
+        "knowledge_graph": false,
         "learning_mode": "always",
+        "cheap_model": null,
         "compaction": {
           "enabled": true,
           "fallback_model": null,
@@ -5015,6 +5284,21 @@
         }
       },
       "description": "Memory configuration"
+    },
+    "knowledge_graph": {
+      "$ref": "#/$defs/KnowledgeGraphConfig",
+      "default": {
+        "model": null,
+        "ingest": {
+          "backfill_days": 7,
+          "idle_seconds": 120,
+          "interval_seconds": 600,
+          "max_episode_chars": 24000,
+          "max_sessions_per_cycle": 10,
+          "max_tool_result_chars": 4000
+        }
+      },
+      "description": "Knowledge graph built from graph-enabled agents' conversations"
     },
     "knowledge_bases": {
       "additionalProperties": {

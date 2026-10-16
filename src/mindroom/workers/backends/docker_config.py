@@ -80,6 +80,7 @@ _PUBLISH_HOST_ENV = "MINDROOM_DOCKER_WORKER_PUBLISH_HOST"
 _ENDPOINT_HOST_ENV = "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST"
 _USER_ENV = "MINDROOM_DOCKER_WORKER_USER"
 _SECURITY_POLICY_ENV = "MINDROOM_DOCKER_WORKER_SECURITY_POLICY"
+_RUNTIME_ENV = "MINDROOM_DOCKER_WORKER_RUNTIME"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
 DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
@@ -204,6 +205,7 @@ class _DockerWorkerBackendConfig:
     extra_env: dict[str, str]
     extra_labels: dict[str, str]
     security_policy: Literal["runtime_default", "computer"] = "runtime_default"
+    runtime: str | None = None
 
     def __post_init__(self) -> None:
         if self.security_policy not in {"runtime_default", "computer"}:
@@ -264,6 +266,7 @@ class _DockerWorkerBackendConfig:
                 'Literal["runtime_default", "computer"]',
                 read_env(env, _SECURITY_POLICY_ENV, "runtime_default"),
             ),
+            runtime=read_env(env, _RUNTIME_ENV) or None,
         )
         config.validate_runtime_security(runtime_paths)
         return config

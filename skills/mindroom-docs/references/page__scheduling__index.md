@@ -266,7 +266,7 @@ For `schedule:fired` hooks that run more than once for the same occurrence, see 
 ## Automations
 
 Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
-MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](https://docs.mindroom.chat/plugins/#automations) can add more.
+MindRoom ships three, [`prompt_curation`](#prompt_curation), [`dreaming`](#dreaming), and [`exploration`](#exploration), and [plugins](https://docs.mindroom.chat/plugins/#automations) can add more.
 The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
 Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
 
@@ -294,7 +294,7 @@ agents:
   Only the agent named by `personal_rooms.agent` can run automations as a private agent, its entries cannot set `room`, and it inherits only default entries without `room`.
   A requester without a personal room, or whom the agent may no longer answer, is skipped.
   Everyone who can read that personal room, such as an agent the requester invited or an adopted room's other participants, sees the prompts and replies, like any other reply there.
-- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
+- `prompt_curation` and `dreaming` need `memory_backend: file`, and `exploration` needs `knowledge_graph: true`; an agent that lacks what a default entry needs skips it and keeps inheriting the others.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
@@ -360,3 +360,40 @@ Each run keeps its agenda and report, and a run that reached review also its pat
 `dreaming` needs `memory_backend: file` and something to work from: [auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](https://docs.mindroom.chat/thread-exports/) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
 It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
 Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
+
+### `exploration`
+
+`exploration` asks an agent with a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) to explore its data sources on a schedule, so the graph learns about projects, people, and documents nobody has asked about yet.
+
+```yaml
+agents:
+  mind:
+    knowledge_graph: true
+    tools: [mcp_github, duckduckgo]
+    automations:
+      - name: exploration
+        cron: "0 */6 * * *"
+        room: "#mind-exploration"
+        max_tool_calls: 30
+```
+
+1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
+2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
+3. The agent answers the prompt like any message, with its own tools and [approval rules](https://docs.mindroom.chat/tool-approval/); a shared agent's call that needs approval is denied, because no person asked for the run, while a private agent's call waits in the thread until its requester answers or the request expires.
+4. When the run ends, MindRoom marks the thread resolved and adds its tool results to the graph; the agent's own summary is not added, and an interrupted run adds nothing.
+
+The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
+The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+A turn whose message was redacted can still be listed until the agent next replies in that conversation.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `30 2 * * *` | When to check |
+| `room` | required for a shared agent | Where the prompt is posted |
+| `max_tool_calls` | `40` (1 to 1000) | Tool calls the prompt asks one run to stay within |
+| `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
+| `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
+| `model` | the agent's model | A key of `models` to run the exploration with |
+
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

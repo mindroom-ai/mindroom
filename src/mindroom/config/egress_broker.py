@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import re
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -354,10 +355,22 @@ class EgressBrokerConfig(BaseModel):
         default="passthrough",
         description="Action for hosts with no matching rules",
     )
+    private_networks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Private address ranges (CIDR) agents may reach through the broker; loopback and cloud metadata stay blocked"
+        ),
+    )
     services: dict[str, EgressService] = Field(
         default_factory=dict,
         description="Service configurations by name",
     )
+
+    @field_validator("private_networks")
+    @classmethod
+    def validate_private_networks(cls, value: list[str]) -> list[str]:
+        """Return each network in canonical form; host bits set (`192.168.1.5/24`) is a mistake, not a network."""
+        return [str(ipaddress.ip_network(network)) for network in value]
 
     @field_validator("services")
     @classmethod

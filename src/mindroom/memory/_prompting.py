@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.prompt_templates import render_prompt_template
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -44,7 +45,7 @@ def _build_conversation_messages(
     messages: list[dict] = []
     for message in thread_history:
         role = "user" if message.sender == user_id else "assistant"
-        body = message.body.strip()
+        body = body_without_tool_markers(message.body, message.content).strip()
         if not body:
             continue
         messages.append({"role": role, "content": body})

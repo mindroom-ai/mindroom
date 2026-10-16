@@ -38,6 +38,7 @@ from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
+from mindroom.tool_system.events import is_visible_tool_marker_line
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -119,7 +120,9 @@ def _attribute_relay(content: dict[str, Any], sender: str, name: str) -> None:
     if content.get("msgtype") in MATRIX_MEDIA_MSGTYPES:
         # With a filename present, clients show the body as the caption.
         content["filename"] = content.get("filename") or body
-    content["body"] = f"{name}: {body}"
+    # A leading tool marker must stay a line of its own to remain recognizable display chrome.
+    separator = "\n\n" if is_visible_tool_marker_line(body.split("\n", 1)[0]) else " "
+    content["body"] = f"{name}:{separator}{body}"
     if "formatted_body" in content:
         content["formatted_body"] = f"<strong>{html.escape(name)}</strong>: {content['formatted_body']}"
 
