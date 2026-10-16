@@ -25,6 +25,7 @@ Each `shell` and `python` call routed to a worker gets a fresh token valid for `
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
+That includes LAN and Tailscale addresses and names that resolve to them, so these calls cannot reach services on your local network through the broker; a command that needs one can bypass it, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
 
 ## Configuration
 
@@ -307,6 +308,7 @@ The pages show, for each service and scope, whether a key is set and when it was
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
 The dashboard's routes are under `/api/egress-broker/`, the personal page's under `/api/connections/egress`, and the broker's root CA certificate is at `/api/egress-broker/ca.pem`.
 A script can set a shared or unscoped agent's key with `PUT /api/egress-broker/services/<name>/secret?agent_name=<agent>` and the body `{"secret": "..."}`, and remove it with `DELETE` on the same URL; without `agent_name` it sets the key that agents without a scope share.
+On a standalone deployment the script authenticates with `Authorization: Bearer $MINDROOM_API_KEY`.
 
 ### Connecting an account
 
