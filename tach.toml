@@ -8988,6 +8988,7 @@ visibility = ["mindroom.knowledge_graph.store"]
 path = "mindroom.knowledge_graph.clients"
 depends_on = [
     "mindroom.helper_usage",
+    "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",
     "mindroom.providers.model_loading",
     "mindroom.session_storage.agent_storage",

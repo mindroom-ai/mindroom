@@ -28,7 +28,7 @@ from mindroom.knowledge_graph.episodes import (
 )
 from mindroom.knowledge_graph.scope import graph_scopes
 from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
-from mindroom.knowledge_graph.store import record_knowledge_graph_failure
+from mindroom.knowledge_graph.store import UnusableExtractionError, record_knowledge_graph_failure
 from mindroom.knowledge_graph.usage import UsageTarget
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -404,8 +404,8 @@ class KnowledgeGraphIngestionWorker:
                 # The counts belong to one episode, so another kind's successes never reset them.
                 entry.update(failures=0, bad_outputs=0, failing_since=0, failing_piece=piece)
             entry["failures"] += 1
-            # Unusable model output, such as JSON that does not match the schema, raises ValueError.
-            entry["bad_outputs"] = entry["bad_outputs"] + 1 if isinstance(exc, ValueError) else 0
+            # Only output the model got wrong counts here; a setup error such as a bad embedder waits like an outage.
+            entry["bad_outputs"] = entry["bad_outputs"] + 1 if isinstance(exc, UnusableExtractionError) else 0
             entry["failing_since"] = entry["failing_since"] or now
             _report_failure("Knowledge graph ingestion failed", exc, agent=scope.agent_name)
             if entry["bad_outputs"] < _MAX_BAD_OUTPUTS and now - entry["failing_since"] < _MAX_FAILING_SECONDS:

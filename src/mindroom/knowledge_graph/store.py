@@ -96,6 +96,10 @@ class GraphStore(Protocol):
         """Release the database connection."""
 
 
+class UnusableExtractionError(ValueError):
+    """The extraction model answered with output Graphiti cannot use; repeated ones drop the episode."""
+
+
 _SHOWN_SOURCES = 3
 _failure: str | None = None
 _runtime_store: GraphStore | None = None

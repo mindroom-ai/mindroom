@@ -21,6 +21,7 @@ from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, LLMConfig, Model
 from pydantic import BaseModel
 
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
+from mindroom.knowledge_graph.store import UnusableExtractionError
 from mindroom.knowledge_graph.usage import current_usage_target
 from mindroom.providers import model_loading
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -102,17 +103,17 @@ class MindRoomLLMClient(LLMClient):
             raise RuntimeError(msg)
         if isinstance(content, BaseModel):
             return content.model_dump()
-        # Output Graphiti cannot use raises ValueError, which ingestion counts toward dropping the episode.
+        # Output Graphiti cannot use counts toward dropping the episode; other errors wait like an outage.
         try:
             parsed = json.loads(content if isinstance(content, str) else "")
             if response_model is not None:
                 return response_model.model_validate(parsed).model_dump()
         except ValueError as exc:
             msg = f"The knowledge graph extraction output is unusable: {exc}"
-            raise ValueError(msg) from exc
+            raise UnusableExtractionError(msg) from exc
         if not isinstance(parsed, dict):
             msg = "The knowledge graph extraction output is not a JSON object"
-            raise ValueError(msg)  # noqa: TRY004 - ingestion counts ValueError as unusable output
+            raise UnusableExtractionError(msg)
         return parsed
 
 

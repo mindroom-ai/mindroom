@@ -27,7 +27,11 @@ from mindroom.knowledge_graph.ingestion import (
     wake_knowledge_graph_ingestion,
 )
 from mindroom.knowledge_graph.scope import graph_scope
-from mindroom.knowledge_graph.store import knowledge_graph_failure, record_knowledge_graph_failure
+from mindroom.knowledge_graph.store import (
+    UnusableExtractionError,
+    knowledge_graph_failure,
+    record_knowledge_graph_failure,
+)
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import seed_session
 
@@ -52,6 +56,7 @@ class _FakeStore:
     failing: set[str] = field(default_factory=set)
     failing_kinds: set[str] = field(default_factory=set)
     failing_text: str | None = None
+    misconfigured: bool = False
     unavailable: bool = False
     added: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -59,13 +64,16 @@ class _FakeStore:
         if self.unavailable:
             msg = "graph database unavailable"
             raise ConnectionError(msg)
+        if self.misconfigured:
+            msg = "Unsupported embedder provider"
+            raise ValueError(msg)
         if (
             usage.session_id in self.failing
             or episode.kind in self.failing_kinds
             or (self.failing_text is not None and self.failing_text in episode.body)
         ):
             msg = "structured output did not match"
-            raise ValueError(msg)
+            raise UnusableExtractionError(msg)
         self.episodes.append((scope.graph_name, episode, usage))
         self.added.set()
 
@@ -397,7 +405,7 @@ async def test_health_names_a_failure_without_its_content(tmp_path: Path) -> Non
 
     detail = knowledge_graph_failure()
     assert detail is not None
-    assert "ValueError" in detail
+    assert "UnusableExtractionError" in detail
     assert "structured output did not match" not in detail
 
 
@@ -619,7 +627,7 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
                 first_pieces.append(first_call)
             if first_call in {"call fetch_2", "call fetch_4"}:
                 msg = "unusable output"
-                raise ValueError(msg)
+                raise UnusableExtractionError(msg)
         await real_add(scope, episode, usage)
 
     worker = _worker(config, paths, store)
@@ -733,3 +741,19 @@ async def test_a_failing_tool_result_is_dropped_while_the_conversation_keeps_suc
         await worker._run_cycle(config, now=T0 + day * 7200 + 100)
 
     assert [episode.kind for _, episode, _ in store.episodes].count("tool_results") >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_configuration_error_never_counts_as_unusable_output(tmp_path: Path) -> None:
+    """A ValueError from setup, such as an unsupported embedder, waits like an outage instead of dropping episodes."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(misconfigured=True)
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+
+    for attempt in range(8):
+        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+    store.misconfigured = False
+    await worker._run_cycle(config, now=T0 + 40_000)
+
+    assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
