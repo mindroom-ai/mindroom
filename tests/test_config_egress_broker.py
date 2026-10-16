@@ -71,7 +71,7 @@ def test_private_networks_round_trip_through_the_authored_dump() -> None:
 
 @pytest.mark.parametrize("network", ["192.168.1.5/24", "lab.example", "192.168.1.0/33", ""])
 def test_invalid_private_network_rejected(network: str) -> None:
-    """A network with host bits set, or anything that is not a network, is refused naming the value."""
+    """A network with host bits set, or anything that is not a network, is refused."""
     with pytest.raises(ValidationError, match="private_networks"):
         EgressBrokerConfig(private_networks=[network])
 

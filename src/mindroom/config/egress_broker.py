@@ -370,11 +370,7 @@ class EgressBrokerConfig(BaseModel):
     @classmethod
     def validate_private_networks(cls, value: list[str]) -> list[str]:
         """Return each network in canonical form; host bits set (`192.168.1.5/24`) is a mistake, not a network."""
-        try:
-            return [str(ipaddress.ip_network(network)) for network in value]
-        except ValueError as exc:
-            msg = f"not a network in CIDR form: {exc}"
-            raise ValueError(msg) from exc
+        return [str(ipaddress.ip_network(network)) for network in value]
 
     @field_validator("services")
     @classmethod

@@ -331,7 +331,8 @@ def validated_connect_addresses(
 ) -> list[_IPAddress]:
     """Resolve and validate the addresses used for an actual TCP connection.
 
-    Private addresses are refused unless `allow_private_networks` is set or they fall inside `private_networks`.
+    Private addresses are refused unless `allow_private_networks` is set or they fall inside `private_networks`,
+    which never opens loopback or metadata addresses.
     """
     return _validated_host_addresses(
         host,
