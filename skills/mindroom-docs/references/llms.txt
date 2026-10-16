@@ -20,6 +20,7 @@
 - [History & Compaction](https://docs.mindroom.chat/configuration/history/)
 - [Memory](https://docs.mindroom.chat/memory/)
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/)
+- [Knowledge Graph](https://docs.mindroom.chat/knowledge-graph/)
 - [Skills](https://docs.mindroom.chat/skills/)
 - [Scheduling](https://docs.mindroom.chat/scheduling/)
 - [Chat Commands](https://docs.mindroom.chat/chat-commands/)

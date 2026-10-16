@@ -135,6 +135,7 @@ VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
         "COMPOSIO_DISABLE_VERSION_CHECK": "true",
         "DISABLE_TELEMETRY": "1",
         "DO_NOT_TRACK": "1",
+        "GRAPHITI_TELEMETRY_ENABLED": "false",
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "true",
         "LITELLM_LOCAL_MODEL_COST_MAP": "true",

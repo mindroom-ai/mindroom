@@ -1,0 +1,87 @@
+"""Each agent and private instance gets its own graph, named in code and never after a requester."""
+
+from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING
+
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge_graph.scope import _graph_name, graph_scope, graph_scopes
+from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+
+ALICE = "@alice:example.test"
+BOB = "@bob:example.test"
+
+
+def _config(**embedder: object) -> Config:
+    return Config(
+        agents={
+            "mind": AgentConfig(display_name="Mind", knowledge_graph=True),
+            "pal": AgentConfig(display_name="Pal", knowledge_graph=True, private=AgentPrivateConfig(per="user")),
+            "coder": AgentConfig(display_name="Coder"),
+        },
+        models={"luna": ModelConfig(provider="openai", id="gpt-6-luna")},
+        knowledge_graph={"model": "luna"},
+        memory={"embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small", **embedder}}},
+    )
+
+
+def _paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+
+def _create_private_instance(config: Config, paths: RuntimePaths, requester: str) -> None:
+    identity = build_requester_execution_identity(agent_name="pal", runtime_paths=paths, requester_id=requester)
+    resolve_agent_runtime("pal", config, paths, identity, create=True)
+
+
+def test_graph_name_is_stable_and_hides_the_scope() -> None:
+    """The same scope and embedder always name the same graph, and the name reveals neither."""
+    signature = ("openai", "text-embedding-3-small", "", "1536")
+    name = _graph_name("private_instances/abc/pal", signature)
+    assert name == _graph_name("private_instances/abc/pal", signature)
+    assert re.fullmatch(r"kg_[0-9a-f]{24}", name)
+    assert "pal" not in name
+
+
+def test_embedder_change_changes_the_graph_name(tmp_path: Path) -> None:
+    """Vectors from another embedder are incompatible, so the graph changes with it."""
+    paths = _paths(tmp_path)
+    before = graph_scope("mind", _config(), paths, None).graph_name
+    after = graph_scope("mind", _config(dimensions=256), paths, None).graph_name
+    assert before != after
+
+
+def test_private_instances_get_distinct_graphs(tmp_path: Path) -> None:
+    """Two requesters of one private agent never share a graph, and a shared agent has its own."""
+    config = _config()
+    paths = _paths(tmp_path)
+    for requester in (ALICE, BOB):
+        _create_private_instance(config, paths, requester)
+
+    scopes = graph_scopes(config, paths)
+
+    by_owner = {(scope.agent_name, scope.requester_id): scope.graph_name for scope in scopes}
+    assert set(by_owner) == {("mind", None), ("pal", ALICE), ("pal", BOB)}
+    assert len(set(by_owner.values())) == 3
+
+
+def test_scope_for_a_requester_matches_the_listed_scope(tmp_path: Path) -> None:
+    """The tool and the ingestion worker resolve the same graph for one requester."""
+    config = _config()
+    paths = _paths(tmp_path)
+    _create_private_instance(config, paths, ALICE)
+    identity = build_requester_execution_identity(agent_name="pal", runtime_paths=paths, requester_id=ALICE)
+
+    listed = next(scope for scope in graph_scopes(config, paths) if scope.requester_id == ALICE)
+
+    assert graph_scope("pal", config, paths, identity).graph_name == listed.graph_name

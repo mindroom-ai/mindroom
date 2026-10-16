@@ -275,6 +275,11 @@ def has_pending_force_compaction_scope(
     return scope.key in {scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key}
 
 
+def load_archived_runs(storage: BaseDb, session_id: str) -> list[RunOutput | TeamRunOutput]:
+    """Return the runs compaction moved out of a session's live history, in archive order."""
+    return archive.archived_runs(storage, session_id=session_id)
+
+
 def read_scope_seen_event_ids(
     storage: BaseDb,
     session: AgentSession | TeamSession,

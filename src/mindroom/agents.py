@@ -805,6 +805,14 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             ),
         )
 
+    if tool_name == "knowledge_graph":
+        if not config.agent_uses_knowledge_graph(agent_name):
+            return None
+
+        from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools  # noqa: PLC0415
+
+        return wrap_direct(KnowledgeGraphTools(agent_name, config, runtime_paths, execution_identity))
+
     if tool_name == "delegate":
         # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
         from mindroom.custom_tools import delegate  # noqa: PLC0415

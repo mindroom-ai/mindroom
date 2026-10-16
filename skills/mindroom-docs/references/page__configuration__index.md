@@ -57,6 +57,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](https://docs.mindroom.chat/configuration/agents/#defaults) |
 | `memory` | Memory backends and embedder | [Memory](https://docs.mindroom.chat/memory/) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
+| `knowledge_graph` | Graph of facts built from agents' conversations | [Knowledge Graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](https://docs.mindroom.chat/mcp/) |
 | `plugins` | Plugin loading | [Plugins](https://docs.mindroom.chat/plugins/) |
 | `voice` | Speech-to-text for voice messages | [Voice](https://docs.mindroom.chat/voice/) |

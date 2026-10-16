@@ -8857,6 +8857,34 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "graphiti-core"
+      ],
+      "description": "Look up facts, entities, and their sources in the agent's knowledge graph",
+      "display_name": "Knowledge Graph",
+      "docs_url": null,
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "graph_entity",
+        "search_graph"
+      ],
+      "helper_text": null,
+      "icon": "Network",
+      "icon_color": "text-teal-500",
+      "name": "knowledge_graph",
+      "requires_conversation": false,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "authored_override": true,

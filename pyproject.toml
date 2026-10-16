@@ -281,6 +281,10 @@ jina = [
 jira = [
   "jira>=3.10.5",
 ]
+knowledge_graph = [
+  "graphiti-core[falkordblite]==0.31.1",
+  "psutil",
+]
 linear = [
   "requests",
 ]

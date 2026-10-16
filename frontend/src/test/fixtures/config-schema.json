@@ -2155,7 +2155,7 @@
         "idle_seconds": {
           "default": 120,
           "description": "Seconds a conversation must be idle before its new turns are ingested",
-          "minimum": 0,
+          "minimum": 1,
           "title": "Idle Seconds",
           "type": "integer"
         },

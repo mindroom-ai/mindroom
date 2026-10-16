@@ -226,3 +226,31 @@ def test_archive_requires_sqlite_storage() -> None:
     """Other storage types cannot hold the archive."""
     with pytest.raises(TypeError, match="SQLite"):
         archive.latest_generation(object(), session_id="session", scope_key=_SCOPE)  # type: ignore[arg-type]
+
+
+def test_archived_runs_returns_compacted_runs_in_archive_order(storage: SqliteDb) -> None:
+    """Readers outside replay can load every archived run of a session, member runs included."""
+    session = _seed(storage, ["r1", "r2", "r3"], children={"r1-member": "r1"})
+    _archive(storage, session, ["r1-member", "r1"], "summary one")
+    session = get_agent_session(storage, "session")
+    assert session is not None
+    _archive(storage, session, ["r2"], "summary two")
+
+    runs = archive.archived_runs(storage, session_id="session")
+
+    assert [run.run_id for run in runs] == ["r1", "r1-member", "r2"]
+    assert runs[0].messages is not None
+    assert runs[0].messages[0].content == "question r1"
+
+
+def test_archived_runs_skip_content_free_tombstones(tmp_path: Path) -> None:
+    """A run whose archived content was dropped is not returned."""
+    storage = _open(tmp_path)
+    try:
+        session = _seed(storage, ["r1", "r2"])
+        _archive(storage, session, ["r1"], "generation one")
+        archive.clear_to_legacy(storage, session_id="session", scope_key=_SCOPE, live_run_ids=["r2"])
+
+        assert archive.archived_runs(storage, session_id="session") == []
+    finally:
+        storage.close()

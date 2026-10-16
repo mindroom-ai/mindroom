@@ -33,8 +33,7 @@ from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.personal_room_store import personal_room_record_path, read_personal_room
 from mindroom.matrix.state import resolve_room_id
-from mindroom.private_storage.private_instance_identity import private_instances_for_agent
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import private_agent_requesters
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
@@ -103,11 +102,7 @@ def _key(instance: _Instance, automation_name: str) -> str:
 
 
 def _instances(config: Config, runtime_paths: RuntimePaths) -> list[_Instance]:
-    """Return what every agent with automations maintains: a shared agent's own state, or each private instance.
-
-    Only the primary's copy of an owner record names a requester, so an instance worker code created gets no runs.
-    A requester now aliased to another ID is skipped, because ingress would run the prompt against that ID's instance.
-    """
+    """Return what every agent with automations maintains: a shared agent's own state, or each private instance."""
     instances: list[_Instance] = []
     for agent_name, agent in config.agents.items():
         if not config.resolve_entity(agent_name).automations:
@@ -116,18 +111,12 @@ def _instances(config: Config, runtime_paths: RuntimePaths) -> list[_Instance]:
             instances.append((agent_name, None))
             continue
         try:
-            records = private_instances_for_agent(runtime_paths.storage_root, agent_name, agent.private.per)
+            requesters = private_agent_requesters(config, runtime_paths, agent_name)
         except OSError as exc:
             # Instances can be created or removed while they are listed; the next pass lists them again.
             logger.warning("Automation could not list private instances", agent=agent_name, error=str(exc))
             continue
-        requesters = {
-            record.requester_id
-            for record in records
-            if record.requester_id is not None
-            and resolve_human_requester_alias(record.requester_id, config, runtime_paths) == record.requester_id
-        }
-        instances.extend((agent_name, requester_id) for requester_id in sorted(requesters))
+        instances.extend((agent_name, requester_id) for requester_id in requesters)
     return instances
 
 

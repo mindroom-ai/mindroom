@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -105,3 +106,24 @@ def equivalent_requester_ids(
             if resolve_human_requester_alias(alias, config, runtime_paths) == canonical_user_id
         ),
     }
+
+
+def private_agent_requesters(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
+    """Return the requesters whose private instance of ``agent_name`` the primary created, sorted.
+
+    Only the primary's copy of an owner record names a requester, so an instance worker code created is not listed.
+    A requester now aliased to another ID is skipped, because ingress would route that requester to the other ID's
+    instance. Listing races with instances being created or removed, so ``OSError`` reaches the caller.
+    """
+    private = config.get_agent(agent_name).private
+    if private is None:
+        return []
+    records = private_instances_for_agent(runtime_paths.storage_root, agent_name, private.per)
+    return sorted(
+        {
+            record.requester_id
+            for record in records
+            if record.requester_id is not None
+            and resolve_human_requester_alias(record.requester_id, config, runtime_paths) == record.requester_id
+        },
+    )

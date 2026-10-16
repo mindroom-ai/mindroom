@@ -22,6 +22,7 @@ from mindroom.tools import (
     delegate,  # noqa: F401
     dynamic_tools,  # noqa: F401
     dynamic_workflow,  # noqa: F401
+    knowledge_graph,  # noqa: F401
     memory,  # noqa: F401
     report_publishing,  # noqa: F401
     self_config,  # noqa: F401

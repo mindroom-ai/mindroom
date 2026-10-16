@@ -27,6 +27,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Configuration | History & Compaction | `configuration/history.md` | `configuration/history/index.md` | `page__configuration__history__index.md` |
 | Features | Memory | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Features | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
+| Features | Knowledge Graph | `knowledge-graph.md` | `knowledge-graph/index.md` | `page__knowledge-graph__index.md` |
 | Features | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
 | Features | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
 | Features | Chat Commands | `chat-commands.md` | `chat-commands/index.md` | `page__chat-commands__index.md` |

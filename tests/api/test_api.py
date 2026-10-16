@@ -38,6 +38,7 @@ from mindroom.config.main import Config, dashboard_config_schema
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
+from mindroom.knowledge_graph.store import record_knowledge_graph_failure
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
@@ -967,6 +968,22 @@ def test_health_check_reports_recorded_embedder_failure(test_client: TestClient)
         "status": "failing",
         "detail": "embedder authentication failed (HTTP 401)",
     }
+
+
+def test_health_check_reports_knowledge_graph_failure(test_client: TestClient) -> None:
+    """A failing graph ingestion appears as an additive block without flipping status."""
+    reset_matrix_sync_health()
+    record_knowledge_graph_failure("ValueError: structured output did not match")
+    try:
+        response = test_client.get("/api/health")
+    finally:
+        record_knowledge_graph_failure(None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["knowledge_graph"] == {"status": "failing", "detail": "ValueError: structured output did not match"}
+    assert "knowledge_graph" not in test_client.get("/api/health").json()
 
 
 def test_health_check_omits_embedder_block_when_healthy(test_client: TestClient) -> None:
