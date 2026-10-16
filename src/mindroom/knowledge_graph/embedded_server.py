@@ -122,15 +122,16 @@ async def _wait_until_ready(server: EmbeddedServer, db_dir: Path) -> None:
 
 def _stop_orphaned_server(db_dir: Path, executable: str) -> None:
     """Stop a server that a crashed runtime left running on this database, so two never write one file."""
-    import psutil  # noqa: PLC0415
+    from psutil import Error as PsutilError  # noqa: PLC0415
+    from psutil import Process, TimeoutExpired  # noqa: PLC0415
 
     try:
         pid = int((db_dir / _PIDFILE).read_text(encoding="utf-8").strip())
-        process = psutil.Process(pid)
+        process = Process(pid)
         # A recycled PID belongs to another program or another database; only this database's server is stopped.
         # The binary path is not compared, because an upgrade moves it while the old server keeps running.
         is_this_server = process.name() == Path(executable).name and Path(process.cwd()).resolve() == db_dir.resolve()
-    except (FileNotFoundError, ValueError, psutil.Error):
+    except (FileNotFoundError, ValueError, PsutilError):
         return
     if not is_this_server:
         return
@@ -138,6 +139,6 @@ def _stop_orphaned_server(db_dir: Path, executable: str) -> None:
     process.terminate()
     try:
         process.wait(_STOP_TIMEOUT_SECONDS)
-    except psutil.TimeoutExpired:
+    except TimeoutExpired:
         process.kill()
         process.wait(_STOP_TIMEOUT_SECONDS)

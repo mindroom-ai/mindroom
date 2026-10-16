@@ -142,6 +142,8 @@ async def test_unavailable_graph_returns_a_readable_error(tmp_path: Path, store:
     text = await KnowledgeGraphTools("mind", _config(), paths, None).search_graph("Atlas")
 
     assert text.startswith("The knowledge graph is unavailable")
+    # The error can carry request data or internals; the log keeps it, the agent and its requester do not.
+    assert "socket closed" not in text
 
 
 @pytest.mark.asyncio

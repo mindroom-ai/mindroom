@@ -93,8 +93,13 @@ class KnowledgeGraphTools(Toolkit):
                 return "\n".join(_render_fact(fact) for fact in facts) or f"No facts match {text!r}."
             entity = await store.entity(scope, text)
         except Exception as exc:
-            logger.warning("Knowledge graph lookup failed", agent=self._agent_name, error_type=type(exc).__name__)
-            return f"The knowledge graph is unavailable: {type(exc).__name__}: {exc}"
+            # The error can carry request data or internals, so only the log sees it.
+            logger.warning(
+                "Knowledge graph lookup failed",
+                agent=self._agent_name,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return "The knowledge graph is unavailable right now; try again later."
         if entity is None:
             return f"No entity matches {text!r}."
         facts = "\n".join(_render_fact(fact) for fact in entity.facts) or "No facts yet."

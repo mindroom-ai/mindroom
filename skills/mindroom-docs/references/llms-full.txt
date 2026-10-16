@@ -3852,7 +3852,7 @@ Not added: threads started by other automations such as `dreaming`, graph lookup
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
-Each fact keeps its sources: `conversation` means someone said it, `tool_results` means a tool returned it.
+Each fact keeps its sources: `conversation` means someone said it, `tool_results` means it came from a tool call, its arguments or what it returned.
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
 A message redacted before its conversation is added stays out of the graph, and so does the turn that read it.

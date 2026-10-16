@@ -31,7 +31,7 @@ A labeled evaluation of extracted facts against their sources measures precision
 3. **Active exploration**: a built-in `exploration` automation asks the agent, on a cron schedule, to explore the sources its tools reach; ingestion then records the raw tool results as evidence.
 
 The agent reads the graph through a read-only `knowledge_graph` tool.
-Nothing the model writes in prose enters the graph as evidence from an exploration run, so the agent cannot launder its own summaries into facts.
+The agent's answers in an exploration run never enter the graph, so it cannot launder its own summaries into facts; its tool calls do, arguments included, as observations of what it did.
 
 ### Evidence enters only from transcripts and tool results
 
