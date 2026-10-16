@@ -1,0 +1,262 @@
+{
+  "oauth_providers": [
+    {
+      "display_name": "GitHub",
+      "id": "github"
+    },
+    {
+      "display_name": "Google Drive",
+      "id": "google_drive"
+    },
+    {
+      "display_name": "Gmail",
+      "id": "google_gmail"
+    },
+    {
+      "display_name": "Google Calendar",
+      "id": "google_calendar"
+    },
+    {
+      "display_name": "Google Sheets",
+      "id": "google_sheets"
+    },
+    {
+      "display_name": "Google Docs",
+      "id": "google_docs"
+    },
+    {
+      "display_name": "Google Tasks",
+      "id": "google_tasks"
+    },
+    {
+      "display_name": "Atlassian",
+      "id": "atlassian"
+    }
+  ],
+  "presets": [
+    {
+      "description": "GitHub API, gh CLI, and git over HTTPS",
+      "display_name": "GitHub",
+      "id": "github",
+      "oauth_provider": "github",
+      "placeholder_env": {
+        "GH_TOKEN": "mindroom-brokered",
+        "GITHUB_TOKEN": "mindroom-brokered"
+      },
+      "rules": [
+        {
+          "host": "api.github.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "uploads.github.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "github.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Drive API",
+      "display_name": "Google Drive",
+      "id": "google_drive",
+      "oauth_provider": "google_drive",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/drive/",
+          "port": null
+        },
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/upload/drive/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Gmail API",
+      "display_name": "Gmail",
+      "id": "google_gmail",
+      "oauth_provider": "google_gmail",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "gmail.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/gmail/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Calendar API",
+      "display_name": "Google Calendar",
+      "id": "google_calendar",
+      "oauth_provider": "google_calendar",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/calendar/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Sheets API",
+      "display_name": "Google Sheets",
+      "id": "google_sheets",
+      "oauth_provider": "google_sheets",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "sheets.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Docs API",
+      "display_name": "Google Docs",
+      "id": "google_docs",
+      "oauth_provider": "google_docs",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "docs.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Google Tasks API",
+      "display_name": "Google Tasks",
+      "id": "google_tasks",
+      "oauth_provider": "google_tasks",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "tasks.googleapis.com",
+          "path_prefix": "/",
+          "port": null
+        },
+        {
+          "host": "www.googleapis.com",
+          "path_prefix": "/tasks/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Atlassian Cloud APIs (Jira and Confluence)",
+      "display_name": "Atlassian",
+      "id": "atlassian",
+      "oauth_provider": "atlassian",
+      "placeholder_env": {},
+      "rules": [
+        {
+          "host": "api.atlassian.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "OpenAI API",
+      "display_name": "OpenAI",
+      "id": "openai",
+      "oauth_provider": null,
+      "placeholder_env": {
+        "OPENAI_API_KEY": "mindroom-brokered"
+      },
+      "rules": [
+        {
+          "host": "api.openai.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    },
+    {
+      "description": "Anthropic API",
+      "display_name": "Anthropic",
+      "id": "anthropic",
+      "oauth_provider": null,
+      "placeholder_env": {
+        "ANTHROPIC_API_KEY": "mindroom-brokered"
+      },
+      "rules": [
+        {
+          "host": "api.anthropic.com",
+          "path_prefix": "/",
+          "port": null
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "max_rules_per_service": 50,
+    "max_service_bytes": 16384,
+    "placeholder": {
+      "credential_words": [
+        "TOKEN",
+        "KEY",
+        "SECRET",
+        "PASSWORD",
+        "PAT",
+        "AUTH",
+        "CREDENTIAL"
+      ],
+      "name_pattern": "[A-Z][A-Z0-9_]*",
+      "refused_prefix": "SSH_",
+      "refused_words": [
+        "COMMAND",
+        "CMD",
+        "FILE",
+        "DIR",
+        "PROVIDER",
+        "HELPER",
+        "OPTS",
+        "OPTIONS",
+        "EXTENSIONS"
+      ],
+      "reserved_names": [
+        "ALL_PROXY",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "HOME",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_USE_ENV_PROXY",
+        "NO_PROXY",
+        "PATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy"
+      ],
+      "reserved_prefixes": [
+        "GIT_CONFIG_",
+        "MINDROOM_"
+      ],
+      "value_max_length": 256,
+      "value_pattern": "[A-Za-z0-9._:-]{1,256}"
+    }
+  }
+}

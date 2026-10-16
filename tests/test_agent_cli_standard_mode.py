@@ -10,6 +10,9 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.agent import Agent
+from agno.models.response import ModelResponse
+from agno.run import RunContext  # noqa: TC002 - Agno injects the tool argument by its annotation
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
@@ -19,20 +22,25 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
+from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from tests.access_schema_support import with_responder_access
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_agent_cli_shell_access import running_api  # noqa: F401 - pytest fixture
+from tests.test_delegation_execution import DelegationModel
 from tests.tool_job_helpers import job_owner
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_cli.session import TurnToolRegistry
+    from mindroom.delegation.state import DelegationChild
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -361,3 +369,72 @@ def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> Non
         assert run.__name__ != "windowed"
     finally:
         close_agent_runtime_state_dbs(agent)
+
+
+@pytest.mark.asyncio
+async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """After a subagent returns, CLI calls from the continued run's shell share that run's state with its native calls."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    # Delegation reads the managed runtime's spend monitor, which this harness leaves out.
+    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=running_api, budgets=None))
+    runtime.config.agents["helper"].delegate_to = ["code"]
+    runtime.config.agents["code"] = AgentConfig(display_name="Code", learning=False)
+    with_responder_access(runtime.config, "code", users=[runtime.requester_id])
+    persist_entity_accounts(runtime.config, runtime.runtime_paths)
+
+    def remember(value: int, run_context: RunContext) -> str:
+        run_context.session_state["remembered"] = value
+        return "remembered"
+
+    def recall(run_context: RunContext) -> str:
+        return f"recalled:{run_context.session_state.get('remembered')}"
+
+    original = agents.get_tool_by_name
+
+    def build(name: str, *args: object, **kwargs: object) -> object:
+        if name != "calculator":
+            return original(name, *args, **kwargs)
+        return Toolkit(name="calculator", tools=[remember, recall])
+
+    monkeypatch.setattr(agents, "get_tool_by_name", build)
+
+    async def child_response(child: DelegationChild, **_kwargs: object) -> str:
+        child_agent = Agent(
+            id="code",
+            db=create_session_storage("code", runtime.config, runtime.runtime_paths, child_execution_identity(child)),
+            model=DelegationModel(id="test", responses=[ModelResponse(content="child done")]),
+        )
+        try:
+            await child_agent.arun(
+                child.task,
+                run_id=child.run_id,
+                session_id=child.session_id,
+                user_id=runtime.requester_id,
+            )
+        finally:
+            child_agent.db.close()
+        return "child done"
+
+    monkeypatch.setattr(ai, "run_delegated_child_response", child_response)
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    command = _call_and_wait("00000000-0000-4000-8000-000000000005", "calculator", "remember", {"value": 7})
+    provider.steps = [
+        [("run_subagent", {"agent_name": "code", "task": "work"})],
+        [("run_shell_command", {"args": command})],
+        [("recall", {})],
+        "done",
+    ]
+
+    async with asyncio.timeout(60):
+        assert "done" in await _respond(runtime)
+
+    tool_outputs = [
+        str(message["content"]) for message in provider.requests[3]["messages"] if message["role"] == "tool"
+    ]
+    assert '"status":"completed"' in tool_outputs[-2].replace(" ", ""), tool_outputs[-2]
+    assert tool_outputs[-1] == "recalled:7", tool_outputs

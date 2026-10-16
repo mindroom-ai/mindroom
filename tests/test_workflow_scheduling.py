@@ -12,12 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
@@ -500,6 +502,30 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, _WorkflowParseError)
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
+
+    @patch("mindroom.providers.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.tasks.Agent")
+    async def test_parse_refusal_reports_declined_request_without_rephrase_hint(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """A parser model refusal must say the parser declined instead of asking for a more specific request."""
+        mock_agent = AsyncMock()
+        mock_agent.arun.return_value = RunOutput(content=MODEL_SAFEGUARD_REFUSAL_MESSAGE, status=RunStatus.error)
+        mock_agent_class.return_value = mock_agent
+
+        result = await _parse_workflow_schedule(
+            "Every day at 9am, summarize the news",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_responders=[_mid("general")],
+        )
+
+        assert result == _WorkflowParseError(
+            error=f"The schedule parser model declined this request ({MODEL_SAFEGUARD_REFUSAL_MESSAGE}).",
+        )
 
     @patch("mindroom.scheduling.tasks.Agent")
     async def test_parse_empty_available_responders_returns_parse_error(

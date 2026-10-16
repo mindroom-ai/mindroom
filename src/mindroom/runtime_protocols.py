@@ -83,6 +83,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Return the Matrix client of one running managed entity."""
         ...
 
+    def open_reply_event_id(self, entity_name: str, room_id: str, thread_id: str | None) -> Awaitable[str | None]:
+        """Return the event of one running managed entity's unfinished reply in one conversation."""
+        ...
+
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102
 
     def validate_managed_entity_identities(self) -> None:

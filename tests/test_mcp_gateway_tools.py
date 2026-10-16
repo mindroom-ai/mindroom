@@ -181,6 +181,53 @@ async def test_room_and_conversation_tools_are_hidden_and_cannot_be_selected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("broker_on", [False, True])
+async def test_egress_credentials_is_offered_only_while_the_broker_is_on(tmp_path: Path, *, broker_on: bool) -> None:
+    """With the broker off an agent that lists the egress credentials tool does not offer it through the gateway."""
+    paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_CONNECTIONS_AGENT": "personal",
+            "MATRIX_HOMESERVER": "https://example.org",
+            **({"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}),
+        },
+    )
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "models": {"default": {"provider": "ollama", "id": "test-model"}},
+            "agents": {
+                "personal": {
+                    "display_name": "Personal assistant",
+                    "tools": ["calculator", "egress_credentials"],
+                    "private": {"per": "user_agent"},
+                    "access": {"users": ["@alice:example.org"]},
+                },
+            },
+        },
+        paths,
+    )
+    snapshot = ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config)
+    context = resolve_connection_agent(resolve_connection_user(snapshot, "@alice:example.org"), "personal")
+
+    searched = await gateway.search_tools(context)
+    schema = await gateway.get_tool(context, toolkit="egress_credentials", function="list_egress_credentials")
+
+    assert "error" not in searched
+    assert [item["toolkit"] for item in searched["results"]] == (
+        ["calculator", "egress_credentials"] if broker_on else ["calculator"]
+    )
+    if broker_on:
+        assert "error" not in schema
+        assert schema["function"] == "list_egress_credentials"
+    else:
+        assert schema == {
+            "error": {"code": "tool_not_found", "message": "This tool is not assigned to the selected agent."},
+        }
+
+
+@pytest.mark.asyncio
 async def test_gateway_rechecks_tool_metadata_after_discovery(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,

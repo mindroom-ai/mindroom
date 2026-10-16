@@ -1742,9 +1742,9 @@ class AgentBot:
                 sliding_sync_room_subscriptions(self.rooms, self.config.matrix_sync.sliding_timeline_limit),
             )
 
-    def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
+    async def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
-        self._call_manager = maybe_build_call_manager(
+        self._call_manager = await maybe_build_call_manager(
             agent_name=self.agent_name,
             config=self.config,
             client=client,
@@ -1910,7 +1910,7 @@ class AgentBot:
                 self._on_invite_before_sync_certification,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
-            self._register_call_manager_callbacks(client)
+            await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,
                 client=client,

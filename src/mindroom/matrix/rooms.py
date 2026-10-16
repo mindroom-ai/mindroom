@@ -41,7 +41,7 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
     split_concrete_matrix_user_ids,
 )
-from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
+from mindroom.topic_generator import configured_room_topic, ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -399,8 +399,12 @@ async def _ensure_room_exists(
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
         _remove_room(room_key, runtime_paths=runtime_paths)
 
-    # Generate a contextual topic for the room using AI
-    topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
+    topic = configured_room_topic(room_key, config) or await generate_room_topic_ai(
+        room_key,
+        room_name,
+        config,
+        runtime_paths,
+    )
     logger.info("managed_room_creation_started", room_key=room_key, topic=topic)
 
     created_room_id = await create_room(

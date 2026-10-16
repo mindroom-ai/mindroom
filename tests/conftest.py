@@ -152,6 +152,7 @@ from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -2925,6 +2926,12 @@ def build_private_template_dir(tmp_path: Path) -> Callable[..., Path]:
         return template_dir
 
     return _build
+
+
+@pytest.fixture
+def test_ca_pem() -> str:
+    """Return a valid test CA certificate in PEM format."""
+    return make_test_ca_pem()
 
 
 @pytest_asyncio.fixture

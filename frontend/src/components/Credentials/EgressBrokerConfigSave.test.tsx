@@ -1,0 +1,339 @@
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import egressPresets from "@/test/fixtures/egressPresets.json";
+import { pressInDialog, presetsReady } from "@/test/egressServiceTestKit";
+import { readConfigRoot, useConfigStore } from "@/store/configStore";
+import { EgressBroker } from "./EgressBroker";
+
+// These tests use the real config store, to show that the dashboard editor
+// reads the config as authored and saves it the way Settings does.
+
+const authoredConfig = {
+  agents: {
+    coder: {
+      display_name: "Coder",
+      role: "Writes code",
+      tools: ["shell"],
+      skills: [],
+      instructions: [],
+      rooms: [],
+    },
+  },
+  defaults: { markdown: true },
+  models: { default: { provider: "ollama", id: "test-model" } },
+  router: { model: "default" },
+  egress_broker: {
+    services: {
+      github: { preset: "github" },
+      openai: {
+        rules: [{ host: "api.openai.com", auth: { type: "bearer" } }],
+      },
+    },
+  },
+};
+
+const json = (value: unknown, status = 200) =>
+  new Response(JSON.stringify(value), { status });
+
+const row = (name: string, display_name: string) => ({
+  name,
+  display_name,
+  description: "",
+  source: "config",
+  rules: [],
+  configured: false,
+  active_source: null,
+  key_configured: false,
+  key_updated_at: null,
+  oauth: null,
+});
+
+let saveResponse: () => Response | Promise<Response>;
+
+// The Config type does not model egress_broker, so read it like Settings does.
+function storedBroker() {
+  const config = useConfigStore.getState().config;
+  return config
+    ? (readConfigRoot(config, "egress_broker") as
+        { services: Record<string, unknown> } | undefined)
+    : undefined;
+}
+
+function saveBodies() {
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(
+      ([input, init]) =>
+        String(input) === "/api/config/save" && init?.method === "PUT",
+    )
+    .map(([, init]) => JSON.parse(String(init?.body)));
+}
+
+/** Refuses other paths on GitHub's hosts and saves, the edit the GitHub tests make. */
+async function restrictGithub() {
+  render(<EgressBroker />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Edit service for GitHub" }),
+  );
+  await presetsReady();
+  fireEvent.click(screen.getByRole("button", { name: "More options" }));
+  fireEvent.click(screen.getByLabelText("Refuse other paths on these hosts"));
+  fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+}
+
+async function deleteOpenai() {
+  render(<EgressBroker />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Delete service for OpenAI" }),
+  );
+  await pressInDialog("Delete");
+}
+
+beforeEach(async () => {
+  saveResponse = () => json({ success: true });
+  vi.mocked(fetch).mockImplementation(async (input) => {
+    const path = new URL(String(input), "http://localhost").pathname;
+    if (path === "/api/config/load") return json(authoredConfig);
+    if (path === "/api/config/agent-policies")
+      return json({ agent_policies: {} });
+    if (path === "/api/config/save") return saveResponse();
+    if (path === "/api/egress-broker/services")
+      return json({
+        services: [row("github", "GitHub"), row("openai", "OpenAI")],
+        // `coder` has no worker scope, so it uses the global keys.
+        shared_agents: [],
+        has_unscoped_agents: true,
+      });
+    if (path === "/api/egress-broker/logs") return json({ records: [] });
+    if (path === "/api/egress-broker/presets") return json(egressPresets);
+    throw new Error(`Unexpected request: ${String(input)}`);
+  });
+  useConfigStore.setState({ ...useConfigStore.getInitialState() });
+  await useConfigStore.getState().loadConfig();
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe("egress broker panel with the real config store", () => {
+  it("loads preset services as authored, not expanded", () => {
+    expect(storedBroker()).toEqual(authoredConfig.egress_broker);
+  });
+
+  it("saves an edited preset service as the preset plus what changed", async () => {
+    await restrictGithub();
+
+    await waitFor(() => expect(saveBodies()).toHaveLength(1));
+    // Other services and the rest of the config go back untouched.
+    expect(saveBodies()[0].egress_broker).toEqual({
+      services: {
+        github: { preset: "github", restrict_to_rules: true },
+        openai: authoredConfig.egress_broker.services.openai,
+      },
+    });
+    expect(saveBodies()[0].models).toEqual(authoredConfig.models);
+    await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
+    expect(useConfigStore.getState().isDirty).toBe(false);
+    expect(storedBroker()?.services.github).toEqual({
+      preset: "github",
+      restrict_to_rules: true,
+    });
+  });
+
+  it("saves a new service next to the others", async () => {
+    render(<EgressBroker />);
+    await screen.findByLabelText("GitHub");
+    fireEvent.click(screen.getByRole("button", { name: "Add service" }));
+    await presetsReady();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "claude" },
+    });
+    fireEvent.change(screen.getByLabelText("Preset"), {
+      target: { value: "anthropic" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+    await waitFor(() => expect(saveBodies()).toHaveLength(1));
+    expect(saveBodies()[0].egress_broker.services).toEqual({
+      ...authoredConfig.egress_broker.services,
+      claude: { preset: "anthropic" },
+    });
+  });
+
+  it("removes a deleted service from the saved config", async () => {
+    await deleteOpenai();
+
+    await waitFor(() => expect(saveBodies()).toHaveLength(1));
+    expect(saveBodies()[0].egress_broker.services).toEqual({
+      github: { preset: "github" },
+    });
+  });
+
+  describe("after a save that fails", () => {
+    const failingSave = () =>
+      json(
+        {
+          detail: [
+            {
+              loc: ["egress_broker", "services", "bad", "rules", 0, "host"],
+              msg: "Value error, host must not contain scheme",
+              type: "value_error",
+            },
+          ],
+        },
+        422,
+      );
+    const addBadService = async () => {
+      render(<EgressBroker />);
+      await screen.findByLabelText("GitHub");
+      fireEvent.click(screen.getByRole("button", { name: "Add service" }));
+      await presetsReady();
+      fireEvent.change(screen.getByLabelText("Name"), {
+        target: { value: "bad" },
+      });
+      fireEvent.change(screen.getByLabelText("Website"), {
+        target: { value: "api.example.com" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    };
+
+    it("shows the server's validation error and leaves no invalid draft behind", async () => {
+      saveResponse = failingSave;
+      await addBadService();
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "bad.rules.0.host: host must not contain scheme",
+      );
+      expect(storedBroker()?.services).toEqual(
+        authoredConfig.egress_broker.services,
+      );
+      expect(screen.getByLabelText("Name")).toHaveValue("bad");
+    });
+
+    it("leaves the draft clean when the editor was the only change", async () => {
+      saveResponse = failingSave;
+      await addBadService();
+      await screen.findByText(/bad.rules.0.host/);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(false);
+      expect(state.dirtyRoots).toEqual([]);
+      expect(state.syncStatus).toBe("synced");
+      expect(state.config).toEqual(state.loadedConfig);
+      // The server's complaint about the editor's own draft does not linger.
+      expect(
+        state.diagnostics.filter(
+          (diagnostic) => diagnostic.kind === "validation",
+        ),
+      ).toEqual([]);
+    });
+
+    it("keeps other unsaved changes dirty and unsaved", async () => {
+      useConfigStore
+        .getState()
+        .updateConfigValue(["router"], { model: "other" });
+      expect(useConfigStore.getState().dirtyRoots).toEqual(["router"]);
+      saveResponse = failingSave;
+      await addBadService();
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Save all changes" }),
+      );
+      await screen.findByText(/bad.rules.0.host/);
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toEqual(["router"]);
+      expect(state.config?.router).toEqual({ model: "other" });
+      expect(storedBroker()?.services).toEqual(
+        authoredConfig.egress_broker.services,
+      );
+    });
+
+    it("keeps an edit made elsewhere while the refused save was running", async () => {
+      let refuse: (response: Response) => void = () => {};
+      saveResponse = () =>
+        new Promise<Response>((done) => {
+          refuse = done;
+        });
+      await addBadService();
+      await waitFor(() => expect(saveBodies()).toHaveLength(1));
+      // Settings is edited in the meantime, then the server turns the save down.
+      act(() => {
+        useConfigStore
+          .getState()
+          .updateConfigValue(["router"], { model: "other" });
+      });
+      refuse(json({ detail: "Configuration changed elsewhere." }, 409));
+      await screen.findByText(/Configuration changed/);
+
+      const state = useConfigStore.getState();
+      // The editor's own value is gone, the other edit is not.
+      expect(storedBroker()?.services).toEqual(
+        authoredConfig.egress_broker.services,
+      );
+      expect(state.config?.router).toEqual({ model: "other" });
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toContain("router");
+    });
+
+    it("saves again without the earlier attempt left in the draft", async () => {
+      saveResponse = failingSave;
+      await addBadService();
+      await screen.findByText(/bad.rules.0.host/);
+
+      saveResponse = () => json({ success: true });
+      fireEvent.change(screen.getByLabelText("Name"), {
+        target: { value: "good" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+
+      await waitFor(() => expect(saveBodies()).toHaveLength(2));
+      expect(Object.keys(saveBodies()[1].egress_broker.services)).toEqual([
+        "github",
+        "openai",
+        "good",
+      ]);
+    });
+
+    it("restores a deleted service and leaves the draft clean when the delete is refused", async () => {
+      saveResponse = () => json({ detail: "Failed to save" }, 500);
+      await deleteOpenai();
+      await screen.findByText("Failed to save");
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(false);
+      expect(state.config).toEqual(state.loadedConfig);
+      expect(storedBroker()?.services).toEqual(
+        authoredConfig.egress_broker.services,
+      );
+    });
+  });
+
+  it("asks before saving when the draft holds other unsaved changes, then saves them too", async () => {
+    useConfigStore.getState().updateConfigValue(["router"], { model: "other" });
+    await restrictGithub();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This also saves your other unsaved settings changes.",
+    );
+    expect(saveBodies()).toHaveLength(0);
+    expect(storedBroker()?.services.github).toEqual({ preset: "github" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save all changes" }));
+    await waitFor(() => expect(saveBodies()).toHaveLength(1));
+    expect(saveBodies()[0].router).toEqual({ model: "other" });
+    expect(saveBodies()[0].egress_broker.services.github).toEqual({
+      preset: "github",
+      restrict_to_rules: true,
+    });
+    await waitFor(() => expect(useConfigStore.getState().isDirty).toBe(false));
+  });
+});

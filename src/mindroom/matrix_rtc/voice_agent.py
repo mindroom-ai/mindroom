@@ -13,7 +13,6 @@ The heavy ``livekit`` / ``livekit-agents`` dependencies are optional (the
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -21,6 +20,7 @@ from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.dependencies import check_deps_installed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -307,18 +307,13 @@ class _AuthorizedParticipantAudioInput:
             await asyncio.gather(*self._close_tasks, return_exceptions=True)
 
 
+#: Modules the optional ``matrix_calls`` extra provides; pyproject.toml owns its package requirements.
+MATRIX_CALLS_MODULES = ["livekit.rtc", "livekit.agents", "livekit.plugins.openai"]
+
+
 def matrix_calls_dependencies_available() -> bool:
     """Whether the optional ``matrix_calls`` extra is installed."""
-    # find_spec("livekit.rtc") raises (rather than returning None) when the
-    # parent "livekit" package itself is missing.
-    try:
-        return (
-            importlib.util.find_spec("livekit.rtc") is not None
-            and importlib.util.find_spec("livekit.agents") is not None
-            and importlib.util.find_spec("livekit.plugins.openai") is not None
-        )
-    except ModuleNotFoundError:
-        return False
+    return check_deps_installed(MATRIX_CALLS_MODULES)
 
 
 @dataclass(frozen=True)

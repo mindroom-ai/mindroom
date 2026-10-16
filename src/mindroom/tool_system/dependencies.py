@@ -134,7 +134,11 @@ def check_deps_installed(dependencies: list[str]) -> bool:
     """Check if all dependencies are importable using find_spec (no side effects)."""
     for dep in dependencies:
         module_name = _pip_name_to_import(dep)
-        if importlib.util.find_spec(module_name) is None:
+        try:
+            if importlib.util.find_spec(module_name) is None:
+                return False
+        except ModuleNotFoundError:
+            # find_spec raises instead of returning None when a dotted name's parent package is missing.
             return False
     return True
 

@@ -103,6 +103,23 @@ Matrix sync callback
 | `oauth/reset.py` | OAuth reset target resolution and requester-bound browser intents |
 | `oauth/reset_execution.py` | MCP retirement and durable reset execution |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
+| `egress_broker/` | Agent Keys: the egress broker in the primary that adds stored keys or connected-account tokens to worker HTTP(S) requests the worker never sees |
+| `egress_broker/service.py` | Broker lifecycle on its own thread, secret resolution per verified worker scope, and the per-call broker env for worker-routed calls |
+| `egress_broker/proxy.py` | Authenticated forward-proxy listener: CONNECT interception or blind tunnels, plain HTTP forwarding, and the unmatched-host policy |
+| `egress_broker/mitm.py` | TLS interception for hosts with rules: `Host` checks against the CONNECT target and per-request credential injection |
+| `egress_broker/_relay.py` | HTTP/1.1 plumbing both listener paths share: request framing, guarded dialing, body streaming, refusals, and audit rows |
+| `egress_broker/dial.py` | Guarded upstream dialing: refuses loopback, private, and cloud metadata destinations and connects only to the address it validated, through the operator proxy when the primary has one |
+| `egress_broker/rules.py` | Pure rule matching, path restriction checks, ambiguous-path refusal, and credential injection into a header or query parameter |
+| `egress_broker/user_services.py` | Services users define per scope, stored beside the scope's keys and merged after the config services into the config the broker matches |
+| `egress_broker/secrets.py` | Per-scope egress keys in the primary-only credential store and each service's key-or-account status |
+| `egress_broker/tokens.py` | Signed, expiring worker proxy tokens that carry the worker scope, agent, and requester |
+| `egress_broker/audit.py` | Metadata-only SQLite request log, pruned to 30 days and 100,000 rows |
+| `egress_broker/ca.py` | Local broker CA, per-host leaf certificates, the SNI check against the CONNECT host, and the worker trust bundle |
+| `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect and disconnect, the full request log, and the CA download |
+| `api/egress_credentials.py` | Personal `/api/connections/egress` routes: per-agent services and keys, user services, account connections, and the caller's request log |
+| `api/egress_status.py` | Service status, preset, and request-log responses and the account-connection gate shared by both egress APIs |
+| `config/egress_broker.py` | `egress_broker` config models: services, preset expansion, rules, auth types, and their validation |
+| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool: which services have a key or connected account in the agent's scope, and where to add missing ones |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A background subagent's job: native child admission, outcome, and cleanup inside the generic execution owner |
@@ -314,7 +331,7 @@ Matrix sync callback
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | `SpanRegistry`: cancels exactly the reply span a Stop reaches, then its Agno run; the Stop button reaction |
-| `topic_generator.py` | AI-generated room topics |
+| `topic_generator.py` | Managed room topics from the configured description or generated with AI |
 | `debug_report.py` | Read-only collection of what the backend stored about one reported conversation: event journal, Agno runs, tool-call and LLM request logs, and log lines |
 | `cli/main.py` | Main CLI entry point (Typer app) |
 | `cli/banner.py` | CLI startup banner |
@@ -329,6 +346,7 @@ Matrix sync callback
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
+| `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded router relays, tag copy, and the moved notice in the source thread |
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |

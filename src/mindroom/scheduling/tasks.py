@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import humanize
 import nio
 from agno.agent import Agent
+from agno.run.base import RunStatus
 from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
@@ -33,6 +34,7 @@ from mindroom.approval.tool_approval import (
     withdraw_scheduled_call_approval,
 )
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.helper_usage import record_system_usage
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
@@ -1365,6 +1367,11 @@ async def _parse_workflow_schedule(
 
             logger.info("Successfully parsed workflow schedule", request=request, schedule_type=result.schedule_type)
             return result
+
+        # Agno returns provider failures as errored run output text, not as raised exceptions.
+        if response.status == RunStatus.error and is_model_safeguard_refusal(str(result)):
+            logger.warning("Schedule parser model refused the request", request=request)
+            return _WorkflowParseError(error=f"The schedule parser model declined this request ({result}).")
 
         logger.error("Unexpected response type from AI", response_type=type(result).__name__)
         return _WorkflowParseError(

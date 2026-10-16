@@ -570,7 +570,10 @@ class RoomConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
-    description: str = Field(default="", description="Dashboard-facing room purpose")
+    description: str = Field(
+        default="",
+        description="Room purpose shown in the dashboard and used as the topic of a new room or a room without one",
+    )
     join_policy: RoomJoinPolicy | None = Field(default=None, description="Room-specific join-policy override")
     listed: bool | None = Field(default=None, description="Room-specific directory-listing override")
     encrypted: bool | None = Field(

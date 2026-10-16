@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.egress_broker.env import egress_tool_unavailable
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
@@ -1202,6 +1203,23 @@ def resolved_tool_metadata_for_runtime(
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
     return resolved_state.tool_metadata
+
+
+def listable_tool_metadata(runtime_paths: RuntimePaths, config: Config) -> dict[str, ToolMetadata]:
+    """Return the tools a tool listing offers for one runtime config: the visible ones that can run here.
+
+    The egress credentials tool cannot run while the egress broker is off. A plugin that fails to load drops its own
+    tools, never the listing.
+    """
+    return {
+        name: metadata
+        for name, metadata in resolved_tool_metadata_for_runtime(
+            runtime_paths,
+            config,
+            tolerate_plugin_load_errors=True,
+        ).items()
+        if not egress_tool_unavailable(name, runtime_paths)
+    }
 
 
 def _tool_validation_snapshot_from_state(

@@ -35,6 +35,8 @@ const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
   calls: "*",
   budgets: "*",
   room_defaults: ["admins"],
+  // The Agent Keys card edits services and shows only while the broker runs; unmatched_hosts stays in config.yaml.
+  egress_broker: "*",
 };
 
 const SETTINGS_SECTIONS: readonly SettingsSection[] = [

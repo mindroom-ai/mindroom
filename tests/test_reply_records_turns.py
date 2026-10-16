@@ -1080,9 +1080,19 @@ async def test_a_stop_reaction_reaches_a_running_reply_only_in_its_room(tmp_path
         patch.object(bot._journal_dispatcher, "receipt_order", new=AsyncMock(return_value=7)),
     ):
         elsewhere = MagicMock(room_id="!elsewhere:localhost")
-        assert not await dispatcher._maybe_handle_stop_reaction(elsewhere, _stop_reaction(reply.event_id), None)
+        assert not await dispatcher._maybe_handle_stop_reaction(
+            elsewhere,
+            _stop_reaction(reply.event_id),
+            None,
+            "@user:localhost",
+        )
         here = MagicMock(room_id=_target().room_id)
-        assert await dispatcher._maybe_handle_stop_reaction(here, _stop_reaction(reply.event_id), None)
+        assert await dispatcher._maybe_handle_stop_reaction(
+            here,
+            _stop_reaction(reply.event_id),
+            None,
+            "@user:localhost",
+        )
 
     await asyncio.wait_for(response, timeout=5)
     assert (await _reply(bot)).state is rl.ReplyState.CANCELLED

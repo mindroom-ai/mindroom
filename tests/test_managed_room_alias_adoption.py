@@ -456,3 +456,33 @@ async def test_transient_root_space_read_failure_neither_adopts_nor_creates(
     assert _recorded_space(config) is None
     create_space.assert_not_awaited()
     join.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("description", "expected_topic"),
+    [("  Literature reviews  ", "Literature reviews"), ("", "topic")],
+)
+async def test_new_room_topic_uses_configured_description_before_ai(
+    tmp_path: Path,
+    create_room: AsyncMock,
+    description: str,
+    expected_topic: str,
+) -> None:
+    """A new managed room takes its description as the topic, and only rooms without one ask the model."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"], rooms={"lobby": {"description": description}})
+    client = AsyncMock()
+    client.homeserver = "http://localhost:8008"
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasError("missing", "M_NOT_FOUND")
+
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=client,
+        room_key="lobby",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_policy=resolve_room_policy(config, "lobby"),
+    )
+
+    assert room_id == _FRESH
+    assert create_room.await_args.kwargs["topic"] == expected_topic
+    assert matrix_rooms.generate_room_topic_ai.await_count == (0 if description else 1)

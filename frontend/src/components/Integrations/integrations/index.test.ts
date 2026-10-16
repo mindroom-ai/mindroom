@@ -94,7 +94,7 @@ describe("Generic OAuth integration provider", () => {
     window.dispatchEvent(
       new MessageEvent("message", {
         data: {
-          type: "mindroom:oauth-complete",
+          type: "mindroom-oauth",
           provider: "google_drive",
           status: "connected",
         },
@@ -107,7 +107,7 @@ describe("Generic OAuth integration provider", () => {
     window.dispatchEvent(
       new MessageEvent("message", {
         data: {
-          type: "mindroom:oauth-complete",
+          type: "mindroom-oauth",
           provider: "google_drive",
           status: "connected",
         },
@@ -123,6 +123,48 @@ describe("Generic OAuth integration provider", () => {
       expect.any(Function),
     );
     removeListener.mockRestore();
+  });
+
+  it("settles on the newer popup message too: connected resolves and cancelled rejects", async () => {
+    const openPopup = () => {
+      const authWindow = {
+        closed: false,
+        close: vi.fn(),
+      } as unknown as Window;
+      (global.window.open as any).mockReturnValue(authWindow);
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
+      });
+      return authWindow;
+    };
+    const say = (authWindow: Window, status: string) =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "mindroom-oauth", provider: "google_drive", status },
+          source: authWindow,
+          origin: window.location.origin,
+        }),
+      );
+    const config = integrationProviders.google_drive.getConfig();
+
+    const connected = openPopup();
+    const connect = config.onAction!(config.integration);
+    await vi.waitFor(() => expect(global.window.open).toHaveBeenCalled());
+    say(connected, "connected");
+    await connect;
+    expect(connected.close).toHaveBeenCalledOnce();
+
+    const cancelled = openPopup();
+    const cancel = config.onAction!(config.integration);
+    const rejection = expect(cancel).rejects.toThrow(
+      "Google Drive authorization was cancelled",
+    );
+    await vi.waitFor(() => expect(global.window.open).toHaveBeenCalledTimes(2));
+    say(cancelled, "cancelled");
+    await rejection;
+    // The popup's page closes itself, so it is left alone.
+    expect(cancelled.close).not.toHaveBeenCalled();
   });
 
   it("accepts OAuth completion from the backend origin returned by connect", async () => {
@@ -153,7 +195,7 @@ describe("Generic OAuth integration provider", () => {
     window.dispatchEvent(
       new MessageEvent("message", {
         data: {
-          type: "mindroom:oauth-complete",
+          type: "mindroom-oauth",
           provider: "google_drive",
           status: "connected",
         },
@@ -193,7 +235,7 @@ describe("Generic OAuth integration provider", () => {
     window.dispatchEvent(
       new MessageEvent("message", {
         data: {
-          type: "mindroom:oauth-complete",
+          type: "mindroom-oauth",
           provider: "google_drive",
           status: "connected",
         },

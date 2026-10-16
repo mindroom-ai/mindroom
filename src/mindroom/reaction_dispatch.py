@@ -102,6 +102,7 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
+        requester_user_id: str,
     ) -> bool:
         """Route a stop reaction only to the live run that claimed it."""
         stop_claimed = consumer is SemanticConsumer.STOP_REACTION
@@ -112,7 +113,9 @@ class ReactionDispatcher:
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
             ).current_entity_name_for_user_id(event.sender)
-            if sender_agent_name or not (
+            # An entity's 🛑, its own Stop button included, stops nothing unless it relays
+            # the user it acts for, as stop_agent_reply does; access then applies to that user.
+            if (sender_agent_name and requester_user_id == event.sender) or not (
                 # A running reply in the reaction's room, including one whose create is still unacknowledged.
                 await self.deps.user_stop_reconciler.accepts_reply_stop(event.reacts_to, room.room_id)
             ):
@@ -188,7 +191,7 @@ class ReactionDispatcher:
                     self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
                     await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-                if await self._maybe_handle_stop_reaction(room, event, consumer):
+                if await self._maybe_handle_stop_reaction(room, event, consumer, requester_user_id):
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 outcome = await self._maybe_handle_interactive_reaction(
                     room,
@@ -208,7 +211,7 @@ class ReactionDispatcher:
                     correlation_id=event.event_id,
                 )
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        if await self._maybe_handle_stop_reaction(room, event, consumer):
+        if await self._maybe_handle_stop_reaction(room, event, consumer, requester_user_id):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._maybe_handle_interactive_reaction(
             room,

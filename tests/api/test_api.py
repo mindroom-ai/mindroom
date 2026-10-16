@@ -2351,8 +2351,8 @@ def test_get_tools_uses_one_runtime_snapshot(
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", side_effect=_read_tools_runtime_config),
         patch(
-            "mindroom.api.tools.resolved_tool_metadata_for_runtime",
-            side_effect=lambda runtime_paths, _config, **_kwargs: (captured_runtime_paths.append(runtime_paths), {})[1],
+            "mindroom.api.tools.listable_tool_metadata",
+            side_effect=lambda runtime_paths, _config: (captured_runtime_paths.append(runtime_paths), {})[1],
         ),
         patch(
             "mindroom.api.tools.export_tools_metadata",
@@ -3183,6 +3183,24 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     # The editor-facing authored serializer preserves explicit emptiness
     # instead of materializing model defaults into saved config.
     assert saved_config["defaults"] == {}
+
+
+def test_save_config_writes_keys_in_alphabetical_order(test_client: TestClient, temp_config_file: Path) -> None:
+    """A save writes config.yaml with every mapping's keys sorted, whatever order the draft has them in."""
+    agent = {"display_name": "Agent", "role": "Role", "tools": [], "instructions": [], "rooms": []}
+    new_config = {
+        "router": {"model": "default"},
+        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "agents": {"zeta": agent, "alpha": agent},
+    }
+
+    response = test_client.put("/api/config/save", json=new_config)
+    assert response.status_code == 200, response.text
+
+    saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    assert list(saved_config) == sorted(saved_config)
+    assert list(saved_config["agents"]) == ["alpha", "zeta"]
+    assert list(saved_config["agents"]["alpha"]) == sorted(saved_config["agents"]["alpha"])
 
 
 def test_save_config_persists_unassigned_configured_rooms(
@@ -5709,7 +5727,9 @@ def test_api_key_keeps_oauth_callbacks_open(
 
     response = api_key_client.get(path)
     assert response.status_code == 400
-    assert "OAuth state is invalid or expired" in response.json()["detail"]
+    # The generic OAuth callback answers the popup with a page; the older integration callbacks answer JSON.
+    body = response.text if path.startswith("/api/oauth/") else response.json()["detail"]
+    assert "OAuth state is invalid or expired" in body
 
 
 _PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
@@ -6060,7 +6080,7 @@ def test_platform_runtime_restricts_cors_origins(tmp_path: Path) -> None:
         },
     )
 
-    assert main._api_cors_origins(runtime_paths) == [
+    assert auth._hosted_browser_origins(runtime_paths) == [
         "https://tenant42.example.test",
         "https://app.example.test",
     ]

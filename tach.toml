@@ -285,8 +285,6 @@ visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.response_turn",
     "mindroom.agent_cli.cli_shell_agent",
-    # Native delegation retires the caller's CLI binding before continuing its run.
-    "mindroom.delegation.execution",
 ]
 
 [[interfaces]]
@@ -1410,6 +1408,7 @@ visibility = [
     "mindroom.custom_tools.config_manager",
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
+    "mindroom.egress_broker",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",
     "mindroom.oauth.reset",
@@ -1592,6 +1591,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.frontend_assets",
+    "mindroom.egress_broker",
 ]
 
 [[modules]]
@@ -1601,6 +1601,27 @@ depends_on = [
     "mindroom.api.report_headers",
     "mindroom.constants",
     "mindroom.dynamic_workflows",
+]
+
+[[modules]]
+path = "mindroom.api.egress_broker"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.credentials_target",
+    "mindroom.api.egress_status",
+    "mindroom.api.oauth",
+    "mindroom.egress_broker",
+]
+
+[[modules]]
+path = "mindroom.api.egress_status"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.api.oauth",
+    "mindroom.config.egress_broker",
+    "mindroom.constants",
+    "mindroom.egress_broker",
 ]
 
 [[modules]]
@@ -1732,22 +1753,41 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.oauth",
     "mindroom.api.connection_agents",
+    "mindroom.api.egress_credentials",
     "mindroom.constants",
     "mindroom.oauth",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.oauth.service",
     "mindroom.tool_system.catalog",
+    "mindroom.egress_broker",
 ]
 
 [[modules]]
 path = "mindroom.api.connection_agents"
 depends_on = [
     "mindroom.access_policy",
+    "mindroom.api.auth",
     "mindroom.authorization",
     "mindroom.matrix.identity",
     "mindroom.mcp_gateway.types",
+    "mindroom.origins",
     "mindroom.requester_identity",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.api.egress_credentials"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.auth",
+    "mindroom.api.connection_agents",
+    "mindroom.api.egress_status",
+    "mindroom.api.oauth",
+    "mindroom.authorization",
+    "mindroom.config.egress_broker",
+    "mindroom.credentials.manager",
+    "mindroom.egress_broker",
+    "mindroom.requester_identity",
 ]
 
 [[modules]]
@@ -1805,6 +1845,8 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.dynamic_workflows",
+    "mindroom.api.egress_broker",
+    "mindroom.api.egress_credentials",
     "mindroom.api.external_triggers",
     "mindroom.api.frontend",
     "mindroom.api.homeassistant_integration",
@@ -1939,6 +1981,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.constants",
     "mindroom.tool_system.worker_routing",
+    "mindroom.egress_broker",
 ]
 
 [[modules]]
@@ -2302,6 +2345,18 @@ depends_on = [
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_visible_messages",
     "mindroom.thread_summary",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.stop_reply"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
+    "mindroom.requester_identity",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -2887,6 +2942,7 @@ depends_on = [
     "mindroom.workers.runtime",
     "mindroom.automations.runner",
     "mindroom.skill_learning.runner",
+    "mindroom.egress_broker",
 ]
 
 [[modules]]
@@ -3165,6 +3221,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
     "mindroom.config.schema_hints",
+    "mindroom.config.egress_broker",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -3525,6 +3582,7 @@ visibility = [
     "mindroom.custom_tools.chat_ui",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
+    "mindroom.custom_tools.stop_reply",
     "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
     "mindroom.matrix.client",
@@ -4201,6 +4259,7 @@ depends_on = [
     "mindroom.model_defaults",
     "mindroom.response_admission",
     "mindroom.session_ids",
+    "mindroom.tool_system.dependencies",
 ]
 
 [[modules]]
@@ -4300,7 +4359,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix_rtc.voice_agent"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.tool_system.dependencies"]
 
 [[modules]]
 path = "mindroom.matrix_rtc.spoken_turns"
@@ -4915,6 +4974,7 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.legacy_tool_overrides",
+    "mindroom.egress_broker",
 ]
 
 [[modules]]
@@ -5044,6 +5104,40 @@ path = "mindroom.egress"
 depends_on = ["mindroom.tool_system.worker_routing"]
 
 [[modules]]
+path = "mindroom.egress_broker"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.config.egress_broker",
+    "mindroom.constants",
+    "mindroom.credentials.policy",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.worker_computer.browser_proxy",
+]
+# The broker's wiring points: every module outside the feature that may import it.
+visibility = [
+    "mindroom.api.connections",
+    "mindroom.api.egress_broker",
+    "mindroom.api.egress_credentials",
+    "mindroom.api.egress_status",
+    "mindroom.api.frontend",
+    "mindroom.api.sandbox_exec",
+    "mindroom.config.egress_broker",
+    "mindroom.custom_tools.egress_credentials",
+    "mindroom.orchestrator",
+    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.sandbox_proxy",
+]
+
+[[modules]]
+path = "mindroom.config.egress_broker"
+depends_on = ["mindroom.credentials.policy", "mindroom.egress_broker"]
+
+[[modules]]
+path = "mindroom.custom_tools.egress_credentials"
+depends_on = ["mindroom.egress_broker", "mindroom.tool_system.runtime_context"]
+
+[[modules]]
 path = "mindroom.tool_system.events"
 depends_on = []
 
@@ -5106,12 +5200,14 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.worker_arguments",
     "mindroom.tool_system.worker_proxy_client",
+    "mindroom.egress_broker",
 ]
 
 [[modules]]
 path = "mindroom.tool_system.worker_proxy_client"
 depends_on = [
     "mindroom.credentials.manager",
+    "mindroom.credentials.policy",
     "mindroom.runtime_env_policy",
     "mindroom.workers.models",
     "mindroom.tool_jobs.control",
@@ -6332,8 +6428,10 @@ expose = [
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
     "deserialize_tool_validation_snapshot",
+    "egress_tool_unavailable",
     "export_tools_metadata",
     "get_tool_by_name",
+    "listable_tool_metadata",
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
@@ -6372,9 +6470,11 @@ expose = [
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
     "deserialize_tool_validation_snapshot",
+    "egress_tool_unavailable",
     "ensure_tool_registry_loaded",
     "export_tools_metadata",
     "get_tool_by_name",
+    "listable_tool_metadata",
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
@@ -6663,6 +6763,7 @@ expose = [
     "load_oauth_credentials_snapshot_sync",
     "load_oauth_credentials_status",
     "load_oauth_reset_connection_generation",
+    "oauth_account_label",
     "oauth_credential_generation",
     "oauth_credentials_have_required_scopes",
     "oauth_credentials_have_scopes",
@@ -7189,7 +7290,6 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
-    "mindroom.agent_cli.lifetime",
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.consumption",
     "mindroom.cancellation",
@@ -7698,7 +7798,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.browser_proxy"
 depends_on = []
-visibility = ["mindroom.custom_tools.agno_compat_agentql", "mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.tools.crawl4ai", "mindroom.worker_computer.mcp_provider"]
+visibility = ["mindroom.custom_tools.agno_compat_agentql", "mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.egress_broker", "mindroom.tools.crawl4ai", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"

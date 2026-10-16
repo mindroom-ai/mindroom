@@ -8,13 +8,19 @@ from typing import TYPE_CHECKING
 from fastapi import HTTPException
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.auth import require_same_origin
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
+from mindroom.origins import normalized_origin
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
+    from fastapi import Request
+
     from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -25,6 +31,33 @@ SHARED_CREDENTIALS_GATEWAY_MESSAGE = (
     "This shared agent runs tools with credentials shared by all its users and is not available through MCP. "
     "Use it in MindRoom chat."
 )
+
+
+def require_connections_same_origin(
+    request: Request,
+    runtime_paths: RuntimePaths,
+    *,
+    detail: str = "Connection changes require a same-origin request",
+) -> None:
+    """Reject mutations from another origin (shared helper for connections and egress routes)."""
+    public_url = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
+    expected = normalized_origin(public_url)
+    if expected is None or not expected.startswith("https://"):
+        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
+    require_same_origin(
+        request,
+        expected,
+        detail=detail,
+        headers=CONNECTIONS_HEADERS,
+    )
+
+
+async def masked_oauth_call[T](call: Awaitable[T], detail: str) -> T:
+    """Await a portal route's OAuth call; a refusal keeps its status but says only `detail`, with the portal headers."""
+    try:
+        return await call
+    except HTTPException as exc:
+        raise HTTPException(exc.status_code, detail, headers=CONNECTIONS_HEADERS) from exc
 
 
 @dataclass(frozen=True)
@@ -53,10 +86,9 @@ class ConnectionUserContext:
 
     @property
     def visible_agent_names(self) -> tuple[str, ...]:
-        """Show agents the user can execute or whose credentials they can manage."""
+        """Show agents the user can execute or whose credentials they can manage, in config declaration order."""
         eligible = set(self.agent_names) | set(self.credential_agent_names)
-        personal = (self.personal_agent_name,) if self.personal_agent_name is not None else ()
-        return personal + tuple(name for name in self.config.agents if name in eligible and name not in personal)
+        return tuple(name for name in self.config.agents if name in eligible)
 
 
 def resolve_connection_user(
@@ -120,6 +152,43 @@ def resolve_connection_user(
     )
 
 
+def _connection_agent_identity_and_target(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    agent_name: str,
+) -> tuple[ToolExecutionIdentity, ResolvedWorkerTarget]:
+    """Build the execution identity and worker target for one agent and requester."""
+    identity = build_tool_execution_identity(
+        channel="mcp",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    target = build_agent_toolkit_worker_target(
+        config.resolve_entity(agent_name).execution_scope,
+        agent_name,
+        is_private=config.agents[agent_name].private is not None,
+        execution_identity=identity,
+        runtime_paths=runtime_paths,
+    )
+    return identity, target
+
+
+def build_connection_agent_target(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    agent_name: str,
+) -> ResolvedWorkerTarget:
+    """Build an agent worker target for authorized connection and credential operations."""
+    return _connection_agent_identity_and_target(config, runtime_paths, requester_id, agent_name)[1]
+
+
 def resolve_connection_agent(
     user: ConnectionUserContext,
     agent_name: str,
@@ -127,22 +196,11 @@ def resolve_connection_agent(
     """Build one eligible agent target using its actual privacy and execution scope."""
     if agent_name not in user.agent_names:
         raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
-    identity = build_tool_execution_identity(
-        channel="mcp",
-        agent_name=agent_name,
-        runtime_paths=user.runtime_paths,
-        requester_id=user.owner.requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    target = build_agent_toolkit_worker_target(
-        user.config.resolve_entity(agent_name).execution_scope,
+    identity, target = _connection_agent_identity_and_target(
+        user.config,
+        user.runtime_paths,
+        user.owner.requester_id,
         agent_name,
-        is_private=user.config.agents[agent_name].private is not None,
-        execution_identity=identity,
-        runtime_paths=user.runtime_paths,
     )
     return AgentToolContext(
         agent_name,

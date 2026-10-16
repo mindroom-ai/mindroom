@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import sys
 import threading
 import time
@@ -30,6 +31,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import (
@@ -2312,11 +2314,12 @@ async def test_manager_reconcile_contains_session_stop_failure(tmp_path: Path) -
     assert manager._sessions == {}
 
 
-def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
     """Maybe build call manager respects configuration."""
     client = _client()
     runtime_paths = test_runtime_paths(tmp_path)
-    disabled = maybe_build_call_manager(
+    disabled = await maybe_build_call_manager(
         agent_name="helper",
         config=_config(enabled=False),
         client=client,
@@ -2329,7 +2332,7 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         wait_for_admission_or_shutdown=_admission_available,
     )
     assert disabled is None
-    not_listed = maybe_build_call_manager(
+    not_listed = await maybe_build_call_manager(
         agent_name="other",
         config=_config(),
         client=client,
@@ -2342,7 +2345,7 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         wait_for_admission_or_shutdown=_admission_available,
     )
     assert not_listed is None
-    enabled = maybe_build_call_manager(
+    enabled = await maybe_build_call_manager(
         agent_name="helper",
         config=_config(),
         client=client,
@@ -2357,30 +2360,67 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
     assert isinstance(enabled, CallManager)
 
 
-def test_maybe_build_call_manager_survives_missing_livekit_package(
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["installed", "auto_install_disabled", "install_failed"])
+async def test_maybe_build_call_manager_auto_installs_missing_livekit_package(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    outcome: str,
 ) -> None:
-    """A missing livekit package disables calls instead of crashing agent startup."""
+    """A missing matrix_calls extra is installed before building; when it cannot be, calls stay off without crashing."""
+    livekit_installed = False
+    real_find_spec = importlib.util.find_spec
 
-    def raising_find_spec(_name: str) -> None:
-        msg = "No module named 'livekit'"
-        raise ModuleNotFoundError(msg)
+    def find_spec(name: str, *args: object) -> object:
+        if name.startswith("livekit") and not livekit_installed:
+            msg = "No module named 'livekit'"
+            raise ModuleNotFoundError(msg)
+        return real_find_spec(name, *args)
 
-    monkeypatch.setattr("importlib.util.find_spec", raising_find_spec)
-    manager = maybe_build_call_manager(
-        agent_name="helper",
-        config=_config(),
-        client=_client(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        ssl_verify=True,
-        tool_support=object(),
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
-    assert manager is None
+    def install(_extras: list[str], *, quiet: bool) -> bool:
+        nonlocal livekit_installed
+        assert quiet
+        livekit_installed = outcome == "installed"
+        return livekit_installed
+
+    install_extras = MagicMock(side_effect=install)
+    monkeypatch.setattr("importlib.util.find_spec", find_spec)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", install_extras)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    process_env = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"} if outcome == "auto_install_disabled" else {}
+
+    with capture_logs() as logs:
+        manager = await maybe_build_call_manager(
+            agent_name="helper",
+            config=_config(),
+            client=_client(),
+            runtime_paths=resolve_runtime_paths(
+                config_path=config_path,
+                storage_path=tmp_path / "mindroom_data",
+                process_env=process_env,
+            ),
+            ssl_verify=True,
+            tool_support=object(),
+            get_invited_rooms_by_agent=dict,
+            agent_reply_memberships=AgentReplyMembershipIndex(),
+            response_admission_gate=ResponseAdmissionGate(),
+            wait_for_admission_or_shutdown=_admission_available,
+        )
+
+    events = {log["event"]: log for log in logs}
+    if outcome == "auto_install_disabled":
+        install_extras.assert_not_called()
+    else:
+        install_extras.assert_called_once_with(["matrix_calls"], quiet=True)
+    if outcome == "installed":
+        assert isinstance(manager, CallManager)
+        assert "calls_optional_dependencies_auto_installed" in events
+    else:
+        assert manager is None
+        assert events["calls_enabled_but_dependencies_missing"]["hint"] == (
+            "install mindroom with the [matrix_calls] extra"
+        )
 
 
 @pytest.mark.asyncio
