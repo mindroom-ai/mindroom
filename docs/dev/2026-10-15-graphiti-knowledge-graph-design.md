@@ -1,6 +1,6 @@
 # Graphiti knowledge graph and autonomous exploration
 
-Status: design, not implemented.
+Status: implemented; the extraction-quality question below is still open.
 
 ## Intent
 
@@ -74,6 +74,7 @@ An exploration turn is marked by its trusted automation hook source, and its age
 - caps tool calls at the entry's `max_tool_calls` for the whole exploration thread.
 
 The existing per-turn cap counts each Agno response loop afresh, so a continuation would reset it; exploration instead counts executed calls per exploration thread and declines calls past the cap, and the restrictions apply to every continuation and deferred tool in that thread.
+The count lives in memory, so a restart during an exploration run grants that thread a fresh cap; persisting it was rejected as more machinery than a rare, bounded overrun is worth.
 
 The allowlist rejects, at config load, toolkits that start other agent runs or change the agent itself (`delegate`, `dynamic_tools`, `dynamic_workflow`, `scheduler`, `matrix_message`, `invite_router`, `self_config`, `skill_manage`, `memory`, `compact_context`, `thread_model`, `script`), because a call to one would act outside the allowlist.
 Listing a code-executing tool such as `shell` or `python` is allowed and gives exploration everything that tool can reach, as the trust model states for any agent.
@@ -95,6 +96,11 @@ The graph name also carries the effective embedder signature that names Mem0 col
 
 Rejected: one embedded database file per agent or private instance.
 FalkorDB Lite starts one Redis server process per file, and per-scope graphs in one server already isolate data that code addresses.
+
+MindRoom starts falkordblite 0.10.0's bundled `redis-server` as its own child process instead of using falkordblite's clients.
+Evidence: its async client's `close()` skips the shutdown it delegates to the async wrapper, so the server outlives the Python process; its sync client waits up to ten seconds per close and did not always stop the server; and a server whose final save fails, for example after its directory is removed, ignores SIGTERM.
+A restart that leaves the old server running would put two servers on one database file, so a start first stops a server left in the same directory, matched by process name and working directory rather than binary path, because an upgrade moves the binary while the old server keeps running.
+The server persists with an append-only file, so a kill loses at most a second of writes.
 
 ### Graphiti's models come from MindRoom config
 
@@ -156,11 +162,12 @@ agents:
 
 1. Every `interval_seconds`, for each graph-enabled agent and private instance, list sessions updated since that scope's cursor.
 2. Skip sessions active within `idle_seconds`, and threads that automations other than `exploration` started.
-3. For each session, up to `max_sessions_per_cycle`, read the completed runs after the session's ingested-run marker from both the live session and the compaction archive, because compaction can move runs before ingestion reaches them.
+3. For each session, up to `max_sessions_per_cycle`, read its finished and approval-waiting top-level runs from both the live session and the compaction archive, because compaction can move runs before ingestion reaches them, and stop at the first run that waits for approval, because it finishes in place later with its original, earlier creation time and a marker past it would skip it.
 4. Render them with a dedicated episode renderer, not the skill-learning digest, which shortens older messages and drops older tool results: every message in full with its speaker, tool calls with arguments, each tool result clipped to `max_tool_result_chars`, credential-like values redacted with the shared `redact_sensitive_text`, and consecutive runs merged into `conversation` and `tool_results` episodes of at most `max_episode_chars`, split only at run boundaries; a single run larger than the cap is clipped.
-5. Call `add_episode` for each episode with `reference_time` from its last run and the scope's `group_id`, then advance the marker past that episode's runs.
+5. Call `add_episode` for each episode with `reference_time` from its last run and the scope's `group_id`, then advance that episode kind's marker past its runs; each kind has its own marker, so a kind that keeps failing never repeats the other kind's episodes.
 6. The marker is the only record of completion; Graphiti's `add_episode(uuid=...)` loads an existing episode and extracts again rather than skipping it, so no UUID is passed, and a crash between the write and the marker update re-extracts one episode, whose entities and facts Graphiti's resolution merges with the first copy.
-7. A failure keeps the marker, logs, and retries the session next cycle with a growing cooldown.
+7. A failure keeps the marker, logs, and retries the session next cycle with a growing cooldown; after five failures in a row the episode is dropped with an error in the log, so one episode the model cannot extract does not cost calls forever.
+8. A new graph's start time is saved when the graph is first seen, so the backfill window stays anchored even with `backfill_days: 0`.
 
 Ingestion spend is bounded by `max_sessions_per_cycle` sessions of at most `max_episode_chars` per episode each `interval_seconds`, independent of exploration's `max_tool_calls`.
 
@@ -171,7 +178,7 @@ The exploration automation's final step wakes the worker so an exploration threa
 1. The check, in code, collects leads: distinct `(function, arguments)` calls in the agent's conversations since the last run, excluding `knowledge_graph` calls and exploration threads, arguments redacted, with counts and last-seen times, newest first, capped at `max_leads`.
 2. With no leads and `revisit_days` not elapsed, it returns `None` and costs nothing.
 3. Otherwise it asks the agent, in a new thread, to: check what the graph knows with `knowledge_graph`, re-read the sources behind the leads for changes, follow references into containers not yet seen, and look for owners, dates, and links the graph lacks, using only read operations, then end with a short report of what it checked and what remains unknown.
-4. When the run ends, the step wakes ingestion, posts a notice with the tool calls made, and resolves the thread.
+4. When the run ends, the step posts a notice, resolves the thread, and wakes ingestion once the thread has been idle for `idle_seconds`, since an immediate pass would still find it active.
 
 `exploration` does not require file memory, unlike the other built-ins.
 
@@ -196,6 +203,10 @@ The tool runs in the primary process and touches no files.
 
 ## Error handling
 
+- Graphiti calls `load_dotenv()` when it is imported, which would copy the first `.env` above its install into `os.environ`; MindRoom imports it with `PYTHON_DOTENV_DISABLED` set, because it reads `.env` files only deliberately.
+- An extraction call the provider rejects raises with the provider's message, so health shows the cause rather than a JSON parse error.
+- An agent or private instance whose conversations cannot be read is reported and skipped, so it does not stop ingestion for the others, and stopping the runtime cancels a pass in progress instead of waiting for its extraction calls.
+
 - Missing optional dependency: install on first use, as other extras do; failure disables ingestion and the tool for that runtime with one logged error and a `/api/health` entry.
 - Extraction failure or timeout: the session keeps its marker and retries later; repeated failure appears in health, not in rooms.
 - Database unavailable: tool calls return a readable error; ingestion pauses and retries.
@@ -205,7 +216,7 @@ The tool runs in the primary process and touches no files.
 
 - Unit: lead collection from a seeded session DB (allowlist filtering, `knowledge_graph` exclusion, dedup, caps), episode rendering (episode kinds and speakers, conversation vs exploration threads, archived runs, splitting at run boundaries, redaction), marker advance and retry, scope derivation, graph-name hashing, and the embedder fingerprint.
 - Seam: exploration turns build with only allowlisted functions and no gated functions, and ordinary turns of the same agent are unchanged; the per-thread cap holds across a continuation.
-- Integration: a fake Graphiti client behind the store protocol for the worker loop; one opt-in test against real FalkorDB Lite and a local OpenAI-compatible model.
+- Integration: a fake store for the worker loop, and real FalkorDB Lite for the store, server lifecycle, and scope isolation, with seeded nodes and edges instead of model extraction.
 - Live: the success scenario above with two real sources, checked for correct facts and source links.
 
 ## Out of scope
@@ -216,6 +227,11 @@ The tool runs in the primary process and touches no files.
 - A monthly USD cap for exploration; `max_tool_calls`, cron, and model choice bound spend, and `knowledge_graph` usage shows extraction cost.
 - Custom entity and edge types; Graphiti's default extraction first, a prescribed ontology only if evaluation shows it is needed.
 - Cognee, which the user did not ask for and was not evaluated.
+
+## Limitations
+
+- Redacting or deleting a message does not remove facts already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
+- A config reload that changes the embedder during a pass can add that pass's remaining episodes to the old graph.
 
 ## Open questions
 
