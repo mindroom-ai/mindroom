@@ -131,6 +131,7 @@ _EXPLORATION_RESTRICTED_TOOLKITS = frozenset(
         "self_config",
         "skill_manage",
         "thread_model",
+        "thread_summary",
         "todo",
     },
 )

@@ -27,7 +27,7 @@ agents:
 
 `agents.<name>.knowledge_graph` (bool, default from `defaults.knowledge_graph`, which defaults to `false`) turns the graph on for one agent and gives it the `knowledge_graph` tool.
 MindRoom installs the optional `knowledge_graph` extra the first time a graph is used.
-Extraction needs a model with reliable structured output; small local models often fail it, and failed conversations are retried later.
+Extraction needs a model with reliable structured output; small local models often fail it; a failed extraction is retried later, and a part of a conversation that still fails after five tries or three days is skipped.
 
 ## Settings
 
@@ -38,7 +38,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations added per pass; the rest wait for the next |
 | `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once |
-| `knowledge_graph.ingest.max_tool_result_chars` | `4000` (100 to 60000) | Characters kept from each tool result |
+| `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
 Facts are embedded with [`memory.embedder`](memory.md#embedder).

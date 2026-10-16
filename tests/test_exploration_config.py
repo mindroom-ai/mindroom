@@ -88,6 +88,7 @@ def test_exploration_tools_must_be_the_agents_own() -> None:
         "external_trigger_manager",
         "todo",
         "matrix_api.send_event",
+        "thread_summary",
     ],
 )
 def test_exploration_rejects_toolkits_that_act_beyond_it(toolkit: str) -> None:

@@ -384,17 +384,17 @@ agents:
 
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
 2. When there are such calls, or `revisit_days` have passed since the last run, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
-3. Every tool result in that thread is added to the graph; the agent's own summary is not.
+3. When the run finishes, its tool results are added to the graph; the agent's own summary is not, and an interrupted run adds nothing.
 4. When the run ends, MindRoom marks the thread resolved.
 
 During an exploration run the agent can call only the toolkits or `toolkit.function` entries in `tools`, plus `knowledge_graph`, and never a function that needs [approval](tool-approval.md), so nothing waits for a person.
 Skills, knowledge base search, and background jobs are off during exploration, and an OAuth-backed MCP server is reachable only through its listed tools, not its `call_tool` function.
 It is told to only read, but only `tools` limits what it can do, so leave out tools that change things, or add an [approval rule](tool-approval.md) for their writing functions.
-`tools` cannot name `callback_manager`, `compact_context`, `config_manager`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `external_trigger_manager`, `invite_router`, `matrix_api`, `matrix_message`, `memory`, `scheduler`, `script`, `self_config`, `skill_manage`, `thread_model`, or `todo`, because those start other runs or change agents.
+`tools` cannot name `callback_manager`, `compact_context`, `config_manager`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `external_trigger_manager`, `invite_router`, `matrix_api`, `matrix_message`, `memory`, `scheduler`, `script`, `self_config`, `skill_manage`, `thread_model`, `thread_summary`, or `todo`, because those start other runs or change agents.
 Allowing a code-executing tool such as `shell` gives exploration everything that tool can reach.
 A person who replies in an exploration thread gets the agent's ordinary tools, but agents named in the exploration reply do not answer it.
 
-The prompt lists recent tool calls with their arguments, credential-like values removed and every `@` replaced by `＠` so it mentions nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 
 | Field | Default | Description |
 |---|---|---|

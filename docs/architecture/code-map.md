@@ -164,7 +164,7 @@ Matrix sync callback
 | `knowledge_graph/session_runs.py` | Finished and approval-waiting Matrix turns of a conversation, live and compacted |
 | `knowledge_graph/ingestion.py` | Background ingestion passes with per-kind markers, backoff, and dropped episodes |
 | `knowledge_graph/runtime.py` | Starts and stops the store and ingestion worker as agents enable the graph |
-| `config/knowledge_graph.py` | The `knowledge_graph` section: backend, extraction model, and ingestion settings |
+| `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model and ingestion settings |
 | `custom_tools/knowledge_graph.py` | The read-only `knowledge_graph` tool |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |

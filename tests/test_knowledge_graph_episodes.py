@@ -153,7 +153,7 @@ def test_credentials_are_redacted() -> None:
 
 def test_runs_merge_until_the_cap_and_split_only_at_run_boundaries() -> None:
     """Consecutive runs share an episode until the next would pass the cap."""
-    settings = KnowledgeGraphIngestConfig(max_episode_chars=1000)
+    settings = KnowledgeGraphIngestConfig(max_episode_chars=1000, max_tool_result_chars=400)
     runs = [_run(f"r{index}", created_at=1_760_000_000 + index, answer="a" * 400) for index in range(3)]
 
     rendered = render_episodes(
@@ -171,7 +171,7 @@ def test_runs_merge_until_the_cap_and_split_only_at_run_boundaries() -> None:
 
 def test_a_single_message_over_the_cap_is_clipped() -> None:
     """A message larger than the cap still produces an episode, clipped to it, and completes its run."""
-    settings = KnowledgeGraphIngestConfig(max_episode_chars=1000)
+    settings = KnowledgeGraphIngestConfig(max_episode_chars=1000, max_tool_result_chars=400)
 
     rendered = _episodes([_run("r1", answer="b" * 5000)], "conversation", settings)
 

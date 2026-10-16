@@ -2306,6 +2306,8 @@ def create_agent(  # noqa: PLR0915
         not disable_runtime_capabilities
         and knowledge is not None
         and (persona is None or persona.kept_knowledge != ())
+        # Knowledge search is not on an exploration allowlist.
+        and exploration is None
         and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
     )
     knowledge_sources = (

@@ -417,7 +417,7 @@ async def test_a_new_graph_skips_turns_older_than_the_backfill_window(tmp_path: 
 @pytest.mark.asyncio
 async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
     """One conversation adds a bounded number of episodes per pass and stays due until it is done."""
-    config, paths, store = _config(max_episode_chars=1000), _paths(tmp_path), _FakeStore()
+    config, paths, store = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path), _FakeStore()
     run_ids = [f"r{index:02d}" for index in range(30)]
     _seed(config, paths, "!room:x:$t1", run_ids)
     storage = create_session_storage("mind", config, paths, execution_identity=None)
@@ -463,5 +463,56 @@ async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
     store.unavailable = False
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
     await worker._run_cycle(config, now=T0 + 10 + 4 * DAY)
+
+    assert _answers(store) == ["agent mind: answer r2"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_later_piece_of_a_long_run_is_eventually_dropped(tmp_path: Path) -> None:
+    """A piece that keeps failing is dropped, even though the pieces before it keep succeeding."""
+    config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        session = storage.get_session("!room:x:$t1", SessionType.AGENT)
+        assert session is not None
+        session.runs[0].tools = [
+            ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
+            for index in range(6)
+        ]
+        storage.upsert_run(run=session.runs[0], session_id="!room:x:$t1", user_id=None)
+    finally:
+        storage.close()
+    store = _FakeStore()
+    attempts: list[str] = []
+    real_add = store.add_episode
+
+    async def second_piece_fails(scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
+        if episode.kind == "tool_results":
+            attempts.append(episode.body.split("(", 1)[0])
+            if "fetch_3" in episode.body and "fetch_0" not in episode.body:
+                msg = "unusable output"
+                raise ValueError(msg)
+        await real_add(scope, episode, usage)
+
+    worker = _worker(config, paths, store)
+    with patch.object(store, "add_episode", second_piece_fails):
+        for attempt in range(10):
+            await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+
+    assert len(attempts) <= 2 * 5 + 2
+    assert any("fetch_3" in body for _, episode, _ in store.episodes for body in [episode.body]) is False
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_held_back_by_an_approval_is_ingested_once_it_expires(tmp_path: Path) -> None:
+    """Turns after an abandoned approval are ingested once its window passes, without another message."""
+    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
+    worker = _worker(config, paths, store)
+
+    await worker._run_cycle(config, now=T0 + 10)
+    assert store.episodes == []
+    await worker._run_cycle(config, now=T0 + 8 * DAY)
 
     assert _answers(store) == ["agent mind: answer r2"]

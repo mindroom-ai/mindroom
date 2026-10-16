@@ -133,11 +133,7 @@ def _after_run(state_dir: Path, checked_at: float, config: Config, thread_id: st
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     write_json_file_durable(state_dir / _STATE_FILE, {"last_run_at": checked_at})
-    notice = (
-        "⚠️ Exploration did not finish within an hour; what it read so far still joins the knowledge graph."
-        if timed_out
-        else "🔭 Exploration finished; what it read joins the knowledge graph shortly."
-    )
+    notice = "⚠️ Exploration did not finish within an hour." if timed_out else "🔭 Exploration ended."
     return Done(
         notice,
         resolve=(thread_id,),

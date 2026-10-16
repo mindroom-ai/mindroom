@@ -62,6 +62,8 @@ class _SessionState(TypedDict):
     # When the current episode started failing, so one that never succeeds is dropped after a while.
     failing_since: float
     retry_at: float
+    # When a turn holding the conversation back stops waiting for approval, or 0.
+    recheck_at: float
 
 
 class _GraphState(TypedDict):
@@ -87,7 +89,15 @@ def wake_knowledge_graph_ingestion(*, after_seconds: float = 0) -> None:
 
 
 def _new_session_state() -> _SessionState:
-    return {"updated_at": 0, "markers": {}, "failures": 0, "bad_outputs": 0, "failing_since": 0, "retry_at": 0}
+    return {
+        "updated_at": 0,
+        "markers": {},
+        "failures": 0,
+        "bad_outputs": 0,
+        "failing_since": 0,
+        "retry_at": 0,
+        "recheck_at": 0,
+    }
 
 
 def _approval_window_seconds(config: Config) -> float:
@@ -97,8 +107,12 @@ def _approval_window_seconds(config: Config) -> float:
     return days * _DAY_SECONDS
 
 
-def _finished_runs(runs: list[RunOutput], now: float, approval_window: float) -> list[RunOutput]:
-    """Return the finished runs before the first one that can still finish later.
+def _finished_runs(
+    runs: list[RunOutput],
+    now: float,
+    approval_window: float,
+) -> tuple[list[RunOutput], float | None]:
+    """Return the finished runs before the first one that can still finish later, and when that one stops waiting.
 
     A turn waiting for approval finishes in place with its original, earlier creation time, so nothing after it is
     ingested yet; once its approval window has passed it can no longer finish and is skipped.
@@ -106,11 +120,12 @@ def _finished_runs(runs: list[RunOutput], now: float, approval_window: float) ->
     finished: list[RunOutput] = []
     for run in runs:
         if run.status == RunStatus.paused:
-            if now - (run.created_at or 0) < approval_window:
-                break
+            expires_at = (run.created_at or 0) + approval_window
+            if now < expires_at:
+                return finished, expires_at
             continue
         finished.append(run)
-    return finished
+    return finished, None
 
 
 def _start_after_backfill_window(entry: _SessionState, runs: list[RunOutput], *, cutoff: float) -> None:
@@ -217,7 +232,10 @@ class KnowledgeGraphIngestionWorker:
                 if len(due) >= limit:
                     break
                 entry = state["sessions"].get(session_id)
-                if entry is not None and (entry["updated_at"] >= updated_at or entry["retry_at"] > now):
+                if entry is not None and (
+                    entry["retry_at"] > now
+                    or (updated_at <= entry["updated_at"] and not 0 < entry.get("recheck_at", 0) <= now)
+                ):
                     continue
                 if now - updated_at < settings.idle_seconds:
                     continue
@@ -239,7 +257,7 @@ class KnowledgeGraphIngestionWorker:
         settings = config.knowledge_graph.ingest
         first_sight = session.session_id not in state["sessions"]
         entry = state["sessions"].setdefault(session.session_id, _new_session_state())
-        finished = _finished_runs(session.runs, now, _approval_window_seconds(config))
+        finished, blocked_until = _finished_runs(session.runs, now, _approval_window_seconds(config))
         if first_sight:
             _start_after_backfill_window(
                 entry,
@@ -274,7 +292,15 @@ class KnowledgeGraphIngestionWorker:
                     return clean
             if new_runs:
                 entry["markers"][kind] = list(run_key(new_runs[-1]))
-        entry.update(updated_at=session.updated_at, failures=0, bad_outputs=0, failing_since=0, retry_at=0)
+        # Held back by a turn waiting for approval, it is looked at again when those approvals expire, even without news.
+        entry.update(
+            updated_at=session.updated_at,
+            recheck_at=blocked_until or 0,
+            failures=0,
+            bad_outputs=0,
+            failing_since=0,
+            retry_at=0,
+        )
         self._save_state(scope.graph_name, state)
         return clean
 
@@ -309,7 +335,9 @@ class KnowledgeGraphIngestionWorker:
                 episode=rendered.episode.name,
             )
             dropped = True
-        entry.update(failures=0, bad_outputs=0, failing_since=0)
+        # Earlier pieces of a split run succeed again on every retry, so only a finished run or a drop clears failures.
+        if rendered.last_run is not None or dropped:
+            entry.update(failures=0, bad_outputs=0, failing_since=0)
         if rendered.last_run is not None:
             entry["markers"][kind] = list(rendered.last_run)
         self._save_state(scope.graph_name, state)

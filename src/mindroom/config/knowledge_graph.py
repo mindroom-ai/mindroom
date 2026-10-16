@@ -1,6 +1,8 @@
 """Knowledge graph settings: the extraction model and conversation ingestion."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class KnowledgeGraphIngestConfig(BaseModel):
@@ -33,6 +35,14 @@ class KnowledgeGraphIngestConfig(BaseModel):
         ge=0,
         description="A new graph starts from conversations active within this many days",
     )
+
+    @model_validator(mode="after")
+    def fit_tool_results_in_episodes(self) -> Self:
+        """Keep room for a whole tool result in an episode, so the episode limit never cuts one further."""
+        if self.max_tool_result_chars * 2 > self.max_episode_chars:
+            msg = "max_tool_result_chars must be at most half of max_episode_chars"
+            raise ValueError(msg)
+        return self
 
 
 class KnowledgeGraphConfig(BaseModel):

@@ -234,3 +234,21 @@ async def test_bridge_declines_every_call_of_an_agent_the_prompt_reached_by_mist
 
     assert "at most 0 tool calls" in str(result)
     tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exploration_prompt_never_points_at_knowledge_search(tmp_path: Path) -> None:
+    """Exploration has no knowledge search, so its instructions must not tell the model to use it."""
+    agent = _agent(_runtime(tmp_path), POLICY, knowledge=Knowledge(name="docs"))
+    session = AgentSession(session_id="session-1")
+    run_context = RunContext(run_id="run-1", session_id="session-1", user_id="@alice:example.test")
+    tools = await agent.aget_tools(RunOutput(run_id="run-1"), run_context, session)
+
+    message = await agent.aget_system_message(
+        session,
+        run_context,
+        [tool for tool in tools if isinstance(tool, Function)],
+    )
+
+    assert message is not None
+    assert "search_knowledge_base" not in str(message.content)
