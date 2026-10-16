@@ -7,6 +7,7 @@ so a restart resumes where the last pass stopped and changing the embedder, whic
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -181,26 +182,21 @@ class KnowledgeGraphIngestionWorker:
         """Run ingestion passes until cancelled."""
         _WAKE_EVENTS.add(self._wake_event)
         try:
-            await self._loop()
+            while True:
+                # Cleared before the pass, so a wake that arrives during it starts the next one at once.
+                self._wake_event.clear()
+                config = self.config_provider()
+                interval = _IDLE_POLL_SECONDS
+                if config is not None and config.knowledge_graph_agents():
+                    try:
+                        await self._run_cycle(config, now=time.time())
+                    except Exception as exc:
+                        _report_failure("Knowledge graph ingestion pass failed", exc)
+                    interval = config.knowledge_graph.ingest.interval_seconds
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
         finally:
             _WAKE_EVENTS.discard(self._wake_event)
-
-    async def _loop(self) -> None:
-        while True:
-            # Cleared before the pass, so a wake that arrives during it starts the next one at once.
-            self._wake_event.clear()
-            config = self.config_provider()
-            interval = _IDLE_POLL_SECONDS
-            if config is not None and config.knowledge_graph_agents():
-                try:
-                    await self._run_cycle(config, now=time.time())
-                except Exception as exc:
-                    _report_failure("Knowledge graph ingestion pass failed", exc)
-                interval = config.knowledge_graph.ingest.interval_seconds
-            try:
-                await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
-            except TimeoutError:
-                continue
 
     async def _run_cycle(self, config: Config, *, now: float) -> None:
         """Ingest up to ``max_sessions_per_cycle`` idle conversations with new turns."""

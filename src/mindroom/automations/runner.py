@@ -33,7 +33,7 @@ from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.personal_room_store import personal_room_record_path, read_personal_room
 from mindroom.matrix.state import resolve_room_id
-from mindroom.requester_identity import private_agent_requesters
+from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
@@ -103,21 +103,11 @@ def _key(instance: _Instance, automation_name: str) -> str:
 
 def _instances(config: Config, runtime_paths: RuntimePaths) -> list[_Instance]:
     """Return what every agent with automations maintains: a shared agent's own state, or each private instance."""
-    instances: list[_Instance] = []
-    for agent_name, agent in config.agents.items():
-        if not config.resolve_entity(agent_name).automations:
-            continue
-        if agent.private is None:
-            instances.append((agent_name, None))
-            continue
-        try:
-            requesters = private_agent_requesters(config, runtime_paths, agent_name)
-        except OSError as exc:
-            # Instances can be created or removed while they are listed; the next pass lists them again.
-            logger.warning("Automation could not list private instances", agent=agent_name, error=str(exc))
-            continue
-        instances.extend((agent_name, requester_id) for requester_id in requesters)
-    return instances
+    return agent_instances(
+        config,
+        runtime_paths,
+        [agent_name for agent_name in config.agents if config.resolve_entity(agent_name).automations],
+    )
 
 
 def _room_id(

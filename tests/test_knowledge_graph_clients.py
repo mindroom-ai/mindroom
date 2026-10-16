@@ -154,7 +154,6 @@ async def test_embedder_embeds_the_single_text_graphiti_sends() -> None:
     """Graphiti sends one text as a one-element list."""
     embedder = MindRoomEmbedder(_Embedder())
     assert await embedder.create(["abc"]) == [3.0, 1.0]
-    assert await embedder.create("ab") == [2.0, 1.0]
     assert await embedder.create_batch(["a", "abcd"]) == [[1.0, 1.0], [4.0, 1.0]]
 
 

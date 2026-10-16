@@ -132,9 +132,7 @@ class MindRoomEmbedder(EmbedderClient):
         self._batches = isinstance(embedder, OpenAIEmbedder)
 
     async def create(self, input_data: str | list[str] | Iterable[int] | Iterable[Iterable[int]]) -> list[float]:
-        """Embed one text; Graphiti passes it alone or as a one-element list."""
-        if isinstance(input_data, str):
-            return await self._embedder.async_get_embedding(input_data)
+        """Embed one text, which Graphiti passes as a one-element list."""
         if isinstance(input_data, list) and input_data and isinstance(input_data[0], str):
             return await self._embedder.async_get_embedding(input_data[0])
         msg = "The knowledge graph embeds text only"

@@ -11,8 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature
-from mindroom.logging_config import get_logger
-from mindroom.requester_identity import private_agent_requesters
+from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
@@ -22,8 +21,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,22 +69,18 @@ def graph_scope(
 
 def graph_scopes(config: Config, runtime_paths: RuntimePaths) -> list[GraphScope]:
     """Return every graph to maintain: each graph-enabled shared agent, and each private instance of a private one."""
-    scopes: list[GraphScope] = []
-    for agent_name in config.knowledge_graph_agents():
-        if config.get_agent(agent_name).private is None:
-            scopes.append(graph_scope(agent_name, config, runtime_paths, None))
-            continue
-        try:
-            requesters = private_agent_requesters(config, runtime_paths, agent_name)
-        except OSError as exc:
-            # Instances can be created or removed while they are listed; the next pass lists them again.
-            logger.warning("Knowledge graph could not list private instances", agent=agent_name, error=str(exc))
-            continue
-        for requester_id in requesters:
-            identity = build_requester_execution_identity(
+    return [
+        graph_scope(
+            agent_name,
+            config,
+            runtime_paths,
+            None
+            if requester_id is None
+            else build_requester_execution_identity(
                 agent_name=agent_name,
                 runtime_paths=runtime_paths,
                 requester_id=requester_id,
-            )
-            scopes.append(graph_scope(agent_name, config, runtime_paths, identity))
-    return scopes
+            ),
+        )
+        for agent_name, requester_id in agent_instances(config, runtime_paths, config.knowledge_graph_agents())
+    ]

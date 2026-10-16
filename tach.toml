@@ -9000,7 +9000,6 @@ visibility = ["mindroom.knowledge_graph.store"]
 path = "mindroom.knowledge_graph.scope"
 depends_on = [
     "mindroom.embeddings.signatures",
-    "mindroom.logging_config",
     "mindroom.requester_identity",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom import requester_identity
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.automations import automation
 from mindroom.automations import runner as runner_module
@@ -916,7 +917,7 @@ async def test_private_instances_that_cannot_be_listed_skip_only_that_pass(tmp_p
     _config, _paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY})
 
     await _tick(runner, NOON)
-    with patch.object(runner_module, "private_agent_requesters", side_effect=PermissionError("denied")):
+    with patch.object(requester_identity, "private_instances_for_agent", side_effect=PermissionError("denied")):
         await _tick(runner, NOON + timedelta(minutes=1))
     await _tick(runner, NOON + timedelta(minutes=2))
     await _tick(runner, DAY_LATER)
