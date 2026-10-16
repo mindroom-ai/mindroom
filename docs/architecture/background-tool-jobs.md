@@ -7,7 +7,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 
 - A reply never waits for background work: it ends with its answer while its jobs run on, so the reply lifecycle, reply tables, and delivery stay as they are without jobs.
 - Only a newer human message releases a tool's wait; scheduled turns, other agents' messages, and follow-ups queue behind the reply instead of detaching its work.
-  A scheduled, hook, or external-trigger reply, or a job follow-up, has nobody to send that message, so its waits without a budget end after 120 seconds; otherwise a server or watcher started in the foreground would hold that reply and the turns queued behind it until a restart.
+  A scheduled, hook, or external-trigger reply, or a job follow-up, usually has nobody to send that message, so its waits without a budget end after 120 seconds; otherwise a server or watcher started in the foreground would hold that reply and the turns queued behind it until a restart.
 - With `mid_turn`, a wait and the post-batch check share one judgment per queued snapshot, so each queue gets one decision and at most one defer reaction, and a message the judge lets wait never moves a call to the background.
 - Stop, an edit, or deleting a message stops only the reply, because each job stays visible and cancellable on its own; a job ends only through its own cancel, revoked access, or the bot leaving the room.
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
