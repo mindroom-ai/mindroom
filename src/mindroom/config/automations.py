@@ -112,8 +112,63 @@ class DreamingAutomation(_ScheduledAutomation):
     cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
 
 
+# Toolkits that start other agent runs or change the agent itself, so a call to one would act outside the allowlist.
+_EXPLORATION_RESTRICTED_TOOLKITS = frozenset(
+    {
+        "compact_context",
+        "delegate",
+        "dynamic_tools",
+        "dynamic_workflow",
+        "invite_router",
+        "matrix_message",
+        "memory",
+        "scheduler",
+        "script",
+        "self_config",
+        "skill_manage",
+        "thread_model",
+    },
+)
+
+
+class ExplorationAutomation(_ScheduledAutomation):
+    """Unattended exploration of the agent's data sources with an allowlist of its tools, feeding its knowledge graph."""
+
+    # Exploration feeds the knowledge graph, which every memory backend can use.
+    requires_file_memory: ClassVar[bool] = False
+
+    name: Literal["exploration"] = Field(default="exploration", description="Built-in automation name")
+    cron: str = Field(default="30 2 * * *", description="When to check, in the configured timezone")
+    tools: list[str] = Field(
+        min_length=1,
+        description="Toolkits, or toolkit.function entries, of the agent's own tools that exploration may call",
+    )
+    max_tool_calls: int = Field(default=40, ge=1, le=1000, description="Most tool calls one exploration run makes")
+    max_leads: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="Most tool calls seen in conversations that one exploration prompt lists",
+    )
+    revisit_days: int = Field(
+        default=7,
+        ge=1,
+        description="Explore without new leads once this many days have passed since the last run",
+    )
+
+    @field_validator("tools")
+    @classmethod
+    def reject_restricted_toolkits(cls, value: list[str]) -> list[str]:
+        """Refuse toolkits whose calls would act outside the allowlist."""
+        for entry in value:
+            if entry.partition(".")[0] in _EXPLORATION_RESTRICTED_TOOLKITS:
+                msg = f"{entry!r} cannot be used by exploration, because it starts other runs or changes the agent"
+                raise ValueError(msg)
+        return value
+
+
 # Reserved for the built-ins, so every entry matches one kind of automation.
-BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming")
+BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming", "exploration")
 
 
 class PluginAutomation(_ScheduledAutomation):
@@ -155,7 +210,7 @@ class PluginAutomation(_ScheduledAutomation):
 
 def _automation_kind(value: object) -> str:
     """Pick the entry's model: a built-in name selects that built-in, any other name a plugin automation."""
-    if isinstance(value, PromptCurationAutomation | DreamingAutomation | PluginAutomation):
+    if isinstance(value, PromptCurationAutomation | DreamingAutomation | ExplorationAutomation | PluginAutomation):
         return value.name if value.name in BUILTIN_AUTOMATION_NAMES else "plugin"
     name = cast("Mapping[str, object]", value).get("name") if isinstance(value, Mapping) else None
     return name if isinstance(name, str) and name in BUILTIN_AUTOMATION_NAMES else "plugin"
@@ -164,6 +219,7 @@ def _automation_kind(value: object) -> str:
 Automation = Annotated[
     Annotated[PromptCurationAutomation, Tag("prompt_curation")]
     | Annotated[DreamingAutomation, Tag("dreaming")]
+    | Annotated[ExplorationAutomation, Tag("exploration")]
     | Annotated[PluginAutomation, Tag("plugin")],
     Discriminator(_automation_kind),
 ]

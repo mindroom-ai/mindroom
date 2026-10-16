@@ -114,6 +114,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
     from mindroom.agent_modes import AgentMode
+    from mindroom.automations.exploration_policy import ExplorationPolicy
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
@@ -1515,12 +1516,22 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
     persona: SubagentPersona | None,
+    allowed_tools: tuple[str, ...] | None,
+    hide_gated_functions: bool,
 ) -> _AgentToolAssembly:
-    """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
+    """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance.
+
+    ``allowed_tools`` keeps only the named toolkits and functions; ``hide_gated_functions`` drops every function that
+    would ask for approval, for a turn nobody is present to approve.
+    """
     approvals_as_jobs = (
-        background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
+        background_tool_jobs_enabled(config, runtime_paths)
+        and delegation_depth == 0
+        and not minimal_mode
+        and not hide_gated_functions
     )
-    persona_tools = persona.tools if persona is not None else None
+    supports_native_tool_approval = supports_native_tool_approval and not hide_gated_functions
+    persona_tools = allowed_tools
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
@@ -2033,6 +2044,7 @@ def create_agent(  # noqa: PLR0915
     agent_mode: AgentMode = "standard",
     agent_cli_in_shell: bool = False,
     persona: SubagentPersona | None = None,
+    exploration: ExplorationPolicy | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -2080,6 +2092,7 @@ def create_agent(  # noqa: PLR0915
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
         persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
+        exploration: Restrictions of a turn an exploration prompt started: its tool allowlist and call cap.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -2113,7 +2126,8 @@ def create_agent(  # noqa: PLR0915
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
     # up front; it also hides functions Agno generates without an owning toolkit, other than kept skills and knowledge.
     persona_prompt = persona.system_prompt if persona is not None else None
-    persona_tools = persona.tools if persona is not None else None
+    # An exploration turn narrows the agent's own tools to the operator's allowlist the same way.
+    persona_tools = persona.tools if persona is not None else exploration.tools if exploration is not None else None
     eager_deferred_tools = eager_deferred_tools or persona_tools is not None
     native_deferred_tools = (
         agent_mode == "standard"
@@ -2159,6 +2173,8 @@ def create_agent(  # noqa: PLR0915
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
         persona=persona,
+        allowed_tools=persona_tools,
+        hide_gated_functions=exploration is not None,
     )
     storage = _open_agent_session_storage(
         agent_name,
@@ -2319,7 +2335,11 @@ def create_agent(  # noqa: PLR0915
         store_history_messages=False,
         compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        tool_call_limit=entity_view.max_tool_calls_per_turn,
+        tool_call_limit=(
+            min(entity_view.max_tool_calls_per_turn, exploration.max_tool_calls)
+            if exploration is not None
+            else entity_view.max_tool_calls_per_turn
+        ),
         telemetry=False,
     )
     if isinstance(agent, MinimalAgent):

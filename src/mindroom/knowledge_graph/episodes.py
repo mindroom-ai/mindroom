@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.automations.exploration_policy import EXPLORATION_HOOK_SOURCE
+from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.knowledge_graph.store import EpisodeInput
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -31,9 +33,7 @@ type _ThreadKind = Literal["conversation", "exploration", "automation"]
 type _RunKey = tuple[int, str]
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
-_KNOWLEDGE_GRAPH_FUNCTIONS = frozenset({"search_graph", "graph_entity"})
-_EXPLORATION_HOOK_SOURCE = "automation/exploration"
-_AUTOMATION_HOOK_PREFIX = "automation/"
+KNOWLEDGE_GRAPH_FUNCTIONS = frozenset({"search_graph", "graph_entity"})
 _MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
 _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
 _CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
@@ -60,9 +60,9 @@ def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) 
     root = min(runs, key=run_key)
     metadata = root.metadata or {}
     hook_source = metadata.get(HOOK_SOURCE_RUN_METADATA_KEY)
-    if hook_source == _EXPLORATION_HOOK_SOURCE:
+    if hook_source == EXPLORATION_HOOK_SOURCE:
         return "exploration"
-    if isinstance(hook_source, str) and hook_source.startswith(_AUTOMATION_HOOK_PREFIX):
+    if isinstance(hook_source, str) and is_automation_hook_source(hook_source):
         return "automation"
     # Runs stored before hook sources were recorded are known by the threads automations started.
     if metadata.get("thread_id") in automation_thread_ids:
@@ -104,9 +104,7 @@ def render_episodes(
 
     for run in sorted(runs, key=run_key):
         run_conversation = _conversation_lines(run, agent_name, settings) if kind == "conversation" else []
-        run_tools = [
-            execution for execution in run.tools or [] if execution.tool_name not in _KNOWLEDGE_GRAPH_FUNCTIONS
-        ]
+        run_tools = [execution for execution in run.tools or [] if execution.tool_name not in KNOWLEDGE_GRAPH_FUNCTIONS]
         run_tool_lines = [_tool_line(execution, settings) for execution in run_tools]
         if chunk_runs and (
             _size(conversation) + _size(run_conversation) > settings.max_episode_chars
@@ -174,16 +172,17 @@ def _prompt_messages(content: str, requester: str) -> list[tuple[str, str]]:
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
     outcome = "error" if execution.tool_call_error else "result"
     output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
-    return f"call {execution.tool_name}({_arguments(execution)}) {outcome}: {output}"
+    return f"call {execution.tool_name}({tool_arguments(execution)}) {outcome}: {output}"
 
 
-def _arguments(execution: ToolExecution) -> str:
+def tool_arguments(execution: ToolExecution) -> str:
+    """Return a tool call's arguments as canonical JSON with credential-like values redacted."""
     redacted = redact_sensitive_data(execution.tool_args or {}, max_string_length=500)
     return json.dumps(redacted, sort_keys=True, default=str)
 
 
 def _digest(execution: ToolExecution) -> str:
-    return hashlib.sha256(_arguments(execution).encode()).hexdigest()[:12]
+    return hashlib.sha256(tool_arguments(execution).encode()).hexdigest()[:12]
 
 
 def _clean(text: str, limit: int) -> str:

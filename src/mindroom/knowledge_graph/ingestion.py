@@ -39,6 +39,7 @@ _DAY_SECONDS = 86_400
 _IDLE_POLL_SECONDS = 30
 _FIRST_RETRY_SECONDS = 60
 _MAX_RETRY_SECONDS = 3600
+_WAKE_EVENTS: set[asyncio.Event] = set()
 
 
 class _SessionState(TypedDict):
@@ -60,6 +61,16 @@ class _DueSession:
     runs: list[RunOutput]
 
 
+def wake_knowledge_graph_ingestion(*, after_seconds: float = 0) -> None:
+    """Run an ingestion pass after ``after_seconds`` instead of at the next interval; call on the event loop."""
+
+    def wake() -> None:
+        for event in _WAKE_EVENTS:
+            event.set()
+
+    asyncio.get_running_loop().call_later(after_seconds, wake)
+
+
 @dataclass
 class KnowledgeGraphIngestionWorker:
     """Periodically ingest the new finished turns of every graph-enabled agent and private instance."""
@@ -77,6 +88,13 @@ class KnowledgeGraphIngestionWorker:
 
     async def run(self) -> None:
         """Run ingestion passes until stopped."""
+        _WAKE_EVENTS.add(self._wake_event)
+        try:
+            await self._loop()
+        finally:
+            _WAKE_EVENTS.discard(self._wake_event)
+
+    async def _loop(self) -> None:
         while not self._stop_event.is_set():
             # Cleared before the pass, so a wake that arrives during it starts the next one at once.
             self._wake_event.clear()

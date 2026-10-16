@@ -270,7 +270,7 @@ For `schedule:fired` hooks that run more than once for the same occurrence, see 
 ## Automations
 
 Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
-MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](plugins.md#automations) can add more.
+MindRoom ships three, [`prompt_curation`](#prompt_curation), [`dreaming`](#dreaming), and [`exploration`](#exploration), and [plugins](plugins.md#automations) can add more.
 The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
 Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
 
@@ -298,7 +298,7 @@ agents:
   Only the agent named by `personal_rooms.agent` can run automations as a private agent, its entries cannot set `room`, and it inherits only default entries without `room`.
   A requester without a personal room, or whom the agent may no longer answer, is skipped.
   Everyone who can read that personal room, such as an agent the requester invited or an adopted room's other participants, sees the prompts and replies, like any other reply there.
-- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
+- `prompt_curation` and `dreaming` need `memory_backend: file`, and `exploration` needs `knowledge_graph: true`; an agent that lacks what a default entry needs skips it and keeps inheriting the others.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
@@ -364,3 +364,46 @@ Each run keeps its agenda and report, and a run that reached review also its pat
 `dreaming` needs `memory_backend: file` and something to work from: [auto-flush](memory.md#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](thread-exports.md) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
 It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
 Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
+
+### `exploration`
+
+`exploration` lets an agent with a [knowledge graph](knowledge-graph.md) explore its data sources unattended, using only tools you allow, so the graph learns about projects, people, and documents nobody has asked about yet.
+
+```yaml
+agents:
+  mind:
+    knowledge_graph: true
+    tools: [mcp_github, duckduckgo, file]
+    automations:
+      - name: exploration
+        cron: "0 */6 * * *"
+        room: "#mind-exploration"
+        tools: [mcp_github, duckduckgo]
+        max_tool_calls: 30
+```
+
+1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
+2. When there are such calls, or `revisit_days` have passed since the last run, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
+3. Every tool result in that thread is added to the graph; the agent's own summary is not.
+4. When the run ends, MindRoom marks the thread resolved.
+
+During an exploration run the agent can call only the toolkits or `toolkit.function` entries in `tools`, plus `knowledge_graph`, and never a function that needs [approval](tool-approval.md), so nothing waits for a person.
+It is told to only read, but only `tools` limits what it can do, so leave out tools that change things, or add an [approval rule](tool-approval.md) for their writing functions.
+`tools` cannot name `delegate`, `dynamic_tools`, `dynamic_workflow`, `scheduler`, `matrix_message`, `invite_router`, `self_config`, `skill_manage`, `memory`, `compact_context`, `thread_model`, or `script`, because those start other runs or change the agent.
+Allowing a code-executing tool such as `shell` gives exploration everything that tool can reach.
+A person who replies in an exploration thread gets the agent's ordinary tools.
+
+The prompt lists recent tool calls with their arguments, credential-like values removed, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+
+| Field | Default | Description |
+|---|---|---|
+| `tools` | required | Toolkits or `toolkit.function` entries from the agent's own tools that exploration may call |
+| `cron` | `30 2 * * *` | When to check |
+| `room` | first configured room | Where the prompt is posted |
+| `max_tool_calls` | `40` (1 to 1000) | Most tool calls one run makes; the agent's `max_tool_calls_per_turn` also applies |
+| `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
+| `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run |
+| `model` | the agent's model | A key of `models` to run the exploration with |
+
+`exploration` needs `knowledge_graph: true`, and its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

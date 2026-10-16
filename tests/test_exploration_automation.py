@@ -1,0 +1,204 @@
+"""The exploration automation runs when there are leads or a revisit is due, and lists what conversations touched."""
+
+from __future__ import annotations
+
+import time
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+
+from agno.models.message import Message
+from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
+
+from mindroom.automations import exploration
+from mindroom.automations.exploration import _collect_leads, check_exploration
+from mindroom.automations.steps import Ask, AutomationContext, Done
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.session_storage.agent_storage import create_session_storage
+from tests.conftest import seed_session
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+
+DAY = 86_400
+
+
+def _config(**entry: object) -> Config:
+    return Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                knowledge_graph=True,
+                tools=["github", "duckduckgo"],
+                automations=[{"name": "exploration", "tools": ["github"], **entry}],
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "luna": ModelConfig(provider="openai", id="gpt-6-luna"),
+        },
+        router=RouterConfig(model="default"),
+        knowledge_graph={"model": "luna"},
+    )
+
+
+def _context(config: Config, paths: RuntimePaths, tmp_path: Path) -> AutomationContext:
+    (entry,) = config.resolve_entity("mind").automations
+    return AutomationContext(
+        agent_name="mind",
+        config=config,
+        runtime_paths=paths,
+        entry=entry,
+        options={},
+        settings={},
+        requester_id=None,
+        execution_identity=None,
+        workspace=None,
+        state_dir=tmp_path / "state",
+    )
+
+
+def _tool(name: str, result: str = "ok", **args: object) -> ToolExecution:
+    return ToolExecution(tool_call_id=f"call-{name}", tool_name=name, tool_args=args, result=result)
+
+
+def _seed(
+    config: Config,
+    paths: RuntimePaths,
+    session_id: str,
+    tools: list[ToolExecution],
+    *,
+    created_at: int,
+    hook_source: str | None = None,
+) -> None:
+    metadata: dict[str, object] = {"room_id": "!room:x", "thread_id": session_id.rsplit(":", 1)[-1]}
+    if hook_source is not None:
+        metadata[HOOK_SOURCE_RUN_METADATA_KEY] = hook_source
+    run = RunOutput(
+        run_id=f"run-{session_id}",
+        session_id=session_id,
+        agent_id="mind",
+        created_at=created_at,
+        status=RunStatus.completed,
+        metadata=metadata,
+        messages=[Message(role="user", content="q"), Message(role="assistant", content="a")],
+        tools=tools,
+    )
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=[run]))
+    finally:
+        storage.close()
+
+
+def _paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+
+def test_first_check_explores_even_without_leads(tmp_path: Path) -> None:
+    """A newly enabled exploration starts by exploring what its tools reach."""
+    config, paths = _config(), _paths(tmp_path)
+
+    ask = check_exploration(_context(config, paths, tmp_path))
+
+    assert isinstance(ask, Ask)
+    assert ask.new_thread
+    assert "at most 40 tool calls" in ask.text
+    assert "No tool calls" in ask.text
+
+
+def test_no_leads_and_a_recent_run_post_nothing(tmp_path: Path) -> None:
+    """Between revisits, a check without new leads costs nothing."""
+    config, paths = _config(), _paths(tmp_path)
+    context = _context(config, paths, tmp_path)
+    assert check_exploration(context) is not None
+
+    assert check_exploration(context) is None
+
+
+def test_revisit_runs_without_leads_once_due(tmp_path: Path) -> None:
+    """After revisit_days, exploration runs again to catch changes in known sources."""
+    config, paths = _config(revisit_days=2), _paths(tmp_path)
+    context = _context(config, paths, tmp_path)
+    check_exploration(context)
+
+    with patch.object(exploration.time, "time", return_value=time.time() + 3 * DAY):
+        assert check_exploration(context) is not None
+
+
+def test_new_leads_start_a_run_before_the_revisit(tmp_path: Path) -> None:
+    """A conversation that used a tool since the last run is a lead worth following."""
+    config, paths = _config(), _paths(tmp_path)
+    context = _context(config, paths, tmp_path)
+    check_exploration(context)
+    _seed(config, paths, "!room:x:$t1", [_tool("get_repository", repo="acme/atlas")], created_at=int(time.time()) + 5)
+
+    with patch.object(exploration.time, "time", return_value=time.time() + 10):
+        ask = check_exploration(context)
+
+    assert ask is not None
+    assert 'get_repository({"repo": "acme/atlas"})' in ask.text
+
+
+def test_leads_are_distinct_counted_newest_first_and_capped(tmp_path: Path) -> None:
+    """Repeated calls collapse into one counted lead, the newest lead comes first, and the list is capped."""
+    config, paths = _config(max_leads=2), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=100)
+    _seed(config, paths, "!room:x:$b", [_tool("get_repository", repo="acme/atlas")], created_at=200)
+    _seed(config, paths, "!room:x:$c", [_tool("list_issues", repo="acme/beacon")], created_at=300)
+    _seed(config, paths, "!room:x:$d", [_tool("search", query="atlas")], created_at=50)
+
+    leads = _collect_leads(_context(config, paths, tmp_path), since=0, limit=2)
+
+    assert [(lead.function, lead.count, lead.last_seen) for lead in leads] == [
+        ("list_issues", 1, 300),
+        ("get_repository", 2, 200),
+    ]
+
+
+def test_leads_skip_graph_lookups_and_exploration_threads(tmp_path: Path) -> None:
+    """The graph's own lookups and exploration's own calls are not leads."""
+    config, paths = _config(), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$a", [_tool("search_graph", query="atlas")], created_at=100)
+    _seed(
+        config,
+        paths,
+        "!room:x:$b",
+        [_tool("get_repository", repo="acme/atlas")],
+        created_at=200,
+        hook_source="automation/exploration",
+    )
+
+    assert _collect_leads(_context(config, paths, tmp_path), since=0, limit=10) == []
+
+
+def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
+    """Credential-like arguments never reach the exploration room."""
+    config, paths = _config(), _paths(tmp_path)
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    _seed(config, paths, "!room:x:$a", [_tool("call_api", token=token)], created_at=100)
+
+    [lead] = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
+
+    assert token not in lead.arguments
+
+
+def test_follow_up_resolves_the_thread_and_schedules_ingestion(tmp_path: Path) -> None:
+    """When the run ends, the thread is resolved and its tool results are ingested soon after."""
+    config, paths = _config(), _paths(tmp_path)
+    ask = check_exploration(_context(config, paths, tmp_path))
+    assert ask is not None
+    assert ask.then is not None
+
+    done = ask.then(config, "$thread", False)
+
+    assert isinstance(done, Done)
+    assert done.resolve == ("$thread",)
+    assert done.on_loop is not None

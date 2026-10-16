@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -15,7 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.knowledge_graph.ingestion import KnowledgeGraphIngestionWorker
+from mindroom.knowledge_graph.ingestion import KnowledgeGraphIngestionWorker, wake_knowledge_graph_ingestion
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import knowledge_graph_failure, record_knowledge_graph_failure
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -40,12 +42,14 @@ class _FakeStore:
 
     episodes: list[tuple[str, EpisodeInput, UsageTarget]] = field(default_factory=list)
     failing: set[str] = field(default_factory=set)
+    added: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
         if usage.session_id in self.failing:
             msg = "structured output did not match"
             raise ValueError(msg)
         self.episodes.append((scope.graph_name, episode, usage))
+        self.added.set()
 
     async def search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:
         del scope, query, limit
@@ -221,3 +225,21 @@ async def test_embedder_change_rebuilds_into_a_new_graph(tmp_path: Path) -> None
 
     assert store.sessions() == ["!room:x:$t1", "!room:x:$t1"]
     assert len({graph for graph, _, _ in store.episodes}) == 2
+
+
+@pytest.mark.asyncio
+async def test_wake_runs_a_pass_before_the_interval(tmp_path: Path) -> None:
+    """An exploration run's results are ingested without waiting a full interval."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    worker = _worker(config, paths, store)
+    task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.sleep(0)
+        _seed(config, paths, "!room:x:$t1", ["r1"], at=int(time.time()) - 10)
+        wake_knowledge_graph_ingestion(after_seconds=0)
+        await asyncio.wait_for(store.added.wait(), timeout=10)
+    finally:
+        worker.stop()
+        await task
+
+    assert store.sessions() == ["!room:x:$t1"]

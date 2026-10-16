@@ -472,6 +472,9 @@
                     "$ref": "#/$defs/DreamingAutomation"
                   },
                   {
+                    "$ref": "#/$defs/ExplorationAutomation"
+                  },
+                  {
                     "$ref": "#/$defs/PluginAutomation"
                   }
                 ],
@@ -1519,6 +1522,9 @@
                 "$ref": "#/$defs/DreamingAutomation"
               },
               {
+                "$ref": "#/$defs/ExplorationAutomation"
+              },
+              {
                 "$ref": "#/$defs/PluginAutomation"
               }
             ],
@@ -1753,6 +1759,92 @@
         }
       },
       "title": "EventJournalConfig",
+      "type": "object"
+    },
+    "ExplorationAutomation": {
+      "additionalProperties": false,
+      "description": "Unattended exploration of the agent's data sources with an allowlist of its tools, feeding its knowledge graph.",
+      "properties": {
+        "cron": {
+          "default": "30 2 * * *",
+          "description": "When to check, in the configured timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "name": {
+          "const": "exploration",
+          "default": "exploration",
+          "description": "Built-in automation name",
+          "title": "Name",
+          "type": "string"
+        },
+        "tools": {
+          "description": "Toolkits, or toolkit.function entries, of the agent's own tools that exploration may call",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Tools",
+          "type": "array"
+        },
+        "max_tool_calls": {
+          "default": 40,
+          "description": "Most tool calls one exploration run makes",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "max_leads": {
+          "default": 20,
+          "description": "Most tool calls seen in conversations that one exploration prompt lists",
+          "maximum": 200,
+          "minimum": 0,
+          "title": "Max Leads",
+          "type": "integer"
+        },
+        "revisit_days": {
+          "default": 7,
+          "description": "Explore without new leads once this many days have passed since the last run",
+          "minimum": 1,
+          "title": "Revisit Days",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "tools"
+      ],
+      "title": "ExplorationAutomation",
       "type": "object"
     },
     "ExternalTriggerPolicyConfig": {
@@ -3504,7 +3596,8 @@
           "not": {
             "enum": [
               "prompt_curation",
-              "dreaming"
+              "dreaming",
+              "exploration"
             ]
           },
           "pattern": "^[a-z][a-z0-9_]*$",

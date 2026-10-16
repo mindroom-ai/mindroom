@@ -64,6 +64,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "include_default_tools",
         "instructions",
         "knowledge_bases",
+        "knowledge_graph",
         "learning",
         "learning_mode",
         "markdown",
