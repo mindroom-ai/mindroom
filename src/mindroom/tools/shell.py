@@ -394,11 +394,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             The last ``tail`` lines of stdout are returned; on non-zero exit, useful
             stdout is preserved together with stderr. A command still running after
-            ``timeout`` seconds is stopped with every process it started, and its
-            output so far is returned. Without ``timeout``, a call that runs as a
-            background job has no time limit, and any other call stops after 120
-            seconds. A process started with ``nohup ... &`` keeps running after the
-            command ends on its own.
+            ``timeout`` seconds is stopped with the processes it started, and its
+            output so far is returned. Without ``timeout``, a call that accepts
+            ``background_after`` has no time limit, even while you wait for it, and
+            any other call stops after 120 seconds. Start a server or anything else
+            that never exits with ``nohup cmd > out.log 2>&1 &``, which keeps running
+            after the command ends; in the foreground it would keep the call running
+            until its job is cancelled.
 
             With ``mindroom_output_path``, capture the complete supported output
             within the redirect byte limit instead of applying ``tail``; a stopped

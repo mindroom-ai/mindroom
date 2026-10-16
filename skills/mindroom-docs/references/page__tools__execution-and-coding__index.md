@@ -127,7 +127,7 @@ The tool returns the last `tail` lines of stdout (default 100), capped at the la
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
-Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, and any other call stops after 120 seconds.
+Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other call stops after 120 seconds.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
 For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
