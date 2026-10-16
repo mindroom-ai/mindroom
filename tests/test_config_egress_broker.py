@@ -61,6 +61,21 @@ def test_default_is_empty_passthrough() -> None:
     assert config.egress_broker.services == {}
 
 
+def test_private_networks_round_trip_through_the_authored_dump() -> None:
+    """Listed networks load, normalize to their canonical form, and dump back as plain strings for YAML."""
+    config = Config.model_validate({"egress_broker": {"private_networks": ["192.168.1.0/24", "FD00::/8"]}})
+
+    assert config.egress_broker.private_networks == ["192.168.1.0/24", "fd00::/8"]
+    assert Config.model_validate(yaml.safe_load(yaml.safe_dump(config.authored_model_dump()))) == config
+
+
+@pytest.mark.parametrize("network", ["192.168.1.5/24", "lab.example", "192.168.1.0/33", ""])
+def test_invalid_private_network_rejected(network: str) -> None:
+    """A network with host bits set, or anything that is not a network, is refused naming the value."""
+    with pytest.raises(ValidationError, match="private_networks"):
+        EgressBrokerConfig(private_networks=[network])
+
+
 def test_preset_only_service_validates_with_oauth_provider() -> None:
     """`services: {github: {preset: github}}` is a complete service."""
     config = Config(**yaml.safe_load("egress_broker:\n  services:\n    github:\n      preset: github\n"))

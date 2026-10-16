@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import socket
 import ssl
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import server_fetch_url
+from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.egress_broker.dial import (
     DestinationBlockedError,
     DialPolicy,
@@ -154,6 +156,62 @@ async def test_metadata_link_local_unspecified_and_multicast_refused_under_the_l
     assert dialed == []
 
 
+# The only refused destinations that listing every address as a private network opens.
+_OPENED_BY_PRIVATE_NETWORKS = frozenset(
+    {"private", "ipv4-mapped-private", "unique-local", "unique-local-top", "cgnat-low", "cgnat-high"},
+)
+_EVERY_NETWORK = (ipaddress.ip_network("0.0.0.0/0"), ipaddress.ip_network("::/0"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", _REFUSED_DESTINATIONS)
+async def test_private_networks_open_private_addresses_but_never_loopback_or_metadata(
+    name: str,
+    dialed: _Attempts,
+) -> None:
+    """Listing every address opens private, unique-local, and CGNAT addresses; loopback in any form stays refused."""
+    policy = DialPolicy(private_networks=_EVERY_NETWORK)
+
+    if name in _OPENED_BY_PRIVATE_NETWORKS:
+        await open_upstream(_REFUSED_DESTINATIONS[name], 443, policy=policy, ssl_context=None)
+        assert len(dialed) == 1
+    else:
+        with pytest.raises(DestinationBlockedError):
+            await open_upstream(_REFUSED_DESTINATIONS[name], 443, policy=policy, ssl_context=None)
+        assert dialed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "opened"),
+    [
+        (["192.168.1.5"], True),
+        (["::ffff:192.168.1.5"], True),
+        (["192.168.2.5"], False),
+        (["100.64.0.1"], False),
+        (["192.168.1.5", "10.0.0.1"], False),
+    ],
+)
+async def test_private_networks_open_only_their_own_addresses(
+    answer: list[str],
+    *,
+    opened: bool,
+    dialed: _Attempts,
+) -> None:
+    """A name resolving to private addresses is dialed only when every one is inside a listed network."""
+    policy = DialPolicy(private_networks=(ipaddress.ip_network("192.168.1.0/24"),))
+    _lookups, getaddrinfo = _answers(answer)
+
+    with patch.object(server_fetch_url.socket, "getaddrinfo", side_effect=getaddrinfo):
+        if opened:
+            await open_upstream("nas.lab.example", 443, policy=policy, ssl_context=None)
+        else:
+            with pytest.raises(DestinationBlockedError):
+                await open_upstream("nas.lab.example", 443, policy=policy, ssl_context=None)
+
+    assert [host for host, _kwargs in dialed] == (answer if opened else [])
+
+
 @pytest.mark.asyncio
 async def test_dns_rebinding_dials_exactly_the_checked_address(dialed: _Attempts) -> None:
     """A name that answers public, then loopback, is resolved once and dialed at the public address it was checked as.
@@ -266,6 +324,31 @@ async def test_broker_refuses_blocked_destinations_in_every_form(
     assert response.status == status
     assert response.json()["error"] == ("destination_blocked" if status == 403 else "bad_request")
     dial_checked_address.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["connect", "plain"])
+async def test_broker_dials_private_networks_the_config_lists(
+    broker: BrokerFactory,
+    raw_proxy: RawProxy,
+    transport: str,
+) -> None:
+    """The broker reads `private_networks` from the config on each request, so a listed address is dialed."""
+    listed = EgressBrokerConfig(private_networks=["10.0.0.0/8"])
+    config = EgressBrokerConfig()
+    started = await broker(dial_policy=DialPolicy(), rules_provider=lambda _claims: config)
+    authorization = proxy_authorization(broker.token())
+    send = connect_request if transport == "connect" else plain_request
+    unreachable = OSError("Connection refused")
+
+    with patch("mindroom.egress_broker.dial._dial", new_callable=AsyncMock, side_effect=unreachable) as dial:
+        refused = await raw_proxy(started.port, send("10.0.0.1:443", authorization=authorization))
+        config = listed
+        dialed = await raw_proxy(started.port, send("10.0.0.1:443", authorization=authorization))
+
+    assert refused.json()["error"] == "destination_blocked"
+    assert dialed.status == 502
+    assert [call.args[1] for call in dial.call_args_list] == [ipaddress.ip_address("10.0.0.1")]
 
 
 @pytest.mark.asyncio

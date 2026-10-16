@@ -219,7 +219,7 @@ class EgressBroker:
             await self._relay.deny(client, entry, host_not_allowed(rules, host))
             return
         # A blind tunnel: raw bytes to an unmatched host, never looked inside.
-        upstream = await self._relay.open_upstream(client, entry, port, ssl_context=None)
+        upstream = await self._relay.open_upstream(client, entry, port, rules, ssl_context=None)
         if upstream is None:
             return
         try:
@@ -244,9 +244,10 @@ class EgressBroker:
             return False
         path = target.split(b"?", 1)[0].decode("ascii")
         entry = AuditEntry(claims=claims, kind="request", method=request.method.decode("ascii"), host=host, path=path)
-        route = await self._relay.route(client, entry, port)
-        if route is None:
+        routed = await self._relay.route(client, entry, port)
+        if routed is None:
             return False
+        rules, route = routed
         if route.match is not None:
             entry.service = route.match.service
             await self._relay.deny(client, entry, refusal_body("tls_required", host=host, service=route.match.service))
@@ -256,7 +257,7 @@ class EgressBroker:
         if await self._relay.refuse_large_body(client, entry, upstream_request):
             return False
         # Each plain request goes over a fresh upstream connection.
-        upstream = await self._relay.open_upstream(client, entry, port, ssl_context=None)
+        upstream = await self._relay.open_upstream(client, entry, port, rules, ssl_context=None)
         if upstream is None:
             return False
         try:

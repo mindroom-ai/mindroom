@@ -25,7 +25,8 @@ Each `shell` and `python` call routed to a worker gets a fresh token valid for `
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
-That includes LAN and Tailscale addresses and names that resolve to them, so these calls cannot reach services on your local network through the broker; a command that needs one can bypass it, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
+That includes LAN and Tailscale addresses and names that resolve to them, unless [`private_networks`](#private-networks) lists them.
+Without that, a command that needs one can bypass the broker, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
 
 ## Configuration
 
@@ -220,6 +221,31 @@ It is how a user narrows an administrator's service, such as GitHub, to some rep
 For example, with the administrator's `github: {preset: github}` and a limit to `octo-org/octo-repo`, `api.github.com/repos/octo-org/octo-repo/pulls` gets the administrator's credential and `api.github.com/user` gets 403 `path_not_allowed` naming the limit.
 A limit has no key, account login, or placeholder variables (it may not set `oauth_provider`, `placeholder_env`, or `oauth_on_shared_workers`, and its rules need no `auth`), the broker refuses to store a key for it, and the [`egress_credentials` tool](#agent-tool) leaves it out.
 On the personal page, users who can manage the agent get **Limit to repositories** on an administrator's service with a rule on `github.com`, `api.github.com`, or `uploads.github.com`, which opens the [limit editor](#the-limit-editor) and saves one.
+
+### Private networks
+
+The broker refuses private addresses, so by default worker calls through it cannot reach your LAN or your Tailscale network.
+List the ranges agents may reach in `private_networks`:
+
+```yaml
+egress_broker:
+  private_networks:
+    - 192.168.1.0/24  # LAN
+    - 100.64.0.0/10   # Tailscale
+```
+
+Each entry is a network in CIDR form with the host bits zero: `192.168.1.0/24`, not `192.168.1.5/24`.
+A name that resolves to several addresses is dialed only when every private one is inside a listed network.
+Loopback addresses (`127.0.0.0/8`, `::1`) stay refused even inside a listed range, because the broker runs in the primary process and its loopback is the primary's.
+Cloud metadata, link-local, and multicast addresses and the names `localhost`, `*.localhost`, and `*.local` stay refused too.
+Service rules work on hosts in these ranges, so a LAN service such as Home Assistant can get its key from the broker like any other service.
+The broker reads the list for each request, so a change to `config.yaml` applies without a restart.
+
+> [!WARNING]
+> A listed range opens every port on every address in it to every agent that uses the broker, including the primary's own address in that range.
+> With Docker workers, a range that covers the `docker0` gateway (typically `172.17.0.1`) reaches every port of the primary host, which the `docker0` firewall rule otherwise keeps closed.
+> On Kubernetes, a range that covers the pod or Service network lets workers reach whatever the primary pod can, which their NetworkPolicy otherwise blocks.
+> List only the networks agents need, as narrowly as you can.
 
 ## Secret sources
 
@@ -619,6 +645,7 @@ Each of these is a choice you make, so make it on purpose.
   Path tools that run in the primary process, such as `attachments` or `gmail`, can also open any file the primary can reach under `file_access: unrestricted`.
   Use a dedicated worker backend or a sandbox runner, keep `file_access` at `workspace`, and keep such tools off agents that should not see secrets.
 - **Write access to the configuration.** `config_manager`, and any other way to write the `egress_broker` config, can point a service at another host, and the broker then sends that service's key there.
+  It can also add [`private_networks`](#private-networks) that open your local network to every agent.
   Give config write access only to people and agents you would trust with every key.
 - **Hosts that echo requests.** A host that sends the request back to the caller, such as a debug endpoint that echoes headers (`httpbin.org/headers`) or an error page with the full URL, hands the injected key to the agent.
   `query` auth is the most exposed, because a redirect `Location`, an error page, or a log line that echoes the URL can hand the key back; use it only for APIs that accept nothing else.
@@ -643,6 +670,8 @@ Each of these is a choice you make, so make it on purpose.
 **Workers time out when calling brokered services.** Check that the broker port is open on the interface workers reach it through (`docker0` for Docker workers, the broker Service for Kubernetes workers).
 Verify with `curl -v -x "$HTTPS_PROXY" https://example.com` from an agent's `shell` tool call, whose environment carries the broker URL and token.
 A shell opened with `docker exec` does not have that per-call environment.
+
+**403 `destination_blocked` for a LAN or Tailscale service.** Add its range to [`private_networks`](#private-networks).
 
 **403 `credential_not_configured` errors.** The service is matched but the worker's scope has neither an API key nor a connected account for it.
 Connect an account (when the response has `provider` and `connect_url`) or set a key: for shared and unscoped agents through the dashboard (or by their credential managers on the Connections page), for personal agents on the personal egress page when it is served.

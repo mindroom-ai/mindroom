@@ -1695,6 +1695,15 @@
           "title": "Unmatched Hosts",
           "type": "string"
         },
+        "private_networks": {
+          "default": [],
+          "description": "Private address ranges (CIDR) agents may reach through the broker; loopback and cloud metadata stay blocked",
+          "items": {
+            "type": "string"
+          },
+          "title": "Private Networks",
+          "type": "array"
+        },
         "services": {
           "additionalProperties": {
             "$ref": "#/$defs/EgressService"
@@ -4804,6 +4813,7 @@
       "$ref": "#/$defs/EgressBrokerConfig",
       "default": {
         "unmatched_hosts": "passthrough",
+        "private_networks": [],
         "services": {}
       },
       "description": "Credential-injecting egress broker for worker shell and python traffic"

@@ -55,6 +55,7 @@ _METADATA_IP_ADDRESSES = frozenset(
     },
 )
 _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+_IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 _AsyncNetworkStreamT = TypeVar("_AsyncNetworkStreamT")
 
 
@@ -132,8 +133,12 @@ def _validate_ip_address(
     *,
     allow_private_networks: bool,
     allow_loopback: bool = False,
+    private_networks: tuple[_IPNetwork, ...] = (),
 ) -> None:
-    """Reject addresses that are unsafe for the selected fetch policy."""
+    """Reject addresses that are unsafe for the selected fetch policy.
+
+    A private address inside one of `private_networks` is allowed, unless it or an address it embeds is loopback.
+    """
     loopback_address = (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
     if allow_loopback and loopback_address.is_loopback:
         return
@@ -153,10 +158,13 @@ def _validate_ip_address(
         ):
             _deny("blocked_address")
 
-    if allow_private_networks:
+    if allow_private_networks or address.is_global:
         return
 
-    if not address.is_global:
+    if any(checked_address.is_loopback for checked_address in checked_addresses):
+        _deny("private_address")
+    mapped_address = (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
+    if not any(mapped_address in network for network in private_networks):
         _deny("private_address")
 
 
@@ -212,6 +220,7 @@ def _validated_host_addresses(
     allow_private_networks: bool,
     resolve_hostnames: bool,
     allow_loopback: bool = False,
+    private_networks: tuple[_IPNetwork, ...] = (),
 ) -> list[_IPAddress]:
     """Validate a host and optionally return addresses that are safe to dial."""
     host = _normalize_hostname(hostname)
@@ -221,6 +230,7 @@ def _validated_host_addresses(
             direct_address,
             allow_private_networks=allow_private_networks,
             allow_loopback=allow_loopback,
+            private_networks=private_networks,
         )
         return [direct_address]
 
@@ -239,7 +249,12 @@ def _validated_host_addresses(
         local_address = (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
         if allow_loopback and loopback_hostname and not local_address.is_loopback:
             _deny("private_hostname")
-        _validate_ip_address(address, allow_private_networks=allow_private_networks, allow_loopback=allow_loopback)
+        _validate_ip_address(
+            address,
+            allow_private_networks=allow_private_networks,
+            allow_loopback=allow_loopback,
+            private_networks=private_networks,
+        )
     return addresses
 
 
@@ -313,8 +328,12 @@ def validated_connect_addresses(
     port: int,
     allow_private_networks: bool,
     allow_loopback: bool = False,
+    private_networks: tuple[_IPNetwork, ...] = (),
 ) -> list[_IPAddress]:
-    """Resolve and validate the addresses used for an actual TCP connection."""
+    """Resolve and validate the addresses used for an actual TCP connection.
+
+    Private addresses are refused unless `allow_private_networks` is set or they fall inside `private_networks`.
+    """
     return _validated_host_addresses(
         host,
         port=port,
@@ -322,6 +341,7 @@ def validated_connect_addresses(
         allow_private_networks=allow_private_networks,
         resolve_hostnames=True,
         allow_loopback=allow_loopback,
+        private_networks=private_networks,
     )
 
 

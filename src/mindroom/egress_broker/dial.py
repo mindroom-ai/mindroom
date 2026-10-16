@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
     _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+    _IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 __all__ = [
     "DestinationBlockedError",
@@ -40,9 +41,11 @@ class DialPolicy:
 
     ``egress`` holds the operator HTTP(S) proxies (from ``HTTPS_PROXY``, ``HTTP_PROXY``, and ``NO_PROXY``)
     that destinations reach the internet through. The destination guard applies before and regardless of them.
+    ``private_networks`` opens private addresses inside them, never loopback.
     """
 
     allow_private_networks: bool = False
+    private_networks: tuple[_IPNetwork, ...] = ()
     allow_loopback: bool = False
     connect_timeout: float = 10.0
     egress: BrowserEgress | None = None
@@ -127,6 +130,7 @@ async def open_upstream(
             port=port,
             allow_private_networks=policy.allow_private_networks,
             allow_loopback=policy.allow_loopback,
+            private_networks=policy.private_networks,
         )
     except ServerFetchUrlError as exc:
         # An unresolvable name is a failed connect, not a policy refusal.
