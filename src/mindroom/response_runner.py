@@ -5860,6 +5860,9 @@ class ResponseRunner:
             or resolved_model != agent.model
             # Only a thread can be switched for good.
             or thread_id is None
+            # A regenerated or resumed answer follows one the agent model just gave.
+            or request.edit_regeneration
+            or _resumed_reply() is not None
             # The judge cannot see media, and the cheap model may not read it.
             or _request_has_media(request)
         ):

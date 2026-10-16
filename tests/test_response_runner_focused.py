@@ -54,6 +54,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.cold_cache import ColdCacheConfig
+from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import (
@@ -161,6 +162,7 @@ from mindroom.streaming import (
     UnfinishedStreamedReply,
 )
 from mindroom.teams import _TeamStreamPresentation, continue_paused_team_run
+from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -7958,6 +7960,7 @@ async def _cold_cache_reply_model(
     *,
     scheduled_model: str | None = None,
     room_model: str | None = None,
+    thread_model: str | None = None,
     media: MediaInputs | None = None,
     inherit_cheap_model: bool = False,
     thread_id: str | None = "$event",
@@ -7976,6 +7979,14 @@ async def _cold_cache_reply_model(
         config.defaults.cheap_model = "cheap"
     if room_model is not None:
         set_room_model_override(coordinator.deps.runtime_paths, room_id="!room:localhost", model_name=room_model)
+    if thread_model is not None:
+        set_thread_model_override(
+            coordinator.deps.runtime_paths,
+            thread_id="$event",
+            model_name=thread_model,
+            entity_names=("general",),
+            config=config,
+        )
     selector_calls: list[dict[str, object]] = []
     active_models: list[str | None] = []
 
@@ -8067,6 +8078,7 @@ async def test_cold_cache_skipped_in_room_mode(tmp_path: Path) -> None:
         ({"room_model": "cheap2"}, "cheap2"),
         # An override naming the agent's own model is still an explicit choice.
         ({"room_model": "default"}, "default"),
+        ({"thread_model": "default"}, "default"),
         ({"media": MediaInputs(images=[Image(content=b"png")])}, "default"),
     ],
 )
@@ -8079,6 +8091,31 @@ async def test_cold_cache_skipped_for_override(
     active_models, selector_calls = await _cold_cache_reply_model(tmp_path, **override)
     assert selector_calls == []
     assert active_models == [expected_model]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit_regeneration", [False, True])
+async def test_cold_cache_skipped_for_edit_regeneration(tmp_path: Path, edit_regeneration: bool) -> None:
+    """An edit regenerates the answer the agent model just gave, so its cache is warm and no judge runs."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    config.agents["general"] = config.agents["general"].model_copy(
+        update={"cheap_model": "cheap", "cold_cache": ColdCacheConfig()},
+    )
+    select = AsyncMock(return_value="cheap")
+    request = replace(_plain_request(_target(thread_id="$event")), edit_regeneration=edit_regeneration)
+    with (
+        patch("mindroom.response_runner.select_cold_cache_model", new=select),
+        patch("mindroom.response_runner.set_thread_model_override"),
+    ):
+        chosen = await coordinator._cold_cache_model(
+            request,
+            runtime_model=ResolvedRuntimeModel(model_name="default", context_window=None),
+            thread_id="$event",
+        )
+    assert (chosen, select.await_count) == (("default", 0) if edit_regeneration else ("cheap", 1))
 
 
 @pytest.mark.asyncio
