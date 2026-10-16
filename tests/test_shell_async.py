@@ -808,3 +808,17 @@ async def test_a_shell_call_reports_its_output_as_its_progress(tmp_path: Path) -
 
     assert result == "building\nbuilt"
     assert reports[0] == "building"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seconds", [0, -5])
+async def test_a_timeout_that_is_not_positive_is_rejected_before_the_command_runs(tmp_path: Path, seconds: int) -> None:
+    """A zero or negative timeout would stop the command at once, so the call explains the argument instead."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    assert entrypoint is not None
+    marker = tmp_path / "ran"
+
+    result = await entrypoint(["touch", str(marker)], timeout=seconds)
+
+    assert result == "Error: timeout must be a positive number of seconds; omit it for the default limit."
+    assert not marker.exists()

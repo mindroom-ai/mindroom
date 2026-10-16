@@ -420,6 +420,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 command_args = _normalize_shell_args(args)
             except ValueError as exc:
                 return f"Error: {exc}"
+            if timeout is not None and timeout <= 0:
+                # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
+                return "Error: timeout must be a positive number of seconds; omit it for the default limit."
             runtime_env = self._runtime_env
             extra_path_prepend: tuple[str, ...] = ()
             if (cli_env := current_agent_cli_shell_env()) is not None:
