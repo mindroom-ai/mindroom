@@ -3,19 +3,25 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from mem0 import AsyncMemory
+from mem0.llms.openai import OpenAILLM
 from openai import AuthenticationError
 from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import _MemoryLLMConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,
@@ -25,6 +31,7 @@ from mindroom.memory import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -37,7 +44,10 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from agno.run.agent import RunOutput
 
 
 async def _search_memory_results(*args: object, **kwargs: object) -> list:
@@ -694,3 +704,183 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
         assert not any(result.get("memory") == "Team shared note" for result in calculator_deleted)
         assert not any(result.get("memory") == "Updated team shared note" for result in general_deleted)
         assert not any(result.get("memory") == "Updated team shared note" for result in calculator_deleted)
+
+
+def _mem0_memory_reporting_usage(config: Config) -> Callable[..., SimpleNamespace]:
+    """Return a Mem0 factory whose memories run one extraction call reporting 120 input and 30 output tokens per add."""
+    config.memory.backend = "mem0"
+    config.memory.llm = _MemoryLLMConfig(provider="openai", config={"api_key": "test-key", "model": "gpt-6-luna"})
+    usage = SimpleNamespace(prompt_tokens=120, completion_tokens=30, prompt_tokens_details=None)
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))], usage=usage)
+
+    def from_config(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=MagicMock(return_value=response))),
+        )
+        with patch("mem0.llms.openai.OpenAI", return_value=client):
+            mem0_llm = OpenAILLM(config.memory.llm.config)
+
+        async def add(messages: list[dict], **_: object) -> None:
+            # Mem0 runs its extraction prompt in a worker thread.
+            await asyncio.to_thread(mem0_llm.generate_response, messages=messages)
+
+        return SimpleNamespace(llm=mem0_llm, vector_store=object(), add=add)
+
+    return from_config
+
+
+@pytest.mark.asyncio
+async def test_conversation_memory_extraction_records_its_token_usage(storage_path: Path, config: Config) -> None:
+    """Mem0 calls its own LLM client, so its extraction tokens are recorded for the conversation that produced them."""
+    fake_memory = _mem0_memory_reporting_usage(config)
+    recorded: list[tuple[RunOutput, str, str, str | None]] = []
+
+    async def record(
+        response: RunOutput,
+        *,
+        owner: HelperUsageOwner,
+        kind: str,
+        requester_id: str | None,
+        **_: object,
+    ) -> None:
+        recorded.append((response, owner.session_id, kind, requester_id))
+
+    with (
+        patch.object(AsyncMemory, "from_config", side_effect=fake_memory),
+        patch("mindroom.memory._mem0_backend.record_helper_usage", side_effect=record),
+    ):
+        await store_conversation_memory(
+            "Remember that Atlas ships Friday.",
+            "general",
+            storage_path,
+            "session-alice",
+            config,
+            runtime_paths_for(config),
+            user_id="@alice:example.org",
+        )
+
+    [(run, session_id, kind, requester_id)] = recorded
+    assert (session_id, kind, requester_id) == ("session-alice", "memory_extraction", "@alice:example.org")
+    assert run.metrics is not None
+    assert (run.metrics.input_tokens, run.metrics.output_tokens, run.metrics.total_tokens) == (120, 30, 150)
+
+
+@pytest.mark.asyncio
+async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Path, config: Config) -> None:
+    """A team conversation has no single agent session, so its extraction is reported as internal work."""
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    fake_stores = MagicMock(side_effect=_mem0_memory_reporting_usage(config))
+    recorded: list[tuple[RunOutput, str, str | None]] = []
+
+    async def record(response: RunOutput, *, kind: str, requester_id: str | None = None, **_: object) -> None:
+        recorded.append((response, kind, requester_id))
+
+    with (
+        patch.object(AsyncMemory, "from_config", fake_stores),
+        patch("mindroom.memory._mem0_backend.record_system_usage", side_effect=record),
+    ):
+        await store_conversation_memory(
+            "Remember that Atlas ships Friday.",
+            ["general", "calculator"],
+            storage_path,
+            "team-session",
+            config,
+            runtime_paths_for(config),
+            user_id="@alice:example.org",
+        )
+
+    [(run, kind, requester_id)] = recorded
+    assert (kind, requester_id) == ("memory_extraction", "@alice:example.org")
+    assert run.metrics is not None
+    # Team memory is extracted once into each store it is kept in.
+    assert run.metrics.total_tokens == 150 * fake_stores.call_count
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The memory tool runs inside a reply, so its extraction tokens go to that reply's conversation."""
+    fake_memory = _mem0_memory_reporting_usage(config)
+    owner = HelperUsageOwner(storage_factory=MagicMock(), session_id="reply-session")
+    recorded: list[tuple[HelperUsageOwner, str, int]] = []
+
+    async def record(response: RunOutput, *, owner: HelperUsageOwner, kind: str, **_: object) -> None:
+        assert response.metrics is not None
+        recorded.append((owner, kind, response.metrics.total_tokens))
+
+    with (
+        patch.object(AsyncMemory, "from_config", side_effect=fake_memory),
+        patch("mindroom.memory._mem0_backend.record_helper_usage", side_effect=record),
+        helper_usage_owner_context(owner),
+    ):
+        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+
+    assert recorded == [(owner, "memory_extraction", 150)]
+
+
+@pytest.mark.parametrize(
+    ("provider", "client", "expected"),
+    [
+        pytest.param(
+            "openai",
+            SimpleNamespace(
+                chat=SimpleNamespace(
+                    completions=SimpleNamespace(
+                        create=lambda **_: SimpleNamespace(
+                            usage=SimpleNamespace(
+                                prompt_tokens=100,
+                                completion_tokens=20,
+                                prompt_tokens_details=SimpleNamespace(cached_tokens=40),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            (100, 20, 40),
+            id="openai",
+        ),
+        pytest.param(
+            "anthropic",
+            SimpleNamespace(
+                messages=SimpleNamespace(
+                    create=lambda **_: SimpleNamespace(
+                        usage=SimpleNamespace(input_tokens=90, output_tokens=10, cache_read_input_tokens=30),
+                    ),
+                ),
+            ),
+            (90, 10, 30),
+            id="anthropic",
+        ),
+        pytest.param(
+            "ollama",
+            SimpleNamespace(chat=lambda **_: SimpleNamespace(prompt_eval_count=70, eval_count=5)),
+            (70, 5, 0),
+            id="ollama",
+        ),
+    ],
+)
+def test_each_provider_reports_its_extraction_tokens(
+    provider: str,
+    client: SimpleNamespace,
+    expected: tuple[int, int, int],
+) -> None:
+    """Each provider SDK reports usage in its own shape."""
+    llm = SimpleNamespace(config=SimpleNamespace(model="extractor"), client=client)
+    install_mem0_usage_capture(llm, provider)
+    install_mem0_usage_capture(llm, provider)  # Installing again must not count calls twice.
+    call = {
+        "openai": lambda: llm.client.chat.completions.create(),
+        "anthropic": lambda: llm.client.messages.create(),
+        "ollama": lambda: llm.client.chat(),
+    }[provider]
+
+    call()  # Outside a memory write, nothing is collected.
+    with counted_mem0_usage() as calls:
+        call()
+
+    run = mem0_usage_run(calls)
+    assert run is not None
+    assert run.metrics is not None
+    assert (run.metrics.input_tokens, run.metrics.output_tokens, run.metrics.cache_read_tokens) == expected

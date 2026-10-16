@@ -983,6 +983,7 @@ visibility = [
     "mindroom.knowledge_graph.session_runs",
     "mindroom.knowledge_graph.ingestion",
     "mindroom.automations.exploration",
+    "mindroom.memory._mem0_backend",
 ]
 
 [[modules]]
@@ -992,6 +993,7 @@ visibility = [
     "mindroom.response_turn",
     "mindroom.api.openai_compat",
     "mindroom.memory.auto_flush",
+    "mindroom.memory._mem0_backend",
     "mindroom.custom_tools.claude_agent",
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.approval.execution",
@@ -3342,6 +3344,7 @@ depends_on = [
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
     "mindroom.memory._mem0_openai",
+    "mindroom.memory._mem0_usage",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
@@ -3351,6 +3354,11 @@ visibility = ["mindroom.memory._backend"]
 path = "mindroom.memory._mem0_openai"
 depends_on = ["mindroom.model_defaults"]
 visibility = ["mindroom.memory.config"]
+
+[[modules]]
+path = "mindroom.memory._mem0_usage"
+depends_on = []
+visibility = ["mindroom.memory._mem0_backend", "mindroom.memory.config"]
 
 [[modules]]
 path = "mindroom.memory._file_backend"
@@ -3389,11 +3397,14 @@ path = "mindroom.memory._mem0_backend"
 depends_on = [
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
+    "mindroom.helper_usage",
     "mindroom.logging_config",
+    "mindroom.memory._mem0_usage",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
     "mindroom.memory_scope_ids",
+    "mindroom.session_storage.agent_storage",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend"]

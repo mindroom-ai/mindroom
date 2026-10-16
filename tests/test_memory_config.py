@@ -48,6 +48,11 @@ from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
 
 
+def _fake_mem0_llm() -> SimpleNamespace:
+    """Return a stand-in for Mem0's default Ollama LLM, whose client call MindRoom counts."""
+    return SimpleNamespace(config=SimpleNamespace(model="gemma4"), client=SimpleNamespace(chat=MagicMock()))
+
+
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
 
@@ -755,7 +760,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(vector_store=object())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -784,7 +789,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        mock_from_config.return_value = SimpleNamespace(vector_store=object())
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
         install_running = threading.Event()
         finish_install = threading.Event()
 
@@ -834,7 +839,7 @@ class TestMemoryConfig:
             api_key="sk-test",
             openai_client=client,
         )
-        memory = SimpleNamespace(vector_store=object(), embedding_model=object())
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),

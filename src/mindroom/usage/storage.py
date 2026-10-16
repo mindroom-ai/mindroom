@@ -11,6 +11,7 @@ type IndependentUsageKind = Literal[
     "claude_agent",
     "compaction_summary",
     "memory_auto_flush",
+    "memory_extraction",
     "dynamic_workflow",
     "knowledge_graph",
     "live_voice",

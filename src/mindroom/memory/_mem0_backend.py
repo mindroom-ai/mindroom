@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_checkable
 
 from mindroom.embeddings.embedder_health import (
@@ -11,10 +12,13 @@ from mindroom.embeddings.embedder_health import (
     capture_embedder_health_recorder,
 )
 from mindroom.embeddings.errors import EmbedderRequestError, classified_embedder_error
+from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage, record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.timing import timed
 
+from ._mem0_usage import counted_mem0_usage, mem0_usage_run
 from ._policy import (
     allowed_scope_storage_paths,
     build_team_user_id,
@@ -38,6 +42,8 @@ from ._shared import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from agno.metrics import ModelMetrics
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -353,6 +359,35 @@ class Mem0MemoryBackend:
     create_memory: _MemoryFactory
     context_label: ClassVar[str] = "agent"
 
+    async def _record_extraction_usage(
+        self,
+        calls: list[ModelMetrics],
+        owner: HelperUsageOwner | None,
+        requester_id: str | None,
+    ) -> None:
+        """Count Mem0's extraction tokens toward the conversation, or as internal work when there is none."""
+        if (run := mem0_usage_run(calls)) is None:
+            return
+        if owner is None:
+            await record_system_usage(
+                run,
+                runtime_paths=self.runtime_paths,
+                kind="memory_extraction",
+                requester_id=requester_id,
+            )
+            return
+        try:
+            await record_helper_usage(
+                run,
+                owner=owner,
+                invocation_id=run.run_id or "",
+                kind="memory_extraction",
+                requester_id=requester_id,
+            )
+        except Exception:
+            # The memory is already stored; failing the write here would make the memory tool report an error.
+            logger.exception("Memory extraction usage could not be recorded")
+
     async def add(
         self,
         content: str,
@@ -385,7 +420,14 @@ class Mem0MemoryBackend:
                 metadata=metadata,
             )
 
-        await _run_mem0_embedder_mutation(add_memory, health_recorder)
+        with counted_mem0_usage() as calls:
+            await _run_mem0_embedder_mutation(add_memory, health_recorder)
+        # The memory tool runs inside a reply, whose conversation is the bound owner.
+        await self._record_extraction_usage(
+            calls,
+            get_helper_usage_owner(),
+            execution_identity.requester_id if execution_identity is not None else None,
+        )
         logger.info("Memory added", agent=agent_name)
 
     @timed("system_prompt_assembly.memory_search.mem0_backend")
@@ -636,25 +678,42 @@ class Mem0MemoryBackend:
             failure_context = {"agent": agent_name}
 
         stored_targets = 0
-        for target_storage_path in target_storage_paths:
-            health_recorder = capture_embedder_health_recorder()
-            try:
-                memory = await self.create_memory(target_storage_path, config)
-            except Exception as exc:
-                if (detail := _record_classified_embedder_failure(exc, health_recorder)) is None:
-                    raise
-                logger.warning(failure_log, error=detail, **failure_context)
-                continue
-            if await _add_mem0_scope_messages(
-                memory=memory,
-                messages=messages,
-                user_id=scope_user_id,
-                metadata=metadata,
-                failure_log=failure_log,
-                failure_context=failure_context,
-                health_recorder=health_recorder,
-            ):
-                stored_targets += 1
+        with counted_mem0_usage() as calls:
+            for target_storage_path in target_storage_paths:
+                health_recorder = capture_embedder_health_recorder()
+                try:
+                    memory = await self.create_memory(target_storage_path, config)
+                except Exception as exc:
+                    if (detail := _record_classified_embedder_failure(exc, health_recorder)) is None:
+                        raise
+                    logger.warning(failure_log, error=detail, **failure_context)
+                    continue
+                if await _add_mem0_scope_messages(
+                    memory=memory,
+                    messages=messages,
+                    user_id=scope_user_id,
+                    metadata=metadata,
+                    failure_log=failure_log,
+                    failure_context=failure_context,
+                    health_recorder=health_recorder,
+                ):
+                    stored_targets += 1
+        # A team's conversation has no single agent session, so its extraction counts as internal work.
+        owner = (
+            None
+            if isinstance(agent_name, list)
+            else HelperUsageOwner(
+                storage_factory=partial(
+                    create_session_storage,
+                    agent_name,
+                    config,
+                    self.runtime_paths,
+                    execution_identity=execution_identity,
+                ),
+                session_id=session_id,
+            )
+        )
+        await self._record_extraction_usage(calls, owner, user_id)
 
         if stored_targets == 0:
             logger.warning(

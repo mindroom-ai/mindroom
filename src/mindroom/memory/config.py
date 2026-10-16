@@ -282,6 +282,9 @@ async def create_memory_instance(
         from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
 
         install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
+    from mindroom.memory._mem0_usage import install_mem0_usage_capture  # noqa: PLC0415
+
+    install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.
