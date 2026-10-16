@@ -63,9 +63,9 @@ def _is_thread_cache_warm(session: AgentSession | None, model_config: ModelConfi
     """Whether the agent model served this thread's newest run within its cache TTL."""
     if session is None or not session.runs:
         return False
-    newest = max(session.runs, key=lambda run: run.created_at)
-    # Interrupted-turn replays carry no model, so only the TTL decides after them.
-    if newest.model and newest.model != effective_model_id(model_config):
+    # Interrupted-turn replays carry no model, so the newest run that names one decides.
+    served = max((run for run in session.runs if run.model), key=lambda run: run.created_at, default=None)
+    if served is not None and served.model != effective_model_id(model_config):
         return False
     # The session is written at or after the last provider request, so this errs toward warm.
     return session.updated_at is None or now - session.updated_at < _prompt_cache_ttl_seconds(model_config)

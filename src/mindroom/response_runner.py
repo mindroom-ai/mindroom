@@ -5863,13 +5863,9 @@ class ResponseRunner:
             return resolved_model
         try:
             session = await asyncio.to_thread(self._read_agent_session, session_id, execution_identity)
-        except Exception as error:
+        except Exception:
             # The switch is an optimization, so an unreadable session must not fail the reply.
-            self.deps.logger.warning(
-                "cold_cache_session_read_failed",
-                session_id=session_id,
-                exception_type=error.__class__.__name__,
-            )
+            self.deps.logger.warning("cold_cache_session_read_failed", session_id=session_id, exc_info=True)
             return resolved_model
         return await select_cold_cache_model(
             agent.cold_cache,
