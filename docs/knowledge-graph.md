@@ -49,7 +49,7 @@ Changing the embedder starts a new, empty graph that fills again from conversati
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](scheduling.md#exploration) threads and tasks another agent delegated to it, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, conversations through the OpenAI-compatible API, and team conversations.
+Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, subagents' answers, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -77,5 +77,5 @@ Use a private agent when requesters must not see each other's facts.
 
 ## Cost and Health
 
-Extraction makes several model calls per piece of conversation, reported as `knowledge_graph` in [usage tracking](usage.md#token-usage); lookups make none.
+Extraction makes several model calls per piece of conversation, reported as `knowledge_graph` in [usage tracking](usage.md#token-usage); each lookup makes one embedding request.
 When ingestion fails, `/api/health` includes a `knowledge_graph` block naming the kind of failure until a later pass succeeds, and the MindRoom log has the details.

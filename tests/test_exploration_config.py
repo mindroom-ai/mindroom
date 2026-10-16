@@ -22,7 +22,7 @@ def _config(
     defaults: list[object] | None = None,
     **entry: object,
 ) -> Config:
-    automations = None if defaults is not None else [{"name": "exploration", **entry}]
+    automations = None if defaults is not None else [{"name": "exploration", "room": "lab", **entry}]
     return Config(
         agents={
             "mind": AgentConfig(
@@ -59,3 +59,9 @@ def test_inherited_exploration_is_skipped_without_the_graph() -> None:
     """A default entry applies only to agents that build a graph."""
     config = _config(knowledge_graph=False, defaults=[{"name": "exploration"}])
     assert config.resolve_entity("mind").automations == []
+
+
+def test_a_shared_agents_exploration_needs_a_room() -> None:
+    """The prompt lists what every requester's conversations looked up, so it never falls back to the first room."""
+    with pytest.raises(ValidationError, match="room"):
+        _config(room=None)

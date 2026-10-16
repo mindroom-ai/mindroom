@@ -66,7 +66,9 @@ class GraphFact:
     fact: str
     valid_at: datetime | None
     invalid_at: datetime | None
+    # The newest supporting episodes, oldest first, and how many support the fact in all.
     sources: list[_FactSource]
+    source_count: int
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,7 @@ class GraphStore(Protocol):
         """Release the database connection."""
 
 
+_SHOWN_SOURCES = 3
 _failure: str | None = None
 _runtime_store: GraphStore | None = None
 
@@ -142,10 +145,15 @@ def _import_graphiti() -> None:
 
 
 async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[GraphFact]:
-    """Return edges as facts with the episodes that support them."""
+    """Return edges as facts with the newest episodes that support them.
+
+    Graphiti appends an episode to a fact each time it sees the fact again, so a fact explored every day gathers
+    hundreds; loading and listing them all would make every lookup grow without bound.
+    """
     from graphiti_core.nodes import EpisodicNode  # noqa: PLC0415
 
-    episode_uuids = sorted({uuid for edge in edges for uuid in edge.episodes})
+    shown = {edge.uuid: edge.episodes[-_SHOWN_SOURCES:] for edge in edges}
+    episode_uuids = sorted({uuid for uuids in shown.values() for uuid in uuids})
     episodes: dict[str, EpisodicNode] = {}
     if episode_uuids:
         episodes = {episode.uuid: episode for episode in await EpisodicNode.get_by_uuids(driver, episode_uuids)}
@@ -156,9 +164,10 @@ async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[Graph
             invalid_at=edge.invalid_at,
             sources=[
                 _FactSource(description=episode.source_description, observed_at=episode.valid_at)
-                for uuid in edge.episodes
+                for uuid in shown[edge.uuid]
                 if (episode := episodes.get(uuid)) is not None
             ],
+            source_count=len(edge.episodes),
         )
         for edge in edges
     ]
@@ -229,6 +238,9 @@ class GraphitiStore:
                 reference_time=episode.reference_time,
                 source=EpisodeType.message if episode.kind == "conversation" else EpisodeType.text,
                 group_id=scope.graph_name,
+                # Graphiti otherwise adds the graph's ten newest episodes, from any conversation, to every prompt,
+                # which multiplies extraction cost and overflows smaller context windows; an episode carries its own context.
+                previous_episode_uuids=[],
             )
 
     async def search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:

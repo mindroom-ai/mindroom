@@ -6,9 +6,9 @@ import hashlib
 import subprocess
 import sys
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -21,7 +21,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
 from mindroom.knowledge_graph.scope import GraphScope
-from mindroom.knowledge_graph.store import GraphitiStore, _FactSource
+from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
+from mindroom.knowledge_graph.usage import UsageTarget
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -68,19 +69,25 @@ async def _seed_fact(
     source_description: str,
     valid_at: datetime,
     invalid_at: datetime | None = None,
+    seen: int = 1,
 ) -> None:
+    """Store a fact supported by ``seen`` episodes, one day apart from ``valid_at``, numbered in their descriptions."""
     graphiti = await graph_store._graphiti_client()
     driver = graphiti.driver.clone(database=scope.graph_name)
     embedder = graphiti.embedder
-    episode = EpisodicNode(
-        name="episode",
-        group_id=scope.graph_name,
-        source=EpisodeType.text,
-        source_description=source_description,
-        content=fact,
-        valid_at=valid_at,
-    )
-    await episode.save(driver)
+    episodes = [
+        EpisodicNode(
+            name="episode",
+            group_id=scope.graph_name,
+            source=EpisodeType.text,
+            source_description=source_description if seen == 1 else f"{source_description} #{index}",
+            content=fact,
+            valid_at=valid_at + timedelta(days=index),
+        )
+        for index in range(seen)
+    ]
+    for episode in episodes:
+        await episode.save(driver)
     alice = EntityNode(name="Alice", group_id=scope.graph_name, summary="Alice leads Project Atlas.")
     atlas = EntityNode(name="Project Atlas", group_id=scope.graph_name, summary="A data platform project.")
     for node in (alice, atlas):
@@ -92,7 +99,7 @@ async def _seed_fact(
         name="LEADS",
         fact=fact,
         group_id=scope.graph_name,
-        episodes=[episode.uuid],
+        episodes=[episode.uuid for episode in episodes],
         created_at=valid_at,
         valid_at=valid_at,
         invalid_at=invalid_at,
@@ -121,6 +128,24 @@ async def test_search_facts_returns_validity_and_sources(store: GraphitiStore) -
     assert facts[0].sources == [
         _FactSource(description="conversation: room !r:x thread $t", observed_at=JAN),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_fact_seen_many_times_returns_only_its_newest_sources(store: GraphitiStore) -> None:
+    """A fact re-seen on every exploration keeps every source, but a lookup loads and returns only the newest few."""
+    await _seed_fact(
+        store,
+        ALPHA,
+        fact="Alice leads Project Atlas",
+        source_description="tool_results",
+        valid_at=JAN,
+        seen=8,
+    )
+
+    [fact] = await store.search_facts(ALPHA, "who leads Project Atlas", limit=5)
+
+    assert [source.description for source in fact.sources] == ["tool_results #5", "tool_results #6", "tool_results #7"]
+    assert fact.source_count == 8
 
 
 @pytest.mark.asyncio
@@ -236,3 +261,16 @@ async def test_the_embedder_is_built_off_the_event_loop(tmp_path: Path) -> None:
 
     assert built_on
     assert built_on[0] is not threading.main_thread()
+
+
+@pytest.mark.asyncio
+async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) -> None:
+    """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt."""
+    graphiti = await store._graphiti_client()
+    episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
+
+    with patch.object(graphiti, "add_episode", AsyncMock()) as add:
+        await store.add_episode(ALPHA, episode, UsageTarget("mind", "!r:$t", None))
+
+    assert add.await_args is not None
+    assert add.await_args.kwargs["previous_episode_uuids"] == []

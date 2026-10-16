@@ -38,8 +38,9 @@ RUN_DONE = 1 << 30
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
 _GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
-# Agno's reasoning functions return the model's own thoughts.
-_SCRATCHPAD_FUNCTIONS = ("think", "analyze")
+# Agno's reasoning functions return the model's own thoughts, and subagents answer in another model's prose; a
+# subagent's own tool results come in through its own session.
+_PROSE_FUNCTIONS = ("think", "analyze", "run_subagent", "continue_subagent")
 _MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
 _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
 _CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
@@ -59,8 +60,8 @@ class RenderedEpisode:
 
 
 def is_evidence(execution: ToolExecution) -> bool:
-    """Return whether a tool call observed something, rather than returning the graph or the model's own thoughts."""
-    if execution.tool_name in (*_GRAPH_FUNCTIONS, *_SCRATCHPAD_FUNCTIONS):
+    """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
+    if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
         return False
     # A shell or `mindroom-agent` call can look the graph up too, and returns its facts as the command's output.
     arguments = tool_arguments(execution)

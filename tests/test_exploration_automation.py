@@ -37,7 +37,7 @@ def _config(**entry: object) -> Config:
                 display_name="Mind",
                 knowledge_graph=True,
                 tools=["github", "duckduckgo"],
-                automations=[{"name": "exploration", **entry}],
+                automations=[{"name": "exploration", "room": "lab", **entry}],
             ),
         },
         models={
@@ -250,3 +250,22 @@ def test_a_prompt_that_was_never_answered_keeps_its_leads(tmp_path: Path) -> Non
     assert first is not None
     assert second is not None
     assert first.text == second.text
+
+
+def test_an_unreadable_conversation_does_not_stop_exploration(tmp_path: Path) -> None:
+    """One conversation whose turns cannot be read is skipped, and the others still give leads."""
+    config, paths = _config(), _paths(tmp_path)
+    _seed(config, paths, "!room:x:$bad", [_tool("get_repository", repo="acme/bad")], created_at=100)
+    _seed(config, paths, "!room:x:$good", [_tool("get_repository", repo="acme/atlas")], created_at=200)
+    real = exploration.session_runs
+
+    def runs(storage: object, session_id: str) -> list[RunOutput]:
+        if session_id == "!room:x:$bad":
+            msg = "corrupt session row"
+            raise ValueError(msg)
+        return real(storage, session_id)
+
+    with patch.object(exploration, "session_runs", runs):
+        leads = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
+
+    assert [lead.arguments for lead in leads] == ['{"repo": "acme/atlas"}']

@@ -373,7 +373,7 @@ async def test_usage_is_charged_to_the_conversations_requester(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_an_outage_never_drops_episodes(tmp_path: Path) -> None:
-    """While the database or provider is down, episodes wait however long it lasts."""
+    """While the database or provider is down for hours, episodes wait instead of being dropped."""
     config, paths = _config(), _paths(tmp_path)
     store = _FakeStore(unavailable=True)
     _seed(config, paths, "!room:x:$t1", ["r1"])

@@ -1893,8 +1893,12 @@ class Config(BaseModel):
                 return f"is private; {automation.name} posts in each requester's personal room and cannot set room"
         if automation.requires_file_memory and self._agent_memory_backend(agent_name) != "file":
             return f"needs memory_backend: file for {automation.name}"
-        if isinstance(automation, ExplorationAutomation) and not self.agent_uses_knowledge_graph(agent_name):
-            return "needs knowledge_graph: true for exploration"
+        if isinstance(automation, ExplorationAutomation):
+            if not self.agent_uses_knowledge_graph(agent_name):
+                return "needs knowledge_graph: true for exploration"
+            # Its prompt lists what every requester's conversations looked up, so the operator picks who sees it.
+            if automation.room is None and self.get_agent(agent_name).private is None:
+                return "needs room for exploration, because its prompt lists what conversations looked up"
         return None
 
     def _agent_automations(self, agent_name: str) -> list[Automation]:

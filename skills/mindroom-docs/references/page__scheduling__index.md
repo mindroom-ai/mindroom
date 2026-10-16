@@ -384,12 +384,12 @@ agents:
 5. When the run ends, MindRoom marks the thread resolved.
 
 The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
-The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 
 | Field | Default | Description |
 |---|---|---|
 | `cron` | `30 2 * * *` | When to check |
-| `room` | first configured room | Where the prompt is posted |
+| `room` | required for a shared agent | Where the prompt is posted |
 | `max_tool_calls` | `40` (1 to 1000) | Tool calls the prompt asks one run to stay within |
 | `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
 | `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run |

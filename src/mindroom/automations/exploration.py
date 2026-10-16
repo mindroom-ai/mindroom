@@ -24,12 +24,15 @@ from mindroom.durable_write import write_json_file_durable
 from mindroom.knowledge_graph.episodes import classify_thread, is_evidence, tool_arguments
 from mindroom.knowledge_graph.ingestion import wake_knowledge_graph_ingestion
 from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
+from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_session_storage
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+
+logger = get_logger(__name__)
 
 _DAY_SECONDS = 86_400
 _STATE_FILE = "exploration.json"
@@ -58,7 +61,12 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_L
     seen: dict[tuple[str, str], tuple[int, int]] = {}
     try:
         for session_id, _updated_at in updated_sessions(storage, ctx.agent_name, since=since):
-            runs = session_runs(storage, session_id)
+            try:
+                runs = session_runs(storage, session_id)
+            except Exception as exc:
+                # One conversation that cannot be read must not stop every later check.
+                logger.warning("Exploration skipped an unreadable conversation", agent=ctx.agent_name, error=str(exc))
+                continue
             if classify_thread(runs, automation_thread_ids) != "conversation":
                 continue
             for run in runs:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -12,7 +12,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools
+from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools, _render_fact
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import GraphFact, _FactSource, _GraphEntity, set_knowledge_graph_store
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -39,6 +39,7 @@ FACT = GraphFact(
             observed_at=JAN,
         ),
     ],
+    source_count=1,
 )
 
 
@@ -111,6 +112,14 @@ async def test_search_graph_shows_validity_and_sources(tmp_path: Path) -> None:
     assert "Alice leads Project Atlas" in text
     assert "valid 2026-01-05 until 2026-03-09 (superseded)" in text
     assert "tool_results: room !r thread $t; calls: get_repo 1a2b (2026-01-05)" in text
+
+
+def test_a_fact_with_more_sources_than_shown_says_how_many_more() -> None:
+    """A fact re-seen many times lists its newest sources and counts the rest, so lookups stay small."""
+    rendered = _render_fact(replace(FACT, source_count=120))
+
+    assert rendered.count("tool_results:") == 1
+    assert "and 119 earlier" in rendered
 
 
 @pytest.mark.asyncio

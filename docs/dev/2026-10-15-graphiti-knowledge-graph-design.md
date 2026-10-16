@@ -41,7 +41,7 @@ Exploration threads and delegated tasks ingest only tool calls and their results
 Other automation threads (`dreaming`, `prompt_curation`, plugin automations) are not ingested.
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
 Each run's metadata records the hook source of the message that started it.
-Calls to the `knowledge_graph` tool and their results, including lookups through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze` are left out because they return the model's own thoughts.
+Calls to the `knowledge_graph` tool and their results, including lookups through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze` and subagents' answers are left out because they are a model's prose.
 
 Every fact is an attributed claim, not a verified truth.
 Graphiti records which episodes support a fact, so provenance is per episode, and each episode has one kind:

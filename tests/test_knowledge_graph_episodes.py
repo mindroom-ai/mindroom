@@ -158,6 +158,13 @@ def test_reasoning_scratchpads_are_never_rendered() -> None:
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 
 
+def test_subagent_answers_are_never_rendered() -> None:
+    """A subagent's answer is another model's prose; its own tool results come in through its own session."""
+    run = _run("r1", tools=[_tool("run_subagent", "Bob owns Atlas, I think.", task="Who owns Atlas?")])
+
+    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
 def test_oversized_tool_result_is_clipped_before_redaction() -> None:
     """A huge result keeps its first part rather than failing redaction as a whole."""
     run = _run("r1", tools=[_tool("fetch_page", "Atlas launch notes. " + "x" * 200_000, url="https://example.test")])
