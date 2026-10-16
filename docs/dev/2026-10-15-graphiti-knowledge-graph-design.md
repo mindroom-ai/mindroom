@@ -68,7 +68,7 @@ Approval cards and the stop control need a visible thread, and the thread is the
 
 ### Exploration is a prompt, with the agent's own tools and approval rules
 
-An exploration turn is an ordinary turn started by a trusted automation prompt: the agent has its usual tools, and approval rules apply as in any turn, so a call that needs approval waits in the exploration thread until someone answers or the request expires.
+An exploration turn is an ordinary turn started by a trusted automation prompt: the agent has its usual tools, and approval rules apply as in any turn, so a call that needs approval waits in the exploration thread for a private agent's requester, and a shared agent's is denied because no person asked for its run, which a live run on 2026-10-16 confirmed.
 The prompt asks the agent to only read and to stay within `max_tool_calls`; the agent's `max_tool_calls_per_turn` is the enforced limit, and approval rules are what stop writes, as for any turn that reads untrusted content.
 Observed tool calls are leads: the prompt lists them, and the agent follows them with its own tools.
 
