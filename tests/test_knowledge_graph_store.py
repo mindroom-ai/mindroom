@@ -129,6 +129,8 @@ async def test_search_facts_returns_validity_and_sources(store: GraphitiStore) -
     assert facts[0].sources == [
         _FactSource(description="conversation: room !r:x thread $t", observed_at=JAN),
     ]
+    # Each scope is its own graph, so a search in one never returns another's facts.
+    assert await store.search_facts(BETA, "Alice Project Atlas", limit=5) == []
 
 
 @pytest.mark.asyncio
@@ -150,15 +152,6 @@ async def test_a_fact_seen_many_times_returns_only_its_newest_sources(store: Gra
 
 
 @pytest.mark.asyncio
-async def test_scopes_never_see_each_others_facts(store: GraphitiStore) -> None:
-    """Each scope is its own graph, so a search in one never returns another's facts."""
-    await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
-
-    assert await store.search_facts(BETA, "Alice Project Atlas", limit=5) == []
-    assert await store.entity(BETA, "Alice") is None
-
-
-@pytest.mark.asyncio
 async def test_entity_returns_summary_and_facts(store: GraphitiStore) -> None:
     """An entity lookup returns its summary and the facts that touch it."""
     await _seed_fact(
@@ -176,6 +169,7 @@ async def test_entity_returns_summary_and_facts(store: GraphitiStore) -> None:
     assert entity.summary == "Alice leads Project Atlas."
     assert [fact.fact for fact in entity.facts] == ["Alice leads Project Atlas"]
     assert entity.facts[0].sources[0].description.startswith("tool_results:")
+    assert await store.entity(BETA, "Alice") is None
 
 
 def test_importing_graphiti_leaves_the_environment_alone(tmp_path: Path) -> None:

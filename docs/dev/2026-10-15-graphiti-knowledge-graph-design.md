@@ -24,15 +24,6 @@ A labeled evaluation of extracted facts against their sources measures precision
 
 ## Decisions
 
-### Three units with one store
-
-1. **Graph store**: one Graphiti instance per runtime over an embedded FalkorDB Lite database.
-2. **Passive ingestion**: a background worker turns new conversation content, including tool calls and their results, into Graphiti episodes in code, without an agent turn.
-3. **Active exploration**: a built-in `exploration` automation asks the agent, on a cron schedule, to explore the sources its tools reach; ingestion then records the raw tool results as evidence.
-
-The agent reads the graph through a read-only `knowledge_graph` tool.
-The agent's answers in an exploration run never enter the graph, so it cannot launder its own summaries into facts; its tool calls do, arguments included, as observations of what it did.
-
 ### Evidence enters only from transcripts and tool results
 
 Episodes come from stored sessions, never from a model-callable write function.
@@ -79,7 +70,7 @@ FalkorDB keeps each Graphiti `group_id` in its own graph.
 The scope is derived from the agent name, or for a private agent from the requester's private instance, hashed so no Matrix ID appears in a graph name.
 No tool function takes a `group_id`; the model can never name another scope.
 The embedded database file lives in primary-only storage at `<storage_root>/knowledge_graph/`, outside every workspace.
-FalkorDB Lite's server opens no TCP port and listens on a Unix socket in its own `0700` temporary directory, which keeps the socket path under the 108-byte limit that a long storage path could exceed; worker containers cannot reach it.
+The server's socket sits in its own temporary directory because a long storage path could push it past the 108-byte socket-path limit.
 The graph name also carries the effective embedder signature that names Mem0 collections, so changing the embedder starts a new graph that ingestion rebuilds from stored sessions, as Mem0 switches collections.
 
 Rejected: an external FalkorDB server.
@@ -95,7 +86,6 @@ The server persists with an append-only file, so a kill loses at most a second o
 ### Graphiti's models come from MindRoom config
 
 Graphiti's `LLMClient` and `EmbedderClient` are thin adapters over MindRoom's own model and embedder construction (`get_model_instance` with a structured-output Agno run, and `create_configured_embedder` for `memory.embedder`), so every provider, credential rule, and base URL MindRoom supports works without a second mapping.
-Each extraction call is an Agno run, so its tokens are recorded through the same helper-usage path as auto-flush.
 
 Rejected: mapping MindRoom providers onto Graphiti's own provider clients.
 It duplicates key precedence and base-URL rules per provider, covers fewer providers, and gives no usage accounting.
@@ -103,14 +93,6 @@ Search uses Graphiti's hybrid search with reciprocal-rank fusion and no cross-en
 Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI key, so MindRoom passes a reranker that is never called by the search recipes it uses.
 
 Graphiti needs structured output; small local models may fail extraction, which the ingestion worker reports and retries rather than hides.
-
-### Graphiti is optional
-
-`graphiti-core[falkordblite]` is an optional extra installed on first use, imported only inside the store module, and kept out of the slim import surfaces that `tests/test_import_graph.py` pins.
-
-## Configuration
-
-Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `exploration` section of `docs/scheduling.md`.
 
 ## Ingestion invariants
 
@@ -140,7 +122,6 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 - Exploration prompts list redacted arguments of recent tool calls from the agent's conversations, so everyone who can read the exploration room sees them; a shared agent's operator must choose that room, and private agents post in the requester's own personal room.
 - Ingestion skips turns derived from events the agent's journal saw redacted, because stored history drops a redacted turn only when the agent next replies there; it waits while the agent's bot is not running, since it cannot tell then.
   Exploration's lead check runs in a thread without the journal, so a redacted turn's calls can be listed until that reply.
-- Private agents get one graph per requester instance and explore as that requester, with that requester's credentials, as automations already do.
 
 ## Error handling
 

@@ -94,18 +94,10 @@ async def test_search_graph_reads_only_the_callers_graph(tmp_path: Path, store: 
     identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=ALICE)
     tools = KnowledgeGraphTools("mind", config, paths, identity)
 
-    await tools.search_graph("who leads Atlas")
+    text = await tools.search_graph("who leads Atlas")
 
     assert store.queries == [(graph_scope("mind", config, paths, identity).graph_name, "who leads Atlas", 10)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("store")
-async def test_search_graph_shows_validity_and_sources(tmp_path: Path) -> None:
-    """Each fact shows when it held and what evidence supports it."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    text = await KnowledgeGraphTools("mind", _config(), paths, None).search_graph("Atlas")
-
+    # Each fact shows when it held and what evidence supports it.
     assert "Alice leads Project Atlas" in text
     assert "valid 2026-01-05 until 2026-03-09 (superseded)" in text
     assert "tool_results: room !r thread $t; calls: get_repo 1a2b (2026-01-05)" in text

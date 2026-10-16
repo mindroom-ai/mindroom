@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from itertools import accumulate
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from agno.models.message import Message
@@ -15,6 +15,9 @@ from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.knowledge_graph.episodes import RUN_DONE, RenderedEpisode, classify_thread, render_episodes
 from mindroom.prompt_message_tags import render_msg_tag
+
+if TYPE_CHECKING:
+    from mindroom.knowledge_graph.store import EpisodeKind
 
 ROOM = "!room:example.test"
 THREAD = "$thread"
@@ -65,7 +68,7 @@ def _episodes(
 
 def _render(
     runs: list[RunOutput],
-    episode_kind: Literal["conversation", "tool_results"],
+    episode_kind: EpisodeKind,
     settings: KnowledgeGraphIngestConfig = SETTINGS,
     thread_kind: _ThreadKind = "conversation",
 ) -> list[RenderedEpisode]:
@@ -104,41 +107,35 @@ def test_conversation_run_renders_speakers_and_a_separate_tool_episode() -> None
     assert [item.progress for item in rendered] == [(1_760_000_000, "r1", RUN_DONE)] * 2
 
 
-def test_several_people_in_one_prompt_are_each_labeled() -> None:
-    """A coalesced prompt names each sender, with no colon inside the name, since Graphiti ends a speaker at one."""
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        # A coalesced prompt names each sender, with no colon inside the name, since Graphiti ends a speaker at one.
+        pytest.param(
+            [("@alice:x", "Bob owns Atlas."), ("@bob:x", "No, Carol does now.")],
+            ["person @alice (x): Bob owns Atlas.", "person @bob (x): No, Carol does now."],
+            id="people",
+        ),
+        # Another agent's reply, or a hook post from this agent's account, is not something a person said.
+        pytest.param(
+            [
+                ("@mindroom_research:example.test", "I checked: Bob owns Atlas now."),
+                ("@mindroom_mind:example.test", "[posted automatically by hook]"),
+            ],
+            ["agent research: I checked: Bob owns Atlas now.", "agent mind: [posted automatically by hook]"],
+            id="agents",
+        ),
+    ],
+)
+def test_each_sender_in_a_prompt_is_labeled(messages: list[tuple[str, str]], expected: list[str]) -> None:
+    """Each message of a prompt is labeled with who sent it."""
     prompt = (
-        "<messages>"
-        + render_msg_tag(sender="@alice:x", body="Bob owns Atlas.")
-        + render_msg_tag(
-            sender="@bob:x",
-            body="No, Carol does now.",
-        )
-        + "</messages>"
+        "<messages>" + "".join(render_msg_tag(sender=sender, body=body) for sender, body in messages) + "</messages>"
     )
 
     conversation = _episodes([_run("r1", prompt=prompt)], "conversation")[0].episode
 
-    assert conversation.body.splitlines()[:2] == [
-        "person @alice (x): Bob owns Atlas.",
-        "person @bob (x): No, Carol does now.",
-    ]
-
-
-def test_messages_from_agents_are_labeled_as_agents() -> None:
-    """Another agent's reply, or a hook post from this agent's account, is not something a person said."""
-    prompt = (
-        "<messages>"
-        + render_msg_tag(sender="@mindroom_research:example.test", body="I checked: Bob owns Atlas now.")
-        + render_msg_tag(sender="@mindroom_mind:example.test", body="[posted automatically by hook]")
-        + "</messages>"
-    )
-
-    conversation = _episodes([_run("r1", prompt=prompt)], "conversation")[0].episode
-
-    assert conversation.body.splitlines()[:2] == [
-        "agent research: I checked: Bob owns Atlas now.",
-        "agent mind: [posted automatically by hook]",
-    ]
+    assert conversation.body.splitlines()[:2] == expected
 
 
 def test_an_interrupted_turn_adds_only_what_the_person_said() -> None:
