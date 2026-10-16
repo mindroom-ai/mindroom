@@ -36,7 +36,7 @@ import threading
 import time
 import traceback
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -117,6 +117,37 @@ class _ChildRequest:
     cwd: str | None
     envelope: str
     timeout_seconds: float | None
+
+
+@dataclass
+class _RequestChild:
+    """The child serving one request, signalled only while that request runs.
+
+    The template reaps children as they exit, so after its request ended a child's PID may name another process.
+    """
+
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _pid: int | None = None
+    _ended: bool = False
+
+    def started(self, pid: int) -> None:
+        with self._lock:
+            if not self._ended:
+                self._pid = pid
+
+    def end(self) -> None:
+        with self._lock:
+            self._ended = True
+            self._pid = None
+
+    def kill(self) -> None:
+        """Kill the child's process group, which also stops what its tool started."""
+        with self._lock:
+            # The pid is deserialized from the child's socket message; never let a
+            # degenerate value reach os.killpg, where 0 targets this process's own group.
+            if self._pid is not None and self._pid > 0:
+                with suppress(OSError):
+                    os.killpg(self._pid, signal.SIGKILL)
 
 
 def _stderr_tail(stderr_path: Path) -> str:
@@ -363,13 +394,15 @@ class _SandboxForkserver:
         template: _Template,
         request_payload: bytes,
         bind_stop: Callable[[Callable[[], None]], None],
+        child: _RequestChild,
     ) -> None:
         stopped = threading.Event()
 
         def stop() -> None:
-            # The template reaps children as they exit, so stopping never signals a PID
-            # another process may reuse: it hangs up, and the forked child ends its process group.
+            # Killing reaches a tool that holds the GIL, which the child's own hang-up
+            # watcher cannot; the hang-up still ends a child whose PID is not known yet.
             stopped.set()
+            child.kill()
             _hang_up(conn)
 
         try:
@@ -415,14 +448,14 @@ class _SandboxForkserver:
         except OSError as exc:
             msg = f"Failed to open a sandbox forkserver connection: {exc}"
             raise ForkserverError(msg) from exc
-        child_pid: int | None = None
+        child = _RequestChild()
         try:
             # Handing a job's request over still has a bound; only waiting for its response does not.
             conn.settimeout(remaining if remaining is not None else _CHILD_REQUEST_READ_TIMEOUT_SECONDS)
-            self._send_request(conn, key, template, request_payload, bind_stop)
+            self._send_request(conn, key, template, request_payload, bind_stop, child)
             reader = _SocketLineReader(conn, deadline)
             try:
-                child_pid = int(json.loads(reader.read_line())["pid"])
+                child.started(int(json.loads(reader.read_line())["pid"]))
                 while "progress" in (response := json.loads(reader.read_line())):
                     on_progress(str(response["progress"]))
                 returncode = int(response["returncode"])
@@ -431,7 +464,7 @@ class _SandboxForkserver:
             except TimeoutError as exc:
                 # At its deadline the child is still running, maybe holding the GIL in a
                 # long C call that a hang-up cannot interrupt, so kill it as before.
-                self._kill_child(child_pid)
+                child.kill()
                 raise ForkserverTimeoutError from exc
             except (_ConnectionClosedError, OSError, ValueError, KeyError, TypeError) as exc:
                 if template.process.poll() is not None:
@@ -439,6 +472,7 @@ class _SandboxForkserver:
                 msg = "Sandbox forkserver child exited without returning a response."
                 raise ForkserverError(msg) from exc
         finally:
+            child.end()
             conn.close()
         return subprocess.CompletedProcess(
             args=["sandbox-forkserver", key],
@@ -446,16 +480,6 @@ class _SandboxForkserver:
             stdout=stdout_text,
             stderr=stderr_text,
         )
-
-    @staticmethod
-    def _kill_child(child_pid: int | None) -> None:
-        # The pid is deserialized from the child's socket message; never let a
-        # degenerate value reach os.killpg, where 0 targets this process's own group.
-        if child_pid is None or child_pid <= 0:
-            return
-        # The child leads its own process group, so this also stops what its tool started.
-        with suppress(OSError):
-            os.killpg(child_pid, signal.SIGKILL)
 
 
 _STOPPED_BEFORE_DISPATCH = "Sandbox forkserver request was stopped before it was sent."

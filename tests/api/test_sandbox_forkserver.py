@@ -62,6 +62,10 @@ def _run_payload(payload: str, report) -> tuple[int, str, str]:
         pid_file = Path(payload.removeprefix("sleep:"))
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
         time.sleep(30)
+    if payload.startswith("spin:"):
+        Path(payload.removeprefix("spin:")).write_text(str(os.getpid()), encoding="utf-8")
+        # One long C call that never releases the GIL.
+        sum(range(10**15))
     if payload.startswith("group:"):
         member = subprocess.Popen(["sleep", "300"])
         Path(payload.removeprefix("group:")).write_text(str(member.pid), encoding="utf-8")
@@ -231,12 +235,12 @@ def test_stop_after_its_request_ended_never_signals_the_reaped_child(
     assert signals == []
 
 
-def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
+def test_stopping_a_request_kills_its_child_and_hangs_up(
     stub_manager: tuple[_SandboxForkserver, list[str]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Stopping hangs up on the running child, which exits; no PID is signalled, so none can be reused."""
+    """Stopping kills the running child's group and hangs up, so the child also exits when the kill cannot reach it."""
     manager, _spawned = stub_manager
     pid_file = tmp_path / "child.pid"
     stops: list[Callable[[], None]] = []
@@ -256,7 +260,7 @@ def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
             with pytest.raises(ForkserverError):
                 running.result(timeout=10)
 
-    assert signals == []
+    assert signals == [(child_pid, signal.SIGKILL)]
     deadline = time.monotonic() + 10
     while True:
         try:
@@ -265,6 +269,47 @@ def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
             break
         assert time.monotonic() < deadline
         time.sleep(0.05)
+
+
+def test_stopping_a_request_kills_a_child_whose_tool_holds_the_gil(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    tmp_path: Path,
+) -> None:
+    """A stop reaches a child busy in one long C call, which the child's own hang-up watcher cannot interrupt."""
+    manager, _spawned = stub_manager
+    pid_file = tmp_path / "child.pid"
+    stops: list[Callable[[], None]] = []
+    child_pid = None
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(
+                _stub_execute,
+                manager,
+                envelope=f"spin:{pid_file}",
+                timeout_seconds=None,
+                bind_stop=stops.append,
+            )
+            deadline = time.monotonic() + 10
+            while not pid_file.exists() or not pid_file.read_text(encoding="utf-8"):
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            stops[0]()
+            with pytest.raises(ForkserverError):
+                running.result(timeout=10)
+
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "the stopped child kept running its C call"
+            time.sleep(0.05)
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.parametrize("ending", ["stop", "timeout"])
