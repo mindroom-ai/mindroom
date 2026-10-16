@@ -35,6 +35,7 @@ from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
@@ -2295,3 +2296,30 @@ async def test_matrix_message_cross_room_read_defaults_to_room_level() -> None:
     assert payload["action"] == "read"
     assert "thread_id" not in payload
     ctx.client.room_messages.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_drops_tool_markers_from_bodies() -> None:
+    """Agents reading a thread get each reply's text, not its tool display markers."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    trace = build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]) or {}
+    body = "Checked.\n\n🔧 `shell` [1]\n\nAll good."
+    serve_conversation_reader(
+        ctx.conversation_reader,
+        [
+            make_visible_message(
+                event_id="$reply",
+                sender="@mindroom_general:localhost",
+                body=body,
+                content={"msgtype": "m.text", "body": body, **trace},
+            ),
+        ],
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="read"))
+
+    assert "🔧" not in payload["messages"][0]["body"]
+    assert "All good." in payload["messages"][0]["body"]
+    assert "🔧" not in payload["edit_options"][0]["body_preview"]

@@ -33,6 +33,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
 from mindroom.requester_identity import is_human_requester_id
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -46,6 +47,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
+
+
+def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
+    """Return one message for the agent, with its text free of tool display markers."""
+    return {**message.to_dict(), "body": body_without_tool_markers(message.body, message.content)}
 
 
 @dataclass(frozen=True)
@@ -396,7 +402,7 @@ class MatrixMessageOperations:
             action="read",
             room_id=room_id,
             limit=read_limit,
-            messages=[message.to_dict() for message in messages],
+            messages=[_message_payload(message) for message in messages],
         )
 
     @staticmethod
@@ -415,7 +421,7 @@ class MatrixMessageOperations:
                 "event_id": event_id,
                 "sender": sender,
                 "can_edit": can_edit,
-                "body_preview": message_preview(message.body),
+                "body_preview": message_preview(body_without_tool_markers(message.body, message.content)),
             }
             if can_edit:
                 option["edit_action"] = {"action": "edit", "event_id": event_id}
@@ -439,7 +445,7 @@ class MatrixMessageOperations:
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,
-            messages=[message.to_dict() for message in recent_messages],
+            messages=[_message_payload(message) for message in recent_messages],
             edit_options=self._build_edit_options(context, messages=recent_messages),
         )
 

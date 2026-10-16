@@ -2260,6 +2260,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.mentions",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.custom_tools.matrix_message",
@@ -3906,6 +3907,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.matrix.room_history_reads",
@@ -4011,7 +4013,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.thread_export.storage"
-depends_on = ["mindroom.path_confinement", "mindroom.atomic_file"]
+depends_on = ["mindroom.path_confinement", "mindroom.atomic_file", "mindroom.tool_system.events"]
 visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
