@@ -8720,24 +8720,33 @@ ls("src")
 
 ## [`shared_directories`]
 
-`shared_directories` lets an agent create a directory and invite other agents, who can then read it from their own workers.
+`shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
+It is meant for [dedicated Docker and Kubernetes workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes), where each agent's worker otherwise sees only its own workspace.
 It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, and `list_shared_directories()`, and has no configuration fields.
-Only the agent that created a directory can change or delete it, and deleting it removes every file in it.
+Only the agent that created a directory can invite, remove, or delete, and deleting a directory removes every file in it.
 Names use 1 to 64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit.
 
 The owner reads and writes the directory, and invited agents only read it.
-`shell`, `python`, `file`, and `coding` reach it by the path that `create_shared_directory` and `list_shared_directories` return, and every agent that owns or joined a directory sees its path in its prompt.
-Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories and list them by absolute path, when they run in a worker or when MindRoom runs without workers; with workers, an agent whose `file` or `coding` runs in the primary process reaches shared directories only through its worker tools.
+Invited agents do not need `shared_directories` themselves: they read the directory with `shell`, `python`, `file`, or `coding`, at the path that `create_shared_directory` and `list_shared_directories` return.
+Every agent that owns or joined a directory sees that path and its access in its prompt.
+Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
+When MindRoom uses workers but an agent's `file` or `coding` runs in the primary process, `workspace` keeps those tools out of shared directories; add them to the agent's `worker_tools`.
 Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
 
-An agent can be invited only on behalf of a user who may use it outside the current room, through `access.users`, administrator rights, `access.members_of_rooms`, or the default access of its configured rooms; `access.current_room_members` does not count.
+The user who asks for an invitation must be allowed to use the invited agent outside the current room, through `access.users`, administrator rights, `access.members_of_rooms`, or the default access of the agent's configured rooms; `access.current_room_members` does not count.
 Private agents can neither create nor join shared directories.
-Invited agents read the directory with `shell`, `python`, `file`, or `coding` and do not need `shared_directories` themselves.
 Creating or deleting a directory, and inviting or removing an agent, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
 
-Only [dedicated Docker and Kubernetes workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) keep shared directories read-only for invited agents and out of reach for agents in other workers; a `worker_scope: user` worker serves several agents, which all reach what any of them owns or joined.
-With the Kubernetes `static_runner` sidecar, every agent's tools can read and write every shared directory, and without workers so can `shell` and `python`.
-A Compose or host-container `static_runner` sees only its scratch storage, so no agent reaches shared directories there.
+Where tools run decides who reaches a shared directory:
+
+| Where tools run | Owner | Invited agents | Other agents |
+|---|---|---|---|
+| Dedicated Docker or Kubernetes workers | Read and write | Read only | No access |
+| Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
+| No workers | Read and write | Read only with `file` and `coding`, read and write with `shell` and `python` | Read and write with `shell` and `python` |
+| Compose or host-container `static_runner` | No access | No access | No access |
+
+A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
 
 ```yaml
 agents:
@@ -19122,7 +19131,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
-- `shared_directories/` - [Shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories), one per owning agent and name; a deleted one stays as an empty folder, and those of agents removed from the config stay until you delete them
+- `shared_directories/` - [Shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
 - `knowledge_db/` - Knowledge base vector stores
 - `knowledge_git/` - Git data of [Git-backed knowledge bases](https://docs.mindroom.chat/knowledge/#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
