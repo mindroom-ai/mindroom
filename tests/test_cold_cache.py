@@ -179,6 +179,8 @@ def test_ttl_openrouter_anthropic_routes_match_claude() -> None:
         (_session(("claude-opus-5-5", _NOW - 3700), updated_at=_NOW - 3601), False),
         (_session(("claude-opus-5-5", _NOW - 3700), updated_at=None), True),
         (_session(("claude-opus-5-5", _NOW - 20), ("claude-haiku-5-5", _NOW - 30), updated_at=_NOW - 10), True),
+        (_session(("claude-haiku-5-5", _NOW - 20), ("claude-opus-5-5", _NOW - 20), updated_at=_NOW - 10), True),
+        (_session(("claude-opus-5-5", _NOW - 20), ("claude-haiku-5-5", _NOW - 20), updated_at=_NOW - 10), False),
         (_session(("claude-opus-5-5", _NOW - 40), (None, _NOW - 10), updated_at=_NOW - 5), True),
         (_session(("claude-haiku-5-5", _NOW - 40), (None, _NOW - 10), updated_at=_NOW - 5), False),
         (_session(("claude-opus-5-5", _NOW - 7300), (None, _NOW - 7250), updated_at=_NOW - 7200), False),

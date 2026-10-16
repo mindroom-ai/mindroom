@@ -72,7 +72,8 @@ def _is_thread_cache_warm(session: AgentSession | None, model_config: ModelConfi
     if session is None or not session.runs:
         return False
     # Interrupted-turn replays carry no model, so the newest run that names one decides.
-    served = max((run for run in session.runs if run.model), key=lambda run: run.created_at, default=None)
+    # Timestamps are whole seconds, so on a tie the later stored run wins.
+    served = max((run for run in reversed(session.runs) if run.model), key=lambda run: run.created_at, default=None)
     if served is not None and served.model != effective_model_id(model_config):
         return False
     # The session is written at or after the last provider request, so this errs toward warm.
