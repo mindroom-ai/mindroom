@@ -24,7 +24,6 @@ from mindroom.dispatch_source import (
     is_voice_event,
 )
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
-from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
@@ -136,7 +135,6 @@ async def dispatch_text_message(
                 turn.room,
                 prepared.event,
                 prepared.dispatch,
-                is_dm=await is_dm_room(controller._client(), turn.room.room_id),
                 has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
                 extra_content=router_extra_content or None,
                 media_events=list(turn.media_events) or None,

@@ -234,7 +234,6 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
-        patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
@@ -278,7 +277,6 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
-        patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
@@ -821,7 +819,6 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -900,7 +897,6 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -962,7 +958,6 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
@@ -1886,7 +1881,6 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
@@ -1964,7 +1958,6 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
