@@ -47,7 +47,7 @@ def _run(
 
 def _episodes(
     runs: list[RunOutput],
-    thread_kind: Literal["conversation", "exploration", "automation"],
+    thread_kind: Literal["conversation", "exploration", "delegation", "automation"],
     settings: KnowledgeGraphIngestConfig = SETTINGS,
 ) -> list[RenderedEpisode]:
     """Render both episode kinds, conversation first, as ingestion does."""
@@ -117,6 +117,18 @@ def test_exploration_thread_renders_only_tool_results() -> None:
 
     assert [item.episode.kind for item in rendered] == ["tool_results"]
     assert "Bob owns everything" not in rendered[0].episode.body
+
+
+def test_work_delegated_by_another_agent_renders_only_tool_results() -> None:
+    """A delegated task's prompt was written by the calling agent, so it is never recorded as something a person said."""
+    run = _run("r1", prompt="Find who owns Atlas.", tools=[_tool("list_repos", "acme/atlas")])
+    run.session_id = "delegate:general:mind:0123abcd"
+
+    thread_kind = classify_thread([run], set())
+    rendered = _episodes([run], thread_kind)
+
+    assert [item.episode.kind for item in rendered] == ["tool_results"]
+    assert "Find who owns Atlas" not in rendered[0].episode.body
 
 
 def test_automation_thread_renders_nothing() -> None:

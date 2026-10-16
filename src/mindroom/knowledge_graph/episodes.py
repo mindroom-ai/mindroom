@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 
-type _ThreadKind = Literal["conversation", "exploration", "automation"]
+type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
 type _RunKey = tuple[int, str]
 type Progress = tuple[int, str, int]
 
@@ -43,6 +43,8 @@ _MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
 _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
 _CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
 _MAX_LISTED_CALLS = 20
+# A task delegated by another agent runs in a session of its own, named after the delegation.
+_DELEGATION_SESSION_PREFIX = "delegate:"
 
 
 @dataclass(frozen=True)
@@ -61,10 +63,12 @@ def run_key(run: RunOutput) -> _RunKey:
 
 
 def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) -> _ThreadKind:
-    """Return what a thread is, from its root run's trusted hook source or the threads automations recorded."""
+    """Return what a thread is, from its session, its root run's trusted hook source, or the threads automations recorded."""
     if not runs:
         return "conversation"
     root = min(runs, key=run_key)
+    if (root.session_id or "").startswith(_DELEGATION_SESSION_PREFIX):
+        return "delegation"
     metadata = root.metadata or {}
     hook_source = metadata.get(HOOK_SOURCE_RUN_METADATA_KEY)
     if hook_source == EXPLORATION_HOOK_SOURCE:
@@ -90,7 +94,8 @@ def render_episodes(
     settings: KnowledgeGraphIngestConfig,
 ) -> list[RenderedEpisode]:
     """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries."""
-    if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind == "exploration"):
+    # Exploration and delegated prompts come from an agent, and their answers restate the tool results.
+    if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind in ("exploration", "delegation")):
         return []
     rendered: list[RenderedEpisode] = []
     lines: list[str] = []

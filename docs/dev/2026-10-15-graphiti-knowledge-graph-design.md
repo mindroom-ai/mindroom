@@ -37,7 +37,7 @@ Nothing the model writes in prose enters the graph as evidence from an explorati
 
 Episodes come from stored sessions, never from a model-callable write function.
 Ordinary conversations ingest user, assistant, and tool messages with speaker labels, because a person confirming or correcting the agent is evidence.
-Exploration threads ingest only tool calls and their results, because the assistant text there is the agent's own synthesis.
+Exploration threads and delegated tasks ingest only tool calls and their results, because their prompts come from an agent, not a person, and their answers are the agent's own synthesis.
 Other automation threads (`dreaming`, `prompt_curation`, plugin automations) are not ingested.
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
 Each run's metadata records the hook source of the message that started it.
