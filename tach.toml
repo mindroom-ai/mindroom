@@ -5967,6 +5967,7 @@ expose = [
     "ResolvedAgentRuntime",
     "ResolvedAgentStorage",
     "ResolvedKnowledgeBinding",
+    "record_private_instance_owner",
     "resolve_private_requester_scope_root",
     "resolve_agent_execution",
     "resolve_agent_runtime",
