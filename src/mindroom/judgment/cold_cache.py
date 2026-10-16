@@ -8,6 +8,7 @@ from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, fit_judgment_request
 from mindroom.logging_config import get_logger
 from mindroom.providers.model_loading import CLAUDE_CACHE_PROVIDERS, canonical_provider, effective_model_id
+from mindroom.providers.openrouter_prompt_cache import routes_to_anthropic
 
 if TYPE_CHECKING:
     from agno.session.agent import AgentSession
@@ -54,12 +55,15 @@ def _cold_cache_question(agent_model_id: str, cheap_model_id: str) -> JudgmentQu
 
 def _prompt_cache_ttl_seconds(model_config: ModelConfig) -> int:
     """Return how long an idle thread's prompt cache lives, erring long when the provider is not exact."""
-    if canonical_provider(model_config.provider) not in CLAUDE_CACHE_PROVIDERS:
+    provider = canonical_provider(model_config.provider)
+    if provider not in CLAUDE_CACHE_PROVIDERS and not (
+        provider == "openrouter" and routes_to_anthropic(model_config.id)
+    ):
         # Other providers' retention is not known exactly, so only their longest lifetime counts as expired.
         return _LONGEST_PROVIDER_CACHE_TTL_SECONDS
     if (model_config.extra_kwargs or {}).get("extended_cache_time") is False:
         return _DEFAULT_CACHE_TTL_SECONDS
-    # MindRoom enables the 1h TTL for Claude by default.
+    # MindRoom enables the 1h TTL for Claude, direct or through OpenRouter, by default.
     return _EXTENDED_CACHE_TTL_SECONDS
 
 

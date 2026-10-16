@@ -155,6 +155,18 @@ def test_ttl_claude_without_extended_cache_is_five_minutes() -> None:
 def test_ttl_other_providers_is_one_day() -> None:
     """Providers without an exact TTL use OpenAI's 24h extended retention, erring toward warm."""
     assert _prompt_cache_ttl_seconds(_model(provider="openai", id="gpt-5.5")) == 86400
+    assert _prompt_cache_ttl_seconds(_model(provider="openrouter", id="openai/gpt-5.5")) == 86400
+
+
+def test_ttl_openrouter_anthropic_routes_match_claude() -> None:
+    """MindRoom sets the cache TTL on OpenRouter models that route to Anthropic, as for direct Claude."""
+    assert _prompt_cache_ttl_seconds(_model(provider="openrouter", id="anthropic/claude-opus-5.5")) == 3600
+    disabled = _model(
+        provider="openrouter",
+        id="anthropic/claude-opus-5.5",
+        extra_kwargs={"extended_cache_time": False},
+    )
+    assert _prompt_cache_ttl_seconds(disabled) == 300
 
 
 @pytest.mark.parametrize(

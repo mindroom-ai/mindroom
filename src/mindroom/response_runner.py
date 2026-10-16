@@ -5861,12 +5861,16 @@ class ResponseRunner:
             or _request_has_media(request)
         ):
             return resolved_model
-        try:
-            session = await asyncio.to_thread(self._read_agent_session, session_id, execution_identity)
-        except Exception:
-            # The switch is an optimization, so an unreadable session must not fail the reply.
-            self.deps.logger.warning("cold_cache_session_read_failed", session_id=session_id, exc_info=True)
-            return resolved_model
+        context = self._judgment_context(request)
+        session = None
+        # Without thread history the judge cannot run, so the session is not worth reading.
+        if context is not None:
+            try:
+                session = await asyncio.to_thread(self._read_agent_session, session_id, execution_identity)
+            except Exception:
+                # The switch is an optimization, so an unreadable session must not fail the reply.
+                self.deps.logger.warning("cold_cache_session_read_failed", session_id=session_id, exc_info=True)
+                return resolved_model
         selected = await select_cold_cache_model(
             agent.cold_cache,
             config=config,
@@ -5875,7 +5879,7 @@ class ResponseRunner:
             agent_model=resolved_model,
             cheap_model=cheap_model,
             session=session,
-            context=self._judgment_context(request),
+            context=context,
             prompt=request.prompt,
             now=time.time(),
         )

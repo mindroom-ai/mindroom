@@ -7961,6 +7961,7 @@ async def _cold_cache_reply_model(
     media: MediaInputs | None = None,
     inherit_cheap_model: bool = False,
     reload_cheap_model: str | None = None,
+    thread_id: str | None = "$event",
 ) -> tuple[list[str | None], list[dict[str, object]]]:
     """Run one reply for a cold-cache agent and return the model it used and the selector calls."""
     bot = _bot(tmp_path)
@@ -7990,7 +7991,7 @@ async def _cold_cache_reply_model(
         return "final text"
 
     request = replace(
-        _plain_request(_target(thread_id="$event")),
+        _plain_request(_target(thread_id=thread_id)),
         scheduled_model=scheduled_model,
         media=media,
     )
@@ -8040,6 +8041,14 @@ async def test_cold_cache_choice_dropped_after_reload_replaces_cheap_model(tmp_p
     """A judgment that finishes after a reload replaced the cheap model keeps the agent model."""
     active_models, _selector_calls = await _cold_cache_reply_model(tmp_path, reload_cheap_model="cheap2")
     assert active_models == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_skips_session_read_without_thread_history(tmp_path: Path) -> None:
+    """Without thread history the judge cannot run, so the session is never read."""
+    with patch.object(ResponseRunner, "_read_agent_session", side_effect=AssertionError("session read")):
+        _active_models, selector_calls = await _cold_cache_reply_model(tmp_path, thread_id=None)
+    assert [(call["session"], call["context"]) for call in selector_calls] == [(None, None)]
 
 
 @pytest.mark.asyncio

@@ -2510,7 +2510,7 @@ visibility = ["mindroom.providers.openai_models"]
 [[modules]]
 path = "mindroom.providers.openrouter_prompt_cache"
 depends_on = ["mindroom.providers.claude_prompt_cache", "mindroom.hooks.enrichment"]
-visibility = ["mindroom.providers.openai_models"]
+visibility = ["mindroom.providers.openai_models", "mindroom.judgment.cold_cache"]
 
 [[modules]]
 path = "mindroom.providers.claude_native_compaction"
@@ -7401,7 +7401,7 @@ visibility = ["mindroom.providers.model_loading"]
 [[modules]]
 path = "mindroom.config.cold_cache"
 depends_on = ["mindroom.config.judgment"]
-visibility = ["mindroom.config.agent", "mindroom.judgment.cold_cache"]
+visibility = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.config.participation"
@@ -8569,6 +8569,7 @@ depends_on = [
     "mindroom.judgment.evaluator",
     "mindroom.judgment.state",
     "mindroom.providers.model_loading",
+    "mindroom.providers.openrouter_prompt_cache",
 ]
 visibility = ["mindroom.response_runner"]
 
@@ -8607,12 +8608,12 @@ depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.mid_turn"
-depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.hooks", "mindroom.logging_config", "mindroom.redaction", "mindroom.tool_system.events"]
+depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.logging_config", "mindroom.tool_system.events"]
 visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.response_lifecycle", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.mid_turn_judgment"
-depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.mid_turn"]
+depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.judgment.evaluator", "mindroom.mid_turn"]
 visibility = ["mindroom.response_runner"]
 
 [[modules]]
