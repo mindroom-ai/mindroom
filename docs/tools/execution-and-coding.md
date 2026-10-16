@@ -286,7 +286,7 @@ Private agents can neither create nor join shared directories.
 Creating or deleting a directory, and inviting or removing an agent, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
 
 The user who asks for an invitation must be allowed to use the invited agent outside the current room.
-Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default access of the agent's configured rooms counts, but `access.current_room_members` does not.
+Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default grant to members of the agent's managed `rooms` counts, but `access.current_room_members` does not; see [Responder access](../authorization.md#responder-access).
 Otherwise the invitation fails with "The user you act for has no access to writer outside the current room, so it cannot be invited".
 
 Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
