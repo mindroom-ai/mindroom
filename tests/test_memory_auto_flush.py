@@ -469,6 +469,40 @@ async def test_worker_does_not_load_a_dirty_session_before_it_is_ready_to_flush(
 
 
 @pytest.mark.asyncio
+async def test_worker_flush_never_sends_credentials_to_the_extractor(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token pasted into a conversation stays out of the extraction prompt and so out of daily memory."""
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="s1")
+    session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content=f"the deploy token is {token}, remember the deploy is Friday")],
+    )
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", lambda *_args, **_kwargs: session)
+    prompts: list[list[str]] = []
+
+    async def extract(*, lines: list[str], **_: object) -> str:
+        prompts.append(lines)
+        return "deploy is Friday"
+
+    monkeypatch.setattr("mindroom.memory.auto_flush._extract_memory_summary", extract)
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+
+    await worker._run_cycle(config)
+
+    [lines] = prompts
+    assert token not in "\n".join(lines)
+    assert "remember the deploy is Friday" in "\n".join(lines)
+
+
+@pytest.mark.asyncio
 async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
     tmp_path: Path,
     config: Config,

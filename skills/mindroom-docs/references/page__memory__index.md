@@ -177,6 +177,7 @@ memory:
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
+Credential-like values are removed on a best-effort basis before MindRoom extracts conversation text into memory, whether through `mem0`, auto-flush, or a team's `MEMORY.md`; what an agent writes with the `memory` tool is stored as written.
 Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
 Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.

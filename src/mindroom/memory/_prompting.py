@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.prompt_templates import render_prompt_template
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
@@ -45,11 +46,11 @@ def _build_conversation_messages(
     messages: list[dict] = []
     for message in thread_history:
         role = "user" if message.sender == user_id else "assistant"
-        body = body_without_tool_markers(message.body, message.content).strip()
+        body = redact_sensitive_text(body_without_tool_markers(message.body, message.content).strip())
         if not body:
             continue
         messages.append({"role": role, "content": body})
-    messages.append({"role": "user", "content": current_prompt})
+    messages.append({"role": "user", "content": redact_sensitive_text(current_prompt)})
     return messages
 
 
@@ -59,6 +60,7 @@ def build_memory_messages(
     user_id: str | None,
 ) -> list[dict]:
     """Convert prompt and optional thread history into memory-save messages."""
+    # Mem0 extracts and stores memories from these messages, so credential-like values are removed first.
     if thread_history and user_id:
         return _build_conversation_messages(thread_history, prompt, user_id)
-    return [{"role": "user", "content": prompt}]
+    return [{"role": "user", "content": redact_sensitive_text(prompt)}]

@@ -18,6 +18,7 @@ from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.providers import model_loading
+from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.session_storage.agent_storage import create_session_storage, load_agent_session
 from mindroom.tool_system.worker_routing import (
@@ -316,11 +317,10 @@ def _select_recent_chat_lines(
         content = message.content
         if not isinstance(content, str):
             continue
-        cleaned = " ".join(content.split())
+        # Credential-like values never reach the extraction model or the daily memory it writes.
+        cleaned = redact_sensitive_text(" ".join(content.split()), max_length=500)
         if not cleaned:
             continue
-        if len(cleaned) > 500:
-            cleaned = f"{cleaned[:497]}..."
         line = f"{role}: {cleaned}"
         next_count = char_count + len(line) + 1
         if selected and next_count > max_chars:

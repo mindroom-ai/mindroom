@@ -694,3 +694,32 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
         assert not any(result.get("memory") == "Team shared note" for result in calculator_deleted)
         assert not any(result.get("memory") == "Updated team shared note" for result in general_deleted)
         assert not any(result.get("memory") == "Updated team shared note" for result in calculator_deleted)
+
+
+@pytest.mark.asyncio
+async def test_conversation_memory_never_sends_credentials_to_mem0(storage_path: Path, config: Config) -> None:
+    """Mem0 extracts and stores memories from what it is given, so credential-like values are removed first."""
+    config.memory.backend = "mem0"
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    sent: list[list[dict]] = []
+
+    class FakeScopedMemory:
+        async def add(self, messages: list[dict], **_: object) -> None:
+            sent.append(messages)
+
+    async def create_fake_memory_instance(*_args: object, **_kwargs: object) -> FakeScopedMemory:
+        return FakeScopedMemory()
+
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
+        await store_conversation_memory(
+            f"The staging token is {token}; the launch is Friday.",
+            "general",
+            storage_path,
+            "session-alice",
+            config,
+            runtime_paths_for(config),
+        )
+
+    [messages] = sent
+    assert all(token not in message["content"] for message in messages)
+    assert "the launch is Friday" in messages[-1]["content"]

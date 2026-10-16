@@ -19,6 +19,7 @@ from mindroom.embeddings.errors import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
+from mindroom.redaction import redact_sensitive_text
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_char_tokens
 
@@ -1435,7 +1436,8 @@ class FileMemoryBackend:
     ) -> None:
         """Persist condensed conversation text to file-backed memory scopes."""
         del session_id, thread_history, user_id  # File conversation memory stores condensed text only.
-        condensed_prompt = " ".join(prompt.strip().split())
+        # Credential-like values never reach the memory file.
+        condensed_prompt = redact_sensitive_text(" ".join(prompt.strip().split()))
         if not condensed_prompt:
             return
 
