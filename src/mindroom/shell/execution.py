@@ -430,7 +430,7 @@ async def _stop_timed_out_process(
     """Stop a command at its timeout and report its output so far; a stopped command saves no output file."""
     await _terminate_process_group(process)
     await _await_reader_tasks_with_grace(stdout_reader, stderr_reader, grace_seconds=_POST_EXIT_READER_GRACE_SECONDS)
-    lines = [_stopped_notice(timeout) + (" No output file was saved." if output_capture is not None else "")]
+    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if output_capture is not None else "")]
     if output := stdout_buf.render(tail=tail):
         lines += ["Output:", output]
     if errors := stderr_buf.render():
@@ -444,10 +444,6 @@ async def _stop_timed_out_process(
         return ShellRunResult(message=output_capture.publish(process.returncode), output_file_handled=True)
     finally:
         output_capture.close()
-
-
-def _stopped_notice(timeout: float) -> str:
-    return f"Stopped after {timeout:g}s."
 
 
 def _unused_handle(registry: dict[str, ProcessRecord]) -> str:

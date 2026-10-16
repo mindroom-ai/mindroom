@@ -400,8 +400,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             of a background job has no time limit, even while you wait for it; that
             includes every call that accepts ``background_after`` and, with background
             jobs on, a subagent's calls for its delegated task, whether or not its
-            caller waits for it. Any other call stops after 120 seconds. Set ``timeout`` on a command that might not end on its own,
-            such as a watcher or a test run that can hang. Start a server or anything
+            caller waits for it. Any other command stops after 120 seconds. Set
+            ``timeout`` on a command that might not end on its own, such as a
+            watcher or a test run that can hang. Start a server or anything
             else meant to keep running with ``nohup cmd > out.log 2>&1 &``, which
             keeps running after the command ends; in the foreground it would keep the
             call running until its job is cancelled.
