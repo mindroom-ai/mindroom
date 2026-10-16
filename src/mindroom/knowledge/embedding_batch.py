@@ -146,7 +146,8 @@ class BatchPrefetchEmbedder(Embedder):
         cached = 0
         for text in pending:
             try:
-                self._cache[text] = self._validated(self.inner.get_embedding(text))
+                # Chunks are documents; ``get_embedding`` is the query path, which prompted models embed differently.
+                self._cache[text] = self._validated(self.inner.get_embedding_and_usage(text)[0])
             except Exception as exc:
                 if is_embedder_auth_failure_detail(describe_embedder_error(exc)):
                     raise
@@ -219,8 +220,6 @@ class BatchPrefetchEmbedder(Embedder):
         cached = self._cache.get(text)
         if cached is not None:
             return cached
-        # Validated here too: this is the path Agno's writer actually uses, so
-        # skipping it would let an unusable vector reach the collection.
         return self._validated(self.inner.get_embedding(text))
 
     def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
@@ -233,6 +232,8 @@ class BatchPrefetchEmbedder(Embedder):
         cached = self._cache.get(text)
         if cached is not None:
             return cached, None
+        # Validated here too: this is the path Agno's writer uses, so skipping
+        # it would let an unusable vector reach the collection.
         embedding, usage = self.inner.get_embedding_and_usage(text)
         return self._validated(embedding), usage
 

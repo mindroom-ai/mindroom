@@ -11,7 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
+from agno.exceptions import EmbeddingError
 
 import mindroom.embeddings.signatures as embedding_helpers
 from mindroom.constants import resolve_primary_runtime_paths
@@ -308,19 +310,27 @@ class _ConcurrencyProbe:
             self.active -= 1
 
 
+class _ProbedModelClient:
+    """Stand in for a SentenceTransformer whose encode calls report concurrency."""
+
+    def __init__(self, probe: _ConcurrencyProbe) -> None:
+        self.probe = probe
+
+    def encode_query(self, text: str, **_kwargs: object) -> np.ndarray:
+        self.probe.observe()
+        return np.array([float(len(text))])
+
+    def encode_document(self, text: str, **_kwargs: object) -> np.ndarray:
+        self.probe.observe()
+        return np.array([float(len(text))])
+
+
 def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyProbe) -> object:
     class DummyEmbedder:
         def __init__(self, **kwargs: object) -> None:
-            self.kwargs = kwargs
-            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
-
-        def get_embedding(self, text: str) -> list[float]:
-            probe.observe()
-            return [float(len(text))]
-
-        def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, int]]:
-            probe.observe()
-            return [float(len(text))], {"tokens": len(text)}
+            self.id = kwargs["id"]
+            self.normalize_embeddings = False
+            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", _ProbedModelClient(probe))
 
     monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
     monkeypatch.setattr(
@@ -328,32 +338,6 @@ def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyP
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
     )
     return create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
-
-
-@pytest.mark.timeout(1)
-def test_sentence_transformers_usage_delegation_does_not_deadlock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Agno's usage method may delegate back through the serialized embedding entry point."""
-
-    class DelegatingEmbedder:
-        def __init__(self, **kwargs: object) -> None:
-            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
-
-        def get_embedding(self, text: str) -> list[float]:
-            return [float(len(text))]
-
-        def get_embedding_and_usage(self, text: str) -> tuple[list[float], None]:
-            return self.get_embedding(text), None
-
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setattr(
-        "mindroom.embeddings.signatures.importlib.import_module",
-        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DelegatingEmbedder),
-    )
-    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
-
-    assert embedder.get_embedding_and_usage("chunk") == ([5.0], None)
 
 
 def test_sentence_transformers_embedder_serializes_mixed_entry_points(
@@ -379,14 +363,72 @@ def test_sentence_transformers_embedder_serializes_mixed_entry_points(
     assert probe.max_active == 1
     assert results == [
         [3.0],
-        ([3.0], {"tokens": 3}),
+        ([3.0], None),
         [5.0],
-        ([4.0], {"tokens": 4}),
+        ([4.0], None),
         [4.0],
-        ([3.0], {"tokens": 3}),
+        ([3.0], None),
         [5.0],
-        ([5.0], {"tokens": 5}),
+        ([5.0], None),
     ]
+
+
+class _PromptRecordingModelClient:
+    """Stand in for a SentenceTransformer that records which prompt family each call used."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, bool]] = []
+
+    def encode_query(self, text: str, *, normalize_embeddings: bool) -> np.ndarray:
+        self.calls.append(("query", text, normalize_embeddings))
+        return np.array([1.0, 0.0])
+
+    def encode_document(self, text: str, *, normalize_embeddings: bool) -> np.ndarray:
+        self.calls.append(("document", text, normalize_embeddings))
+        return np.array([0.0, 1.0])
+
+
+@pytest.mark.asyncio
+async def test_sentence_transformers_embedder_embeds_queries_and_documents_with_their_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agno's query path uses the model's query prompt, and its document path the document prompt."""
+    model = "google/embeddinggemma-2"
+    client = _PromptRecordingModelClient()
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(embedding_helpers, "_SENTENCE_TRANSFORMER_CLIENT", (model, client))
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, model)
+
+    assert embedder.get_embedding("search") == [1.0, 0.0]
+    assert await embedder.async_get_embedding("async search") == [1.0, 0.0]
+    assert embedder.get_embedding_and_usage("chunk") == ([0.0, 1.0], None)
+    assert await embedder.async_get_embedding_and_usage("async chunk") == ([0.0, 1.0], None)
+    assert client.calls == [
+        ("query", "search", False),
+        ("query", "async search", False),
+        ("document", "chunk", False),
+        ("document", "async chunk", False),
+    ]
+
+
+def test_sentence_transformers_embedder_reports_model_failures_as_embedding_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local model failure surfaces as Agno's typed embedding error, like other providers."""
+
+    class FailingModelClient:
+        def encode_query(self, text: str, *, normalize_embeddings: bool) -> np.ndarray:
+            del text, normalize_embeddings
+            msg = "out of memory"
+            raise RuntimeError(msg)
+
+    model = "google/embeddinggemma-2"
+    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(embedding_helpers, "_SENTENCE_TRANSFORMER_CLIENT", (model, FailingModelClient()))
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, model)
+
+    with pytest.raises(EmbeddingError, match="out of memory"):
+        embedder.get_embedding("search")
 
 
 def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:

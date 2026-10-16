@@ -3788,6 +3788,9 @@ Semantic knowledge and file-memory indexes support the `openai`, `ollama`, and `
 | `ollama` | `nomic-embed-text` | Self-hosted; set `host` or `OLLAMA_HOST` |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Runs locally in MindRoom; the optional extra installs on first use |
 
+For multilingual text and code, use `google/embeddinggemma-2` with `sentence_transformers`; its first use downloads about 1.4 GB.
+MindRoom applies the query and document prompts that a `sentence_transformers` model defines, so knowledge and file-memory searches need no manual task prefixes.
+
 See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder fields, API key resolution, and how embedder failures are reported.
 
 ## Storage

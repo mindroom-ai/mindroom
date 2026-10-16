@@ -1352,6 +1352,23 @@ def test_batch_prefetch_embedder_degrades_for_providers_without_batching() -> No
     assert inner.single_requests == ["one", "two", "one"]
 
 
+class _QueryPromptedEmbedder(_NonBatchingEmbedder):
+    """Embedder whose query vectors differ from its document vectors, like a prompted local model."""
+
+    def get_embedding(self, text: str) -> list[float]:
+        del text
+        return [0.0, 0.0]
+
+
+def test_batch_prefetch_embeds_chunks_as_documents() -> None:
+    """Per-chunk prefetch must use the document path, or prompted models index chunks as queries."""
+    inner = _QueryPromptedEmbedder()
+    adapter = BatchPrefetchEmbedder(inner=inner)
+
+    assert adapter.embed_batch_into_cache(["chunk"]) == 1
+    assert adapter.get_embedding_and_usage("chunk") == ([5.0, 1.0], None)
+
+
 # --------------------------------------------------------------------------
 # 13. Bounded scheduling
 # --------------------------------------------------------------------------
@@ -2282,19 +2299,19 @@ def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
     widening.supports_batch = False
     adapter = BatchPrefetchEmbedder(inner=widening)
     assert adapter.embed_batch_into_cache(["one"]) == 1
-    original_get = widening.get_embedding
-    widening.get_embedding = lambda text: [*original_get(text), 9.0]  # type: ignore[method-assign]
+    original_get = widening.get_embedding_and_usage
+    widening.get_embedding_and_usage = lambda text: ([*original_get(text)[0], 9.0], None)  # type: ignore[method-assign]
     # Validation guards the path Agno's writer uses, so a widened vector cannot
     # reach the collection even though prefetch treats its own faults as best effort.
     with pytest.raises(EmbedderRequestError, match="3-dimension vector, expected 2"):
-        adapter.get_embedding("two")
+        adapter.get_embedding_and_usage("two")
 
 
 def test_empty_vector_is_rejected_by_the_batch_adapter() -> None:
     """An empty vector is never cached, whatever path produced it."""
     inner = _RecordingEmbedder()
     inner.supports_batch = False
-    inner.get_embedding = lambda _text: []  # type: ignore[method-assign]
+    inner.get_embedding_and_usage = lambda _text: ([], None)  # type: ignore[method-assign]
     adapter = BatchPrefetchEmbedder(inner=inner)
 
     assert adapter.embed_batch_into_cache(["anything"]) == 0, "prefetch leaves it to the per-file path"

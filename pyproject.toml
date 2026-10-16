@@ -372,7 +372,9 @@ self_config = [
   "pyyaml>=6",
 ]
 sentence-transformers = [
-  "sentence-transformers",
+  "sentence-transformers>=6.1",
+  "torchvision",
+  "transformers>=5.19",
 ]
 serpapi = [
   "google-search-results>=2.4.2",
