@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
+from redis.asyncio import Redis
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -229,6 +230,12 @@ async def test_a_crashed_database_server_is_started_again(store: GraphitiStore) 
     await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
     server = store._embedded_server
     assert server is not None
+    # A kill can lose the last second of writes, which is documented and not what this test checks.
+    client = Redis(unix_socket_path=server.socket_path)
+    try:
+        await client.execute_command("WAITAOF", 1, 0, 5000)
+    finally:
+        await client.aclose()
     server.process.kill()
     await server.process.wait()
 
