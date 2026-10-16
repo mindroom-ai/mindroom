@@ -130,11 +130,12 @@ def test_first_check_explores_even_without_leads(tmp_path: Path) -> None:
 
 
 def test_no_leads_and_a_recent_run_post_nothing(tmp_path: Path) -> None:
-    """Between revisits, a check without new leads costs nothing."""
+    """Between revisits, a check without new leads costs nothing, even while people keep talking to the agent."""
     config, paths = _config(), _paths(tmp_path)
     _seed(config, paths, "!room:x:$talk", [], created_at=int(time.time()) - 60)
     context = _context(config, paths, tmp_path)
     _finish(check_exploration(context), config)
+    _seed(config, paths, "!room:x:$more", [], created_at=int(time.time()) + 60)
 
     assert check_exploration(context) is None
 

@@ -46,7 +46,7 @@ Each message is joined onto one line, because Graphiti reads every dialogue line
 Every fact is an attributed claim, not a verified truth.
 Graphiti records which episodes support a fact, so provenance is per episode, and each episode has one kind:
 
-- `conversation`: the run's user and assistant messages as a Graphiti `message` episode, each line prefixed with its speaker (`person <Matrix ID>` or `agent <name>`), so extraction attributes assertions to whoever made them.
+- `conversation`: the run's user and assistant messages as a Graphiti `message` episode, each line prefixed with its speaker, so extraction attributes assertions to whoever made them.
 - `tool_results`: the run's tool calls and results as a `text` episode, an observation of the sources the model chose to query.
 
 Search results return the kinds and origins of each fact's episodes, so the agent can tell an observation from something it or a person said.
@@ -136,13 +136,11 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 ## Security
 
 - The graph is a primary-side store fed by worker-produced text (tool results); it is data, never executed, and extraction prompt injection can at worst add wrong facts, which carry their source.
-- A shared agent's graph holds what it saw in every requester's conversations, including tool results, and any requester of that agent can query it; this matches shared-agent memory.
+- The intentional behaviors a reviewer must not "fix", such as a shared agent's graph answering every requester, are listed in `docs/architecture/security-posture.md`.
 - Exploration prompts list redacted arguments of recent tool calls from the agent's conversations, so everyone who can read the exploration room sees them; a shared agent's operator must choose that room, and private agents post in the requester's own personal room.
 - Ingestion skips turns derived from events the agent's journal saw redacted, because stored history drops a redacted turn only when the agent next replies there; it waits while the agent's bot is not running, since it cannot tell then.
   Exploration's lead check runs in a thread without the journal, so a redacted turn's calls can be listed until that reply.
-- Only top-level, completed Matrix runs are ingested: runs with a `room_id`, not OpenAI-compatible API sessions, dynamic-workflow participant sessions, or team-member runs.
 - Private agents get one graph per requester instance and explore as that requester, with that requester's credentials, as automations already do.
-- Credential-like values are redacted best-effort before ingestion with the shared `redact_sensitive_text`, the single redaction implementation.
 
 ## Error handling
 

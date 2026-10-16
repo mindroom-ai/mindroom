@@ -78,15 +78,7 @@ def test_private_instances_get_distinct_graphs(tmp_path: Path) -> None:
     by_owner = {(scope.agent_name, _requester(scope)): scope.graph_name for scope in scopes}
     assert set(by_owner) == {("mind", None), ("pal", ALICE), ("pal", BOB)}
     assert len(set(by_owner.values())) == 3
-
-
-def test_scope_for_a_requester_matches_the_listed_scope(tmp_path: Path) -> None:
-    """The tool and the ingestion worker resolve the same graph for one requester."""
-    config = _config()
-    paths = _paths(tmp_path)
-    _create_private_instance(config, paths, ALICE)
-    identity = build_requester_execution_identity(agent_name="pal", runtime_paths=paths, requester_id=ALICE)
-
-    listed = next(scope for scope in graph_scopes(config, paths) if _requester(scope) == ALICE)
-
-    assert graph_scope("pal", config, paths, identity).graph_name == listed.graph_name
+    # The tool and the ingestion worker resolve the same graph for one requester.
+    for requester in (ALICE, BOB):
+        identity = build_requester_execution_identity(agent_name="pal", runtime_paths=paths, requester_id=requester)
+        assert graph_scope("pal", config, paths, identity).graph_name == by_owner[("pal", requester)]

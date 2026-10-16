@@ -39,14 +39,13 @@ def _run(
     run_id: str,
     created_at: int,
     *,
-    session_id: str = SESSION,
     room_id: str | None = ROOM,
     parent_run_id: str | None = None,
     status: RunStatus = RunStatus.completed,
 ) -> RunOutput:
     return RunOutput(
         run_id=run_id,
-        session_id=session_id,
+        session_id=SESSION,
         agent_id="mind",
         parent_run_id=parent_run_id,
         created_at=created_at,

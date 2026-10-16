@@ -184,6 +184,19 @@ def test_automation_thread_renders_nothing() -> None:
     [
         # Graph lookups returned to the graph would read as fresh evidence.
         pytest.param([_tool("search_graph", "Alice leads Atlas", query="Atlas")], id="graph"),
+        # A shell or minimal-mode lookup returns the graph's facts as its output; the whole command is searched.
+        pytest.param(
+            [
+                _tool(
+                    "bash",
+                    "Alice leads Atlas",
+                    command="cd /work && "
+                    + "echo setup; " * 60
+                    + "mindroom-agent tools call knowledge_graph search_graph --json '{}'",
+                ),
+            ],
+            id="shell-lookup",
+        ),
         # `think` and `analyze` return the model's own thoughts, not anything a tool observed.
         pytest.param([_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")], id="reasoning"),
         # A subagent's answer is another model's prose; its own tool results come in through its own session.
@@ -209,24 +222,6 @@ def test_automation_thread_renders_nothing() -> None:
 def test_graph_lookups_and_model_prose_are_never_rendered(tools: list[ToolExecution]) -> None:
     """Only tools that observed something are evidence."""
     run = _run("r1", tools=tools)
-
-    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
-
-
-def test_graph_lookups_through_a_shell_are_never_rendered() -> None:
-    """A minimal-mode or shell lookup returns the graph's facts as a shell result, which is no more evidence."""
-    command = 'mindroom-agent tools call knowledge_graph search_graph --json \'{"query": "Atlas"}\''
-    run = _run("r1", tools=[_tool("bash", "Alice leads Atlas", command=command)])
-
-    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
-
-
-def test_a_graph_lookup_late_in_a_long_shell_command_is_never_rendered() -> None:
-    """The lookup is found in the whole command, not only the part kept for the episode."""
-    command = (
-        "cd /work && " + "echo setup; " * 60 + "mindroom-agent tools call knowledge_graph search_graph --json '{}'"
-    )
-    run = _run("r1", tools=[_tool("bash", "Alice leads Atlas", command=command)])
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 

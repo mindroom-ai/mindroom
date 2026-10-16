@@ -445,20 +445,7 @@ async def test_a_success_resets_the_failure_count(tmp_path: Path) -> None:
     for attempt in range(4):
         await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
     store.failing_kinds = {"tool_results"}
-    real_add = store.add_episode
-    calls: list[str] = []
-
-    async def conversation_then_tool_failure(scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
-        calls.append(episode.kind)
-        if episode.kind == "conversation":
-            store.failing_kinds = set()
-            await real_add(scope, episode, usage)
-            store.failing_kinds = {"tool_results"}
-            return
-        await real_add(scope, episode, usage)
-
-    with patch.object(store, "add_episode", conversation_then_tool_failure):
-        await worker._run_cycle(config, now=T0 + 20_000)
+    await worker._run_cycle(config, now=T0 + 20_000)
     store.failing_kinds = set()
     await worker._run_cycle(config, now=T0 + 40_000)
 

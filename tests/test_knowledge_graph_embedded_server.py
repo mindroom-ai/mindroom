@@ -24,6 +24,10 @@ async def _query(socket_path: str, query: str) -> list[list[object]]:
         await db.connection.aclose()
 
 
+def _stopped(pid: int) -> bool:
+    return not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+
+
 @pytest.mark.asyncio
 async def test_server_answers_and_stops_cleanly(tmp_path: Path) -> None:
     """A started server answers graph queries; stopping it ends the process and removes its socket."""
@@ -35,7 +39,7 @@ async def test_server_answers_and_stops_cleanly(tmp_path: Path) -> None:
     finally:
         await server.stop()
 
-    assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    assert _stopped(pid)
     assert not Path(server.socket_path).exists()
 
 
@@ -54,27 +58,8 @@ async def test_graph_data_survives_a_restart(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_server_left_by_a_crashed_runtime_is_stopped_before_the_next_start(tmp_path: Path) -> None:
-    """Two servers must never write one database file, so a start first stops a server a crash left behind."""
-    orphan = await start_embedded_server(tmp_path)
-    # A crash skips stop(); the child keeps running.
-    try:
-        successor = await start_embedded_server(tmp_path)
-        try:
-            assert (
-                not psutil.pid_exists(orphan.process.pid)
-                or psutil.Process(orphan.process.pid).status() == psutil.STATUS_ZOMBIE
-            )
-            assert await _query(successor.socket_path, "RETURN 1") == [[1]]
-        finally:
-            await successor.stop()
-    finally:
-        await orphan.stop()
-
-
-@pytest.mark.asyncio
-async def test_server_left_before_an_upgrade_is_stopped_too(tmp_path: Path) -> None:
-    """An upgrade moves the server binary, and the server a crash left still runs from the old path."""
+async def test_server_left_by_a_crash_is_stopped_before_the_next_start(tmp_path: Path) -> None:
+    """Two servers must never write one database file, even when an upgrade moved the binary the old one runs from."""
     old_install = tmp_path / "old-install"
     old_install.mkdir()
     old_binary = old_install / "redis-server"
@@ -85,10 +70,8 @@ async def test_server_left_before_an_upgrade_is_stopped_too(tmp_path: Path) -> N
     try:
         successor = await start_embedded_server(db_dir)
         try:
-            assert (
-                not psutil.pid_exists(orphan.process.pid)
-                or psutil.Process(orphan.process.pid).status() == psutil.STATUS_ZOMBIE
-            )
+            assert _stopped(orphan.process.pid)
+            assert await _query(successor.socket_path, "RETURN 1") == [[1]]
         finally:
             await successor.stop()
     finally:
