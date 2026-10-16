@@ -811,6 +811,25 @@ async def test_a_shell_call_reports_its_output_as_its_progress(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_a_command_never_reads_the_terminal_mindroom_runs_in(tmp_path: Path) -> None:
+    """A command that reads stdin sees end of input instead of waiting on the primary's own stdin."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    assert entrypoint is not None
+    # A silent pipe stands in for the terminal a foreground `mindroom run` reads from.
+    read_end, write_end = os.pipe()
+    saved_stdin = os.dup(0)
+    os.dup2(read_end, 0)
+    try:
+        result = await entrypoint("read -r line; echo read:$?", timeout=5)
+    finally:
+        os.dup2(saved_stdin, 0)
+        for fd in (saved_stdin, read_end, write_end):
+            os.close(fd)
+
+    assert result == "read:1"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("seconds", [0, -5])
 async def test_a_timeout_that_is_not_positive_is_rejected_before_the_command_runs(tmp_path: Path, seconds: int) -> None:
     """A zero or negative timeout would stop the command at once, so the call explains the argument instead."""

@@ -50,6 +50,9 @@ class MinimalBashTools(Toolkit):
     ) -> str | ToolResult:
         """Run a Bash command and return its output.
 
+        Start servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later
+        commands.
+
         Args:
             command: The Bash command to run.
             timeout: Seconds after which the command and every process it started are stopped, returning the output

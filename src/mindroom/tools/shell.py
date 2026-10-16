@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -395,12 +396,15 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             The last ``tail`` lines of stdout are returned; on non-zero exit, useful
             stdout is preserved together with stderr. A command still running after
             ``timeout`` seconds is stopped with the processes it started, and its
-            output so far is returned. Without ``timeout``, a call that accepts
-            ``background_after`` has no time limit, even while you wait for it, and
-            any other call stops after 120 seconds. Start a server or anything else
-            that never exits with ``nohup cmd > out.log 2>&1 &``, which keeps running
-            after the command ends; in the foreground it would keep the call running
-            until its job is cancelled.
+            output so far is returned. Without ``timeout``, a call that runs as part
+            of a background job has no time limit, even while you wait for it; that
+            includes every call that accepts ``background_after`` and a subagent's
+            calls for a task delegated in the background. Any other call stops after
+            120 seconds. Set ``timeout`` on a command that might not end on its own,
+            such as a watcher or a test run that can hang. Start a server or anything
+            else meant to keep running with ``nohup cmd > out.log 2>&1 &``, which
+            keeps running after the command ends; in the foreground it would keep the
+            call running until its job is cancelled.
 
             With ``mindroom_output_path``, capture the complete supported output
             within the redirect byte limit instead of applying ``tail``; a stopped
@@ -473,6 +477,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     argv=argv,
                     env=subprocess_env,
                     cwd=cwd,
+                    # Never the terminal MindRoom runs in, where a prompting command would wait forever.
+                    stdin=subprocess.DEVNULL,
                     tail=tail,
                     timeout=stop_after,
                     on_timeout="kill",
