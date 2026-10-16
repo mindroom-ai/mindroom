@@ -70,10 +70,10 @@ def conversation_context_before_sources(
         text = message_judgment_text(message)
         if text is None:
             return None
+        # MindRoom relays speak for their original author, which may be another agent (thread move copies).
+        author = message.content.get(ORIGINAL_SENDER_KEY) if message.sender in internal_senders else None
         role = (
-            "assistant"
-            if message.sender in internal_senders and not message.content.get(ORIGINAL_SENDER_KEY)
-            else "user"
+            "assistant" if message.sender in internal_senders and (not author or author in internal_senders) else "user"
         )
         context.append(JudgmentMessage(role, text))
     return None

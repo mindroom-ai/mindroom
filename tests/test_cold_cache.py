@@ -169,6 +169,15 @@ def test_ttl_openrouter_anthropic_routes_match_claude() -> None:
     assert _prompt_cache_ttl_seconds(disabled) == 300
 
 
+@pytest.mark.parametrize("route", [{}, {"provider": "openrouter", "id": "anthropic/claude-opus-5.5"}])
+def test_disabled_claude_cache_is_always_cold(route: dict[str, str]) -> None:
+    """Without cache breakpoints nothing is cached, so even a fresh agent-model turn counts as cold."""
+    model = _model(**route, extra_kwargs={"cache_system_prompt": False})
+    assert _prompt_cache_ttl_seconds(model) == 0
+    for updated_at in (_NOW - 10, None):
+        assert not _is_thread_cache_warm(_session((model.id, _NOW - 20), updated_at=updated_at), model, now=_NOW)
+
+
 @pytest.mark.parametrize(
     ("session", "warm"),
     [

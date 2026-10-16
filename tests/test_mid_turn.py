@@ -19,7 +19,7 @@ from structlog.testing import capture_logs
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.conversation import conversation_context_before_sources
@@ -923,6 +923,39 @@ def test_traced_agent_reply_reaches_the_judge_with_tool_tags(tmp_path: Path, mon
     assert context is not None
     assert (
         context[1].text == 'Running them.\n\n<tool name="shell" input="cmd=pytest" output="3 failed"/>\n\nThree fail.'
+    )
+
+
+def test_relayed_messages_keep_their_original_author_role(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A thread move copy of an agent reply stays an assistant turn, while a relayed person stays a user."""
+    monkeypatch.setattr(
+        "mindroom.judgment.conversation.current_internal_sender_ids",
+        lambda *_: frozenset({"@mindroom_router:localhost", "@mindroom_research:localhost"}),
+    )
+    history = [
+        make_visible_message(
+            sender="@mindroom_router:localhost",
+            body="Find the release notes",
+            event_id="$root",
+            content={"msgtype": "m.text", ORIGINAL_SENDER_KEY: "@alice:localhost"},
+        ),
+        make_visible_message(
+            sender="@mindroom_router:localhost",
+            body="I found the release notes.",
+            event_id="$copy",
+            content={"msgtype": "m.text", ORIGINAL_SENDER_KEY: "@mindroom_research:localhost"},
+        ),
+        make_visible_message(body="Continue", event_id="$source"),
+    ]
+    assert conversation_context_before_sources(
+        history,
+        source_event_ids=("$source",),
+        thread_id="$root",
+        config=Config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+    ) == (
+        JudgmentMessage("user", "Find the release notes"),
+        JudgmentMessage("assistant", "I found the release notes."),
     )
 
 

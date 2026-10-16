@@ -8047,7 +8047,7 @@ async def test_cold_cache_choice_dropped_after_reload(tmp_path: Path, reload_upd
 @pytest.mark.asyncio
 async def test_cold_cache_skips_session_read_without_thread_history(tmp_path: Path) -> None:
     """Without thread history the judge cannot run, so the session is never read."""
-    with patch.object(ResponseRunner, "_read_agent_session", side_effect=AssertionError("session read")):
+    with patch("mindroom.response_runner.load_agent_session", side_effect=AssertionError("session read")):
         _active_models, selector_calls = await _cold_cache_reply_model(tmp_path, thread_id=None)
     assert [(call["session"], call["context"]) for call in selector_calls] == [(None, None)]
 
@@ -8055,7 +8055,7 @@ async def test_cold_cache_skips_session_read_without_thread_history(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_cold_cache_session_read_failure_keeps_agent_model(tmp_path: Path) -> None:
     """An unreadable session skips the optional switch instead of failing the reply."""
-    with patch.object(ResponseRunner, "_read_agent_session", side_effect=RuntimeError("storage unavailable")):
+    with patch("mindroom.response_runner.load_agent_session", side_effect=RuntimeError("storage unavailable")):
         active_models, selector_calls = await _cold_cache_reply_model(tmp_path)
     assert selector_calls == []
     assert active_models == ["default"]

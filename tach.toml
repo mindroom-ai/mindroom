@@ -978,6 +978,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
     "mindroom.tool_jobs.consumption",
+    "mindroom.response_runner",
 ]
 
 [[modules]]
@@ -2942,6 +2943,7 @@ depends_on = [
     "mindroom.user_turn_time",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.skill_learning.capture",
+    "mindroom.session_storage.agent_storage",
 ]
 
 [[modules]]
@@ -6711,7 +6713,6 @@ expose = [
     "message_tool_trace",
     "remap_visible_tool_marker_indices",
     "renumbered_tool_trace",
-    "render_tool_tag",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
     "strip_visible_tool_markers",

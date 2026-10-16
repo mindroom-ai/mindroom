@@ -61,7 +61,11 @@ def _prompt_cache_ttl_seconds(model_config: ModelConfig) -> int:
     ):
         # Other providers' retention is not known exactly, so only their longest lifetime counts as expired.
         return _LONGEST_PROVIDER_CACHE_TTL_SECONDS
-    if (model_config.extra_kwargs or {}).get("extended_cache_time") is False:
+    extra_kwargs = model_config.extra_kwargs or {}
+    if extra_kwargs.get("cache_system_prompt") is False:
+        # Without cache breakpoints Claude caches nothing, so every turn is cold.
+        return 0
+    if extra_kwargs.get("extended_cache_time") is False:
         return _DEFAULT_CACHE_TTL_SECONDS
     # MindRoom enables the 1h TTL for Claude, direct or through OpenRouter, by default.
     return _EXTENDED_CACHE_TTL_SECONDS
@@ -77,7 +81,8 @@ def _is_thread_cache_warm(session: AgentSession | None, model_config: ModelConfi
     if served is not None and served.model != effective_model_id(model_config):
         return False
     # The session is written at or after the last provider request, so this errs toward warm.
-    return session.updated_at is None or now - session.updated_at < _prompt_cache_ttl_seconds(model_config)
+    ttl = _prompt_cache_ttl_seconds(model_config)
+    return ttl > 0 and (session.updated_at is None or now - session.updated_at < ttl)
 
 
 async def select_cold_cache_model(

@@ -2377,6 +2377,7 @@ Set `defaults.cheap_model` to give every agent the same cheap model; an agent's 
 A thread's cache counts as cold when its newest run used a different model, or when its session was last written longer ago than the cache lifetime:
 
 - Claude providers, and `openrouter` model IDs that route to Anthropic: one hour, or five minutes with `extra_kwargs.extended_cache_time: false`. Anthropic refreshes the lifetime on every cache hit, and the session's last write stands in for the last hit, so the estimate errs toward warm.
+  With `extra_kwargs.cache_system_prompt: false` nothing is cached, so every turn counts as cold.
 - Other providers: 24 hours, OpenAI's extended retention and its default for GPT-5.5 and earlier, so a warm cache is not mistaken for a cold one. The switch therefore mainly helps Claude agents.
 
 On a cold turn, the judge sees the thread and the new request, and decides whether the cheap model can continue the whole conversation as well as the agent model; the question names both by their configured model `id`.

@@ -136,6 +136,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
+from mindroom.session_storage.agent_storage import load_agent_session
 from mindroom.session_storage.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
@@ -5867,7 +5868,14 @@ class ResponseRunner:
         # Without thread history the judge cannot run, so the session is not worth reading.
         if context is not None:
             try:
-                session = await asyncio.to_thread(self._read_agent_session, session_id, execution_identity)
+                session = await asyncio.to_thread(
+                    load_agent_session,
+                    self.deps.agent_name,
+                    config,
+                    self.deps.runtime_paths,
+                    session_id,
+                    execution_identity=execution_identity,
+                )
             except Exception:
                 # The switch is an optimization, so an unreadable session must not fail the reply.
                 self.deps.logger.warning("cold_cache_session_read_failed", session_id=session_id, exc_info=True)
@@ -5894,18 +5902,6 @@ class ResponseRunner:
         ):
             return selected
         return resolved_model
-
-    def _read_agent_session(
-        self,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity,
-    ) -> AgentSession | None:
-        storage = self.deps.state_writer.create_storage(execution_identity)
-        try:
-            session = storage.get_session(session_id, SessionType.AGENT)
-        finally:
-            storage.close()
-        return session if isinstance(session, AgentSession) else None
 
     async def _generate_response_with_participation_locked(
         self,

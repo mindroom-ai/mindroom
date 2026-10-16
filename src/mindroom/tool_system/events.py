@@ -602,7 +602,7 @@ def body_without_tool_markers(body: str, content: Mapping[str, object]) -> str:
     return strip_visible_tool_markers(body)
 
 
-def render_tool_tag(entry: ToolTraceEntry) -> str:
+def _render_tool_tag(entry: ToolTraceEntry) -> str:
     """Render one tool call as a tag for judges, which read conversations as data.
 
     Values stay verbatim: any escaping changes the already redacted previews, and
@@ -628,7 +628,7 @@ def body_with_tool_tags(body: str, trace: Sequence[ToolTraceEntry]) -> str:
         index_match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line)
         index = int(index_match.group()) if index_match is not None else 0
         if 1 <= index <= len(trace):
-            lines.append(render_tool_tag(trace[index - 1]))
+            lines.append(_render_tool_tag(trace[index - 1]))
     return "\n".join(lines)
 
 

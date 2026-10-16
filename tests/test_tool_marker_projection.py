@@ -16,7 +16,6 @@ from mindroom.tool_system.events import (
     body_without_tool_markers,
     build_tool_trace_content,
     message_tool_trace,
-    render_tool_tag,
 )
 
 _TRACE = [
@@ -66,12 +65,6 @@ def test_malformed_tool_trace_reads_as_a_trace_without_entries(event: dict[str, 
     assert "Fixing." in dispatch_prompt_for_event(event)
 
 
-def test_render_tool_tag_keeps_previews_verbatim() -> None:
-    """Judges are models, not parsers, so previews go in unescaped."""
-    assert render_tool_tag(_TRACE[0]) == '<tool name="shell" input="command=pytest -x" output="3 "failed""/>'
-    assert render_tool_tag(_TRACE[1]) == '<tool name="file" input="path=src/auth.py" truncated="true"/>'
-
-
 @pytest.mark.parametrize(
     ("args", "result"),
     [
@@ -106,7 +99,7 @@ def test_oversized_marker_index_reads_as_unmatched() -> None:
 
 
 def test_body_with_tool_tags_replaces_markers_in_place() -> None:
-    """Each marker becomes its own trace entry's tag, and a marker without an entry disappears."""
+    """Each marker becomes its own trace entry's verbatim tag, and a marker without an entry disappears."""
     assert body_with_tool_tags(_BODY, _TRACE) == (
         "Running tests.\n\n"
         '<tool name="shell" input="command=pytest -x" output="3 "failed""/>\n\n'
