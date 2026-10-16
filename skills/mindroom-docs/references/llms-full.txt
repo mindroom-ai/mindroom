@@ -14514,6 +14514,7 @@ Do not report or "fix" these; they are deliberate.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
 - A proxy environment the primary cannot follow, such as a SOCKS proxy or `auto_proxy`, makes the relay dial directly within the browser's destination policy instead of refusing to start, because no MindRoom egress policy depends on that proxy there; a sandbox runner refuses.
 - A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, or inside a shared directory is bound without following links below that directory, so even an operator-made link there is refused; shared knowledge outside every agent workspace and shared directory still follows operator links.
+- `egress_broker.private_networks` lets the broker, which runs in the primary, dial the listed private ranges for workers, including primary-host addresses in them (such as the `docker0` gateway) and destinations a Kubernetes worker's NetworkPolicy blocks; loopback and metadata addresses stay refused, and [Private networks](https://docs.mindroom.chat/deployment/egress-broker/#private-networks) describes the exposure.
 - The egress broker streams request bodies, so a valid request head can reach the right upstream before a bad or oversized body gets 400 or 413 and the upstream connection is aborted; the head carries the secret only to the host the request was routed to, and [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#where-a-secret-may-go) gives the reason.
 - The egress broker's check for stray bytes on a reused tunnel upstream cannot see bytes that reach the socket just after the check polls it.
   Such bytes can only come from that tunnel's own upstream, and no other tunnel, host, or requester is affected.
@@ -18285,13 +18286,15 @@ Each entry is a network in CIDR form with the host bits zero: `192.168.1.0/24`, 
 A name that resolves to several addresses is dialed only when every private one is inside a listed network.
 Loopback addresses (`127.0.0.0/8`, `::1`) stay refused even inside a listed range, because the broker runs in the primary process and its loopback is the primary's.
 Cloud metadata, link-local, and multicast addresses and the names `localhost`, `*.localhost`, and `*.local` stay refused too.
-Service rules work on hosts in these ranges, so a LAN service such as Home Assistant can get its key from the broker like any other service.
+Service rules work on hosts in these ranges, but the broker adds a key only over HTTPS with a certificate the primary trusts.
+Many LAN services serve plain HTTP, which gets 403 `tls_required`, or a self-signed certificate, which fails verification and gets 502 `upstream_unreachable`.
 The broker reads the list for each request, so a change to `config.yaml` applies without a restart.
 
 > [!WARNING]
-> A listed range opens every port on every address in it to every agent that uses the broker, including the primary's own address in that range.
-> With Docker workers, a range that covers the `docker0` gateway (typically `172.17.0.1`) reaches every port of the primary host, which the `docker0` firewall rule otherwise keeps closed.
+> Under `unmatched_hosts: passthrough`, a listed range opens every port on every address in it to every agent that uses the broker, including the primary's own address in that range.
+> With Docker workers, a range that covers the `docker0` gateway (typically `172.17.0.1`) then reaches every port of the primary host, which the `docker0` firewall rule otherwise keeps closed.
 > On Kubernetes, a range that covers the pod or Service network lets workers reach whatever the primary pod can, which their NetworkPolicy otherwise blocks.
+> Under `unmatched_hosts: deny`, a listed range opens only the hosts and ports the services' rules name.
 > List only the networks agents need, as narrowly as you can.
 
 ## Secret sources

@@ -19,10 +19,12 @@ from mindroom.egress_broker.dial import (
     open_upstream,
 )
 from mindroom.server_fetch_url import ServerFetchUrlError
-from tests.egress_broker.conftest import connect_request, plain_request, proxy_authorization
+from tests.egress_broker.conftest import connect_request, plain_request, proxy_authorization, single_rule_config
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    import httpx
 
     from mindroom.egress_broker.proxy import EgressBroker
     from tests.egress_broker.conftest import BrokerFactory, RawProxy
@@ -47,6 +49,8 @@ _REFUSED_DESTINATIONS = {
     "ipv4-compatible": "::127.0.0.1",
     "nat64-loopback": "64:ff9b::7f00:1",
     "6to4-loopback": "2002:7f00:1::1",
+    # Teredo whose client is 127.0.0.1, stored inverted as 80ff:fffe.
+    "teredo-loopback": "2001:0:4136:e378:8000:63bf:80ff:fffe",
     "decimal": "2130706433",
     "octal": "0177.0.0.1",
     "hex": "0x7f000001",
@@ -348,6 +352,26 @@ async def test_broker_dials_private_networks_the_config_lists(
 
     assert refused.json()["error"] == "destination_blocked"
     assert dialed.status == 502
+    assert [call.args[1] for call in dial.call_args_list] == [ipaddress.ip_address("10.0.0.1")]
+
+
+@pytest.mark.asyncio
+async def test_broker_injects_keys_for_hosts_in_listed_private_networks(
+    broker: BrokerFactory,
+    proxy_client: Callable[..., httpx.AsyncClient],
+) -> None:
+    """An intercepted request to a rule's private host is dialed once the config lists its network."""
+    config = single_rule_config("10.0.0.1")
+    await broker(dial_policy=DialPolicy(), rules_provider=lambda _claims: config, secrets={"svc": "s"})
+    client = proxy_client(broker.token())
+
+    with patch("mindroom.egress_broker.dial._dial", new_callable=AsyncMock, side_effect=OSError("refused")) as dial:
+        refused = await client.get("https://10.0.0.1/")
+        config = config.model_copy(update={"private_networks": ["10.0.0.0/8"]})
+        dialed = await client.get("https://10.0.0.1/")
+
+    assert refused.json()["error"] == "destination_blocked"
+    assert dialed.json()["error"] == "upstream_unreachable"
     assert [call.args[1] for call in dial.call_args_list] == [ipaddress.ip_address("10.0.0.1")]
 
 

@@ -139,8 +139,8 @@ def _validate_ip_address(
 
     A private address inside one of `private_networks` is allowed, unless it or an address it embeds is loopback.
     """
-    loopback_address = (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
-    if allow_loopback and loopback_address.is_loopback:
+    unmapped_address = (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
+    if allow_loopback and unmapped_address.is_loopback:
         return
     checked_addresses = (address, *_embedded_ipv4_addresses(address))
     for checked_address in checked_addresses:
@@ -163,8 +163,7 @@ def _validate_ip_address(
 
     if any(checked_address.is_loopback for checked_address in checked_addresses):
         _deny("private_address")
-    mapped_address = (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
-    if not any(mapped_address in network for network in private_networks):
+    if not any(unmapped_address in network for network in private_networks):
         _deny("private_address")
 
 

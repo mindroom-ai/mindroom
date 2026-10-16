@@ -610,7 +610,7 @@ AMBIGUOUS_PATH = {
 LOCALHOST_UNREACHABLE = {"error": "upstream_unreachable", "message": "localhost could not be reached."}
 LOCALHOST_BLOCKED = {
     "error": "destination_blocked",
-    "message": "localhost resolves to a private or internal address, which agents may not reach.",
+    "message": "localhost resolves to a private or internal address that the administrator's egress policy does not let agents reach.",
 }
 # The links a broker started with `manage_url=MANAGE_URL`, or a lookup returning `CONNECT_URL`, puts in refusals.
 MANAGE_URL = "https://m.test/connections/egress"

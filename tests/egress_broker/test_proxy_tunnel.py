@@ -313,7 +313,7 @@ async def test_default_policy_blocks_loopback(
     assert response.status == 403
     assert response.json() == {
         "error": "destination_blocked",
-        "message": f"{host} resolves to a private or internal address, which agents may not reach.",
+        "message": f"{host} resolves to a private or internal address that the administrator's egress policy does not let agents reach.",
     }
 
 

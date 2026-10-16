@@ -234,13 +234,15 @@ Each entry is a network in CIDR form with the host bits zero: `192.168.1.0/24`, 
 A name that resolves to several addresses is dialed only when every private one is inside a listed network.
 Loopback addresses (`127.0.0.0/8`, `::1`) stay refused even inside a listed range, because the broker runs in the primary process and its loopback is the primary's.
 Cloud metadata, link-local, and multicast addresses and the names `localhost`, `*.localhost`, and `*.local` stay refused too.
-Service rules work on hosts in these ranges, so a LAN service such as Home Assistant can get its key from the broker like any other service.
+Service rules work on hosts in these ranges, but the broker adds a key only over HTTPS with a certificate the primary trusts.
+Many LAN services serve plain HTTP, which gets 403 `tls_required`, or a self-signed certificate, which fails verification and gets 502 `upstream_unreachable`.
 The broker reads the list for each request, so a change to `config.yaml` applies without a restart.
 
 > [!WARNING]
-> A listed range opens every port on every address in it to every agent that uses the broker, including the primary's own address in that range.
-> With Docker workers, a range that covers the `docker0` gateway (typically `172.17.0.1`) reaches every port of the primary host, which the `docker0` firewall rule otherwise keeps closed.
+> Under `unmatched_hosts: passthrough`, a listed range opens every port on every address in it to every agent that uses the broker, including the primary's own address in that range.
+> With Docker workers, a range that covers the `docker0` gateway (typically `172.17.0.1`) then reaches every port of the primary host, which the `docker0` firewall rule otherwise keeps closed.
 > On Kubernetes, a range that covers the pod or Service network lets workers reach whatever the primary pod can, which their NetworkPolicy otherwise blocks.
+> Under `unmatched_hosts: deny`, a listed range opens only the hosts and ports the services' rules name.
 > List only the networks agents need, as narrowly as you can.
 
 ## Secret sources
