@@ -517,7 +517,11 @@ class MemoryAutoFlushWorker:
                 config = self.config_provider()
                 interval = 30
                 if config is not None and auto_flush_enabled(config):
-                    await self._run_cycle(config)
+                    try:
+                        await self._run_cycle(config)
+                    except Exception:
+                        # A failed cycle, such as an unwritable state file, must not end flushing until a restart.
+                        logger.exception("Memory auto-flush cycle failed")
                     interval = config.memory.auto_flush.flush_interval_seconds
                 self._wake_event.clear()
                 try:
@@ -594,14 +598,24 @@ class MemoryAutoFlushWorker:
                 strict=False,
             )
 
-            session = await asyncio.to_thread(
-                load_agent_session,
-                agent_name,
-                config,
-                self.runtime_paths,
-                session_id,
-                execution_identity=entry_execution_identity,
-            )
+            try:
+                session = await asyncio.to_thread(
+                    load_agent_session,
+                    agent_name,
+                    config,
+                    self.runtime_paths,
+                    session_id,
+                    execution_identity=entry_execution_identity,
+                )
+            except Exception:
+                # One conversation that cannot be read backs off instead of blocking every later one.
+                self._record_failure(key, entry, now, settings)
+                logger.exception(
+                    "Memory auto-flush could not read a conversation",
+                    agent=agent_name,
+                    session_id=session_id,
+                )
+                continue
             if session is None:
                 continue
             session_updated_at = session.updated_at
@@ -635,7 +649,19 @@ class MemoryAutoFlushWorker:
         for key in selected_keys:
             await self._process_session_key(config, key)
 
-    async def _process_session_key(self, config: Config, key: str) -> None:  # noqa: PLR0915
+    def _record_failure(self, key: str, entry: _FlushSessionEntry, now: int, settings: MemoryAutoFlushConfig) -> None:
+        """Count one failed attempt and back the conversation off before its next one."""
+        with _STATE_LOCK:
+            latest_state = _read_state_unlocked(self.storage_path)
+            latest_entry = latest_state["sessions"].get(key, entry)
+            failures = latest_entry.get("consecutive_failures", 0) + 1
+            latest_entry["consecutive_failures"] = failures
+            latest_entry["next_attempt_at"] = now + _retry_cooldown_seconds(settings, failures)
+            latest_entry.pop("flush_started_dirty_revision", None)
+            latest_state["sessions"][key] = latest_entry
+            _write_state_unlocked(self.storage_path, latest_state)
+
+    async def _process_session_key(self, config: Config, key: str) -> None:
         now = _now_ts()
         settings = config.memory.auto_flush
         with _STATE_LOCK:
@@ -663,16 +689,7 @@ class MemoryAutoFlushWorker:
                 timeout=settings.extractor.max_extraction_seconds,
             )
         except TimeoutError:
-            with _STATE_LOCK:
-                latest_state = _read_state_unlocked(self.storage_path)
-                latest_entry = latest_state["sessions"].get(key, entry)
-                failures = latest_entry.get("consecutive_failures", 0) + 1
-                cooldown = _retry_cooldown_seconds(settings, failures)
-                latest_entry["consecutive_failures"] = failures
-                latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry.pop("flush_started_dirty_revision", None)
-                latest_state["sessions"][key] = latest_entry
-                _write_state_unlocked(self.storage_path, latest_state)
+            self._record_failure(key, entry, now, settings)
             logger.warning(
                 "Memory auto-flush timed out",
                 agent=agent_name,
@@ -681,28 +698,28 @@ class MemoryAutoFlushWorker:
             )
             return
         except Exception:
-            with _STATE_LOCK:
-                latest_state = _read_state_unlocked(self.storage_path)
-                latest_entry = latest_state["sessions"].get(key, entry)
-                failures = latest_entry.get("consecutive_failures", 0) + 1
-                cooldown = _retry_cooldown_seconds(settings, failures)
-                latest_entry["consecutive_failures"] = failures
-                latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry.pop("flush_started_dirty_revision", None)
-                latest_state["sessions"][key] = latest_entry
-                _write_state_unlocked(self.storage_path, latest_state)
+            self._record_failure(key, entry, now, settings)
             logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
             return
 
         latest_session_updated_at: int | None = None
-        latest_session = await asyncio.to_thread(
-            load_agent_session,
-            agent_name,
-            config,
-            self.runtime_paths,
-            session_id,
-            execution_identity=entry_execution_identity,
-        )
+        try:
+            latest_session = await asyncio.to_thread(
+                load_agent_session,
+                agent_name,
+                config,
+                self.runtime_paths,
+                session_id,
+                execution_identity=entry_execution_identity,
+            )
+        except Exception:
+            # The memory is already written, so the flush still counts as done; only a requeue check is lost.
+            logger.exception(
+                "Memory auto-flush could not reread a conversation",
+                agent=agent_name,
+                session_id=session_id,
+            )
+            latest_session = None
         if latest_session is not None and isinstance(latest_session.updated_at, int):
             latest_session_updated_at = latest_session.updated_at
 

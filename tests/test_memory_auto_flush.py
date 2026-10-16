@@ -657,6 +657,109 @@ async def _fake_extract_memory_summary(**_: object) -> str:
 
 
 @pytest.mark.asyncio
+async def test_worker_keeps_running_after_a_cycle_fails(tmp_path: Path, config: Config) -> None:
+    """A cycle that fails, for example on an unwritable state file, is logged and the next one still runs."""
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    cycles = 0
+
+    async def failing_then_stopping_cycle(_config: Config) -> None:
+        nonlocal cycles
+        cycles += 1
+        if cycles == 1:
+            msg = "state file is not writable"
+            raise OSError(msg)
+        worker.stop()
+
+    worker._run_cycle = failing_then_stopping_cycle  # type: ignore[method-assign]
+    await asyncio.wait_for(worker.run(), timeout=10)
+
+    assert cycles == 2
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_cannot_be_read_does_not_block_the_others(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable conversation backs off, and the next dirty conversation is flushed in the same cycle."""
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="broken")
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="fine")
+
+    def load(_agent: str, _config: Config, _runtime_paths: RuntimePaths, session_id: str, **_: object) -> _FakeSession:
+        if session_id == "broken":
+            msg = "session database is locked"
+            raise OSError(msg)
+        return _FakeSession(updated_at=100, messages=[_FakeMessage(role="user", content="remember this decision")])
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", load)
+    monkeypatch.setattr("mindroom.memory.auto_flush._extract_memory_summary", _fake_extract_memory_summary)
+    writes: list[str] = []
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.append_agent_daily_memory",
+        lambda content, agent_name, **_: writes.append(f"{agent_name}:{content}") or {"id": "m"},
+    )
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+
+    await worker._run_cycle(config)
+
+    assert writes == ["general:[auto_flush:fine:100] important decision"]
+    state = json.loads((tmp_path / "memory_flush_state.json").read_text())
+    broken = next(entry for entry in state["sessions"].values() if entry["session_id"] == "broken")
+    assert broken["dirty"] is True
+    assert broken["consecutive_failures"] == 1
+    assert broken["next_attempt_at"] > 0
+
+
+@pytest.mark.asyncio
+async def test_a_flushed_session_that_cannot_be_reread_is_not_flushed_again(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memory is already written when the reread fails, so the conversation is not flushed twice."""
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="s1")
+    loads = 0
+
+    def load(*_args: object, **_kwargs: object) -> _FakeSession:
+        nonlocal loads
+        loads += 1
+        # The cycle reads the session, the flush reads it again, and then the worker rereads it.
+        if loads == 3:
+            msg = "session database is locked"
+            raise OSError(msg)
+        return _FakeSession(updated_at=100, messages=[_FakeMessage(role="user", content="remember this decision")])
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", load)
+    monkeypatch.setattr("mindroom.memory.auto_flush._extract_memory_summary", _fake_extract_memory_summary)
+    writes: list[str] = []
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.append_agent_daily_memory",
+        lambda content, agent_name, **_: writes.append(f"{agent_name}:{content}") or {"id": "m"},
+    )
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+
+    assert len(writes) == 1
+    state = json.loads((tmp_path / "memory_flush_state.json").read_text())
+    assert [entry["dirty"] for entry in state["sessions"].values()] == [False]
+
+
+@pytest.mark.asyncio
 async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     tmp_path: Path,
     config: Config,
