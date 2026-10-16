@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -209,3 +210,29 @@ async def test_a_crashed_database_server_is_started_again(store: GraphitiStore) 
     facts = await store.search_facts(ALPHA, "Alice Project Atlas", limit=5)
 
     assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]
+
+
+@pytest.mark.asyncio
+async def test_the_embedder_is_built_off_the_event_loop(tmp_path: Path) -> None:
+    """A local embedder installs packages and loads a model when built, which must not stall every agent's replies."""
+    config = Config(
+        agents={"mind": AgentConfig(display_name="Mind", knowledge_graph=True)},
+        models={"luna": ModelConfig(provider="openai", id="gpt-6-luna")},
+        knowledge_graph={"model": "luna"},
+    )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    built_on: list[threading.Thread] = []
+
+    def embedder(*_args: object) -> _HashEmbedder:
+        built_on.append(threading.current_thread())
+        return _HashEmbedder()
+
+    graph_store = GraphitiStore(lambda: config, paths)
+    try:
+        with patch.object(store_module, "create_configured_embedder", embedder):
+            await graph_store.search_facts(ALPHA, "anything", limit=1)
+    finally:
+        await graph_store.close()
+
+    assert built_on
+    assert built_on[0] is not threading.main_thread()

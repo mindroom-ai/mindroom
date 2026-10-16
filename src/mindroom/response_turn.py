@@ -62,7 +62,6 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutput
 
     from mindroom.agent_modes import AgentMode
-    from mindroom.automations.exploration_policy import ExplorationPolicy
     from mindroom.delegation.state import SubagentPersona
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.session_context import ScopeSessionContext
@@ -318,8 +317,6 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for authored subagents: their authored prompt and tool subset.
     persona: SubagentPersona | None = None
-    # Set only for the turn an exploration prompt starts: its allowlist and call cap.
-    exploration: ExplorationPolicy | None = None
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
     # Which events this turn's history derives from are redacted, each with the source a legacy summary consumed

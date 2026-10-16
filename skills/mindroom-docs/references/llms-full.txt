@@ -3825,7 +3825,7 @@ agents:
 
 `agents.<name>.knowledge_graph` (bool, default from `defaults.knowledge_graph`, which defaults to `false`) turns the graph on for one agent and gives it the `knowledge_graph` tool.
 MindRoom installs the optional `knowledge_graph` extra the first time a graph is used.
-Extraction needs a model with reliable structured output; small local models often fail it; a failed extraction is retried later, and a part of a conversation that still fails after five tries or three days is skipped.
+Extraction needs a model with reliable structured output; small local models often fail it; a failed extraction is retried later, and a part of a conversation is skipped once its extraction output was unusable five times or it kept failing for three days.
 
 ## Settings
 
@@ -3835,7 +3835,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time between ingestion passes |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations added per pass; the rest wait for the next |
-| `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once |
+| `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once; a single longer message is cut to this length |
 | `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
@@ -3847,7 +3847,7 @@ Changing the embedder starts a new, empty graph that fills again from conversati
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads and tasks another agent delegated to it, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, calls to the `knowledge_graph` tool itself, conversations through the OpenAI-compatible API, and team conversations.
+Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -3876,7 +3876,7 @@ Use a private agent when requesters must not see each other's facts.
 ## Cost and Health
 
 Extraction makes several model calls per piece of conversation, reported as `knowledge_graph` in [usage tracking](https://docs.mindroom.chat/usage/#token-usage); lookups make none.
-When ingestion fails, `/api/health` includes a `knowledge_graph` block with the reason until a later pass succeeds.
+When ingestion fails, `/api/health` includes a `knowledge_graph` block naming the kind of failure until a later pass succeeds, and the MindRoom log has the details.
 
 # Skills
 
@@ -4485,46 +4485,39 @@ Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING
 
 ### `exploration`
 
-`exploration` lets an agent with a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) explore its data sources unattended, using only tools you allow, so the graph learns about projects, people, and documents nobody has asked about yet.
+`exploration` asks an agent with a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) to explore its data sources on a schedule, so the graph learns about projects, people, and documents nobody has asked about yet.
 
 ```yaml
 agents:
   mind:
     knowledge_graph: true
-    tools: [mcp_github, duckduckgo, file]
+    tools: [mcp_github, duckduckgo]
     automations:
       - name: exploration
         cron: "0 */6 * * *"
         room: "#mind-exploration"
-        tools: [mcp_github, duckduckgo]
         max_tool_calls: 30
 ```
 
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
 2. When there are such calls, or `revisit_days` have passed since the last run, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
-3. When the run finishes, its tool results are added to the graph; the agent's own summary is not, and an interrupted run adds nothing.
-4. When the run ends, MindRoom marks the thread resolved.
+3. The agent answers the prompt like any message, with its own tools and [approval rules](https://docs.mindroom.chat/tool-approval/); a call that needs approval waits in the thread until someone answers or the request expires.
+4. When the run finishes, its tool results are added to the graph; the agent's own summary is not, and an interrupted run adds nothing.
+5. When the run ends, MindRoom marks the thread resolved.
 
-During an exploration run the agent can call only the toolkits or `toolkit.function` entries in `tools`, plus `knowledge_graph`, and never a function that needs [approval](https://docs.mindroom.chat/tool-approval/), so nothing waits for a person.
-Skills, knowledge base search, and background jobs are off during exploration, and an OAuth-backed MCP server is reachable only through its listed tools, not its `call_tool` function.
-It is told to only read, but only `tools` limits what it can do, so leave out tools that change things, or add an [approval rule](https://docs.mindroom.chat/tool-approval/) for their writing functions.
-`tools` cannot name `callback_manager`, `compact_context`, `config_manager`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `external_trigger_manager`, `invite_router`, `matrix_api`, `matrix_message`, `memory`, `scheduler`, `script`, `self_config`, `skill_manage`, `thread_model`, `thread_summary`, or `todo`, because those start other runs or change agents.
-Allowing a code-executing tool such as `shell` gives exploration everything that tool can reach.
-A person who replies in an exploration thread gets the agent's ordinary tools, but agents named in the exploration reply do not answer it.
-
+The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 
 | Field | Default | Description |
 |---|---|---|
-| `tools` | required | Toolkits or `toolkit.function` entries from the agent's own tools that exploration may call |
 | `cron` | `30 2 * * *` | When to check |
 | `room` | first configured room | Where the prompt is posted |
-| `max_tool_calls` | `40` (1 to 1000) | Most tool calls one run makes; the agent's `max_tool_calls_per_turn` also applies |
+| `max_tool_calls` | `40` (1 to 1000) | Tool calls the prompt asks one run to stay within |
 | `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
 | `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run |
 | `model` | the agent's model | A key of `models` to run the exploration with |
 
-`exploration` needs `knowledge_graph: true`, and its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
 Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.
 
 # Chat Commands
@@ -14524,7 +14517,7 @@ Do not report or "fix" these; they are deliberate.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
 - Redacting a message does not remove facts the knowledge graph already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
-- An `exploration` run calls the agent's tools unattended; its authority is the operator's `tools` allowlist, enforced in the agent build together with hiding every approval-gated function, turning off skills, knowledge search, background jobs, and MCP `call_tool` dispatchers, and a per-thread call cap, not the prompt, so content it reads can steer it only within that list; its replies wake no mentioned agent, and any other entity its prompt reaches calls no tool.
+- An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.

@@ -95,11 +95,17 @@ def _paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
 
-def _run(run_id: str, session_id: str, created_at: int, status: RunStatus = RunStatus.completed) -> RunOutput:
+def _run(
+    run_id: str,
+    session_id: str,
+    created_at: int,
+    status: RunStatus = RunStatus.completed,
+    agent: str = "mind",
+) -> RunOutput:
     return RunOutput(
         run_id=run_id,
         session_id=session_id,
-        agent_id="mind",
+        agent_id=agent,
         created_at=created_at,
         status=status,
         tools=[
@@ -122,15 +128,16 @@ def _seed(
     at: int = T0,
     paused: frozenset[str] = frozenset(),
     updated_at: int | None = None,
+    agent: str = "mind",
 ) -> None:
     """Store a conversation whose runs start at ``at``, one second apart, last updated with its last run."""
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    storage = create_session_storage(agent, config, paths, execution_identity=None)
     try:
         runs = [
-            _run(run_id, session_id, at + index, RunStatus.paused if run_id in paused else RunStatus.completed)
+            _run(run_id, session_id, at + index, RunStatus.paused if run_id in paused else RunStatus.completed, agent)
             for index, run_id in enumerate(run_ids)
         ]
-        seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=runs))
+        seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
         with storage.db_engine.begin() as connection:
             connection.exec_driver_sql(
                 f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
@@ -335,7 +342,22 @@ async def test_one_failing_agent_does_not_stop_the_others(tmp_path: Path) -> Non
         await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
 
     assert store.sessions() == ["!room:x:$t1"]
-    assert "unreadable session store" in (knowledge_graph_failure() or "")
+    assert "OSError" in (knowledge_graph_failure() or "")
+
+
+@pytest.mark.asyncio
+async def test_health_names_a_failure_without_its_content(tmp_path: Path) -> None:
+    """The unauthenticated health endpoint gets the failure's kind; error text can quote conversation content."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing={"!room:x:$t1"})
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+
+    detail = knowledge_graph_failure()
+    assert detail is not None
+    assert "ValueError" in detail
+    assert "structured output did not match" not in detail
 
 
 @pytest.mark.asyncio
@@ -574,3 +596,41 @@ async def test_a_turn_waiting_on_a_recent_approval_still_holds_back(tmp_path: Pa
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 8 * DAY)
 
     assert store.episodes == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_path: Path) -> None:
+    """A conversation whose turns cannot be read is reported, and the agent's other conversations are still added."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$bad", ["b1"], at=T0 - 5)
+    _seed(config, paths, "!room:x:$good", ["g1"])
+    real = ingestion.session_runs
+
+    def runs(storage: object, session_id: str) -> list[RunOutput]:
+        if session_id == "!room:x:$bad":
+            msg = "corrupt session row"
+            raise ValueError(msg)
+        return real(storage, session_id)
+
+    with patch.object(ingestion, "session_runs", runs):
+        await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$good"]
+    assert knowledge_graph_failure() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_busy_agent_does_not_take_every_pass(tmp_path: Path) -> None:
+    """Passes take turns starting with each agent, so one with a long backlog cannot starve the others."""
+    config = _config(max_sessions_per_cycle=1)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    for thread in ("$m1", "$m2", "$m3"):
+        _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"])
+    _seed(config, paths, "!room:x:$p1", ["rp1"], agent="pal")
+    worker = _worker(config, paths, store)
+
+    await worker._run_cycle(config, now=T0 + 10)
+    await worker._run_cycle(config, now=T0 + 11)
+
+    assert "!room:x:$p1" in store.sessions()

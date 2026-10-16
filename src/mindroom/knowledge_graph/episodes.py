@@ -15,8 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.automations.exploration_policy import EXPLORATION_HOOK_SOURCE
-from mindroom.automations.steps import is_automation_hook_source
+from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.knowledge_graph.store import EpisodeInput
 from mindroom.prompt_message_tags import cdata_body_text
@@ -38,7 +37,9 @@ type Progress = tuple[int, str, int]
 RUN_DONE = 1 << 30
 
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
-KNOWLEDGE_GRAPH_FUNCTIONS = frozenset({"search_graph", "graph_entity"})
+_GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
+# Agno's reasoning functions return the model's own thoughts.
+_SCRATCHPAD_FUNCTIONS = ("think", "analyze")
 _MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
 _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
 _CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
@@ -57,6 +58,15 @@ class RenderedEpisode:
     requester_id: str | None
 
 
+def is_evidence(execution: ToolExecution) -> bool:
+    """Return whether a tool call observed something, rather than returning the graph or the model's own thoughts."""
+    if execution.tool_name in (*_GRAPH_FUNCTIONS, *_SCRATCHPAD_FUNCTIONS):
+        return False
+    # A shell or `mindroom-agent` call can look the graph up too, and returns its facts as the command's output.
+    arguments = tool_arguments(execution)
+    return not any(name in arguments for name in _GRAPH_FUNCTIONS)
+
+
 def run_key(run: RunOutput) -> _RunKey:
     """Return a run's position in its session."""
     return (run.created_at or 0, run.run_id or "")
@@ -71,7 +81,7 @@ def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) 
         return "delegation"
     metadata = root.metadata or {}
     hook_source = metadata.get(HOOK_SOURCE_RUN_METADATA_KEY)
-    if hook_source == EXPLORATION_HOOK_SOURCE:
+    if hook_source == f"{AUTOMATION_HOOK_PREFIX}exploration":
         return "exploration"
     if isinstance(hook_source, str) and is_automation_hook_source(hook_source):
         return "automation"
@@ -161,7 +171,7 @@ def _episode_items(
     """Return a run's lines of one kind, each tool result with the call it lists in the episode description."""
     if episode_kind == "conversation":
         return [(line, None) for line in _conversation_lines(run, agent_name, settings)]
-    executions = [execution for execution in run.tools or [] if execution.tool_name not in KNOWLEDGE_GRAPH_FUNCTIONS]
+    executions = [execution for execution in run.tools or [] if is_evidence(execution)]
     return [
         (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}") for execution in executions
     ]
@@ -198,12 +208,18 @@ def _conversation_lines(run: RunOutput, agent_name: str, settings: KnowledgeGrap
             continue
         if message.role == "user":
             lines.extend(
-                f"person {sender}: {_clean(body, settings.max_episode_chars)}"
+                f"person {_speaker(sender)}: {_clean(body, settings.max_episode_chars)}"
                 for sender, body in _prompt_messages(message.content, str(requester))
             )
         elif message.role == "assistant":
             lines.append(f"agent {agent_name}: {_clean(message.content, settings.max_episode_chars)}")
     return lines
+
+
+def _speaker(sender: str) -> str:
+    """Return a Matrix ID without its colon, since Graphiti reads a dialogue line's speaker up to the first colon."""
+    user, separator, server = sender.partition(":")
+    return f"{user} ({server})" if separator else sender
 
 
 def _prompt_messages(content: str, requester: str) -> list[tuple[str, str]]:

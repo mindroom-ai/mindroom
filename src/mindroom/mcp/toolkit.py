@@ -159,12 +159,6 @@ class MindRoomMCPToolkit(Toolkit):
             seen.add(tool.function_name)
             self.async_functions[tool.function_name] = self._build_function(tool)
 
-    def dispatch_function_names(self) -> set[str]:
-        """Return the functions that call any remote tool by name, which only an OAuth-backed server registers."""
-        if self.server_config is None or not self._is_oauth_backed():
-            return set()
-        return {f"{resolved_mcp_tool_prefix(self.server_id, self.server_config)}_call_tool"}
-
     def _register_oauth_bridge_tools(self) -> None:
         if self.server_config is None:
             return

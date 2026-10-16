@@ -1885,21 +1885,9 @@ class Config(BaseModel):
                 return f"is private; {automation.name} posts in each requester's personal room and cannot set room"
         if automation.requires_file_memory and self._agent_memory_backend(agent_name) != "file":
             return f"needs memory_backend: file for {automation.name}"
-        if isinstance(automation, ExplorationAutomation):
-            if not self.agent_uses_knowledge_graph(agent_name):
-                return "needs knowledge_graph: true for exploration"
-            available = {*self._agent_available_tools(agent_name), "knowledge_graph"}
-            for entry in automation.tools:
-                if entry.partition(".")[0] not in available:
-                    return f"cannot let exploration call {entry!r}, which is not one of its tools"
+        if isinstance(automation, ExplorationAutomation) and not self.agent_uses_knowledge_graph(agent_name):
+            return "needs knowledge_graph: true for exploration"
         return None
-
-    def agent_exploration(self, agent_name: str) -> ExplorationAutomation | None:
-        """Return the agent's exploration settings, or None when it does not explore."""
-        return next(
-            (entry for entry in self._agent_automations(agent_name) if isinstance(entry, ExplorationAutomation)),
-            None,
-        )
 
     def _agent_automations(self, agent_name: str) -> list[Automation]:
         """Get one agent's automations: its own list, or the inherited defaults it can run."""

@@ -1,8 +1,8 @@
 """The ``exploration`` automation: unattended exploration of the agent's sources, feeding its knowledge graph.
 
 The check runs when conversations used tools since the last run, or a revisit is due, and asks the agent in a new
-thread to explore. The turn that prompt starts is restricted by ``exploration_policy``, and its tool results reach the
-graph through ingestion, never through anything the agent writes.
+thread to explore with its own tools and approval rules. The thread's tool results reach the graph through ingestion,
+never through anything the agent writes.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
 from mindroom.config.automations import ExplorationAutomation
 from mindroom.durable_write import write_json_file_durable
-from mindroom.knowledge_graph.episodes import KNOWLEDGE_GRAPH_FUNCTIONS, classify_thread, tool_arguments
+from mindroom.knowledge_graph.episodes import classify_thread, is_evidence, tool_arguments
 from mindroom.knowledge_graph.ingestion import wake_knowledge_graph_ingestion
 from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -66,7 +66,7 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> list[_L
                 if run.status != RunStatus.completed or (run.created_at or 0) <= since:
                     continue
                 for execution in run.tools or []:
-                    if not execution.tool_name or execution.tool_name in KNOWLEDGE_GRAPH_FUNCTIONS:
+                    if not execution.tool_name or not is_evidence(execution):
                         continue
                     key = (execution.tool_name, tool_arguments(execution)[:_MAX_ARGUMENT_CHARS])
                     count, last_seen = seen.get(key, (0, 0))

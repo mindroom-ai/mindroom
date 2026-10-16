@@ -1145,7 +1145,6 @@ async def _prepare_agent_and_prompt(
                 agent_mode=ctx.agent_mode,
                 agent_cli_in_shell=True,
                 persona=ctx.persona,
-                exploration=ctx.exploration,
             )
             prewarm_agent_model_client(
                 agent,

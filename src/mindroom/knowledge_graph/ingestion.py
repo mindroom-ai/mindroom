@@ -151,9 +151,9 @@ def _marker(entry: _SessionState, kind: str) -> Progress | None:
 
 
 def _report_failure(message: str, exc: Exception, **context: str) -> None:
-    detail = f"{type(exc).__name__}: {str(exc)[:200]}"
-    logger.warning(message, error=detail, **context)
-    record_knowledge_graph_failure(detail)
+    logger.warning(message, error=f"{type(exc).__name__}: {str(exc)[:200]}", **context)
+    # Health is unauthenticated and error text can quote conversation content, so it gets only the failure's kind.
+    record_knowledge_graph_failure(f"{message}: {type(exc).__name__}")
 
 
 @dataclass
@@ -165,6 +165,7 @@ class KnowledgeGraphIngestionWorker:
     store: GraphStore
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _passes: int = field(default=0, init=False)
 
     def stop(self) -> None:
         """Ask the loop to end after the current pass."""
@@ -201,14 +202,20 @@ class KnowledgeGraphIngestionWorker:
         budget = config.knowledge_graph.ingest.max_sessions_per_cycle
         automation_thread_ids = automation_threads(self.runtime_paths)
         outcomes: list[bool] = []
-        for scope in graph_scopes(config, self.runtime_paths):
+        scopes = graph_scopes(config, self.runtime_paths)
+        # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
+        start = self._passes % len(scopes) if scopes else 0
+        self._passes += 1
+        for scope in [*scopes[start:], *scopes[:start]]:
             if budget <= 0:
                 break
             # One agent or private instance whose conversations cannot be read must not stop the others.
             try:
                 state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
-                due = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
+                due, readable = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
                 budget -= len(due)
+                if not readable:
+                    outcomes.append(False)
                 outcomes.extend(
                     [await self._ingest(config, scope, state, session, automation_thread_ids, now) for session in due],
                 )
@@ -226,7 +233,8 @@ class KnowledgeGraphIngestionWorker:
         state: _GraphState,
         now: float,
         limit: int,
-    ) -> list[_DueSession]:
+    ) -> tuple[list[_DueSession], bool]:
+        """Return up to ``limit`` idle conversations with new turns, and whether every conversation could be read."""
         settings = config.knowledge_graph.ingest
         storage = create_session_storage(
             scope.agent_name,
@@ -237,6 +245,7 @@ class KnowledgeGraphIngestionWorker:
         try:
             since = int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS
             due: list[_DueSession] = []
+            readable = True
             for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=since):
                 if len(due) >= limit:
                     break
@@ -248,8 +257,19 @@ class KnowledgeGraphIngestionWorker:
                     continue
                 if now - updated_at < settings.idle_seconds:
                     continue
-                due.append(_DueSession(session_id, updated_at, session_runs(storage, session_id)))
-            return due
+                try:
+                    runs = session_runs(storage, session_id)
+                except Exception as exc:
+                    # One conversation that cannot be read must not stop the agent's others.
+                    _report_failure(
+                        "Knowledge graph ingestion could not read a conversation",
+                        exc,
+                        agent=scope.agent_name,
+                    )
+                    readable = False
+                    continue
+                due.append(_DueSession(session_id, updated_at, runs))
+            return due, readable
         finally:
             storage.close()
 

@@ -28,7 +28,7 @@ A labeled evaluation of extracted facts against their sources measures precision
 
 1. **Graph store**: one Graphiti instance per runtime over an embedded FalkorDB Lite database.
 2. **Passive ingestion**: a background worker turns new conversation content, including tool calls and their results, into Graphiti episodes in code, without an agent turn.
-3. **Active exploration**: a built-in `exploration` automation asks the agent, on a cron schedule, to call an operator-allowlisted set of its tools; ingestion then records the raw tool results as evidence.
+3. **Active exploration**: a built-in `exploration` automation asks the agent, on a cron schedule, to explore the sources its tools reach; ingestion then records the raw tool results as evidence.
 
 The agent reads the graph through a read-only `knowledge_graph` tool.
 Nothing the model writes in prose enters the graph as evidence from an exploration run, so the agent cannot launder its own summaries into facts.
@@ -41,7 +41,7 @@ Exploration threads and delegated tasks ingest only tool calls and their results
 Other automation threads (`dreaming`, `prompt_curation`, plugin automations) are not ingested.
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
 Each run's metadata records the hook source of the message that started it.
-Calls to the `knowledge_graph` tool and their results are never ingested and never become leads, or extracted claims would return as fresh tool evidence.
+Calls to the `knowledge_graph` tool and their results, including lookups through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze` are left out because they return the model's own thoughts.
 
 Every fact is an attributed claim, not a verified truth.
 Graphiti records which episodes support a fact, so provenance is per episode, and each episode has one kind:
@@ -65,24 +65,16 @@ Building an agent's full live toolset outside a turn would duplicate worker rout
 Rejected: silent scheduled delivery.
 Approval cards and the stop control need a visible thread, and the thread is the audit trail.
 
-### Code enforces what exploration may call
+### Exploration is a prompt, with the agent's own tools and approval rules
 
-An exploration turn is marked by its trusted automation hook source, and its agent build:
+An exploration turn is an ordinary turn started by a trusted automation prompt: the agent has its usual tools, and approval rules apply as in any turn, so a call that needs approval waits in the exploration thread until someone answers or the request expires.
+The prompt asks the agent to only read and to stay within `max_tool_calls`; the agent's `max_tool_calls_per_turn` is the enforced limit, and approval rules are what stop writes, as for any turn that reads untrusted content.
+Observed tool calls are leads: the prompt lists them, and the agent follows them with its own tools.
 
-- keeps only the functions named in the entry's required `tools` allowlist, plus the `knowledge_graph` tool, through the same pruning that subagent personas use;
-- hides every approval-gated function, as minimal delegation children do, so an unattended run never waits on a card;
-- caps tool calls at the entry's `max_tool_calls` for the whole exploration thread.
-
-The existing per-turn cap counts each Agno response loop afresh, so a continuation would reset it; exploration instead counts executed calls per exploration thread and declines calls past the cap, and the restrictions apply to every continuation and deferred tool in that thread.
-The count lives in memory, so a restart during an exploration run grants that thread a fresh cap; persisting it was rejected as more machinery than a rare, bounded overrun is worth.
-
-The allowlist rejects, at config load, toolkits that start other agent runs or change the agent itself (`delegate`, `dynamic_tools`, `dynamic_workflow`, `scheduler`, `matrix_message`, `invite_router`, `self_config`, `skill_manage`, `memory`, `compact_context`, `thread_model`, `script`), because a call to one would act outside the allowlist.
-Listing a code-executing tool such as `shell` or `python` is allowed and gives exploration everything that tool can reach, as the trust model states for any agent.
-Observed tool calls are leads, not permissions: stored tool executions record only the function name, so the prompt lists every observed call and the agent can follow only those its pruned tools allow.
-Prompt text is never the boundary: a document the agent reads can contain instructions, and the allowlist plus hidden gated functions bound what such an injection can do.
-
-Rejected: defaulting the allowlist to every function seen in conversations.
-A function a person drove while watching, such as sending mail, is not one an unattended run should call.
+Rejected: restricting exploration turns in code with an operator allowlist, hidden approval-gated functions, and a per-thread call cap.
+Every capability that runs or defers work beside a turn's own tool list became a way around the allowlist: background jobs, skills, knowledge search, delegation, and the OAuth MCP `call_tool` dispatcher, which reaches any remote tool by name.
+Hiding the dispatcher also left exploration unable to reach an OAuth MCP server after a restart, because such a server lists its concrete functions only once its catalog is cached.
+Five review rounds each found another escape, and the boundary duplicated what approval rules already decide.
 
 ### One database, one graph per scope, scope chosen in code
 
@@ -146,11 +138,7 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 
 - Leads come only from completed conversation turns created after the last run, so a reply in an old thread does not bring back that thread's earlier calls.
 - Every `@` in lead arguments becomes `＠`, which no mention parser reads, because the posted prompt is parsed for mentions and a mentioned agent would answer the trusted automation prompt.
-- An exploration reply is marked so that the agents it names do not answer, because its text is steered by content read unattended.
-- A turn started by an exploration prompt fails closed: an entity without exploration settings, such as an ad-hoc team member or an agent whose entry was removed while the prompt waited, may call no tool.
 - The last-run time is saved only when a run ends, so a prompt that never posted offers the same leads again.
-- An exploration build has no skills, no generated knowledge search, no background jobs or job controls, and no MCP `call_tool` dispatcher: skill scripts can run code, a call that became a job would finish in a later turn without the exploration restrictions, and a dispatcher reaches remote tools that approval rules see only by their own names.
-- An allowlisted toolkit that fails to load leaves exploration with the others instead of failing the run.
 
 ## Security
 
@@ -159,20 +147,20 @@ Fields and defaults are documented once, in `docs/knowledge-graph.md` and the `e
 - Exploration prompts list redacted arguments of recent tool calls from the agent's conversations, so everyone who can read the exploration room sees them; operators choose that room accordingly, and private agents post in the requester's own personal room.
 - Only top-level, completed Matrix runs are ingested: runs with a `room_id`, not OpenAI-compatible API sessions, dynamic-workflow participant sessions, or team-member runs.
 - Private agents get one graph per requester instance and explore as that requester, with that requester's credentials, as automations already do.
-- Exploration authority is the allowlist and hidden gated functions, enforced in the agent build, not the prompt.
+- Exploration has the agent's own tools and approval rules; its prompt's instruction to only read bounds nothing.
 - Credential-like values are redacted best-effort before ingestion with the shared `redact_sensitive_text`, the single redaction implementation.
 
 ## Error handling
 
 - Graphiti calls `load_dotenv()` when it is imported, which would copy the first `.env` above its install into `os.environ`; MindRoom imports it with `PYTHON_DOTENV_DISABLED` set, because it reads `.env` files only deliberately.
-- A failed install, extraction, or database call is retried on a later pass with its cause in `/api/health`, never in a room; one agent or private instance that fails does not stop the others.
+- A failed install, extraction, or database call is retried on a later pass, with its kind in `/api/health` and its cause in the log, never in a room; one agent, private instance, or conversation that fails does not stop the others.
 
 ## Out of scope
 
 - Teams, and team sessions as an ingestion source.
 - Injecting graph facts into every prompt automatically; the agent queries when it needs to.
 - External FalkorDB, Neo4j, and Neptune backends; see the rejected external server above.
-- A monthly USD cap for exploration; `max_tool_calls`, cron, and model choice bound spend, and `knowledge_graph` usage shows extraction cost.
+- A monthly USD cap for exploration; the agent's `max_tool_calls_per_turn`, cron, and model choice bound spend, and `knowledge_graph` usage shows extraction cost.
 - Custom entity and edge types; Graphiti's default extraction first, a prescribed ontology only if evaluation shows it is needed.
 - Cognee, which the user did not ask for and was not evaluated.
 

@@ -203,13 +203,15 @@ class GraphitiStore:
         )
         from mindroom.knowledge_graph.embedded_server import start_embedded_server  # noqa: PLC0415
 
+        # A local embedder installs packages and loads its model when built.
+        embedder = await asyncio.to_thread(create_configured_embedder, config, self._runtime_paths)
         server = await start_embedded_server(self._runtime_paths.storage_root / "knowledge_graph")
         self._embedded_server = server
         driver = FalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
         return Graphiti(
             graph_driver=driver,
             llm_client=MindRoomLLMClient(self._config_provider, self._runtime_paths),
-            embedder=MindRoomEmbedder(create_configured_embedder(config, self._runtime_paths)),
+            embedder=MindRoomEmbedder(embedder),
             cross_encoder=UnusedCrossEncoder(),
         )
 

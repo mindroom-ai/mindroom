@@ -1763,7 +1763,7 @@
     },
     "ExplorationAutomation": {
       "additionalProperties": false,
-      "description": "Unattended exploration of the agent's data sources with an allowlist of its tools, feeding its knowledge graph.",
+      "description": "A scheduled prompt asking the agent to explore the sources its tools reach, feeding its knowledge graph.",
       "properties": {
         "cron": {
           "default": "30 2 * * *",
@@ -1807,18 +1807,9 @@
           "title": "Name",
           "type": "string"
         },
-        "tools": {
-          "description": "Toolkits, or toolkit.function entries, of the agent's own tools that exploration may call",
-          "items": {
-            "type": "string"
-          },
-          "minItems": 1,
-          "title": "Tools",
-          "type": "array"
-        },
         "max_tool_calls": {
           "default": 40,
-          "description": "Most tool calls one exploration run makes",
+          "description": "Tool calls the exploration prompt asks the agent to stay within",
           "maximum": 1000,
           "minimum": 1,
           "title": "Max Tool Calls",
@@ -1840,12 +1831,11 @@
           "type": "integer"
         }
       },
-      "required": [
-        "name",
-        "tools"
-      ],
       "title": "ExplorationAutomation",
-      "type": "object"
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "ExternalTriggerPolicyConfig": {
       "additionalProperties": false,

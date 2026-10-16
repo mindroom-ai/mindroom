@@ -23,7 +23,7 @@ agents:
 
 `agents.<name>.knowledge_graph` (bool, default from `defaults.knowledge_graph`, which defaults to `false`) turns the graph on for one agent and gives it the `knowledge_graph` tool.
 MindRoom installs the optional `knowledge_graph` extra the first time a graph is used.
-Extraction needs a model with reliable structured output; small local models often fail it; a failed extraction is retried later, and a part of a conversation that still fails after five tries or three days is skipped.
+Extraction needs a model with reliable structured output; small local models often fail it; a failed extraction is retried later, and a part of a conversation is skipped once its extraction output was unusable five times or it kept failing for three days.
 
 ## Settings
 
@@ -33,7 +33,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time between ingestion passes |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations added per pass; the rest wait for the next |
-| `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once |
+| `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once; a single longer message is cut to this length |
 | `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
@@ -45,7 +45,7 @@ Changing the embedder starts a new, empty graph that fills again from conversati
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads and tasks another agent delegated to it, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, calls to the `knowledge_graph` tool itself, conversations through the OpenAI-compatible API, and team conversations.
+Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -74,4 +74,4 @@ Use a private agent when requesters must not see each other's facts.
 ## Cost and Health
 
 Extraction makes several model calls per piece of conversation, reported as `knowledge_graph` in [usage tracking](https://docs.mindroom.chat/usage/#token-usage); lookups make none.
-When ingestion fails, `/api/health` includes a `knowledge_graph` block with the reason until a later pass succeeds.
+When ingestion fails, `/api/health` includes a `knowledge_graph` block naming the kind of failure until a later pass succeeds, and the MindRoom log has the details.

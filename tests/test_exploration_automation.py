@@ -37,7 +37,7 @@ def _config(**entry: object) -> Config:
                 display_name="Mind",
                 knowledge_graph=True,
                 tools=["github", "duckduckgo"],
-                automations=[{"name": "exploration", "tools": ["github"], **entry}],
+                automations=[{"name": "exploration", **entry}],
             ),
         },
         models={

@@ -19,7 +19,6 @@ import nio
 
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
-from mindroom.automations.exploration_policy import EXPLORATION_HOOK_SOURCE
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -2084,13 +2083,8 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
             return await self._deliver_stream(request)
 
-    def _acting_requester_content(self, identity: ResponseIdentity) -> dict[str, object]:
-        """Name a human or bot-account requester on the reply, so entities it mentions act for that requester.
-
-        An exploration reply is steered by content the agent read unattended, so the agents it names do not answer.
-        """
-        if identity.response_envelope.hook_source == EXPLORATION_HOOK_SOURCE:
-            return {SKIP_MENTIONS_KEY: True}
+    def _acting_requester_content(self, identity: ResponseIdentity) -> dict[str, str]:
+        """Name a human or bot-account requester on the reply, so entities it mentions act for that requester."""
         requester_id = identity.response_envelope.requester_id
         if not is_access_checked_requester_id(requester_id, self.deps.runtime.config, self.deps.runtime_paths):
             return {}

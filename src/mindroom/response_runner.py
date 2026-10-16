@@ -35,7 +35,6 @@ from mindroom.approval.response import (
     require_ordered_pause_presentation,
 )
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
-from mindroom.automations.exploration_policy import exploration_policy_for_turn
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.budgets.monitor import budget_model
@@ -3921,11 +3920,6 @@ class ResponseRunner:
         agent_mode = resolve_agent_mode(self.deps.runtime_paths, state_root, self.deps.agent_name, runtime.session_id)
         return ResponseTurnContext(
             agent_mode=agent_mode,
-            exploration=exploration_policy_for_turn(
-                self.deps.runtime.config,
-                self.deps.agent_name,
-                request.response_envelope.hook_source,
-            ),
             entity_label=self.deps.agent_name,
             session_id=runtime.session_id,
             run_id=run_id,

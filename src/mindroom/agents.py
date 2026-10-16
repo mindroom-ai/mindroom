@@ -43,7 +43,7 @@ from mindroom.history.agno_compat_message_builder import apply_patch as install_
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
-from mindroom.mcp.toolkit import MindRoomMCPToolkit, hide_mcp_function_collisions
+from mindroom.mcp.toolkit import hide_mcp_function_collisions
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.providers import model_loading
@@ -114,7 +114,6 @@ if TYPE_CHECKING:
 
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
     from mindroom.agent_modes import AgentMode
-    from mindroom.automations.exploration_policy import ExplorationPolicy
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
@@ -1482,23 +1481,6 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
-def _exploration_function_filter(inner: Callable[[Function], bool] | None) -> Callable[[Function], bool]:
-    """Keep only functions of allowlisted toolkits; generated skill and knowledge functions belong to no toolkit."""
-
-    def visible(function: Function) -> bool:
-        return function.owning_toolkit is not None and (inner is None or inner(function))
-
-    return visible
-
-
-def _drop_exploration_dispatchers(toolkit: Toolkit) -> None:
-    """Remove functions that call any remote tool by name, since approval rules see only the dispatcher's name."""
-    if isinstance(toolkit, MindRoomMCPToolkit):
-        for name in toolkit.dispatch_function_names():
-            toolkit.async_functions.pop(name, None)
-            toolkit.functions.pop(name, None)
-
-
 def _keep_persona_functions(toolkit: Toolkit, tool_name: str, persona_tools: tuple[str, ...]) -> None:
     """Drop the functions of one concrete toolkit that an authored persona does not name."""
     for functions in (toolkit.functions, toolkit.async_functions):
@@ -1533,22 +1515,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
     persona: SubagentPersona | None,
-    allowed_tools: tuple[str, ...] | None,
-    hide_gated_functions: bool,
 ) -> _AgentToolAssembly:
-    """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance.
-
-    ``allowed_tools`` keeps only the named toolkits and functions; ``hide_gated_functions`` drops every function that
-    would ask for approval, for a turn nobody is present to approve.
-    """
+    """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     approvals_as_jobs = (
-        background_tool_jobs_enabled(config, runtime_paths)
-        and delegation_depth == 0
-        and not minimal_mode
-        and not hide_gated_functions
+        background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
-    supports_native_tool_approval = supports_native_tool_approval and not hide_gated_functions
-    persona_tools = allowed_tools
+    persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
@@ -1659,8 +1631,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
             if persona_tools is not None:
                 # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
                 _keep_persona_functions(toolkit, tool_name, persona_tools)
-            if hide_gated_functions:
-                _drop_exploration_dispatchers(toolkit)
             # Function policies match on the owning toolkit, so stamp it before pruning.
             _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
@@ -1746,9 +1716,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
         runtime_paths,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
-        enabled=not disable_runtime_capabilities
-        and not hide_gated_functions
-        and background_tool_jobs_enabled(config, runtime_paths),
+        enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
         tool_hook_bridge=tool_hook_bridge,
         output_file_policy=_agent_tool_output_file_policy(
             agent_runtime,
@@ -1759,7 +1727,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
     if controls is not None:
         tools.append(controls)
     hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
-    if persona is not None and persona_tools is not None:
+    if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
     return _AgentToolAssembly(
         tools=tools,
@@ -2065,7 +2033,6 @@ def create_agent(  # noqa: PLR0915
     agent_mode: AgentMode = "standard",
     agent_cli_in_shell: bool = False,
     persona: SubagentPersona | None = None,
-    exploration: ExplorationPolicy | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -2113,7 +2080,6 @@ def create_agent(  # noqa: PLR0915
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
         persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
-        exploration: Restrictions of a turn an exploration prompt started: its tool allowlist and call cap.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -2147,8 +2113,7 @@ def create_agent(  # noqa: PLR0915
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
     # up front; it also hides functions Agno generates without an owning toolkit, other than kept skills and knowledge.
     persona_prompt = persona.system_prompt if persona is not None else None
-    # An exploration turn narrows the agent's own tools to the operator's allowlist the same way.
-    persona_tools = persona.tools if persona is not None else exploration.tools if exploration is not None else None
+    persona_tools = persona.tools if persona is not None else None
     eager_deferred_tools = eager_deferred_tools or persona_tools is not None
     native_deferred_tools = (
         agent_mode == "standard"
@@ -2174,8 +2139,6 @@ def create_agent(  # noqa: PLR0915
         tool_function_filter,
         disabled_tool_names,
     )
-    if exploration is not None:
-        tool_function_filter = _exploration_function_filter(tool_function_filter)
     tool_assembly = _assemble_agent_toolkits(
         agent_name,
         config,
@@ -2196,8 +2159,6 @@ def create_agent(  # noqa: PLR0915
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
         persona=persona,
-        allowed_tools=persona_tools,
-        hide_gated_functions=exploration is not None,
     )
     storage = _open_agent_session_storage(
         agent_name,
@@ -2268,8 +2229,7 @@ def create_agent(  # noqa: PLR0915
                 runtime_paths,
                 config.defaults.tool_output_auto_save_threshold_bytes,
             ),
-            # Skill scripts can run code, and no skill is on an exploration allowlist.
-            only=() if exploration is not None else persona.kept_skills if persona is not None else None,
+            only=persona.kept_skills if persona is not None else None,
         )
     )
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
@@ -2306,8 +2266,6 @@ def create_agent(  # noqa: PLR0915
         not disable_runtime_capabilities
         and knowledge is not None
         and (persona is None or persona.kept_knowledge != ())
-        # Knowledge search is not on an exploration allowlist.
-        and exploration is None
         and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
     )
     knowledge_sources = (
@@ -2361,11 +2319,7 @@ def create_agent(  # noqa: PLR0915
         store_history_messages=False,
         compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        tool_call_limit=(
-            min(entity_view.max_tool_calls_per_turn, exploration.max_tool_calls)
-            if exploration is not None
-            else entity_view.max_tool_calls_per_turn
-        ),
+        tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,
     )
     if isinstance(agent, MinimalAgent):
@@ -2407,9 +2361,7 @@ def create_agent(  # noqa: PLR0915
         agent.refresh_scheduler = refresh_scheduler
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
-    if exploration is None:
-        # An exploration call that became a job would finish in a later turn without the exploration restrictions.
-        _install_background_jobs(agent, agent_name, model, config, runtime_paths, depth=delegation_depth)
+    _install_background_jobs(agent, agent_name, model, config, runtime_paths, depth=delegation_depth)
 
     logger.info(
         "Created agent",

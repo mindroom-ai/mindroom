@@ -367,44 +367,37 @@ Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING
 
 ### `exploration`
 
-`exploration` lets an agent with a [knowledge graph](knowledge-graph.md) explore its data sources unattended, using only tools you allow, so the graph learns about projects, people, and documents nobody has asked about yet.
+`exploration` asks an agent with a [knowledge graph](knowledge-graph.md) to explore its data sources on a schedule, so the graph learns about projects, people, and documents nobody has asked about yet.
 
 ```yaml
 agents:
   mind:
     knowledge_graph: true
-    tools: [mcp_github, duckduckgo, file]
+    tools: [mcp_github, duckduckgo]
     automations:
       - name: exploration
         cron: "0 */6 * * *"
         room: "#mind-exploration"
-        tools: [mcp_github, duckduckgo]
         max_tool_calls: 30
 ```
 
 1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
 2. When there are such calls, or `revisit_days` have passed since the last run, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
-3. When the run finishes, its tool results are added to the graph; the agent's own summary is not, and an interrupted run adds nothing.
-4. When the run ends, MindRoom marks the thread resolved.
+3. The agent answers the prompt like any message, with its own tools and [approval rules](tool-approval.md); a call that needs approval waits in the thread until someone answers or the request expires.
+4. When the run finishes, its tool results are added to the graph; the agent's own summary is not, and an interrupted run adds nothing.
+5. When the run ends, MindRoom marks the thread resolved.
 
-During an exploration run the agent can call only the toolkits or `toolkit.function` entries in `tools`, plus `knowledge_graph`, and never a function that needs [approval](tool-approval.md), so nothing waits for a person.
-Skills, knowledge base search, and background jobs are off during exploration, and an OAuth-backed MCP server is reachable only through its listed tools, not its `call_tool` function.
-It is told to only read, but only `tools` limits what it can do, so leave out tools that change things, or add an [approval rule](tool-approval.md) for their writing functions.
-`tools` cannot name `callback_manager`, `compact_context`, `config_manager`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `external_trigger_manager`, `invite_router`, `matrix_api`, `matrix_message`, `memory`, `scheduler`, `script`, `self_config`, `skill_manage`, `thread_model`, `thread_summary`, or `todo`, because those start other runs or change agents.
-Allowing a code-executing tool such as `shell` gives exploration everything that tool can reach.
-A person who replies in an exploration thread gets the agent's ordinary tools, but agents named in the exploration reply do not answer it.
-
+The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
 The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so choose a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
 
 | Field | Default | Description |
 |---|---|---|
-| `tools` | required | Toolkits or `toolkit.function` entries from the agent's own tools that exploration may call |
 | `cron` | `30 2 * * *` | When to check |
 | `room` | first configured room | Where the prompt is posted |
-| `max_tool_calls` | `40` (1 to 1000) | Most tool calls one run makes; the agent's `max_tool_calls_per_turn` also applies |
+| `max_tool_calls` | `40` (1 to 1000) | Tool calls the prompt asks one run to stay within |
 | `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
 | `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run |
 | `model` | the agent's model | A key of `models` to run the exploration with |
 
-`exploration` needs `knowledge_graph: true`, and its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
 Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

@@ -77,7 +77,7 @@ def test_conversation_run_renders_speakers_and_a_separate_tool_episode() -> None
     conversation, tool_results = (item.episode for item in rendered)
     assert conversation.kind == "conversation"
     assert conversation.body.splitlines() == [
-        "person @alice:example.test: When does Atlas ship?",
+        "person @alice (example.test): When does Atlas ship?",
         "agent mind: Atlas ships Friday.",
     ]
     assert conversation.source_description == f"conversation: room {ROOM} thread {THREAD}"
@@ -90,7 +90,7 @@ def test_conversation_run_renders_speakers_and_a_separate_tool_episode() -> None
 
 
 def test_several_people_in_one_prompt_are_each_labeled() -> None:
-    """A coalesced prompt names each sender."""
+    """A coalesced prompt names each sender, with no colon inside the name, since Graphiti ends a speaker at one."""
     prompt = (
         "<messages>"
         + render_msg_tag(sender="@alice:x", body="Bob owns Atlas.")
@@ -104,8 +104,8 @@ def test_several_people_in_one_prompt_are_each_labeled() -> None:
     conversation = _episodes([_run("r1", prompt=prompt)], "conversation")[0].episode
 
     assert conversation.body.splitlines()[:2] == [
-        "person @alice:x: Bob owns Atlas.",
-        "person @bob:x: No, Carol does now.",
+        "person @alice (x): Bob owns Atlas.",
+        "person @bob (x): No, Carol does now.",
     ]
 
 
@@ -139,6 +139,21 @@ def test_automation_thread_renders_nothing() -> None:
 def test_knowledge_graph_calls_are_never_rendered() -> None:
     """Graph lookups returned to the graph would read as fresh evidence."""
     run = _run("r1", tools=[_tool("search_graph", "Alice leads Atlas", query="Atlas")])
+
+    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
+def test_graph_lookups_through_a_shell_are_never_rendered() -> None:
+    """A minimal-mode or shell lookup returns the graph's facts as a shell result, which is no more evidence."""
+    command = 'mindroom-agent tools call knowledge_graph search_graph --json \'{"query": "Atlas"}\''
+    run = _run("r1", tools=[_tool("bash", "Alice leads Atlas", command=command)])
+
+    assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
+def test_reasoning_scratchpads_are_never_rendered() -> None:
+    """`think` and `analyze` return the model's own thoughts, not anything a tool observed."""
+    run = _run("r1", tools=[_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")])
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
 
@@ -205,7 +220,7 @@ def test_message_text_that_ends_a_cdata_section_survives() -> None:
 
     conversation = _episodes([_run("r1", prompt=prompt)], "conversation")[0].episode
 
-    assert conversation.body.splitlines()[0] == "person @alice:x: Use a[b[0]]> c"
+    assert conversation.body.splitlines()[0] == "person @alice (x): Use a[b[0]]> c"
 
 
 def test_a_run_larger_than_the_cap_is_split_without_losing_results() -> None:

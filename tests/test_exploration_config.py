@@ -1,4 +1,4 @@
-"""The exploration automation: it needs the graph, names only the agent's own tools, and never ones that act beyond it."""
+"""The exploration automation needs the graph and has documented defaults."""
 
 from __future__ import annotations
 
@@ -19,17 +19,16 @@ _MODELS = {
 def _config(
     *,
     knowledge_graph: bool = True,
-    agent_tools: list[str] | None = None,
     defaults: list[object] | None = None,
     **entry: object,
 ) -> Config:
-    automations = None if defaults is not None else [{"name": "exploration", "tools": ["duckduckgo"], **entry}]
+    automations = None if defaults is not None else [{"name": "exploration", **entry}]
     return Config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
                 knowledge_graph=knowledge_graph,
-                tools=agent_tools if agent_tools is not None else ["duckduckgo", "github"],
+                tools=["duckduckgo"],
                 automations=automations,
             ),
         },
@@ -58,47 +57,5 @@ def test_exploration_requires_the_knowledge_graph() -> None:
 
 def test_inherited_exploration_is_skipped_without_the_graph() -> None:
     """A default entry applies only to agents that build a graph."""
-    config = _config(knowledge_graph=False, defaults=[{"name": "exploration", "tools": ["duckduckgo"]}])
+    config = _config(knowledge_graph=False, defaults=[{"name": "exploration"}])
     assert config.resolve_entity("mind").automations == []
-
-
-def test_exploration_requires_a_tool_list() -> None:
-    """The operator names what exploration may call; nothing is allowed by default."""
-    with pytest.raises(ValidationError, match="tools"):
-        _config(tools=[])
-
-
-def test_exploration_tools_must_be_the_agents_own() -> None:
-    """Exploration calls only toolkits the agent already has, or functions of them."""
-    with pytest.raises(ValidationError, match="slack"):
-        _config(tools=["slack"])
-    config = _config(tools=["github.get_repository", "knowledge_graph"])
-    assert config.agent_exploration("mind") is not None
-
-
-@pytest.mark.parametrize(
-    "toolkit",
-    [
-        "scheduler",
-        "delegate.delegate_task",
-        "matrix_message",
-        "self_config",
-        "config_manager",
-        "callback_manager",
-        "external_trigger_manager",
-        "todo",
-        "matrix_api.send_event",
-        "thread_summary",
-    ],
-)
-def test_exploration_rejects_toolkits_that_act_beyond_it(toolkit: str) -> None:
-    """Tools that start other runs or change the agent would act outside the allowlist."""
-    with pytest.raises(ValidationError, match="cannot be used by exploration"):
-        ExplorationAutomation(tools=[toolkit])
-
-
-def test_agent_exploration_returns_the_entry() -> None:
-    """The turn policy finds an agent's exploration settings by name."""
-    entry = _config(max_tool_calls=5).agent_exploration("mind")
-    assert entry is not None
-    assert entry.max_tool_calls == 5

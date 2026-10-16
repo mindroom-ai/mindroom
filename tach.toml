@@ -2372,7 +2372,6 @@ depends_on = [
     "mindroom.runtime_protocols",
     "mindroom.streaming",
     "mindroom.turn_record",
-    "mindroom.automations.exploration_policy",
 ]
 
 [[modules]]
@@ -2945,7 +2944,6 @@ depends_on = [
     "mindroom.user_turn_time",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.skill_learning.capture",
-    "mindroom.automations.exploration_policy",
 ]
 
 [[modules]]
@@ -5077,7 +5075,6 @@ depends_on = [
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_jobs.execution_authority",
-    "mindroom.automations.exploration_policy",
 ]
 
 [[modules]]
@@ -8927,7 +8924,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge_graph.episodes"
 depends_on = [
-    "mindroom.automations.exploration_policy",
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.knowledge_graph.store",
@@ -8976,11 +8972,7 @@ visibility = ["mindroom.agents"]
 path = "mindroom.tools.knowledge_graph"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
 
-# Exploration: the automation that explores unattended, and the restrictions on the turns it starts.
-[[modules]]
-path = "mindroom.automations.exploration_policy"
-depends_on = []
-
+# Exploration: the automation that asks the agent to explore its sources.
 [[modules]]
 path = "mindroom.automations.exploration"
 depends_on = [

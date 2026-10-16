@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
-from mindroom.automations.exploration_policy import claim_exploration_call, exploration_policy_for_turn
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -750,27 +749,6 @@ async def _check_before_body(
         raise
 
 
-def _exploration_cap_result(tool_name: str, resolved_context: _ResolvedToolContext) -> str | None:
-    """Return the declined result for an exploration turn's call past its cap, or None."""
-    runtime_context = get_tool_runtime_context()
-    if runtime_context is None or runtime_context.hook_source is None or resolved_context.config is None:
-        return None
-    policy = exploration_policy_for_turn(
-        resolved_context.config,
-        resolved_context.agent_name,
-        runtime_context.hook_source,
-    )
-    thread_key = resolved_context.thread_id or resolved_context.session_id
-    if policy is None or thread_key is None:
-        return None
-    if claim_exploration_call(resolved_context.agent_name, thread_key, policy.max_tool_calls):
-        return None
-    return _format_declined_result(
-        tool_name,
-        f"This exploration run may make at most {policy.max_tool_calls} tool calls; report what you found.",
-    )
-
-
 async def _execute_bridge(
     *,
     hook_registry: HookRegistry,
@@ -810,8 +788,7 @@ async def _execute_bridge(
     )
     hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
     before_hooks_started_at = time.perf_counter()
-    # An exploration turn past its call cap is declined before plugin hooks see the call.
-    blocked_result = _exploration_cap_result(tool_name, resolved_context) or await _maybe_block_for_before_hooks(
+    blocked_result = await _maybe_block_for_before_hooks(
         hook_registry=hook_registry,
         resolved_context=resolved_context,
         hook_arguments=hook_arguments,
