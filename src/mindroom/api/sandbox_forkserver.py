@@ -368,7 +368,7 @@ class _SandboxForkserver:
 
         def stop() -> None:
             # The template reaps children as they exit, so stopping never signals a PID
-            # another process may reuse: it hangs up, and the forked child exits.
+            # another process may reuse: it hangs up, and the forked child ends its process group.
             stopped.set()
             _hang_up(conn)
 
@@ -450,11 +450,12 @@ class _SandboxForkserver:
     @staticmethod
     def _kill_child(child_pid: int | None) -> None:
         # The pid is deserialized from the child's socket message; never let a
-        # degenerate value reach os.kill, where 0 targets the process group.
+        # degenerate value reach os.killpg, where 0 targets this process's own group.
         if child_pid is None or child_pid <= 0:
             return
+        # The child leads its own process group, so this also stops what its tool started.
         with suppress(OSError):
-            os.kill(child_pid, signal.SIGKILL)
+            os.killpg(child_pid, signal.SIGKILL)
 
 
 _STOPPED_BEFORE_DISPATCH = "Sandbox forkserver request was stopped before it was sent."
@@ -537,6 +538,8 @@ def _child_main(
     run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
 ) -> NoReturn:
     """Fork-child request handler; never returns to the template loop."""
+    # Lead a process group, outside the template's, so stopping the request stops what its tool started.
+    os.setsid()
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     exit_code = 1
     try:
@@ -591,7 +594,8 @@ def _run_child_request(
     if select.select([conn], [], [], 0)[0]:
         # The runner hung up while handing this request over; never start it.
         return 1
-    threading.Thread(target=_exit_when_runner_hangs_up, args=(conn,), daemon=True).start()
+    answered = threading.Event()
+    threading.Thread(target=_exit_when_runner_hangs_up, args=(conn, answered), daemon=True).start()
     # Tool threads report progress too; one lock keeps every line whole and the response last.
     lines = threading.Lock()
 
@@ -601,14 +605,21 @@ def _run_child_request(
 
     returncode, stdout_text, stderr_text = run_payload(request.envelope, report)
     with lines:
+        answered.set()
         conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
         _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})
     return 0
 
 
-def _exit_when_runner_hangs_up(conn: socket.socket) -> None:
-    """Exit when the runner stops this request; it sends nothing after the request line, so readable means hung up."""
+def _exit_when_runner_hangs_up(conn: socket.socket, answered: threading.Event) -> None:
+    """Exit when the runner stops this request; it sends nothing after the request line, so readable means hung up.
+
+    A stopped request also kills what its tool started; a hang-up after the response keeps what the tool left running.
+    """
     select.select([conn], [], [])
+    if not answered.is_set():
+        with suppress(OSError):
+            os.killpg(0, signal.SIGKILL)
     os._exit(1)
 
 

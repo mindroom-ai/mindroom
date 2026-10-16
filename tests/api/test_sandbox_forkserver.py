@@ -8,8 +8,10 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import pytest
@@ -42,6 +44,7 @@ _STUB_TEMPLATE = '''\
 """Lightweight forkserver template used to test the manager transport."""
 
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -58,6 +61,10 @@ def _run_payload(payload: str, report) -> tuple[int, str, str]:
     if payload.startswith("sleep:"):
         pid_file = Path(payload.removeprefix("sleep:"))
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        time.sleep(30)
+    if payload.startswith("group:"):
+        member = subprocess.Popen(["sleep", "300"])
+        Path(payload.removeprefix("group:")).write_text(str(member.pid), encoding="utf-8")
         time.sleep(30)
     marker = os.environ.get("FORKSERVER_TEST_MARKER", "")
     return 0, f"{os.getppid()}|{os.getcwd()}|{marker}", "stderr:" + payload
@@ -217,6 +224,7 @@ def test_stop_after_its_request_ended_never_signals_the_reaped_child(
     signals: list[tuple[int, int]] = []
     with monkeypatch.context() as patched:
         patched.setattr(sandbox_forkserver_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+        patched.setattr(sandbox_forkserver_module.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
         stops[0]()
 
     assert completed.returncode == 0
@@ -243,6 +251,7 @@ def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
         child_pid = int(pid_file.read_text(encoding="utf-8"))
         with monkeypatch.context() as patched:
             patched.setattr(sandbox_forkserver_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+            patched.setattr(sandbox_forkserver_module.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
             stops[0]()
             with pytest.raises(ForkserverError):
                 running.result(timeout=10)
@@ -256,6 +265,52 @@ def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
             break
         assert time.monotonic() < deadline
         time.sleep(0.05)
+
+
+@pytest.mark.parametrize("ending", ["stop", "timeout"])
+def test_ending_a_request_kills_every_process_its_child_started(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    tmp_path: Path,
+    ending: str,
+) -> None:
+    """A stopped or timed-out request leaves nothing its child started running, as a spawned child's group does."""
+    manager, _spawned = stub_manager
+    # Warm the template so the short deadline covers only the request.
+    assert _stub_execute(manager).returncode == 0
+    pid_file = tmp_path / "member.pid"
+    stops: list[Callable[[], None]] = []
+    member_pid = None
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(
+                _stub_execute,
+                manager,
+                envelope=f"group:{pid_file}",
+                timeout_seconds=None if ending == "stop" else 2.0,
+                bind_stop=stops.append,
+            )
+            deadline = time.monotonic() + 10
+            while not pid_file.exists() or not pid_file.read_text(encoding="utf-8"):
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+            member_pid = int(pid_file.read_text(encoding="utf-8"))
+            if ending == "stop":
+                stops[0]()
+            with pytest.raises(ForkserverError):
+                running.result(timeout=10)
+
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                os.kill(member_pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "a process the child started survived its request"
+            time.sleep(0.05)
+    finally:
+        if member_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(member_pid, signal.SIGKILL)
 
 
 def test_request_stopped_before_dispatch_never_runs_and_keeps_the_template(
@@ -278,7 +333,7 @@ def test_request_stopped_before_dispatch_never_runs_and_keeps_the_template(
 def test_child_never_runs_a_request_whose_runner_hung_up(monkeypatch: pytest.MonkeyPatch) -> None:
     """A child whose runner hung up while handing the request over never starts it."""
     # The watcher would end this test process; the check before the payload must refuse on its own.
-    monkeypatch.setattr(sandbox_forkserver_module, "_exit_when_runner_hangs_up", lambda _conn: None)
+    monkeypatch.setattr(sandbox_forkserver_module, "_exit_when_runner_hangs_up", lambda _conn, _answered: None)
     runner_end, child_end = socket.socketpair()
     runner_end.close()
     ran: list[str] = []
@@ -294,6 +349,30 @@ def test_child_never_runs_a_request_whose_runner_hung_up(monkeypatch: pytest.Mon
 
     assert returncode == 1
     assert ran == []
+
+
+@pytest.mark.parametrize(("answered", "group_killed"), [(False, True), (True, False)])
+def test_a_hang_up_kills_the_childs_group_only_before_it_answered(
+    monkeypatch: pytest.MonkeyPatch,
+    answered: bool,
+    group_killed: bool,
+) -> None:
+    """A stopped request takes what its tool started with it; once it answered, what the tool left running stays."""
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(sandbox_forkserver_module.os, "killpg", lambda pgid, sig: calls.append(("killpg", pgid, sig)))
+    monkeypatch.setattr(sandbox_forkserver_module.os, "_exit", lambda code: calls.append(("exit", code)))
+    runner_end, child_end = socket.socketpair()
+    runner_end.close()
+    response_sent = threading.Event()
+    if answered:
+        response_sent.set()
+    try:
+        sandbox_forkserver_module._exit_when_runner_hangs_up(child_end, response_sent)
+    finally:
+        child_end.close()
+
+    group_kill = [("killpg", 0, signal.SIGKILL)] if group_killed else []
+    assert calls == [*group_kill, ("exit", 1)]
 
 
 def test_template_recycled_when_env_fingerprint_changes(
