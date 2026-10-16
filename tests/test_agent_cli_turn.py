@@ -380,6 +380,40 @@ async def test_a_minimal_bash_command_stopped_at_its_timeout_stops_its_cli_calls
 
 
 @pytest.mark.asyncio
+async def test_a_stopped_command_whose_long_output_was_saved_still_stops_its_cli_calls(tmp_path: Path) -> None:
+    """Long output becomes a saved-file receipt whose preview still reports the stop, which ends the command's calls."""
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def forever() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "unreachable"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [forever], authorize)
+    receipt = {"mindroom_tool_output": {"status": "saved_to_file", "preview": "Stopped after 5s.\nOutput:\nline"}}
+
+    async def command() -> dict[str, object]:
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="forever"),
+        )
+        await started.wait()
+        return receipt
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command) == receipt
+    assert cancelled.is_set()
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_a_command_that_ended_in_time_waits_for_its_cli_calls(tmp_path: Path) -> None:
     """A command that ended on its own, however long it took, still lets the CLI calls it started finish."""
     finished = asyncio.Event()

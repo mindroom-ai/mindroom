@@ -387,6 +387,12 @@ async def test_a_running_command_reports_its_latest_output_as_progress(
         ("done", False),
         ("[cwd: /work]\nbuild ok", False),
         ('{"mindroom_tool_output": {"status": "error", "error": "Redirected shell output exceeds the limit."}}', False),
+        (
+            {"mindroom_tool_output": {"status": "saved_to_file", "preview": "[cwd: /w]\nStopped after 9s.\nOutput:"}},
+            True,
+        ),
+        ('{"mindroom_tool_output": {"status": "saved_to_file", "preview": "Stopped after 9s.\\nOutput:"}}', True),
+        ({"mindroom_tool_output": {"status": "saved_to_file", "preview": "line 1\nline 2"}}, False),
         (None, False),
     ],
 )

@@ -19,7 +19,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.shell.output_capture import (
     CapturedShellStream,
@@ -451,16 +451,27 @@ def _stopped_notice(timeout: float) -> str:
 
 
 def shell_result_was_stopped(result: object) -> bool:
-    """Return whether a shell call's result reports a command stopped at its timeout, as a worker's result can only."""
-    if not isinstance(result, str):
-        return False
-    text = result.split("\n", 1)[-1] if result.startswith("[cwd: ") else result
-    if text.startswith('{"mindroom_tool_output"'):
+    """Return whether a shell call's result reports a command stopped at its timeout, as a worker's result can only.
+
+    A redirected stopped command reports in its receipt's error, and a saved long result keeps the report's start as
+    its preview.
+    """
+    if isinstance(result, str) and result.startswith('{"mindroom_tool_output"'):
         try:
-            text = json.loads(text)["mindroom_tool_output"]["error"]
-        except (ValueError, KeyError, TypeError):
+            result = json.loads(result)
+        except ValueError:
             return False
-    return isinstance(text, str) and _STOPPED_RE.match(text) is not None
+    if isinstance(result, dict):
+        receipt = cast("dict[str, object]", result).get("mindroom_tool_output")
+        receipt = cast("dict[str, object]", receipt) if isinstance(receipt, dict) else {}
+        reports = [receipt.get("error"), receipt.get("preview")]
+    else:
+        reports = [result]
+    return any(
+        isinstance(report, str)
+        and _STOPPED_RE.match(report.split("\n", 1)[-1] if report.startswith("[cwd: ") else report) is not None
+        for report in reports
+    )
 
 
 def _unused_handle(registry: dict[str, ProcessRecord]) -> str:
