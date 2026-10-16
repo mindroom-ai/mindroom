@@ -345,3 +345,23 @@ async def test_default_and_jev_fallback_use_same_llm_router(tmp_path: Path, monk
     assert len(prompts) == 2
     assert prompts[0] == prompts[1]
     assert aliases == ["cheap_router", "cheap_router"]
+
+
+@pytest.mark.asyncio
+async def test_llm_router_context_drops_tool_markers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The LLM router reads an agent reply's text without its display markers."""
+    prompts = _providers(monkeypatch)
+    config = _config()
+    config.router.judgment = None
+    trace = [ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="cmd=ls")]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom_code:localhost",
+            body="Listing.\n\n🔧 `shell` [1]",
+            event_id="$reply",
+            content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+        ),
+    ]
+    await routing.suggest_responder("Help", ["code", "research"], config, _paths(tmp_path), history)
+    assert "Listing." in prompts[0]
+    assert "🔧" not in prompts[0]

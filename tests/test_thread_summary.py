@@ -67,6 +67,7 @@ from mindroom.thread_tags import (
     ThreadTagsError,
     ThreadTagsState,
 )
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
 from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
 from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
@@ -3473,3 +3474,17 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         _, sent = await self._run_pass(reader, first_threshold=5)
 
         assert sent[0]["io.mindroom.thread_summary"]["message_count"] == 7
+
+
+def test_conversation_text_drops_tool_markers() -> None:
+    """The summarizer reads an agent reply's text without its display markers."""
+    trace = [ToolTraceEntry(type="tool_call_completed", tool_name="shell")]
+    message = ResolvedVisibleMessage.synthetic(
+        sender="@mindroom_code:localhost",
+        body="Listing.\n\n🔧 `shell` [1]\n\nDone.",
+        event_id="$reply",
+        content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+    )
+    text = _build_conversation_text([message], trusted_sender_ids=set())
+    assert "🔧" not in text
+    assert "Done." in text

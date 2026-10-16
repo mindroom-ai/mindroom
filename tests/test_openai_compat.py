@@ -1041,6 +1041,7 @@ class TestChatCompletions:
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
+        assert mock_ai.call_args.kwargs["show_tool_calls"] is False
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
@@ -2229,6 +2230,18 @@ class TestAuthentication:
 
 class TestMessageConversion:
     """Tests for _convert_messages()."""
+
+    def test_assistant_history_drops_tool_markers(self) -> None:
+        """Earlier assistant turns reach the model without tool display markers."""
+        messages = [
+            _ChatMessage(role="user", content="List files"),
+            _ChatMessage(role="assistant", content="Listing.\n\n🔧 `shell` [1]\n\nDone."),
+            _ChatMessage(role="user", content="Thanks"),
+        ]
+        _prompt, history = _convert_messages(messages)
+        assert history is not None
+        assert "🔧" not in history[1].body
+        assert "Done." in history[1].body
 
     def test_simple_user_message(self) -> None:
         """Single user message becomes prompt with no history."""

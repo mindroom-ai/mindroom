@@ -1716,6 +1716,7 @@ depends_on = [
     "mindroom.api.openai_streaming_protocol",
     "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -3024,6 +3025,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
     "mindroom.providers.model_loading",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -3335,7 +3337,7 @@ visibility = ["mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._prompting"
-depends_on = ["mindroom.memory._shared", "mindroom.prompt_templates"]
+depends_on = ["mindroom.memory._shared", "mindroom.prompt_templates", "mindroom.tool_system.events"]
 visibility = ["mindroom.memory", "mindroom.memory._mem0_backend", "mindroom.memory.functions"]
 
 [[modules]]
@@ -4224,6 +4226,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.conversation_reads",
     "mindroom.thread_summary",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -5199,6 +5202,7 @@ depends_on = [
     "mindroom.providers.model_loading",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]
@@ -5254,6 +5258,7 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
+    "mindroom.tool_system.events",
 ]
 
 [[modules]]

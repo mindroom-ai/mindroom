@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import nio
+
+from mindroom.dispatch_handoff import dispatch_prompt_for_event
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.memory._prompting import _build_conversation_messages
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     body_with_tool_tags,
@@ -53,3 +58,32 @@ def test_body_with_tool_tags_replaces_markers_in_place() -> None:
         '<tool name="file" input="path=src/auth.py" truncated="true"/>'
     )
     assert body_with_tool_tags(_BODY, _TRACE[:1]).endswith("Fixing.\n")
+
+
+def test_memory_extraction_reads_replies_without_markers() -> None:
+    """Memory extraction reads an agent reply's text, not its display markers."""
+    message = ResolvedVisibleMessage.synthetic(
+        sender="@mindroom_code:localhost",
+        body=_BODY,
+        event_id="$reply",
+        content={"msgtype": "m.text", **(build_tool_trace_content(_TRACE) or {})},
+    )
+    messages = _build_conversation_messages([message], "next", "@alice:localhost")
+    assert "🔧" not in messages[0]["content"]
+    assert "Fixing." in messages[0]["content"]
+
+
+def test_prompt_from_an_agent_reply_drops_markers() -> None:
+    """A finished agent reply that wakes another agent becomes its prompt without display markers."""
+    event = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$reply",
+            "sender": "@mindroom_code:localhost",
+            "origin_server_ts": 1,
+            "content": {"msgtype": "m.text", "body": _BODY, **(build_tool_trace_content(_TRACE) or {})},
+        },
+    )
+    prompt = dispatch_prompt_for_event(event)
+    assert "🔧" not in prompt
+    assert "Fixing." in prompt

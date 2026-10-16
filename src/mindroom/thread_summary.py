@@ -49,6 +49,7 @@ from mindroom.thread_tags import (
     set_thread_tags_if_empty,
 )
 from mindroom.timing import timed
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -582,7 +583,7 @@ def _build_conversation_text(
         if _is_thread_summary_message(msg, trusted_sender_ids=trusted_sender_ids):
             continue
         sender = msg.sender or "unknown"
-        body = msg.body or ""
+        body = body_without_tool_markers(msg.body or "", msg.content)
         if body:
             lines.append(f"{sender}: {body}")
 

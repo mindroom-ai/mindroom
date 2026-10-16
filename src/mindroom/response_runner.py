@@ -162,7 +162,7 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import strip_visible_tool_markers
+from mindroom.tool_system.events import body_without_tool_markers, strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -1688,7 +1688,11 @@ class ResponseRunner:
                 origin=request.response_envelope.origin,
                 memory_prompt=request.prompt,
                 memory_thread_history=tuple(
-                    ApprovalMemoryTurn(sender=message.sender, body=message.body) for message in request.thread_history
+                    ApprovalMemoryTurn(
+                        sender=message.sender,
+                        body=body_without_tool_markers(message.body, message.content),
+                    )
+                    for message in request.thread_history
                 ),
                 thread_summary_message_count_hint=thread_summary_message_count_hint(
                     request.thread_history,

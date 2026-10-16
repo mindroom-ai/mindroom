@@ -42,6 +42,7 @@ from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
     PendingDispatchMetadata,
     PreparedIngress,
+    dispatch_event_text,
     payload_metadata_from_source,
     prepare_media_ingress,
 )
@@ -2051,7 +2052,7 @@ class TurnController:
             current_timestamp_ms = normalize_timestamp_ms(event.server_timestamp)
             payload_preparation = ResponsePayloadPreparation(
                 dispatch=dispatch,
-                prompt=event.body,
+                prompt=dispatch_event_text(event),
                 action_kind=action.kind,
                 payload_inputs=payload_inputs,
                 target_member_names=target_member_names,
@@ -2083,7 +2084,7 @@ class TurnController:
                 response_request = ResponseRequest(
                     thread_history=dispatch.context.thread_history,
                     member_display_names=room_member_display_names(room),
-                    prompt=event.body,
+                    prompt=dispatch_event_text(event),
                     sources=ResponseSources(
                         pending_event_ids=tuple(
                             dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
