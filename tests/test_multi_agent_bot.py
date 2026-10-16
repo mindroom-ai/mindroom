@@ -1601,7 +1601,6 @@ class TestAgentBot(AgentBotTestBase):
                 "can_reply_to_sender_in_room",
                 return_value=False,
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await self._invoke_handler(bot, handler_name, room, event)
 

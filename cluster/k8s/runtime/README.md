@@ -145,7 +145,7 @@ In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
 Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
 Nothing is mounted at that path: neither dedicated Kubernetes workers nor the `static_runner` sidecar mount the config file or its directory, and each request carries the allowlisted config fields they resolve.
-With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, `shared_directories`, or `sandbox-runner` because the sidecar can write those directories.
 
 Use a content bundle as the source of truth for the runtime config:
 
@@ -1009,7 +1009,7 @@ workers:
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime receives the Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
   The sidecar never receives the credentials encryption key, and saved settings for each proxied tool reach it as per-call leases from the primary.
-  From the storage PVC it mounts only the `agents` and `private_instances` directories read-write over its own `sandbox-runner` directory, so agent workspaces persist while the credential store, Matrix state, and the primary's config stay out of reach.
+  From the storage PVC it mounts only the `agents`, `private_instances`, and `shared_directories` directories read-write over its own `sandbox-runner` directory, so agent workspaces and shared directories persist while the credential store, Matrix state, and the primary's config stay out of reach.
   It mounts neither the config ConfigMap nor a file-sourced config; each request carries the allowlisted config fields the runner resolves.
   An init container creates those directories as the runtime user.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.

@@ -14,8 +14,6 @@ from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
@@ -63,7 +61,7 @@ from mindroom.event_journal import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot, render_stopped_attempt
-from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
+from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
@@ -3721,9 +3719,8 @@ class ResponseRunner:
     ) -> bool:
         """Return whether this scope should compact before creating a reply placeholder.
 
-        Read on a thread. This runs before a placeholder is sent, so every
-        turn pays for it, and the statement underneath is a row out of a
-        session database large enough to have been measured in seconds.
+        Every turn pays for this before its placeholder is sent, so it reads
+        one session row, without its runs, on a thread.
         """
         return await asyncio.to_thread(
             self._read_queued_forced_compaction,
@@ -3742,11 +3739,7 @@ class ResponseRunner:
         storage = None
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
-            session = storage.get_session(session_id, self.deps.state_writer.session_type_for_scope(scope))
-            if not isinstance(session, AgentSession | TeamSession):
-                return False
-            state = read_scope_state(session, scope)
-            return state.force_compact_before_next_run or has_pending_force_compaction_scope(session, scope)
+            return has_queued_force_compaction(storage, session_id, scope)
         except Exception as error:
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",

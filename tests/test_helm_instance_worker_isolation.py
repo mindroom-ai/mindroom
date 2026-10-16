@@ -1002,6 +1002,7 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
         {"name": "storage", "mountPath": "/mindroom_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/mindroom_data/agents", "subPath": "agents"},
         {"name": "storage", "mountPath": "/mindroom_data/private_instances", "subPath": "private_instances"},
+        {"name": "storage", "mountPath": "/mindroom_data/shared_directories", "subPath": "shared_directories"},
         {"name": "sandbox-workspace", "mountPath": "/app/workspace"},
     ]
     assert volumes["storage"] == {"name": "storage", "persistentVolumeClaim": {"claimName": "mindroom-storage-demo"}}
@@ -1013,6 +1014,7 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
         "/mindroom_data/sandbox-runner",
         "/mindroom_data/agents",
         "/mindroom_data/private_instances",
+        "/mindroom_data/shared_directories",
     ]
 
 
@@ -1036,7 +1038,7 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
         for mount in container["volumeMounts"]
         if "subPath" in mount
     }
-    assert runner_subpaths == {"sandbox-runner", "agents", "private_instances"}
+    assert runner_subpaths == {"sandbox-runner", "agents", "private_instances", "shared_directories"}
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     for state_root in (
         paths.storage_root / "agents" / "helper",
@@ -3900,6 +3902,7 @@ def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
         {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},
         {"name": "storage", "mountPath": "/app/agent_data/private_instances", "subPath": "private_instances"},
+        {"name": "storage", "mountPath": "/app/agent_data/shared_directories", "subPath": "shared_directories"},
         {"name": "sandbox-workspace", "mountPath": "/app/workspace"},
     ]
     assert volumes["storage"] == {
@@ -3914,6 +3917,7 @@ def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
         "/app/agent_data/sandbox-runner",
         "/app/agent_data/agents",
         "/app/agent_data/private_instances",
+        "/app/agent_data/shared_directories",
     ]
 
 
@@ -3990,7 +3994,7 @@ def test_charts_never_hand_the_primary_config_to_runners_or_workers(
                 assert not config_relative.startswith(f"{sub_path}/"), mount
 
 
-@pytest.mark.parametrize("directory", ["agents", "private_instances", "sandbox-runner"])
+@pytest.mark.parametrize("directory", ["agents", "private_instances", "sandbox-runner", "shared_directories"])
 def test_runtime_chart_static_runner_rejects_file_config_in_sidecar_writable_storage(directory: str) -> None:
     """The sidecar must not be able to rewrite the config the primary loads."""
     completed = _run_helm_template(

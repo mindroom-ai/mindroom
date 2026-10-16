@@ -27,6 +27,7 @@ from mindroom.workers.backend import (
 )
 from mindroom.workers.backends._dedicated_worker_common import (
     ScopedWorkspaceMount,
+    SharedDirectoryMount,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
 )
@@ -83,6 +84,7 @@ class _ReadyWorkerCacheEntry:
     handle: WorkerHandle
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
+    shared_directory_mounts: tuple[SharedDirectoryMount, ...]
 
 
 def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
@@ -521,6 +523,7 @@ class KubernetesWorkerBackend:
                     # kubelet creates missing subPath sources as root, so shared workspaces exist first;
                     # the cache keeps these mounts to notice a workspace that appears after planning.
                     workspace_mounts = self._plan_workspace_mounts(spec, create_shared=True)
+                    shared_directory_mounts = self._plan_shared_directory_mounts(spec)
                     self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
                     auth_secret_applied = True
                     deployment_apply = self._resources.apply_deployment(
@@ -597,7 +600,13 @@ class KubernetesWorkerBackend:
                     now=timestamp,
                     annotations_override=final_deployment_annotations,
                 )
-                self._store_ready_worker(spec, handle, validated_at=timestamp, workspace_mounts=workspace_mounts)
+                self._store_ready_worker(
+                    spec,
+                    handle,
+                    validated_at=timestamp,
+                    workspace_mounts=workspace_mounts,
+                    shared_directory_mounts=shared_directory_mounts,
+                )
                 return handle
         finally:
             if progress_sink is not None:
@@ -943,6 +952,12 @@ class KubernetesWorkerBackend:
             create_shared=create_shared,
         )
 
+    def _plan_shared_directory_mounts(self, spec: WorkerSpec) -> tuple[SharedDirectoryMount, ...]:
+        return self._resources.plan_shared_directory_mounts(
+            spec.worker_key,
+            state_scope_worker_key=spec.state_scope_worker_key,
+        )
+
     def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
         entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
         if entry is None:
@@ -951,6 +966,10 @@ class KubernetesWorkerBackend:
         state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
         if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(spec, create_shared=False):
+            self._invalidate_ready_worker(spec.worker_key)
+            return None
+        # Shared directories change at runtime, so the Deployment is re-applied whenever their mounts differ.
+        if entry.shared_directory_mounts != self._plan_shared_directory_mounts(spec):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         try:
@@ -976,12 +995,14 @@ class KubernetesWorkerBackend:
         *,
         validated_at: float,
         workspace_mounts: tuple[ScopedWorkspaceMount, ...],
+        shared_directory_mounts: tuple[SharedDirectoryMount, ...],
     ) -> None:
         entry = _ReadyWorkerCacheEntry(
             spec=spec,
             handle=handle,
             validated_at=validated_at,
             workspace_mounts=workspace_mounts,
+            shared_directory_mounts=shared_directory_mounts,
         )
         with self._ready_workers_lock:
             self._ready_workers[spec.worker_key] = entry
@@ -1035,6 +1056,7 @@ class KubernetesWorkerBackend:
             handle,
             validated_at=entry.validated_at,
             workspace_mounts=entry.workspace_mounts,
+            shared_directory_mounts=entry.shared_directory_mounts,
         )
         return handle
 

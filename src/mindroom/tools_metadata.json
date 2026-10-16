@@ -9429,6 +9429,38 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Create directories that other agents can read from their own workers",
+      "display_name": "Shared Directories",
+      "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "create_shared_directory",
+        "invite_to_shared_directory",
+        "remove_from_shared_directory",
+        "delete_shared_directory",
+        "list_shared_directories"
+      ],
+      "helper_text": null,
+      "icon": "FolderOpen",
+      "icon_color": "text-amber-500",
+      "name": "shared_directories",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",

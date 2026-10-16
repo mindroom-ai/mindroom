@@ -100,11 +100,13 @@ class _PersistenceLane:
 # Upstream PR: None identified for this extension point.
 # Remove when: Agno exposes an awaited cancellation-persistence boundary with exact
 # agent/run ownership; preserve caller history ownership and cross-task stream safety.
-# Coverage: tests/test_agno_cancellation.py exercises exact-run ownership and drainage.
+# Coverage: tests/test_agno_cancellation.py exercises exact-run ownership and drainage;
+# tests/test_agent_cli_standard_mode.py::test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive
+# checks that a finished drain no longer keeps its Agent.
 # Additional coverage: tests/test_ai_cancellation_lifecycle.py and tests/test_delegation_stream_lifecycle.py.
 @dataclass
 class _CancellationOwner:
-    agent: Agent
+    agent: Agent | None
     run_id: str
     tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
@@ -143,8 +145,12 @@ async def drain_agent_cancellation(
     try:
         yield owner.bind
     finally:
-        if owner.tasks:
-            await wait_for_future_until_complete(asyncio.gather(*owner.tasks))
+        try:
+            if owner.tasks:
+                await wait_for_future_until_complete(asyncio.gather(*owner.tasks))
+        finally:
+            # Contexts copied during the run can outlive it; they must not keep its Agent.
+            owner.agent = None
 
 
 # AGNO_COMPAT: A stopped team run is saved on a detached task nobody waits for.

@@ -201,8 +201,8 @@ A `user` worker sees the knowledge of every `worker_scope: user` agent; other wo
 
 The worker sees the complete source directory, including files excluded from indexing, and MindRoom does not copy or clone it per agent.
 Only sources inside the shared storage root are mounted.
-A source inside a workspace the worker already mounts stays reachable through that writable workspace mount.
-Sources that are missing, reached through a link, or inside another agent's workspace, a private instance, or a worker directory are skipped with a logged warning or error.
+A source inside a workspace or shared directory the worker already mounts stays reachable through that mount.
+Sources that are missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker directory are skipped with a logged warning or error.
 A knowledge source that overlaps another knowledge source or another worker mount prevents the worker from starting.
 Changing knowledge assignments recreates the affected workers.
 

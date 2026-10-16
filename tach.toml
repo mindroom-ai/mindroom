@@ -5227,6 +5227,7 @@ path = "mindroom.workers.worker_retirement"
 depends_on = []
 visibility = [
     "mindroom.script_runs.manager",
+    "mindroom.shared_directories.store",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.docker_projection",
     "mindroom.workers.backends.legacy_docker_worker_metadata",
@@ -5444,7 +5445,6 @@ depends_on = [
     "mindroom.handled_turns",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.media",
-    "mindroom.matrix.rooms",
     "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.timing",
@@ -5648,6 +5648,7 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.managed_room_notice",
     "mindroom.matrix.identity",
+    "mindroom.matrix.rooms",
     "mindroom.responder_availability",
     "mindroom.runtime_protocols",
     "mindroom.teams",
@@ -5735,6 +5736,7 @@ depends_on = [
     "mindroom.knowledge.github_app_auth",
     "mindroom.knowledge.legacy_git_checkout",
     "mindroom.knowledge.redaction",
+    "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.knowledge.manager"]
 
@@ -6611,6 +6613,7 @@ from = ["mindroom.thread_export"]
 [[interfaces]]
 expose = [
     "normalize_worker_key_part",
+    "SHARED_DIRECTORIES_DIRNAME",
     "ResolvedWorkerTarget",
     "ResolvedWorkerKeyScope",
     "SerializedToolExecutionIdentity",

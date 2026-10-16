@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import mindroom.thread_utils
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
@@ -114,3 +115,28 @@ def test_internal_account_excludes_persisted_and_configured_identity(config: Con
         runtime_paths_for(config),
         current_sender_id="@alice:localhost",
     )
+
+
+def test_long_thread_classifies_each_sender_once(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Classification runs per distinct sender, not per message, so long threads stay cheap."""
+    classified: list[str] = []
+    classify = mindroom.thread_utils.is_human_requester_id
+
+    def counting_classify(user_id: str, *args: object) -> bool:
+        classified.append(user_id)
+        return classify(user_id, *args)
+
+    monkeypatch.setattr(mindroom.thread_utils, "is_human_requester_id", counting_classify)
+    history = [
+        make_visible_message(sender=sender)
+        for _ in range(400)
+        for sender in ("@alice:localhost", "@mindroom_helper:localhost")
+    ]
+
+    assert not has_multiple_non_agent_users_in_thread(
+        history,
+        config,
+        runtime_paths_for(config),
+        current_sender_id="@alice:localhost",
+    )
+    assert classified == ["@alice:localhost", "@mindroom_helper:localhost"]

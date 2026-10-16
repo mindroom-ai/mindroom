@@ -373,7 +373,6 @@ class TestAgentResponseLogic:
             multiple_visible_action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -386,7 +385,6 @@ class TestAgentResponseLogic:
             single_visible_action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -461,7 +459,6 @@ class TestAgentResponseLogic:
             action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -540,7 +537,6 @@ class TestAgentResponseLogic:
             action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -629,7 +625,6 @@ class TestAgentResponseLogic:
             action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 

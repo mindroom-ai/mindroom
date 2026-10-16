@@ -1388,7 +1388,6 @@ class TestRoutingRegression:
                     body="can anyone help?",
                 ),
                 room,
-                False,
                 has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
             )
 
@@ -1470,7 +1469,6 @@ class TestRoutingRegression:
                 body="ops, help",
             ),
             room,
-            False,
             has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 

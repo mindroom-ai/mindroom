@@ -36,6 +36,7 @@ class CliTurnLifetime:
         self._provider: tuple[ProviderBatchCheckpoint, Function] | None = None
         self._response_task = asyncio.current_task()
         self._registry: TurnToolRegistry | None = None
+        self._closed = False
 
     @contextmanager
     def bind(self) -> Iterator[None]:
@@ -59,6 +60,9 @@ class CliTurnLifetime:
 
     def register(self, owner: LiveTurnTools, registry: TurnToolRegistry) -> None:
         """Accept an explicit orchestrator registry, never an ambient authority."""
+        if self._closed:
+            msg = "The response's CLI lifetime has ended"
+            raise RuntimeError(msg)
         owner.bind_response_task(self._response_task)
         registry.register(owner)
         self.owner = owner
@@ -77,6 +81,11 @@ class CliTurnLifetime:
                 await self._close_owner()
         finally:
             self._clear_provider()
+            # A context copied during the response, such as a cancelled timer's, can outlive it.
+            self._closed = True
+            self.owner = None
+            self._registry = None
+            self._response_task = None
 
     async def _close_owner(self) -> None:
         """Finish hooks/catalog, then forget the response's owner."""

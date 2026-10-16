@@ -425,6 +425,50 @@ async def test_worker_session_load_does_not_block_the_event_loop(
 
 
 @pytest.mark.asyncio
+async def test_worker_does_not_load_a_dirty_session_before_it_is_ready_to_flush(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selection pass must not decode a stored session until its entry is idle or old enough to flush."""
+    config.memory.auto_flush.idle_seconds = 120
+    now = 1_000
+    monkeypatch.setattr("mindroom.memory.auto_flush._now_ts", lambda: now)
+    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="s1")
+    loaded_session_ids: list[str] = []
+
+    def _load_session(
+        _agent: str,
+        _config: object,
+        _runtime_paths: object,
+        session_id: str,
+        **_kwargs: object,
+    ) -> _FakeSession:
+        loaded_session_ids.append(session_id)
+        return _FakeSession(updated_at=100, messages=[])
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _load_session)
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    process_session_key = AsyncMock()
+    monkeypatch.setattr(worker, "_process_session_key", process_session_key)
+
+    await worker._run_cycle(config)
+
+    assert loaded_session_ids == []
+    process_session_key.assert_not_awaited()
+
+    now += config.memory.auto_flush.idle_seconds
+    await worker._run_cycle(config)
+
+    assert loaded_session_ids == ["s1"]
+    process_session_key.assert_awaited_once_with(config, "general:s1")
+
+
+@pytest.mark.asyncio
 async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
     tmp_path: Path,
     config: Config,
