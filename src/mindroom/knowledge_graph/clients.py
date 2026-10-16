@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.agent import Agent
+from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.run.base import RunStatus
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.embedder.client import EmbedderClient
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+
+# Requests in flight at once for an embedder that embeds one text per request.
+_EMBED_CONCURRENCY = 8
 
 
 class MindRoomLLMClient(LLMClient):
@@ -133,8 +137,21 @@ class MindRoomEmbedder(EmbedderClient):
         raise TypeError(msg)
 
     async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
-        """Embed several texts."""
-        return list(await asyncio.gather(*(self._embedder.async_get_embedding(text) for text in input_data_list)))
+        """Embed several texts, in batch requests where the embedder sends them.
+
+        Graphiti passes every node name or fact of an episode at once, and one request per text then opened so many
+        connections at the same moment that they timed out connecting.
+        """
+        if isinstance(self._embedder, OpenAIEmbedder):
+            embeddings, _usage = await self._embedder.async_get_embeddings_batch_and_usage(input_data_list)
+            return embeddings
+        slots = asyncio.Semaphore(_EMBED_CONCURRENCY)
+
+        async def embed(text: str) -> list[float]:
+            async with slots:
+                return await self._embedder.async_get_embedding(text)
+
+        return list(await asyncio.gather(*(embed(text) for text in input_data_list)))
 
 
 class UnusedCrossEncoder(CrossEncoderClient):

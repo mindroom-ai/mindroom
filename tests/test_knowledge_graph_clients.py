@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.models.message import Message
@@ -17,6 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.knowledge_graph import clients
 from mindroom.knowledge_graph.clients import MindRoomEmbedder, MindRoomLLMClient, UnusedCrossEncoder
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
@@ -153,6 +156,44 @@ async def test_embedder_embeds_the_single_text_graphiti_sends() -> None:
     assert await embedder.create(["abc"]) == [3.0, 1.0]
     assert await embedder.create("ab") == [2.0, 1.0]
     assert await embedder.create_batch(["a", "abcd"]) == [[1.0, 1.0], [4.0, 1.0]]
+
+
+@pytest.mark.asyncio
+async def test_embedder_sends_an_openai_batch_as_batch_requests() -> None:
+    """Graphiti embeds every node name or fact of an episode at once; one request per text timed out connecting."""
+
+    async def create(**kwargs: object) -> SimpleNamespace:
+        texts = cast("list[str]", kwargs["input"])
+        return SimpleNamespace(data=[SimpleNamespace(embedding=[float(len(text))]) for text in texts], usage=None)
+
+    async_client = MagicMock()
+    async_client.embeddings.create = AsyncMock(side_effect=create)
+    embedder = MindRoomEmbedder(
+        MindRoomOpenAIEmbedder(id="text-embedding-3-small", api_key="sk-test", async_client=async_client),
+    )
+
+    texts = ["x" * (index % 7 + 1) for index in range(150)]
+    assert await embedder.create_batch(texts) == [[float(len(text))] for text in texts]
+    assert async_client.embeddings.create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_embedder_bounds_concurrent_requests_without_batch_support() -> None:
+    """An embedder without batch requests embeds one text per request, a few at a time."""
+    active = peak = 0
+
+    class _Counting:
+        async def async_get_embedding(self, text: str) -> list[float]:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return [float(len(text))]
+
+    texts = ["x" * (index % 5 + 1) for index in range(60)]
+    assert await MindRoomEmbedder(_Counting()).create_batch(texts) == [[float(len(text))] for text in texts]
+    assert peak == clients._EMBED_CONCURRENCY
 
 
 @pytest.mark.asyncio
