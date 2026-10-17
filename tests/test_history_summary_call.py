@@ -757,3 +757,40 @@ def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -
     assert [included_run.run_id for included_run in included_runs] == ["run-big-result"]
     assert "Run truncated to fit compaction budget." in summary_input
     assert "big_a.py" in summary_input
+
+
+def test_each_tool_result_names_its_own_call_in_the_summary_input() -> None:
+    """Results read correctly apart from their call message, even without call ids or in a different order."""
+    run = _completed_run(
+        "run-batch",
+        messages=[
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {"type": "function", "function": {"name": "write_file", "arguments": '{"path": "a.txt"}'}},
+                    {"type": "function", "function": {"name": "missing_tool", "arguments": '{"path": "b.txt"}'}},
+                ],
+            ),
+            # Agno appends the error for an unavailable tool before the results of the calls it runs.
+            Message(role="tool", tool_name="missing_tool", content="Error: The requested tool does not exist."),
+            Message(
+                role="tool",
+                tool_name="write_file",
+                tool_args={"content": "x" * 2_000, "path": "a.txt"},
+                content="Wrote a.txt",
+            ),
+        ],
+    )
+
+    summary_input, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=100_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert '<message role="tool" tool_name="missing_tool">\nError: The requested tool does not exist.' in summary_input
+    write_result = summary_input.index('<message role="tool" tool_name="write_file">\nWrote a.txt')
+    args = summary_input[summary_input.rindex("<tool_args>", 0, write_result) : write_result]
+    assert "a.txt" in args
+    assert "x" * 300 not in args

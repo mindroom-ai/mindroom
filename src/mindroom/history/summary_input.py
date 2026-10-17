@@ -36,6 +36,9 @@ if TYPE_CHECKING:
 _WRAPPER_OVERHEAD_TOKENS = 200
 
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
+# A tool result names the arguments of its call so it reads correctly apart from the call message; large argument
+# values, such as a written file's content, are cut short, since the call message holds them in full.
+_TOOL_RESULT_ARG_CHARS = 200
 
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
@@ -238,6 +241,9 @@ def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHi
             blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(metadata), "</run_metadata>"))
     for message in _compaction_replay_messages(run, history_settings):
         content = render_message_content(message)
+        tool_args = _tool_result_args(message)
+        if tool_args is not None:
+            blocks.append(_ExcerptBlock("<tool_args>", tool_args, "</tool_args>"))
         if content:
             blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
         if message.tool_calls:
@@ -306,7 +312,9 @@ def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings:
 
 
 def _serialize_message(message: Message) -> list[str]:
-    lines = [_message_open_tag(message), _escape_xml_content(render_message_content(message)), "</message>"]
+    tool_args = _tool_result_args(message)
+    lines = [] if tool_args is None else ["<tool_args>", _escape_xml_content(tool_args), "</tool_args>"]
+    lines += [_message_open_tag(message), _escape_xml_content(render_message_content(message)), "</message>"]
     if message.tool_calls:
         lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
     for tag, media_value in message_media_entries(message):
@@ -332,7 +340,24 @@ def _message_open_tag(message: Message) -> str:
         attrs.append(f'name="{escape(message.name, quote=True)}"')
     if message.tool_call_id:
         attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
+    if message.role == "tool" and message.tool_name:
+        attrs.append(f'tool_name="{escape(message.tool_name, quote=True)}"')
     return f"<message {' '.join(attrs)}>"
+
+
+def _tool_result_args(message: Message) -> str | None:
+    """Return a tool result's own call arguments, bounded, so it reads correctly apart from its call message."""
+    if message.role != "tool" or not message.tool_args:
+        return None
+    args = message.tool_args
+    if not isinstance(args, dict):
+        return _truncate_excerpt(stable_serialize(args), _TOOL_RESULT_ARG_CHARS)
+    return stable_serialize({key: _bounded_arg(value) for key, value in args.items()})
+
+
+def _bounded_arg(value: object) -> object:
+    serialized = stable_serialize(value)
+    return value if len(serialized) <= _TOOL_RESULT_ARG_CHARS else _truncate_excerpt(serialized, _TOOL_RESULT_ARG_CHARS)
 
 
 def _serialize_media_payload(media_value: object | None) -> str:
