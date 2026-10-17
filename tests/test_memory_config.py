@@ -200,7 +200,7 @@ class TestMemoryConfig:
         sends_max_tokens: bool,
         legacy_request_builder: bool,
     ) -> None:
-        """Memory extraction must omit only the request parameters its model rejects."""
+        """Memory extraction omits for GPT-5 and later models what Mem0 omits for the reasoning models it knows."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="ollama",
@@ -255,6 +255,8 @@ class TestMemoryConfig:
             name: value for name, value in expected_sampling.items() if value is not None
         }
         assert ("max_tokens" in request_params) is sends_max_tokens
+        # A max_completion_tokens cap would also count reasoning tokens and could leave no answer.
+        assert "max_completion_tokens" not in request_params
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,

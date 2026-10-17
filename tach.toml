@@ -3381,7 +3381,7 @@ visibility = ["mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._mem0_openai"
-depends_on = ["mindroom.model_defaults"]
+depends_on = []
 visibility = ["mindroom.memory.config"]
 
 [[modules]]

@@ -17,11 +17,11 @@ _REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
 _REASONING_MODEL_UNSUPPORTED = frozenset({"temperature", "top_p", "max_tokens"})
 
 
-def _without_parameters(create: Callable[..., object], unsupported: frozenset[str]) -> Callable[..., object]:
-    """Return a completion callable that omits the model's unsupported parameters."""
+def _without_unsupported_parameters(create: Callable[..., object]) -> Callable[..., object]:
+    """Return a completion callable that omits the parameters these models reject."""
 
     def create_without_parameters(*args: object, **kwargs: object) -> object:
-        for name in unsupported:
+        for name in _REASONING_MODEL_UNSUPPORTED:
             kwargs.pop(name, None)
         return create(*args, **kwargs)
 
@@ -34,7 +34,6 @@ def install_mem0_openai_compatibility(llm: OpenAILLM) -> None:
     if not isinstance(model, str) or not model.startswith(_REASONING_MODEL_PREFIXES):
         return
     completions = llm.client.chat.completions
-    completions.create = _without_parameters(  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+    completions.create = _without_unsupported_parameters(  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
         completions.create,
-        _REASONING_MODEL_UNSUPPORTED,
     )
