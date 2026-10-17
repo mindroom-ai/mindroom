@@ -438,7 +438,7 @@ def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: Sqli
 
 
 def test_a_runs_summary_rows_name_every_tool_call_its_folds_summarized(storage: SqliteDb) -> None:
-    """CLI approval recovery rebuilds the folded calls from the rows, so they stay out after a restart too."""
+    """Every interrupted record write reads the folded calls from the rows, so they stay out after a restart too."""
     call = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe"}}])
     nested = TeamRunOutput(
         run_id="nested",

@@ -2000,7 +2000,7 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_the_summary_call_archives_nothing_and_propagates(
+async def test_cancellation_during_the_summary_call_writes_nothing_and_propagates(
     tmp_path: Path,
     summary_calls: _SummaryCalls,
 ) -> None:
