@@ -118,6 +118,19 @@ def _start_after_backfill_window(entry: _SessionState, runs: list[RunOutput], *,
         entry["markers"] = {kind: list(done) for kind in _EPISODE_KINDS}
 
 
+def _finish(entry: _SessionState, updated_at: int, recheck_at: float) -> None:
+    """Record every new turn as done, so the conversation waits for news or for ``recheck_at``."""
+    entry.update(
+        updated_at=updated_at,
+        recheck_at=recheck_at,
+        failures=0,
+        bad_outputs=0,
+        failing_since=0,
+        failing_piece=[],
+        retry_at=0,
+    )
+
+
 def _marker(entry: _SessionState, kind: str) -> Progress | None:
     marker = entry["markers"].get(kind)
     return (int(marker[0]), str(marker[1]), int(marker[2])) if marker is not None else None
@@ -250,7 +263,7 @@ class KnowledgeGraphIngestionWorker:
                 if not runs:
                     # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
                     # ingest, so it does not take a place in the pass.
-                    state["sessions"].setdefault(session_id, _new_session_state())["updated_at"] = updated_at
+                    _finish(state["sessions"].setdefault(session_id, _new_session_state()), updated_at, 0)
                     changed = True
                     continue
                 due.append(_DueSession(session_id, updated_at, runs))
@@ -331,15 +344,7 @@ class KnowledgeGraphIngestionWorker:
             if new_runs:
                 entry["markers"][kind] = [*run_key(new_runs[-1]), RUN_DONE]
         # Held back by a turn waiting for approval, it is looked at again when those approvals expire, even without news.
-        entry.update(
-            updated_at=session.updated_at,
-            recheck_at=blocked_until or 0,
-            failures=0,
-            bad_outputs=0,
-            failing_since=0,
-            failing_piece=[],
-            retry_at=0,
-        )
+        _finish(entry, session.updated_at, blocked_until or 0)
         await self._persist(scope.graph_name, state)
         return clean
 

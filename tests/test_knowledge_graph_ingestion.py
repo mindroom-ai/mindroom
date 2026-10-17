@@ -113,6 +113,8 @@ def _run(
     created_at: int,
     status: RunStatus = RunStatus.completed,
     agent: str = "mind",
+    *,
+    matrix: bool = True,
 ) -> RunOutput:
     return RunOutput(
         run_id=run_id,
@@ -129,7 +131,8 @@ def _run(
             ),
         ],
         metadata={
-            "room_id": "!room:x",
+            # A turn through the OpenAI-compatible API names no room, so it is not a Matrix turn.
+            **({"room_id": "!room:x"} if matrix else {}),
             "thread_id": session_id.rsplit(":", 1)[-1],
             "requester_id": "@alice:x",
             MATRIX_EVENT_ID_METADATA_KEY: f"$event-{run_id}",
@@ -152,6 +155,7 @@ def _seed(
     updated_at: int | None = None,
     agent: str = "mind",
     spacing: int = 1,
+    matrix: bool = True,
 ) -> None:
     """Store a conversation whose runs start at ``at``, ``spacing`` seconds apart, last updated after its last run."""
     storage = create_session_storage(agent, config, paths, execution_identity=None)
@@ -163,6 +167,7 @@ def _seed(
                 at + index * spacing,
                 RunStatus.paused if run_id in paused else RunStatus.completed,
                 agent,
+                matrix=matrix,
             )
             for index, run_id in enumerate(run_ids)
         ]
@@ -617,19 +622,34 @@ async def test_a_conversation_whose_redactions_cannot_be_checked_does_not_block_
 
     assert store.sessions() == ["!room:x:$t2"]
     assert knowledge_graph_failure() is not None
+    # Once the lookup works again, the conversation is added like any other.
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 20)
+    assert store.sessions() == ["!room:x:$t2", "!room:x:$t1"]
 
 
 @pytest.mark.asyncio
 async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_path: Path) -> None:
     """A conversation with nothing to ingest, such as one through the OpenAI-compatible API, leaves the pass to others."""
     config, paths, store = _config(max_sessions_per_cycle=1), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "api-1", ["x1"], at=T0 - 5)
-    _edit_runs(config, paths, "api-1", lambda runs: [(run.metadata or {}).pop("room_id") for run in runs])
+    _seed(config, paths, "api-1", ["x1"], at=T0 - 5, matrix=False)
     _seed(config, paths, "!room:x:$t1", ["r1"])
-
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
-
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
     assert store.sessions() == ["!room:x:$t1"]
+
+    # A pass that only sees such a conversation still records it, so it is not read again until it changes.
+    _seed(config, paths, "api-2", ["x2"], at=T0 + 15, matrix=False)
+    await worker._run_cycle(config, now=T0 + 20)
+    read: list[str] = []
+    real = ingestion.session_runs
+
+    def runs(storage: object, session_id: str) -> list[RunOutput]:
+        read.append(session_id)
+        return real(storage, session_id)
+
+    with patch.object(ingestion, "session_runs", runs):
+        await worker._run_cycle(config, now=T0 + 30)
+    assert read == []
 
 
 @pytest.mark.asyncio
@@ -696,6 +716,24 @@ async def test_health_keeps_failing_while_a_conversation_waits_to_retry(tmp_path
 
     assert store.sessions() == ["!room:x:$good"]
     assert knowledge_graph_failure() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failing_conversation_left_without_matrix_turns_stops_keeping_health_failing(tmp_path: Path) -> None:
+    """A conversation whose failing turn is gone has nothing left to retry, so the next clean pass clears health."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing={"!room:x:$t1"})
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    assert knowledge_graph_failure() is not None
+
+    _seed(config, paths, "!room:x:$t1", ["r1"], updated_at=T0 + 4000, matrix=False)
+    _seed(config, paths, "!room:x:$t2", ["g1"], at=T0 + 4000)
+    await worker._run_cycle(config, now=T0 + 5000)
+
+    assert store.sessions() == ["!room:x:$t2"]
+    assert knowledge_graph_failure() is None
 
 
 @pytest.mark.asyncio
