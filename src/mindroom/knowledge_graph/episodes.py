@@ -8,19 +8,16 @@ agent said, labeled by speaker, and ``tool_results`` holds what the tools the mo
 from __future__ import annotations
 
 import hashlib
-import html
 import json
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
-from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.conversation_text import conversation_lines, redact_conversation_text, run_requester
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
-from mindroom.prompt_message_tags import cdata_body_text
-from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
+from mindroom.redaction import redact_sensitive_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -51,10 +48,6 @@ _PROSE_FUNCTIONS = (
     "claude_send",
     "job",
 )
-_MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
-_FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
-_LINE_BREAK = re.compile(r"\s*\n\s*")
-_CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
 _MAX_LISTED_CALLS = 20
 # A task delegated by another agent runs in a session of its own, named after the delegation.
 _DELEGATION_SESSION_PREFIX = "delegate:"
@@ -133,7 +126,7 @@ def render_episodes(
     def flush() -> None:
         if lines and newest is not None and progress is not None:
             episode = _episode(episode_kind, lines, newest, settings, calls)
-            rendered.append(RenderedEpisode(episode, progress, _requester(newest)))
+            rendered.append(RenderedEpisode(episode, progress, run_requester(newest)))
         lines.clear()
         calls.clear()
 
@@ -150,7 +143,7 @@ def render_episodes(
             and (
                 _size(lines) + _size([line for line, _ in items]) > cap
                 or _day(run) != _day(newest)
-                or _requester(run) != _requester(newest)
+                or run_requester(run) != run_requester(newest)
             )
         ):
             flush()
@@ -173,11 +166,6 @@ def _day(run: RunOutput) -> str:
     return datetime.fromtimestamp(run.created_at or 0, UTC).date().isoformat()
 
 
-def _requester(run: RunOutput) -> str | None:
-    requester = (run.metadata or {}).get("requester_id") or run.user_id
-    return requester if isinstance(requester, str) else None
-
-
 def _episode_items(
     run: RunOutput,
     episode_kind: EpisodeKind,
@@ -187,7 +175,13 @@ def _episode_items(
 ) -> list[tuple[str, str | None]]:
     """Return a run's lines of one kind, each tool result with the call it lists in the episode description."""
     if episode_kind == "conversation":
-        return [(line, None) for line in _conversation_lines(run, agent_name, settings, agent_for_sender)]
+        lines = conversation_lines(
+            run,
+            agent_name=agent_name,
+            agent_for_sender=agent_for_sender,
+            max_line_chars=settings.max_episode_chars,
+        )
+        return [(line, None) for line in lines]
     executions = [execution for execution in run.tools or [] if is_evidence(execution)]
     return [
         (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}") for execution in executions
@@ -216,55 +210,9 @@ def _episode(
     )
 
 
-def _conversation_lines(
-    run: RunOutput,
-    agent_name: str,
-    settings: KnowledgeGraphIngestConfig,
-    agent_for_sender: Callable[[str], str | None],
-) -> list[str]:
-    requester = _requester(run) or "unknown"
-    lines: list[str] = []
-    for message in run.messages or []:
-        if message.from_history or not isinstance(message.content, str) or not message.content.strip():
-            continue
-        if message.role == "user":
-            lines.extend(
-                f"{_speaker(sender, agent_for_sender)}: {_one_line(_clean(body, settings.max_episode_chars))}"
-                for sender, body in _prompt_messages(message.content, requester)
-            )
-        # A stopped turn's answer is a rendered summary that can quote tool previews, not the agent's words.
-        elif message.role == "assistant" and not is_interrupted_replay_run(run):
-            lines.append(f"agent {agent_name}: {_one_line(_clean(message.content, settings.max_episode_chars))}")
-    return lines
-
-
-def _one_line(text: str) -> str:
-    """Join a message's lines, since Graphiti reads every line of a dialogue as a new speaker's."""
-    return _LINE_BREAK.sub(" ", text)
-
-
-def _speaker(sender: str, agent_for_sender: Callable[[str], str | None]) -> str:
-    """Label a sender as an agent or a person, with no colon, since Graphiti reads a speaker up to the first colon."""
-    if (agent := agent_for_sender(sender)) is not None:
-        return f"agent {agent}"
-    user, separator, server = sender.partition(":")
-    return f"person {user} ({server})" if separator else f"person {sender}"
-
-
-def _prompt_messages(content: str, requester: str) -> list[tuple[str, str]]:
-    """Return each ``<msg>`` tag's sender and body, or the whole prompt as the requester's."""
-    tagged = [
-        (sender.group(2) if (sender := _FROM_ATTR.search(attrs)) else requester, cdata_body_text(body))
-        for attrs, body in _MSG_TAG.findall(content)
-    ]
-    if tagged:
-        return [(html.unescape(sender), body) for sender, body in tagged]
-    return [(requester, _CONTAINER_TAG.sub("", content))]
-
-
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
     outcome = "error" if execution.tool_call_error else "result"
-    output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
+    output = redact_conversation_text(str(execution.result or "").strip(), max_chars=settings.max_tool_result_chars)
     # Clipped to half a result, so arguments and result together stay within an episode.
     arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]
     return f"call {execution.tool_name}({arguments}) {outcome}: {output}"
@@ -278,12 +226,6 @@ def tool_arguments(execution: ToolExecution) -> str:
 
 def _digest(execution: ToolExecution) -> str:
     return hashlib.sha256(tool_arguments(execution).encode()).hexdigest()[:12]
-
-
-def _clean(text: str, limit: int) -> str:
-    # Redaction scans a little past the limit, so a credential cut at the edge is still caught, and keeps its input
-    # under the redaction size limit.
-    return redact_sensitive_text(text.strip(), max_length=limit)
 
 
 def _size(lines: Sequence[str]) -> int:

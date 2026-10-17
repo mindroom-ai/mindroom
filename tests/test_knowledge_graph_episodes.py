@@ -12,7 +12,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
 
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
-from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
+from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.knowledge_graph.episodes import RUN_DONE, RenderedEpisode, classify_thread, render_episodes
 from mindroom.prompt_message_tags import render_msg_tag
 
@@ -149,6 +149,26 @@ def test_an_interrupted_turn_adds_only_what_the_person_said() -> None:
     assert conversation.body.splitlines() == ["person @alice (example.test): When does Atlas ship?"]
 
 
+def test_prompts_mindroom_wrote_are_nobodys_words() -> None:
+    """A job follow-up's prompt and an automation's turn inside a conversation never read as a person's words."""
+    follow_up = _run(
+        "r1",
+        prompt=render_msg_tag(sender="@alice:example.test", body="[RUNTIME UPDATE, NOT A USER MESSAGE] Collect jobs."),
+        answer="The deploy finished.",
+    )
+    assert follow_up.metadata is not None
+    follow_up.metadata[TURN_INTENT_RUN_METADATA_KEY] = "job_follow_up"
+    automation = _run("r2", created_at=1_760_000_060, hook_source="automation/todo_poke", answer="Poked.")
+
+    conversation = _episodes([_run("r0", created_at=1_759_999_000), follow_up, automation], "conversation")
+
+    assert conversation[0].episode.body.splitlines() == [
+        "person @alice (example.test): When does Atlas ship?",
+        "agent mind: Atlas ships Friday.",
+        "agent mind: The deploy finished.",
+    ]
+
+
 def test_exploration_thread_renders_only_tool_results() -> None:
     """The agent's own synthesis in an exploration thread is never evidence."""
     run = _run("r1", answer="I think Bob owns everything.", tools=[_tool("list_repos", "acme/atlas, acme/beacon")])
@@ -254,6 +274,20 @@ def test_oversized_tool_result_is_clipped_before_redaction() -> None:
     assert "Atlas launch notes." in body
     assert "[redaction failed]" not in body
     assert len(body) < SETTINGS.max_tool_result_chars + 500
+
+
+def test_a_tool_result_redaction_cannot_read_keeps_its_other_lines() -> None:
+    """A secret-named key with its value on the next line drops that value, not the whole result."""
+    output = "services:\n  db:\n    password:\n      hunter2\n    user: app\n\tready  in   3s"
+    run = _run("r1", answer="Started\tthe   db.", tools=[_tool("shell", output, command="cat compose.yaml")])
+
+    conversation, tool_results = (item.episode for item in _episodes([run], "conversation"))
+
+    assert "hunter2" not in tool_results.body
+    assert "[redaction failed]" not in tool_results.body
+    assert "user: app" in tool_results.body
+    # A conversation line holds single spaces only.
+    assert conversation.body.splitlines()[1] == "agent mind: Started the db."
 
 
 def test_credentials_are_redacted() -> None:

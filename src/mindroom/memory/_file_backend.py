@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embeddings.errors import classified_embedder_error
+from mindroom.history.conversation_text import redact_conversation_text
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -30,7 +31,6 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
-from ._prompting import redact_memory_text
 from ._semantic_file_search import (
     SemanticFileMemoryIndexUnavailableError,
     schedule_semantic_file_memory_refresh,
@@ -1436,7 +1436,7 @@ class FileMemoryBackend:
     ) -> None:
         """Persist condensed conversation text to file-backed memory scopes."""
         del session_id, thread_history, user_id  # File conversation memory stores condensed text only.
-        condensed_prompt = " ".join(redact_memory_text(prompt).split())
+        condensed_prompt = " ".join(redact_conversation_text(prompt).split())
         if not condensed_prompt:
             return
 

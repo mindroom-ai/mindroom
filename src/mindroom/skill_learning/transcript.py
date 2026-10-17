@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from mindroom.history.conversation_text import Utterance, one_line, redact_conversation_text, utterances
 from mindroom.history.run_visibility import is_model_history_visible_run
-from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.session.agent import AgentSession
 
-_CONVERSATION_ROLES = frozenset({"user", "assistant", "tool"})
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
 _DIGEST_ASSISTANT_CHARS = 200
@@ -33,15 +32,9 @@ _MIN_MESSAGE_CHARS = 2_000
 _CLIP_NOTE_CHARS = 64
 
 
-def conversation_messages(session: AgentSession) -> list[Message]:
-    """Return the user, assistant, and tool messages of this session's model-visible runs, in order."""
-    return [
-        message
-        for run in session.runs or []
-        if is_model_history_visible_run(run)
-        for message in run.messages or []
-        if message.role in _CONVERSATION_ROLES and not message.from_history
-    ]
+def conversation_messages(session: AgentSession) -> list[Utterance]:
+    """Return what was said and done in this session's turns, in order, with the agent's tool calls and results."""
+    return [utterance for run in session.runs or [] for utterance in utterances(run, agent_work=True)]
 
 
 def count_model_replies(run: RunOutput | None) -> tuple[int, bool]:
@@ -63,13 +56,13 @@ def count_model_replies(run: RunOutput | None) -> tuple[int, bool]:
     return replies, restarted
 
 
-def render_transcript(messages: Sequence[Message], *, summary: str | None = None, budget_chars: int) -> str:
+def render_transcript(messages: Sequence[Utterance], *, summary: str | None = None, budget_chars: int) -> str:
     """Render the compaction summary, digest lines for older turns, and the newest messages within ``budget_chars``.
 
     The summary is the only record of compacted turns, so it is shortened rather than dropped.
     """
     tail = _TAIL_MESSAGES
-    while len(messages) > tail and messages[-tail].role == "tool":
+    while len(messages) > tail and messages[-tail].kind == "tool_result":
         # A kept run never starts on a tool result whose call was digested away.
         tail += 1
     older, recent = messages[: max(0, len(messages) - tail)], messages[-tail:]
@@ -77,7 +70,7 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
     message_chars = min(_MAX_MESSAGE_CHARS, max(_MIN_MESSAGE_CHARS, budget_chars // 8))
     verbatim = [_render_message(message, message_chars) for message in recent]
     compacted = (
-        [_render_text(f"[Summary of earlier turns removed by compaction.]\n{text}", message_chars)]
+        [redact_conversation_text(_clip(f"[Summary of earlier turns removed by compaction.]\n{text}", message_chars))]
         if summary and (text := summary.strip())
         else []
     )
@@ -105,42 +98,44 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
     return "\n\n".join(sections)
 
 
-def _digest_line(message: Message) -> str | None:
-    if message.role not in {"user", "assistant"}:
+def _digest_line(message: Utterance) -> str | None:
+    if message.kind == "tool_result":
         return None
-    # A digest line keeps a few hundred characters, so only that much of a long message is normalized.
-    text = " ".join(message.get_content_string()[: 4 * _DIGEST_USER_CHARS].split())
-    if message.role == "user":
-        return redact_sensitive_text(f"USER: {text[:_DIGEST_USER_CHARS]}") if text else None
+    # A digest line keeps a few hundred characters, so only that much of a long message is read.
+    text = one_line(redact_conversation_text(message.unredacted, max_chars=4 * _DIGEST_USER_CHARS))
+    if message.kind != "reply":
+        return f"{_heading(message)} {text[:_DIGEST_USER_CHARS]}" if text else None
     parts = []
-    if names := _tool_call_names(message):
-        parts.append(f"ASSISTANT[tools: {', '.join(names)[:_DIGEST_ASSISTANT_CHARS]}]")
+    if names := _tool_call_names(message.message):
+        parts.append(f"ASSISTANT[tools: {redact_conversation_text(', '.join(names))[:_DIGEST_ASSISTANT_CHARS]}]")
     if text:
         parts.append(f"ASSISTANT: {text[:_DIGEST_ASSISTANT_CHARS]}")
-    return redact_sensitive_text("\n".join(parts)) if parts else None
+    return "\n".join(parts) or None
 
 
-def _render_message(message: Message, limit: int) -> str:
-    if message.role == "tool":
-        heading = f"TOOL RESULT ({message.tool_name or 'unknown tool'}):"
-    else:
-        heading = f"{message.role.upper()}:"
-    lines = [heading, message.get_content_string()]
-    for call in message.tool_calls or []:
-        function = call.get("function") or {}
-        arguments = function.get("arguments")
-        rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
-        lines.append(f"-> calls {function.get('name', 'unknown tool')}({rendered})")
-    return _render_text("\n".join(lines), limit)
+def _heading(message: Utterance) -> str:
+    if message.kind == "said":
+        return f"USER ({message.sender}):"
+    if message.kind == "runtime":
+        return "RUNTIME:"
+    if message.kind == "tool_result":
+        return f"TOOL RESULT ({message.message.tool_name or 'unknown tool'}):"
+    return "ASSISTANT:"
 
 
-def _render_text(text: str, limit: int) -> str:
-    """Keep the text's start and end, and redact what remains.
+def _render_message(message: Utterance, limit: int) -> str:
+    """Keep the message's start and end, and redact what remains.
 
     The evidence is a conversation the agent's model already processed, so redaction is best-effort; learned files
     are checked again for credentials when they are written.
     """
-    return redact_sensitive_text(_clip(text, limit))
+    lines = [_heading(message), message.unredacted]
+    for call in message.message.tool_calls or []:
+        function = call.get("function") or {}
+        arguments = function.get("arguments")
+        rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+        lines.append(f"-> calls {function.get('name', 'unknown tool')}({rendered})")
+    return redact_conversation_text(_clip("\n".join(lines), limit))
 
 
 def _tool_call_names(message: Message) -> list[str]:
