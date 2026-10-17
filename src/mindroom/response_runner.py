@@ -2562,6 +2562,7 @@ class ResponseRunner:
             thread_history=self._approval_memory_history(continuation),
             user_id=continuation.requester_id,
             hook_source=continuation.hook_source,
+            origin=continuation.origin,
         )
 
     def _memory_persistence(
@@ -2574,10 +2575,12 @@ class ResponseRunner:
         thread_history: Sequence[ResolvedVisibleMessage],
         user_id: str | None,
         hook_source: str | None,
+        origin: TurnOrigin,
     ) -> Callable[[], None] | None:
         """Build the completed-turn memory handoff for an agent or a team's members, or None for a non-memory turn."""
-        if is_automation_hook_source(hook_source):
-            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
+        if is_automation_hook_source(hook_source) or origin.intent is TurnIntent.JOB_FOLLOW_UP:
+            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory, and neither is a
+            # job follow-up, whose prompt is MindRoom's instruction to collect the results.
             return None
 
         def queue() -> None:
@@ -4846,6 +4849,7 @@ class ResponseRunner:
                 thread_history=memory_thread_history,
                 user_id=request.user_id,
                 hook_source=request.response_envelope.hook_source,
+                origin=request.response_envelope.origin,
             )
             if self.deps.agent_name in self.deps.runtime.config.teams
             else None
@@ -6039,6 +6043,7 @@ class ResponseRunner:
             thread_history=memory_thread_history,
             user_id=request.user_id,
             hook_source=request.response_envelope.hook_source,
+            origin=request.response_envelope.origin,
         )
         queue_skill_review, runtime = self._response_skill_review(
             request,

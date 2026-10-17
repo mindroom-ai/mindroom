@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.turn_origin import TurnIntent
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
@@ -34,6 +36,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     make_matrix_client_mock,
     make_visible_message,
+    message_origin,
     patch_response_runner_module,
     request_envelope,
     runtime_paths_for,
@@ -609,6 +612,7 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
         thread_history=[],
         user_id="@user:localhost",
         hook_source=None,
+        origin=message_origin(),
     )
     assert queue is not None
     with patch_response_runner_module(store_conversation_memory=store, mark_auto_flush_dirty_session=mark_dirty):
@@ -617,3 +621,54 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
 
     assert store.await_count == saves
     mark_dirty.assert_called_once()
+
+
+@pytest.mark.parametrize("agent_name", ["a1", ["a1", "a2"]], ids=["agent", "team"])
+def test_job_follow_up_saves_no_memory(
+    config_with_team: Config,
+    tmp_path: Path,
+    agent_name: str | list[str],
+) -> None:
+    """A job follow-up's prompt is MindRoom's instruction to collect results, not part of the conversation."""
+    config = _bind_runtime_paths(config_with_team, tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    bot = make_test_team_bot(
+        agent_user=AgentMatrixUser(agent_name="t1", user_id=ids["t1"].full_id, display_name="t1", password="p"),  # noqa: S106
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!room:localhost"],
+    )
+    follow_up = replace(message_origin(), intent=TurnIntent.JOB_FOLLOW_UP)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="t1",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    assert (
+        bot._response_runner._memory_persistence(
+            agent_name=agent_name,
+            session_id="session-1",
+            execution_identity=identity,
+            prompt="Background jobs you started earlier ended.",
+            thread_history=[],
+            user_id="@user:localhost",
+            hook_source=None,
+            origin=follow_up,
+        )
+        is None
+    )
+    continuation = approval_continuation(
+        entity_kind="team",
+        entity_name="t1",
+        team_member_names=("a1", "a2"),
+        execution_identity=serialize_tool_execution_identity(identity),
+        origin=follow_up,
+    )
+    assert bot._response_runner._approval_memory_persistence(continuation) is None

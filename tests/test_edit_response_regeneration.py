@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
@@ -73,7 +72,7 @@ from tests.reply_span_helpers import final_in_span, seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.event_journal import EventJournalStore
@@ -1092,31 +1091,15 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     }
 
     storage = MagicMock()
-    scheduled_tasks: list[asyncio.Task[None]] = []
 
     @asynccontextmanager
     async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
         yield
 
-    async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    def schedule_background_task(
-        coro: Coroutine[object, object, None],
-        *,
-        name: str,
-        error_handler: object | None = None,  # noqa: ARG001
-        owner: object | None = None,  # noqa: ARG001
-    ) -> asyncio.Task[None]:
-        task = asyncio.create_task(coro, name=name)
-        scheduled_tasks.append(task)
-        return task
-
     mock_team_response = AsyncMock(return_value="team response")
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
         patch_response_runner_module(
             team_response=mock_team_response,
             should_use_streaming=AsyncMock(return_value=False),
@@ -1155,9 +1138,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
 
         await bot._on_message(room, edit_event)
         await finish_edit_regenerations(bot)
-
-    if scheduled_tasks:
-        await asyncio.gather(*scheduled_tasks)
 
     assert mock_remove_run.call_args_list == [
         call(

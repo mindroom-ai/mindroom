@@ -9318,6 +9318,7 @@ def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, fl
             thread_history=(),
             user_id=None,
             hook_source=hook_source,
+            origin=message_origin(),
         )
         if queue is not None:
             queue()

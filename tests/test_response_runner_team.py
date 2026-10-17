@@ -1001,23 +1001,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Team replies should reuse the shared thread-summary helper for summary gating."""
-
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
-        scheduled_tasks: list[asyncio.Task[None]] = []
-
-        def schedule_background_task(
-            coro: Coroutine[Any, Any, None],
-            *,
-            name: str,
-            error_handler: object | None = None,  # noqa: ARG001
-            owner: object | None = None,  # noqa: ARG001
-        ) -> asyncio.Task[None]:
-            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
-            scheduled_tasks.append(task)
-            return task
-
         thread_history = [
             _visible_message(
                 sender=f"@user{i}:localhost",
@@ -1076,7 +1059,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
-            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
         ):
             await bot._run_regenerated_response(
                 ResponseRequest(
@@ -1097,9 +1079,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             )
-
-        if scheduled_tasks:
-            await asyncio.gather(*scheduled_tasks)
 
         mock_thread_summary.assert_not_called()
 
