@@ -46,6 +46,7 @@ from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -459,11 +460,12 @@ def _split_delivery_tool_trace(
     return completed, interrupted
 
 
-def _run_metadata_with_hook_source(metadata: dict[str, Any] | None, hook_source: str | None) -> dict[str, Any] | None:
-    """Record the trusted hook source that started this turn, so stored runs show which automation asked."""
-    if hook_source is None:
-        return metadata
-    return {**(metadata or {}), HOOK_SOURCE_RUN_METADATA_KEY: hook_source}
+def _run_metadata_with_origin(metadata: dict[str, Any] | None, envelope: MessageEnvelope) -> dict[str, Any]:
+    """Record what started this turn, so stored runs show which automation asked or that MindRoom wrote the prompt."""
+    recorded = {**(metadata or {}), TURN_INTENT_RUN_METADATA_KEY: envelope.origin.intent.value}
+    if envelope.hook_source is not None:
+        recorded[HOOK_SOURCE_RUN_METADATA_KEY] = envelope.hook_source
+    return recorded
 
 
 def _materialize_matrix_run_metadata(
@@ -3942,9 +3944,9 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_run_metadata_with_hook_source(
+            matrix_run_metadata=_run_metadata_with_origin(
                 _materialize_matrix_run_metadata(request.matrix_run_metadata),
-                request.response_envelope.hook_source,
+                request.response_envelope,
             ),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,

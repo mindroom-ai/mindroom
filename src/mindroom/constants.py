@@ -1135,6 +1135,8 @@ MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
 # Run metadata key holding the trusted hook source of the message that started the run, such as an automation prompt.
 HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
+# Run metadata key holding the intent of the message that started the run, such as a background job follow-up.
+TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"

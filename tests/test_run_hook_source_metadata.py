@@ -1,4 +1,4 @@
-"""Stored runs record the trusted hook source of the message that started them."""
+"""Stored runs record the trusted hook source and the intent of the message that started them."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
+from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.message_target import MessageTarget
+from mindroom.turn_origin import TurnIntent
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request
 
@@ -20,10 +21,16 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
-async def _turn(tmp_path: Path, hook_source: str | None) -> ResponseTurnContext:
+async def _turn(
+    tmp_path: Path,
+    hook_source: str | None,
+    intent: TurnIntent = TurnIntent.USER_MESSAGE,
+) -> ResponseTurnContext:
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(MessageTarget.resolve("!room:localhost", "$thread", "$event"))
-    request = replace(request, response_envelope=replace(request.response_envelope, hook_source=hook_source))
+    envelope = request.response_envelope
+    envelope = replace(envelope, hook_source=hook_source, origin=replace(envelope.origin, intent=intent))
+    request = replace(request, response_envelope=envelope)
     runtime = await runner.prepare_response_runtime(request)
     return runner._agent_turn_context(
         request,
@@ -48,3 +55,12 @@ async def test_agent_turn_without_hook_source_records_none(tmp_path: Path) -> No
     """A person's message adds no hook source key."""
     turn = await _turn(tmp_path, None)
     assert HOOK_SOURCE_RUN_METADATA_KEY not in (turn.matrix_run_metadata or {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", [TurnIntent.USER_MESSAGE, TurnIntent.JOB_FOLLOW_UP])
+async def test_agent_turn_records_its_intent_in_run_metadata(tmp_path: Path, intent: TurnIntent) -> None:
+    """A stored job follow-up says so, since its prompt is MindRoom's instruction rather than its requester's words."""
+    turn = await _turn(tmp_path, None, intent)
+    assert turn.matrix_run_metadata is not None
+    assert turn.matrix_run_metadata[TURN_INTENT_RUN_METADATA_KEY] == intent
