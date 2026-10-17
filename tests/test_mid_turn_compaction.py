@@ -7,8 +7,9 @@ import asyncio
 import json
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
@@ -59,7 +60,7 @@ from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.teams import TeamMode, _create_team_instance, prepare_materialized_team_execution
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.usage.storage import project_usage
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
 from tests.conftest import FakeModel, make_turn_context, seed_session
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -85,6 +86,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _TOOL_RESULT = "r" * 4000
+# Metadata a follow-up after an approval resume seeds from the resumed run, including that run's folded usage.
+_SEEDED_METADATA = {COMPACTED_REQUESTS_METADATA_KEY: [{"input_tokens": 10}], "room_topic": "kept"}
 
 
 @pytest.fixture(autouse=True)
@@ -152,6 +155,27 @@ def probe() -> str:
     return _TOOL_RESULT
 
 
+class _PausingLoop(_ToolLoopModel):
+    """A tool loop whose fifth response calls ``approve_me``, which pauses the run for approval."""
+
+    async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
+        response = await super().ainvoke(messages, **kwargs)
+        if len(self.requests) == 5 and response.tool_calls:
+            response.tool_calls[0]["function"]["name"] = "approve_me"
+        return response
+
+
+def _approval_tools() -> list[Any]:
+    return [probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)]
+
+
+class _CancelOnSuccess(RecordingCompactionLifecycle):
+    """Cancel the turn when its compaction reports success, right after the commit."""
+
+    async def complete_success(self, outcome: CompactionOutcome) -> None:  # noqa: ARG002
+        raise asyncio.CancelledError
+
+
 @dataclass
 class _SummaryCalls:
     inputs: list[str] = field(default_factory=list)
@@ -214,6 +238,47 @@ def _config(
     )
 
 
+_TEAMS = {"test_team": TeamConfig(display_name="Test Team", role="Test team", agents=["test_agent"])}
+
+
+def _seeded_team_storage(config: Config, runtime_paths: RuntimePaths) -> object:
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    runs = [_completed_team_run("run-1", team_id="test_team"), _completed_team_run("run-2", team_id="test_team")]
+    seed_session(storage, _team_session("session-1", team_id="test_team", runs=runs))
+    return storage
+
+
+def _scoped_team(
+    model: SyntheticModel,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage: object,
+    *,
+    members: list[Agent] | None = None,
+    tools: list[Any] | None = None,
+) -> Team:
+    team = Team(
+        id="test_team",
+        name="test_team",
+        model=model,
+        members=members or [],
+        tools=tools if tools is not None else [probe],
+        db=storage,
+        add_history_to_context=True,
+        store_history_messages=False,
+        add_session_summary_to_context=False,
+        telemetry=False,
+    )
+    install_mid_turn_compaction(
+        team,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name="test_team",
+        model_name="default",
+    )
+    return team
+
+
 def _agent(
     model: _ToolLoopModel,
     config: Config,
@@ -238,17 +303,26 @@ def _agent(
     return agent
 
 
-async def _run(agent: Agent, prompt: list[Message] | str, *, stream: bool = False) -> RunOutput:
+async def _run(
+    agent: Agent,
+    prompt: list[Message] | str,
+    *,
+    stream: bool = False,
+    session_id: str | None = None,
+) -> RunOutput:
     if not stream:
-        output = await agent.arun(prompt)
+        output = await agent.arun(prompt, session_id=session_id)
         assert isinstance(output, RunOutput)
         return output
     final: RunOutput | None = None
-    async for event in agent.arun(prompt, stream=True, yield_run_output=True):
+    async for event in agent.arun(prompt, session_id=session_id, stream=True, yield_run_output=True):
         if isinstance(event, RunOutput):
             final = event
     assert final is not None
     return final
+
+
+_run_in_session = partial(_run, session_id="session-1")
 
 
 def _first_compacted(model: _ToolLoopModel) -> _Request:
@@ -581,9 +655,10 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
     limit: int,
 ) -> None:
     config, paths = _config(tmp_path)
+    config.agents["test_agent"].max_tool_calls_from_history = limit
     model = _ToolLoopModel(tool_rounds=5)
 
-    await _run(_agent(model, config, paths, max_tool_calls_from_history=limit), "Do the task")
+    await _run(_agent(model, config, paths), "Do the task")
 
     assert summary_calls.inputs
     assert summary_calls.inputs[0].count(_TOOL_RESULT[:200]) >= 2
@@ -793,19 +868,12 @@ async def test_folded_request_usage_stays_in_the_usage_projection(
 async def test_folded_request_usage_survives_approval_resume(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
     config, paths = _config(tmp_path)
 
-    class _PausingLoop(_ToolLoopModel):
-        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            response = await super().ainvoke(messages, **kwargs)
-            if len(self.requests) == 5 and response.tool_calls:
-                response.tool_calls[0]["function"]["name"] = "approve_me"
-            return response
-
     model = _PausingLoop(
         tool_rounds=9,
         usage=lambda number: MessageMetrics(input_tokens=1001 * number, output_tokens=1),
     )
     agent = _agent(model, config, paths, db=SqliteDb(db_file=str(tmp_path / "runs.db")))
-    agent.tools = [probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)]
+    agent.tools = _approval_tools()
     paused = await agent.arun("Do the task", session_id="session")
     for requirement in paused.requirements or []:
         requirement.confirm()
@@ -829,10 +897,6 @@ async def test_folded_request_usage_stays_on_a_run_cancelled_after_compaction(tm
         usage=lambda number: MessageMetrics(input_tokens=1001 * number, output_tokens=1),
     )
     agent = _scoped_agent(model, config, paths, storage)
-
-    class _CancelOnSuccess(RecordingCompactionLifecycle):
-        async def complete_success(self, outcome: CompactionOutcome) -> None:  # noqa: ARG002
-            raise asyncio.CancelledError
 
     bind_compaction_lifecycle(agent, _CancelOnSuccess())
     runs: list[RunOutput] = []
@@ -909,7 +973,7 @@ def test_tool_results_after_an_interleaved_receipt_fold_with_their_call() -> Non
 
     layout = mid_turn_compaction._layout(messages, run_response, scoped=False)
 
-    assert layout.exchanges == ((call, result),)
+    assert layout.folded == (call, result)
     assert layout.kept == (prompt, receipt)
 
 
@@ -1049,16 +1113,9 @@ async def test_resumed_run_does_not_anchor_on_its_paused_response(
 async def test_run_local_summary_survives_approval_resume(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
     config, paths = _config(tmp_path)
 
-    class _PausingLoop(_ToolLoopModel):
-        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            response = await super().ainvoke(messages, **kwargs)
-            if len(self.requests) == 5 and response.tool_calls:
-                response.tool_calls[0]["function"]["name"] = "approve_me"
-            return response
-
     model = _PausingLoop(tool_rounds=6)
     agent = _agent(model, config, paths, db=SqliteDb(db_file=str(tmp_path / "runs.db")))
-    agent.tools = [probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)]
+    agent.tools = _approval_tools()
 
     paused = await agent.arun("Do the task", session_id="session")
     assert paused.status == RunStatus.paused
@@ -1081,16 +1138,9 @@ async def test_scoped_compaction_after_resume_keeps_the_run_local_summary(
 ) -> None:
     config, paths = _config(tmp_path)
 
-    class _PausingLoop(_ToolLoopModel):
-        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            response = await super().ainvoke(messages, **kwargs)
-            if len(self.requests) == 5 and response.tool_calls:
-                response.tool_calls[0]["function"]["name"] = "approve_me"
-            return response
-
     model = _PausingLoop(tool_rounds=6)
     agent = _agent(model, config, paths, db=SqliteDb(db_file=str(tmp_path / "runs.db")))
-    agent.tools = [probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)]
+    agent.tools = _approval_tools()
     paused = await agent.arun("Do the task", session_id="session")
     assert paused.status == RunStatus.paused
     local_summaries = len(summary_calls.inputs)
@@ -1137,7 +1187,7 @@ async def test_factories_cap_a_request_before_compacting_it(
     config, paths = _config(
         tmp_path,
         context_window=12_000,
-        teams={"test_team": TeamConfig(display_name="Test Team", role="Test team", agents=["test_agent"])},
+        teams=_TEAMS,
     )
     # The fourth response reports a request far over the window, so only the fifth request would compact.
     model = _ToolLoopModel(
@@ -1165,6 +1215,7 @@ async def test_prepared_agent_reply_posts_mid_turn_compaction_notices(
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
 ) -> None:
+    """The reply binds its compaction notices, and its metadata leaves out the fold records of the run it follows."""
     config, paths = _config(tmp_path)
     storage = _seeded_storage(config, paths)
     agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage)
@@ -1179,8 +1230,8 @@ async def test_prepared_agent_reply_posts_mid_turn_compaction_notices(
     lifecycle = RecordingCompactionLifecycle()
     recorder = TurnRecorder(user_message="Do the task")
 
-    await ai._prepare_agent_run_context(
-        make_turn_context("test_agent", session_id="session-1"),
+    run_context = await ai._prepare_agent_run_context(
+        replace(make_turn_context("test_agent", session_id="session-1"), matrix_run_metadata=_SEEDED_METADATA),
         prompt="Do the task",
         session_id="session-1",
         runtime_paths=paths,
@@ -1208,6 +1259,9 @@ async def test_prepared_agent_reply_posts_mid_turn_compaction_notices(
     assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
     # An interrupted record of this run would leave out the calls the fold summarized.
     assert "call_1_0" in recorder.folded_tool_call_ids
+    assert run_context.metadata is not None
+    assert COMPACTED_REQUESTS_METADATA_KEY not in run_context.metadata
+    assert run_context.metadata["room_topic"] == "kept"
 
 
 @pytest.mark.asyncio
@@ -1216,32 +1270,10 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
 ) -> None:
-    config, paths = _config(
-        tmp_path,
-        teams={"test_team": TeamConfig(display_name="Test Team", role="Test team", agents=["test_agent"])},
-    )
-    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    seed_session(
-        storage,
-        _team_session(
-            "session-1",
-            team_id="test_team",
-            runs=[_completed_team_run("run-1", team_id="test_team"), _completed_team_run("run-2", team_id="test_team")],
-        ),
-    )
-    team = Team(
-        id="test_team",
-        name="test_team",
-        model=_ToolLoopModel(tool_rounds=5),
-        members=[],
-        tools=[probe],
-        db=storage,
-        add_history_to_context=True,
-        store_history_messages=False,
-        add_session_summary_to_context=False,
-        telemetry=False,
-    )
-    install_mid_turn_compaction(team, config=config, runtime_paths=paths, entity_name="test_team", model_name="default")
+    """The team reply binds its compaction notices, and its metadata leaves out the earlier run's fold records."""
+    config, paths = _config(tmp_path, teams=_TEAMS)
+    storage = _seeded_team_storage(config, paths)
+    team = _scoped_team(_ToolLoopModel(tool_rounds=5), config, paths, storage)
     prepared = _PreparedExecutionContext(
         messages=(Message(role="user", content="Do the task"),),
         unseen_event_ids=[],
@@ -1251,8 +1283,8 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     lifecycle = RecordingCompactionLifecycle()
     recorder = TurnRecorder(user_message="Do the task")
 
-    await prepare_materialized_team_execution(
-        make_turn_context("test_team", session_id="session-1"),
+    prepared_execution = await prepare_materialized_team_execution(
+        replace(make_turn_context("test_team", session_id="session-1"), matrix_run_metadata=_SEEDED_METADATA),
         scope_context=None,
         agents=[],
         team=team,
@@ -1272,34 +1304,9 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     assert summary_calls.inputs
     assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
     assert "call_1_0" in recorder.folded_tool_call_ids
-
-
-class _DelegatingLeader(SyntheticModel):
-    """Delegate once to the member, then answer."""
-
-    def __init__(self) -> None:
-        super().__init__(id="leader-model", name="leader", provider="test")
-        self.requests = 0
-
-    async def ainvoke(self, messages: list[Message], **_kwargs: object) -> ModelResponse:  # noqa: ARG002
-        self.requests += 1
-        if self.requests == 1:
-            return ModelResponse(
-                tool_calls=[
-                    {
-                        "id": "delegate_1",
-                        "type": "function",
-                        "function": {
-                            "name": "delegate_task_to_member",
-                            "arguments": '{"member_id": "test_agent", "task": "Do the task"}',
-                        },
-                    },
-                ],
-            )
-        return ModelResponse(content="team done")
-
-    async def ainvoke_stream(self, messages: list[Message], **kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield await self.ainvoke(messages, **kwargs)
+    assert prepared_execution.run_metadata is not None
+    assert COMPACTED_REQUESTS_METADATA_KEY not in prepared_execution.run_metadata
+    assert prepared_execution.run_metadata["room_topic"] == "kept"
 
 
 @pytest.mark.asyncio
@@ -1308,7 +1315,7 @@ async def test_team_member_loop_compacts_run_locally(tmp_path: Path, summary_cal
     member_model = _ToolLoopModel(tool_rounds=5)
     member = _agent(member_model, config, paths)
     member.name = "Test Agent"
-    team = Team(id="crew", name="Crew", model=_DelegatingLeader(), members=[member], telemetry=False)
+    team = Team(id="crew", name="Crew", model=_Leader("Do the task"), members=[member], telemetry=False)
 
     output = await team.arun("Coordinate the task")
 
@@ -1319,6 +1326,7 @@ async def test_team_member_loop_compacts_run_locally(tmp_path: Path, summary_cal
 
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
+_TEAM_SCOPE = HistoryScope(kind="team", scope_id="test_team")
 
 
 def _scoped_agent(
@@ -1402,33 +1410,10 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     *,
     stream: bool,
 ) -> None:
-    config, paths = _config(
-        tmp_path,
-        teams={"test_team": TeamConfig(display_name="Test Team", role="Test team", agents=["test_agent"])},
-    )
-    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    seed_session(
-        storage,
-        _team_session(
-            "session-1",
-            team_id="test_team",
-            runs=[_completed_team_run("run-1", team_id="test_team"), _completed_team_run("run-2", team_id="test_team")],
-        ),
-    )
+    config, paths = _config(tmp_path, teams=_TEAMS)
+    storage = _seeded_team_storage(config, paths)
     model = _ToolLoopModel(tool_rounds=5)
-    team = Team(
-        id="test_team",
-        name="test_team",
-        model=model,
-        members=[],
-        tools=[probe],
-        db=storage,
-        add_history_to_context=True,
-        store_history_messages=False,
-        add_session_summary_to_context=False,
-        telemetry=False,
-    )
-    install_mid_turn_compaction(team, config=config, runtime_paths=paths, entity_name="test_team", model_name="default")
+    team = _scoped_team(model, config, paths, storage)
 
     if stream:
         outputs = [
@@ -1448,15 +1433,14 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     assert summaries[0].from_history is True
     assert compacted.contents[-1] == "Do the task"
     assert not any("team question" in content or "team answer" in content for content in compacted.contents)
-    team_scope = HistoryScope(kind="team", scope_id="test_team")
-    rows = summary_rows_of(storage, team_scope.key)
-    assert log_of(storage, team_scope.key) == [
+    rows = summary_rows_of(storage, _TEAM_SCOPE.key)
+    assert log_of(storage, _TEAM_SCOPE.key) == [
         "run:run-1",
         "run:run-2",
         *(f"row:{row.summary}" for row in rows),
         f"run:{output.run_id}",
     ]
-    assert {run_id for run_id, _segment in segments_of(storage, team_scope.key)} == {output.run_id}
+    assert {run_id for run_id, _segment in segments_of(storage, _TEAM_SCOPE.key)} == {output.run_id}
     stored = get_team_session(storage, "session-1")
     assert stored is not None
     assert stored.summary is not None
@@ -1487,25 +1471,10 @@ async def test_scoped_team_compaction_keeps_the_turns_member_runs(
     tmp_path: Path,
     summary_calls: _SummaryCalls,
 ) -> None:
-    config, paths = _config(
-        tmp_path,
-        teams={"test_team": TeamConfig(display_name="Test Team", role="Test team", agents=["test_agent"])},
-    )
+    config, paths = _config(tmp_path, teams=_TEAMS)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
     member = Agent(id="helper", name="helper", model=_ToolLoopModel(tool_rounds=0), telemetry=False)
-    team = Team(
-        id="test_team",
-        name="test_team",
-        model=_DelegateThenLoop(tool_rounds=6),
-        members=[member],
-        tools=[probe],
-        db=storage,
-        add_history_to_context=True,
-        store_history_messages=False,
-        add_session_summary_to_context=False,
-        telemetry=False,
-    )
-    install_mid_turn_compaction(team, config=config, runtime_paths=paths, entity_name="test_team", model_name="default")
+    team = _scoped_team(_DelegateThenLoop(tool_rounds=6), config, paths, storage, members=[member])
 
     output = await team.arun("Do the task", session_id="session-1")
 
@@ -1677,16 +1646,9 @@ async def test_approval_resume_after_mid_turn_compaction(tmp_path: Path, summary
     config, paths = _config(tmp_path)
     storage = _seeded_storage(config, paths)
 
-    class _PausingLoop(_ToolLoopModel):
-        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            response = await super().ainvoke(messages, **kwargs)
-            if len(self.requests) == 5 and response.tool_calls:
-                response.tool_calls[0]["function"]["name"] = "approve_me"
-            return response
-
     model = _PausingLoop(tool_rounds=6)
     agent = _scoped_agent(model, config, paths, storage)
-    agent.tools = [probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)]
+    agent.tools = _approval_tools()
 
     paused = await agent.arun("Do the task", session_id="session-1")
     assert paused.status == RunStatus.paused
@@ -1712,16 +1674,9 @@ async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
     config, paths = _config(tmp_path)
     storage = _seeded_storage(config, paths)
 
-    class _PausingLoop(_ToolLoopModel):
-        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            response = await super().ainvoke(messages, **kwargs)
-            if len(self.requests) == 5 and response.tool_calls:
-                response.tool_calls[0]["function"]["name"] = "approve_me"
-            return response
-
     model = _PausingLoop(tool_rounds=12)
     agent = _scoped_agent(model, config, paths, storage)
-    agent.tools = [probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)]
+    agent.tools = _approval_tools()
     paused = await agent.arun("Do the task", session_id="session-1")
     assert paused.status == RunStatus.paused
     compactions_before_resume = len(summary_calls.inputs)
@@ -1748,41 +1703,11 @@ async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
 
 @pytest.mark.asyncio
 async def test_team_approval_resume_after_mid_turn_compaction(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
-    config, paths = _config(
-        tmp_path,
-        teams={"test_team": TeamConfig(display_name="Test Team", role="Test team", agents=["test_agent"])},
-    )
-    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    seed_session(
-        storage,
-        _team_session(
-            "session-1",
-            team_id="test_team",
-            runs=[_completed_team_run("run-1", team_id="test_team"), _completed_team_run("run-2", team_id="test_team")],
-        ),
-    )
-
-    class _PausingLoop(_ToolLoopModel):
-        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            response = await super().ainvoke(messages, **kwargs)
-            if len(self.requests) == 5 and response.tool_calls:
-                response.tool_calls[0]["function"]["name"] = "approve_me"
-            return response
+    config, paths = _config(tmp_path, teams=_TEAMS)
+    storage = _seeded_team_storage(config, paths)
 
     model = _PausingLoop(tool_rounds=6)
-    team = Team(
-        id="test_team",
-        name="test_team",
-        model=model,
-        members=[],
-        tools=[probe, Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)],
-        db=storage,
-        add_history_to_context=True,
-        store_history_messages=False,
-        add_session_summary_to_context=False,
-        telemetry=False,
-    )
-    install_mid_turn_compaction(team, config=config, runtime_paths=paths, entity_name="test_team", model_name="default")
+    team = _scoped_team(model, config, paths, storage, tools=_approval_tools())
 
     paused = await team.arun("Do the task", session_id="session-1")
     assert paused.status == RunStatus.paused
@@ -1798,52 +1723,10 @@ async def test_team_approval_resume_after_mid_turn_compaction(tmp_path: Path, su
     assert len(summaries) == 1
     assert summaries[0].content == next(m.content for m in paused_request.messages if is_compaction_summary(m))
     stored = get_team_session(storage, "session-1")
-    rows = summary_rows_of(storage, HistoryScope(kind="team", scope_id="test_team").key)
+    rows = summary_rows_of(storage, _TEAM_SCOPE.key)
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.summary == rows[-1].summary
-
-
-@pytest.mark.asyncio
-async def test_failure_in_a_later_chunk_leaves_request_and_storage_unchanged(
-    tmp_path: Path,
-    summary_calls: _SummaryCalls,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config, paths = _make_config(
-        tmp_path,
-        defaults_compaction=CompactionConfig(model="summary", reserve_tokens=500),
-        models={
-            "default": ModelConfig(provider="openai", id="test-model", context_window=4000),
-            "summary": ModelConfig(provider="openai", id="summary-model", context_window=6000),
-        },
-    )
-    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    history = [
-        _completed_run(f"run-{index}", messages=[Message(role="user", content="h" * 6000)]) for index in range(2)
-    ]
-    seed_session(storage, _session("session-1", runs=history))
-
-    async def fail_second(**kwargs: Any) -> SessionSummary:  # noqa: ANN401
-        if summary_calls.inputs:
-            summary_calls.inputs.append(kwargs["summary_input"])
-            msg = "summary model unavailable"
-            raise RuntimeError(msg)
-        return await summary_calls(**kwargs)
-
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second)
-    model = _ToolLoopModel(tool_rounds=4)
-
-    output = await _run_in_session(_scoped_agent(model, config, paths, storage), "Do the task")
-
-    assert str(output.content).endswith("done")
-    assert len(summary_calls.inputs) == 2
-    assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
-    # A mid-turn compaction writes nothing until its last chunk succeeds.
-    stored = get_agent_session(storage, "session-1")
-    assert stored is not None
-    assert summary_rows_of(storage, _SCOPE.key) == []
-    assert stored.summary is None
 
 
 @pytest.mark.asyncio
@@ -1921,30 +1804,6 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
     assert attempts[1] == 2
     assert first_summary[0] is not None
     assert [row.summary for row in summary_rows_of(storage, _SCOPE.key)] == [first_summary[0]]
-
-
-@pytest.mark.asyncio
-async def test_cancellation_in_a_later_chunk_commits_nothing(
-    tmp_path: Path,
-    summary_calls: _SummaryCalls,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config, paths = _config(tmp_path, summary_context_window=6_000)
-    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    seed_session(storage, _session("session-1"))
-
-    async def cancel_second(**kwargs: Any) -> SessionSummary:  # noqa: ANN401
-        if summary_calls.inputs:
-            raise asyncio.CancelledError
-        return await summary_calls(**kwargs)
-
-    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", cancel_second)
-
-    with pytest.raises(asyncio.CancelledError):
-        await _run_in_session(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
-
-    assert len(summary_calls.inputs) == 1
-    assert summary_rows_of(storage, _SCOPE.key) == []
 
 
 @pytest.mark.asyncio
@@ -2049,10 +1908,6 @@ async def test_cancellation_after_the_commit_keeps_the_fold_and_its_effects(tmp_
     model = _ToolLoopModel(tool_rounds=5)
     agent = _scoped_agent(model, config, paths, storage)
 
-    class _CancelOnSuccess(RecordingCompactionLifecycle):
-        async def complete_success(self, outcome: CompactionOutcome) -> None:  # noqa: ARG002
-            raise asyncio.CancelledError
-
     bind_compaction_lifecycle(agent, _CancelOnSuccess())
     live_lists: list[list[Message]] = []
     run_ids: list[str] = []
@@ -2074,19 +1929,6 @@ async def test_cancellation_after_the_commit_keeps_the_fold_and_its_effects(tmp_
     # The fold stays: a restarted attempt replays its summary instead of the runs it covered.
     assert [run_id for run_id, _segment in segments_of(storage, _SCOPE.key)] == [run_ids[-1]]
     assert folded_run_ids(storage) == ["run-1", "run-2"]
-
-
-async def _run_in_session(agent: Agent, prompt: str, *, stream: bool = False) -> RunOutput:
-    if not stream:
-        output = await agent.arun(prompt, session_id="session-1")
-        assert isinstance(output, RunOutput)
-        return output
-    final: RunOutput | None = None
-    async for event in agent.arun(prompt, session_id="session-1", stream=True, yield_run_output=True):
-        if isinstance(event, RunOutput):
-            final = event
-    assert final is not None
-    return final
 
 
 def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
@@ -2246,11 +2088,12 @@ async def test_thinking_a_native_checkpoint_replaced_never_triggers_text_compact
     assert model.native_compaction is not None
 
 
-class _TwoTaskLeader(SyntheticModel):
-    """Delegate two tasks to the same member in one response, then answer."""
+class _Leader(SyntheticModel):
+    """Delegate each of ``tasks`` to ``test_agent`` in one response, then answer."""
 
-    def __init__(self) -> None:
+    def __init__(self, *tasks: str) -> None:
         super().__init__(id="leader-model", name="leader", provider="test")
+        self.tasks = tasks
         self.requests = 0
 
     async def ainvoke(self, messages: list[Message], **_kwargs: object) -> ModelResponse:  # noqa: ARG002
@@ -2260,14 +2103,14 @@ class _TwoTaskLeader(SyntheticModel):
         return ModelResponse(
             tool_calls=[
                 {
-                    "id": f"delegate_{task}",
+                    "id": f"delegate_{index}",
                     "type": "function",
                     "function": {
                         "name": "delegate_task_to_member",
-                        "arguments": json.dumps({"member_id": "test_agent", "task": f"Task {task}"}),
+                        "arguments": json.dumps({"member_id": "test_agent", "task": task}),
                     },
                 }
-                for task in ("A", "B")
+                for index, task in enumerate(self.tasks)
             ],
         )
 
@@ -2312,7 +2155,7 @@ async def test_parallel_delegations_to_one_member_both_compact(tmp_path: Path, s
         entity_name="test_agent",
         model_name="default",
     )
-    team = Team(id="crew", name="Crew", model=_TwoTaskLeader(), members=[member], telemetry=False)
+    team = Team(id="crew", name="Crew", model=_Leader("Task A", "Task B"), members=[member], telemetry=False)
 
     output = await team.arun("Coordinate the tasks")
 
@@ -2337,7 +2180,7 @@ def test_a_team_fold_summarizes_the_tool_calls_of_the_members_it_delegated_to() 
         leading=0,
         kept=(),
         history=(),
-        exchanges=((delegation, Message(role="tool", tool_call_id="delegate", content="done")),),
+        folded=(delegation, Message(role="tool", tool_call_id="delegate", content="done")),
         prompt=None,
         previous_run_local_summary=None,
     )

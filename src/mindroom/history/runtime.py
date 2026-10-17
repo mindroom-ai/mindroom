@@ -657,8 +657,7 @@ async def summarize_run_locally(
         runs=snapshots,
         session_id=session_id,
         scope=scope,
-        # Replay limits trim history; the run's own tool results must all reach the summary.
-        history_settings=replace(resolved_inputs.history_settings, max_tool_calls_from_history=None),
+        history_settings=resolved_inputs.history_settings,
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
         timeout_seconds=execution_plan.compaction_timeout_seconds,
         on_response=on_response,
@@ -728,12 +727,7 @@ async def compact_scope_mid_turn(
     on_commit: Callable[[str], None],
 ) -> CompactionOutcome | None:
     """Fold the stored runs after the latest summary row and the running turn into one summary row."""
-    # Replay limits trim history; the running turn's own tool results must all reach the summary.
-    inputs = replace(
-        resolved_inputs,
-        history_settings=replace(resolved_inputs.history_settings, max_tool_calls_from_history=None),
-    )
-    execution_plan = inputs.execution_plan
+    execution_plan = resolved_inputs.execution_plan
 
     async def compact(complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]]) -> CompactionOutcome:
         summary_model, fallback_model = _load_summary_models(
@@ -751,7 +745,7 @@ async def compact_scope_mid_turn(
             segment=segment,
             snapshots=snapshots,
             folded_messages=folded_messages,
-            history_settings=inputs.history_settings,
+            history_settings=resolved_inputs.history_settings,
             summary_model=summary_model,
             fallback_summary_model=fallback_model,
             summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
@@ -771,7 +765,7 @@ async def compact_scope_mid_turn(
         scope=scope,
         # A manual request made during the turn still applies before the next reply.
         state=HistoryScopeState(),
-        resolved_inputs=inputs,
+        resolved_inputs=resolved_inputs,
         history_budget=execution_plan.hard_replay_budget_tokens,
         current_history_tokens=before_tokens,
         runs_before=len(basis.runs) + 1,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -48,7 +47,6 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -522,70 +520,6 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
     assert rendered in _team_system_message(team)
     assert all(agent.additional_context == rendered for agent in member_agents)
     assert all(rendered in _agent_system_message(agent) for agent in member_agents)
-
-
-@pytest.mark.asyncio
-async def test_a_fresh_team_attempt_does_not_inherit_the_fold_records_of_the_run_it_follows(tmp_path: Path) -> None:
-    """A team follow-up after an approval resume seeds its metadata from the resumed run, but not that run's folds."""
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    member_agents = [_agent("code", "CodeAgent"), _agent("research", "ResearchAgent")]
-    prepared_team = Team(id="team-code-research", name="Code + Research", members=member_agents, model=Ollama(id="m"))
-
-    async def prepared_context(_ctx: object, **_kwargs: object) -> _PreparedExecutionContext:
-        return _PreparedExecutionContext(
-            messages=(Message(role="user", content="prepared team prompt"),),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-        )
-
-    with (
-        open_bound_scope_session_context(
-            agents=member_agents,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
-        patch("mindroom.teams._create_team_instance", return_value=prepared_team),
-        patch("mindroom.teams.prepare_bound_team_run_context", new=AsyncMock(side_effect=prepared_context)),
-    ):
-        assert scope_context is not None
-        team = build_materialized_team_instance(
-            requested_agent_names=["code", "research"],
-            agents=member_agents,
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            scope_context=scope_context,
-            model_name="default",
-            configured_team_name=None,
-            execution_identity=None,
-        )
-        prepared = await prepare_materialized_team_execution(
-            replace(
-                make_turn_context(room_id="!room:localhost", reply_to_event_id="$event"),
-                matrix_run_metadata={
-                    COMPACTED_REQUESTS_METADATA_KEY: [{"input_tokens": 10}],
-                    "room_topic": "kept",
-                },
-            ),
-            scope_context=scope_context,
-            agents=member_agents,
-            team=team,
-            message="Coordinate",
-            thread_history=[],
-            config=config,
-            runtime_paths=runtime_paths,
-            runtime_model=config.resolve_runtime_model(entity_name=None),
-            response_sender_id="@mindroom_code:localhost",
-            current_sender_id=None,
-            configured_team_name=None,
-        )
-
-    assert prepared.run_metadata is not None
-    assert COMPACTED_REQUESTS_METADATA_KEY not in prepared.run_metadata
-    assert prepared.run_metadata["room_topic"] == "kept"
 
 
 @pytest.mark.asyncio

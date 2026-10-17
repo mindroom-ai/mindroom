@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, cast
@@ -152,15 +152,10 @@ class _Layout:
     kept: tuple[Message, ...]
     # Replayed messages of earlier turns, which the scope summary or the stored runs it folds already cover.
     history: tuple[Message, ...]
-    # This turn's folded messages, each with the tool results that answer it, oldest first.
-    exchanges: tuple[tuple[Message, ...], ...]
+    # This turn's folded messages, oldest first, with each tool batch whole.
+    folded: tuple[Message, ...]
     prompt: Message | None
     previous_run_local_summary: str | None
-
-    @property
-    def folded(self) -> list[Message]:
-        """Return the turn's folded messages, oldest first."""
-        return [message for exchange in self.exchanges for message in exchange]
 
 
 def install_mid_turn_compaction(
@@ -242,7 +237,7 @@ async def _prepare_request(
         return
     session = _scoped_session(binding, built_session, run_response)
     layout = _layout(messages, run_response, scoped=session is not None)
-    if not layout.exchanges and all(is_compaction_summary(message) for message in layout.history):
+    if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
         return
     summary_message = await _summarize(binding, policy, layout, messages, run_response, session, state, request_tokens)
@@ -282,12 +277,15 @@ async def _summarize(
 
     Returns the summary message, or None when compaction failed and the request is unchanged.
     """
+    # Replay limits trim history; the running turn's own tool results must all reach the summary.
+    settings = replace(policy.inputs.history_settings, max_tool_calls_from_history=None)
+    inputs = replace(policy.inputs, history_settings=settings)
     try:
         if session is None:
-            summary_message = await _summarize_run_locally(binding, policy.inputs, layout, run_response)
+            summary_message = await _summarize_run_locally(binding, inputs, layout, run_response)
             _finish(messages, layout, summary_message, run_response)
             return summary_message
-        return await _compact_scope(binding, policy, layout, messages, run_response, session, state, request_tokens)
+        return await _compact_scope(binding, inputs, layout, messages, run_response, session, state, request_tokens)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -319,7 +317,7 @@ def _scoped_session(
 
 async def _compact_scope(
     binding: _MidTurnCompaction,
-    policy: _Policy,
+    inputs: HistoryPreparationInputs,
     layout: _Layout,
     messages: list[Message],
     run_response: RunOutput | TeamRunOutput,
@@ -357,10 +355,10 @@ async def _compact_scope(
         storage=storage,
         session=session,
         scope=scope,
-        resolved_inputs=policy.inputs,
+        resolved_inputs=inputs,
         basis=basis,
         segment=segment,
-        snapshots=_snapshots(run_response, layout, policy.inputs),
+        snapshots=_snapshots(run_response, layout, inputs),
         folded_messages=layout.folded,
         # The size that triggered this compaction, so the history budget sees what the request needs.
         before_tokens=request_tokens,
@@ -530,7 +528,7 @@ def _thinking_tokens(messages: Sequence[Message]) -> int:
 
 
 def _layout(messages: list[Message], run_response: RunOutput | TeamRunOutput, *, scoped: bool) -> _Layout:
-    """Split a request into kept messages, replayed history, and this turn's exchanges to fold.
+    """Split a request into kept messages, replayed history, and this turn's messages to fold.
 
     A run-local summary this run already wrote seeds the next run-local summary; a scoped compaction folds it into
     the snapshots instead, since the scope summary never saw it.
@@ -542,7 +540,7 @@ def _layout(messages: list[Message], run_response: RunOutput | TeamRunOutput, *,
     prompt = _current_prompt(messages[leading:], run_response)
     kept: list[Message] = []
     history: list[Message] = []
-    exchanges: list[tuple[Message, ...]] = []
+    folded: list[Message] = []
     previous: str | None = None
     for exchange in _exchanges(messages[leading:]):
         head = exchange[0]
@@ -553,12 +551,12 @@ def _layout(messages: list[Message], run_response: RunOutput | TeamRunOutput, *,
         elif head.from_history:
             history.extend(exchange)
         else:
-            exchanges.append(tuple(exchange))
+            folded.extend(exchange)
     return _Layout(
         leading=leading,
         kept=tuple(kept),
         history=tuple(history),
-        exchanges=tuple(exchanges),
+        folded=tuple(folded),
         prompt=prompt,
         previous_run_local_summary=previous,
     )
@@ -613,7 +611,7 @@ def _snapshots(
     run_response: RunOutput | TeamRunOutput,
     layout: _Layout,
     inputs: HistoryPreparationInputs,
-) -> list[RunOutput | TeamRunOutput]:
+) -> list[RunOutput]:
     """Return one completed run per folded message, oldest first, the first led by the prompt and the run's metadata.
 
     Separate runs let the summary chunker size the turn with the summary model's own estimator and summarize it in
@@ -621,7 +619,7 @@ def _snapshots(
     a tool batch whole, but a parallel batch can exceed one summary input; each tool result names its own tool and
     arguments in the summary input, so it needs no call message beside it.
     """
-    snapshots: list[RunOutput | TeamRunOutput] = []
+    snapshots: list[RunOutput] = []
     budget_tokens = inputs.execution_plan.summary_input_budget_tokens or 0
     folded = layout.folded
     for index, message in enumerate(folded):
@@ -632,35 +630,17 @@ def _snapshots(
     return snapshots
 
 
-def _history_snapshot(run_response: RunOutput | TeamRunOutput, layout: _Layout) -> list[RunOutput | TeamRunOutput]:
-    """Return the request's replayed history as completed runs to summarize, one per message, as ``_snapshots`` does."""
-    return [_snapshot_run(run_response, [message], None) for message in layout.history]
-
-
 def _snapshot_run(
     run_response: RunOutput | TeamRunOutput,
     messages: Sequence[Message],
     metadata: dict[str, Any] | None,
-) -> RunOutput | TeamRunOutput:
+) -> RunOutput:
     """Return a completed copy of part of the running turn under a fresh snapshot run id."""
-    run_id = f"{run_response.run_id or ''}:fold:{uuid4().hex}"
-    copies = [message.model_copy(deep=True) for message in messages]
-    if isinstance(run_response, TeamRunOutput):
-        return TeamRunOutput(
-            run_id=run_id,
-            team_id=run_response.team_id,
-            session_id=run_response.session_id,
-            status=RunStatus.completed,
-            messages=copies,
-            metadata=metadata,
-            created_at=run_response.created_at,
-        )
     return RunOutput(
-        run_id=run_id,
-        agent_id=run_response.agent_id,
+        run_id=f"{run_response.run_id or ''}:fold:{uuid4().hex}",
         session_id=run_response.session_id,
         status=RunStatus.completed,
-        messages=copies,
+        messages=[message.model_copy(deep=True) for message in messages],
         metadata=metadata,
         created_at=run_response.created_at,
     )
@@ -691,7 +671,7 @@ async def _summarize_run_locally(
         scope_id=binding.target.id or "",
     )
     # Without a stored session to append a summary row to, replayed history is summarized with the turn's exchanges.
-    history = _history_snapshot(run_response, layout)
+    history = [_snapshot_run(run_response, [message], None) for message in layout.history]
     summary = await summarize_run_locally(
         resolved_inputs=inputs,
         previous_summary=layout.previous_run_local_summary,

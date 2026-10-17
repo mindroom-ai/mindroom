@@ -2012,26 +2012,6 @@ def _install_background_jobs(
             install_job_notice_hook(model, entity_name=agent_name)
 
 
-def _install_request_hooks(
-    agent: Agent,
-    model: Model,
-    *,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    agent_name: str,
-    model_name: str,
-) -> None:
-    """Install mid-turn compaction, then the call cap around it, so a refused request never spends a summary call."""
-    install_mid_turn_compaction(
-        agent,
-        config=config,
-        runtime_paths=runtime_paths,
-        entity_name=agent_name,
-        model_name=model_name,
-    )
-    install_model_call_cap(model, entity_name=agent_name)
-
-
 @timed("system_prompt_assembly.agent_create")
 def create_agent(  # noqa: PLR0915
     agent_name: str,
@@ -2350,14 +2330,15 @@ def create_agent(  # noqa: PLR0915
         tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,
     )
-    _install_request_hooks(
+    install_mid_turn_compaction(
         agent,
-        model,
         config=config,
         runtime_paths=runtime_paths,
-        agent_name=agent_name,
+        entity_name=agent_name,
         model_name=role_context.model_name,
     )
+    # Installed after mid-turn compaction, so a refused request never spends a summary call.
+    install_model_call_cap(model, entity_name=agent_name)
     if isinstance(agent, MinimalAgent):
         agent.configure_minimal(
             instructions=instructions,
