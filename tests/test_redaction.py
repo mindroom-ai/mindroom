@@ -609,10 +609,19 @@ def test_redact_sensitive_text_fails_closed_on_ambiguous_multiline_secret() -> N
         ("Authorization: Bearer\nabc123def456", "Authorization: Bearer\n***redacted***"),
         ("Authorization: Bearer abc.def-ghi", "Authorization: Bearer ***redacted***"),
         ("Invalid API key provided: abcdef123", "Invalid API key provided: ***redacted***"),
+        # A token on the label's own line is taken even when a colon follows it, as before; after "Authorization:",
+        # the assignment rule then masks the whole value.
+        ("Bearer abc123:xyz", "Bearer ***redacted***:xyz"),
+        ("Bearer abc123: rest", "Bearer ***redacted***: rest"),
+        ("Authorization: Bearer abc123:xyz", "Authorization: ***redacted***"),
+        ('curl -H "Authorization: Bearer abc123:xyz"', 'curl -H "Authorization: ***redacted***"'),
+        ("Invalid API key provided: abc123:xyz", "Invalid API key provided: ***redacted***:xyz"),
+        # On the next line too, a token with a colon inside is taken, not read as a key.
+        ("Authorization: Bearer\nabc123:xyz", "Authorization: Bearer\n***redacted***:xyz"),
     ],
 )
-def test_a_token_label_never_takes_the_next_key_as_its_token(text: str, expected: str) -> None:
-    """A key awaiting its value after "bearer" or "API key" is not the token, so its own value is still masked."""
+def test_a_token_label_never_takes_the_next_lines_key_as_its_token(text: str, expected: str) -> None:
+    """A key on the line after "bearer" or "API key" is not the token, so its own value is still masked."""
     assert redact_sensitive_text(text) == expected
 
 

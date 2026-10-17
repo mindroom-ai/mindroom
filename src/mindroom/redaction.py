@@ -44,17 +44,19 @@ URL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*+)"
     r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>]+)",
 )
-# A word followed by a colon is a key awaiting its value, as in "API key\ntoken: <value>", never the labeled token;
-# taking it would leave the assignment rule a masked key and the value unmasked. The words "token" and "provided"
-# belong to the label, so "use a bearer token" at the end of a line still labels a token on the next one.
-_LABELED_VALUE = r"(?P<token>[A-Za-z0-9._~+/=-]+)(?![A-Za-z0-9._~+/=-]|[^\S\r\n]*:)"
+# The space between a label and its token. On the next line, a word followed by a colon and a space or line end is a
+# key awaiting its value, as in "API key\ntoken: <value>", never the labeled token; taking it would leave the
+# assignment rule a masked key and the value unmasked. A token such as "id:secret" is still taken. The words "token"
+# and "provided" belong to the label, so "use a bearer token" at the end of a line still labels a token on the next one.
+_LABEL_GAP = r"(?:[^\S\r\n]+|\s*[\r\n]\s*(?![A-Za-z0-9._~+/=-]+[^\S\r\n]*:(?:\s|$)))"
 _BEARER_TOKEN_PATTERN = re.compile(
-    rf"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token\b)?+\s+){_LABELED_VALUE}",
+    rf"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token\b)?+{_LABEL_GAP})"
+    r"(?P<token>[A-Za-z0-9._~+/=-]+)",
     re.IGNORECASE,
 )
 _API_KEY_MESSAGE_PATTERN = re.compile(
     r"(?P<prefix>(?:(?:incorrect|invalid)\s+api\s+key(?:\s+provided\b)?+|api\s+key(?:\s+provided\b)?+)"
-    rf"(?::\s*|\s+)){_LABELED_VALUE}",
+    rf"(?::?{_LABEL_GAP}|:))(?P<token>[A-Za-z0-9._~+/=-]+)",
     re.IGNORECASE,
 )
 _ASSIGNMENT_PREFIX_PATTERN = re.compile(
