@@ -43,14 +43,17 @@ URL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*+)"
     r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>]+)",
 )
+# A word followed by a colon is a key awaiting its value, as in "API key\ntoken: <value>", never the labeled token;
+# taking it would leave the assignment rule a masked key and the value unmasked. The words "token" and "provided"
+# belong to the label, so "use a bearer token" at the end of a line still labels a token on the next one.
+_LABELED_VALUE = r"(?P<token>[A-Za-z0-9._~+/=-]+)(?![A-Za-z0-9._~+/=-]|[^\S\r\n]*:)"
 _BEARER_TOKEN_PATTERN = re.compile(
-    r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
-    r"(?P<token>[A-Za-z0-9._~+/=-]+)",
+    rf"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token\b)?+\s+){_LABELED_VALUE}",
     re.IGNORECASE,
 )
 _API_KEY_MESSAGE_PATTERN = re.compile(
-    r"(?P<prefix>(?:(?:incorrect|invalid)\s+api\s+key(?:\s+provided)?|api\s+key(?:\s+provided)?)"
-    r"(?::\s*|\s+))(?P<token>[A-Za-z0-9._~+/=-]+)",
+    r"(?P<prefix>(?:(?:incorrect|invalid)\s+api\s+key(?:\s+provided\b)?+|api\s+key(?:\s+provided\b)?+)"
+    rf"(?::\s*|\s+)){_LABELED_VALUE}",
     re.IGNORECASE,
 )
 _ASSIGNMENT_PREFIX_PATTERN = re.compile(

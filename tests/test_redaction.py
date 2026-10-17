@@ -587,6 +587,34 @@ def test_redact_sensitive_text_fails_closed_on_ambiguous_multiline_secret() -> N
     assert redact_sensitive_text(value) == REDACTION_FAILED
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("## Staging API key\ntoken: 9f8e7d6c5b4a3f2e", "## Staging API key\ntoken: ***redacted***"),
+        ("## Staging API key\n\ntoken: 9f8e7d6c5b4a3f2e", "## Staging API key\n\ntoken: ***redacted***"),
+        ("Here is the API key:\nsecret: 9f8e7d6c5b4a3f2e", "Here is the API key:\nsecret: ***redacted***"),
+        (
+            "The service uses a bearer token\npassword: hunter2hunter2",
+            "The service uses a bearer token\npassword: ***redacted***",
+        ),
+        # "token" and "provided" belong to the label, which still masks a token on the next line.
+        ("use a bearer token\nabc123def456 and more", "use a bearer token\n***redacted*** and more"),
+        ("Invalid API key provided\nabc123def456", "Invalid API key provided\n***redacted***"),
+        ("Authorization: Bearer token123", "Authorization: Bearer ***redacted***"),
+        ("bearer token: abc123xyz", "bearer token: ***redacted***"),
+        ("## API key\nAPI_TOKEN=abcdef123", "## API key\n***redacted***"),
+        ("Bearer dGVzdA= then", "Bearer ***redacted*** then"),
+        # A label still masks a token on the next line, and the forms that name one are unchanged.
+        ("Authorization: Bearer\nabc123def456", "Authorization: Bearer\n***redacted***"),
+        ("Authorization: Bearer abc.def-ghi", "Authorization: Bearer ***redacted***"),
+        ("Invalid API key provided: abcdef123", "Invalid API key provided: ***redacted***"),
+    ],
+)
+def test_a_token_label_never_takes_the_next_key_as_its_token(text: str, expected: str) -> None:
+    """A key awaiting its value after "bearer" or "API key" is not the token, so its own value is still masked."""
+    assert redact_sensitive_text(text) == expected
+
+
 def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
     """List items under a secret-bearing key should be redacted without changing container shape."""
     redacted = redact_sensitive_data(
