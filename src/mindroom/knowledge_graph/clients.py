@@ -1,4 +1,4 @@
-"""Graphiti's model, embedder, and reranker clients, backed by MindRoom's own model and embedder construction.
+"""Graphiti's model, embedder, reranker, and database clients, backed by MindRoom's own model and embedder construction.
 
 Every provider, credential rule, and base URL MindRoom supports then works for extraction without a second provider
 mapping, and each extraction call is an Agno run whose tokens are recorded like other helper work.
@@ -16,6 +16,7 @@ from agno.agent import Agent
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.run.base import RunStatus
 from graphiti_core.cross_encoder.client import CrossEncoderClient
+from graphiti_core.driver.falkordb_driver import FalkorDriver
 from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.llm_client.client import LLMClient
 from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, ModelSize
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from agno.knowledge.embedder.base import Embedder
+    from graphiti_core.driver.driver import GraphDriver
     from graphiti_core.prompts.models import Message
 
     from mindroom.config.main import Config
@@ -39,6 +41,18 @@ if TYPE_CHECKING:
 
 # Requests in flight at once for an embedder that embeds one text per request.
 _EMBED_CONCURRENCY = 8
+
+# Graphiti's FalkorDB searches return every entity's and fact's embedding and then discard it.
+# Reason: the entity and fact return clauses select `properties(n)` and `properties(e)`, which include
+# `name_embedding` and `fact_embedding`, and building the records pops them unused. With 3072-dimension embeddings
+# the reply parsing took about 15 ms of event loop time per returned row, so ingestion stalled every agent's replies.
+# Upstream issue: tracking gap; no issue or PR in getzep/graphiti covers it as of 0.31.1.
+# Remove when: the pinned Graphiti's FalkorDB searches no longer read embeddings back.
+# Coverage: tests/test_knowledge_graph_store.py::test_lookups_do_not_read_embeddings_back
+_WITHOUT_EMBEDDINGS = (
+    ("properties(n)", "n {.*, name_embedding: NULL}"),
+    ("properties(e)", "e {.*, fact_embedding: NULL}"),
+)
 
 
 class MindRoomLLMClient(LLMClient):
@@ -171,3 +185,22 @@ class UnusedCrossEncoder(CrossEncoderClient):
         del query, passages
         msg = "The knowledge graph searches without a cross-encoder"
         raise RuntimeError(msg)
+
+
+class MindRoomFalkorDriver(FalkorDriver):
+    """Graphiti's FalkorDB driver, with the embeddings its searches discard replaced by null in each query."""
+
+    async def execute_query(self, cypher_query_: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Run Graphiti's query without reading entity and fact embeddings back."""
+        for selected, projected in _WITHOUT_EMBEDDINGS:
+            cypher_query_ = cypher_query_.replace(selected, projected)
+        return await super().execute_query(cypher_query_, **kwargs)
+
+    def clone(self, database: str) -> GraphDriver:
+        """Address another graph over the same connection; Graphiti's own clone would build a plain driver."""
+        if database == self._database:
+            return self
+        return MindRoomFalkorDriver(
+            falkor_db=self.client,
+            database="default_db" if database == self.default_group_id else database,
+        )

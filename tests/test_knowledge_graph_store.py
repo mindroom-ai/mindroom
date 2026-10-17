@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
+from falkordb.asyncio.graph import AsyncGraph
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
 from redis.asyncio import Redis
@@ -28,6 +29,8 @@ from mindroom.knowledge_graph.usage import UsageTarget
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from falkordb.query_result import QueryResult
 
 ALPHA = GraphScope(agent_name="mind", execution_identity=None, graph_name="kg_" + "a" * 24)
 BETA = GraphScope(agent_name="mind", execution_identity=None, graph_name="kg_" + "b" * 24)
@@ -170,6 +173,41 @@ async def test_entity_returns_summary_and_facts(store: GraphitiStore) -> None:
     assert [fact.fact for fact in entity.facts] == ["Alice leads Project Atlas"]
     assert entity.facts[0].sources[0].description.startswith("tool_results:")
     assert await store.entity(BETA, "Alice") is None
+
+
+def _holds_embedding(value: object) -> bool:
+    """Whether a FalkorDB reply value is, or contains, one of the test embedder's 32-number vectors."""
+    if isinstance(value, dict):
+        return any(_holds_embedding(item) for item in value.values())
+    if isinstance(value, list):
+        if len(value) == 32 and all(isinstance(item, float) for item in value):
+            return True
+        return any(_holds_embedding(item) for item in value)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_lookups_do_not_read_embeddings_back(store: GraphitiStore) -> None:
+    """Graphiti drops the embeddings its searches read, and parsing them stalled the event loop for every search."""
+    await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
+    rows: list[bool] = []
+    query = AsyncGraph.query
+
+    async def recording_query(graph: AsyncGraph, *args: object, **kwargs: object) -> QueryResult:
+        result = await query(graph, *args, **kwargs)
+        # Checked on arrival, because Graphiti pops the embeddings out of these rows in place.
+        rows.extend(_holds_embedding(row) for row in result.result_set)
+        return result
+
+    with patch.object(AsyncGraph, "query", recording_query):
+        facts = await store.search_facts(ALPHA, "who leads Project Atlas", limit=5)
+        entity = await store.entity(ALPHA, "Alice")
+
+    assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]
+    assert entity is not None
+    assert [fact.fact for fact in entity.facts] == ["Alice leads Project Atlas"]
+    assert rows
+    assert not any(rows)
 
 
 def test_importing_graphiti_leaves_the_environment_alone(tmp_path: Path) -> None:

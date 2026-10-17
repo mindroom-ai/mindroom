@@ -201,10 +201,10 @@ class GraphitiStore:
         # why-lazy: Graphiti, FalkorDB, and the embedded server are optional and load only for graph-enabled runtimes.
         from falkordb.asyncio import FalkorDB  # noqa: PLC0415
         from graphiti_core import Graphiti  # noqa: PLC0415
-        from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: PLC0415
 
         from mindroom.knowledge_graph.clients import (  # noqa: PLC0415
             MindRoomEmbedder,
+            MindRoomFalkorDriver,
             MindRoomLLMClient,
             UnusedCrossEncoder,
         )
@@ -214,7 +214,7 @@ class GraphitiStore:
         embedder = await asyncio.to_thread(create_configured_embedder, config, self._runtime_paths)
         server = await start_embedded_server(self._runtime_paths.storage_root / "knowledge_graph")
         self._embedded_server = server
-        driver = FalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
+        driver = MindRoomFalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
         return Graphiti(
             graph_driver=driver,
             llm_client=MindRoomLLMClient(self._config_provider, self._runtime_paths),
