@@ -3398,7 +3398,6 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.logging_config",
     "mindroom.memory._policy",
-    "mindroom.history.conversation_text",
     "mindroom.memory._shared",
     "mindroom.memory._semantic_file_search",
     "mindroom.memory_scope_ids",
@@ -3443,7 +3442,6 @@ visibility = ["mindroom.memory._backend"]
 [[modules]]
 path = "mindroom.memory._prompting"
 depends_on = [
-    "mindroom.history.conversation_text",
     "mindroom.memory._shared",
     "mindroom.prompt_templates",
     "mindroom.tool_system.events",
@@ -4368,7 +4366,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.transcript"
 depends_on = [
-    "mindroom.history.conversation_text",
     "mindroom.logging_config",
     "mindroom.matrix_rtc.spoken_turns",
     "mindroom.memory",
@@ -7533,9 +7530,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.knowledge_graph.episodes",
-    "mindroom.matrix_rtc.transcript",
-    "mindroom.memory._file_backend",
-    "mindroom.memory._prompting",
     "mindroom.memory.auto_flush",
     "mindroom.skill_learning.transcript",
 ]

@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.history.conversation_text import redact_conversation_text
 from mindroom.prompt_templates import render_prompt_template
+from mindroom.redaction import redact_sensitive_lines
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ def redact_memory_text(text: str) -> str:
 
     Auto-flush still reads sessions through its own selection; once it reads ``conversation_lines``, this goes.
     """
-    return redact_conversation_text(text)
+    return redact_sensitive_lines(text)
 
 
 def format_memories_as_context(
@@ -54,11 +54,11 @@ def _build_conversation_messages(
     messages: list[dict] = []
     for message in thread_history:
         role = "user" if message.sender == user_id else "assistant"
-        body = redact_conversation_text(body_without_tool_markers(message.body, message.content)).strip()
+        body = redact_sensitive_lines(body_without_tool_markers(message.body, message.content)).strip()
         if not body:
             continue
         messages.append({"role": role, "content": body})
-    messages.append({"role": "user", "content": redact_conversation_text(current_prompt)})
+    messages.append({"role": "user", "content": redact_sensitive_lines(current_prompt)})
     return messages
 
 
@@ -71,4 +71,4 @@ def build_memory_messages(
     # Mem0 extracts and stores memories from these messages, so credential-like values are removed first.
     if thread_history and user_id:
         return _build_conversation_messages(thread_history, prompt, user_id)
-    return [{"role": "user", "content": redact_conversation_text(prompt)}]
+    return [{"role": "user", "content": redact_sensitive_lines(prompt)}]

@@ -1,8 +1,9 @@
 """What people and agents said in stored turns, as text a background model call reads.
 
-Memory extraction, skill reviews, and the knowledge graph each send a stored conversation to a model. This module owns
-the decisions they share: which turns and messages are conversation, who said each message, and how text is clipped and
-redacted, so a prompt MindRoom wrote is never read as someone's words and every reader redacts the same way.
+Skill reviews and the knowledge graph, and file-memory auto-flush once it reads stored turns, each send stored turns to
+a model. This module owns the decisions they share: which turns and messages are conversation and who said each
+message, so a prompt MindRoom wrote is never read as someone's words. Every reader, Mem0 included, redacts the text
+with ``redact_sensitive_lines``.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_MET
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.prompt_message_tags import parse_msg_tags
-from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
+from mindroom.redaction import redact_sensitive_lines
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
@@ -24,9 +25,6 @@ if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
-
-# The marker redaction itself shortens text with.
-_TRUNCATED = "... [truncated]"
 
 
 @dataclass(frozen=True)
@@ -37,58 +35,10 @@ class Utterance:
     kind: Literal["said", "reply", "runtime", "tool_result"]
     # The Matrix ID behind a `said` message; None for the agent, MindRoom, or a tool.
     sender: str | None
-    # Send this only through `redact_conversation_text`.
+    # Send this only through `redact_sensitive_lines`.
     unredacted: str
     # The stored message, for its tool calls and tool name.
     message: Message
-
-
-def redact_conversation_text(text: str, *, max_chars: int | None = None) -> str:
-    """Return ``text`` with credential-like values removed, best effort, in at most ``max_chars`` characters.
-
-    The whole text is redacted at once, so a label and its value on separate lines are still matched, and with
-    ``max_chars`` only a little more than what is kept is read. When that refuses an ambiguous line, only the lines
-    around it are dropped instead of the whole text: a line that cannot be redacted on its own, with the rest of a
-    quoted value it opens, and a line holding the value of a secret-named key that ends the line before it.
-    """
-    redacted = redact_sensitive_text(text, max_length=max_chars)
-    if redacted != REDACTION_FAILED:
-        return redacted
-    kept = _redact_line_by_line(text if max_chars is None else text[:max_chars])
-    if max_chars is None or (len(text) <= max_chars and len(kept) <= max_chars):
-        return kept
-    return f"{kept[: max_chars - len(_TRUNCATED)]}{_TRUNCATED}"
-
-
-def _redact_line_by_line(text: str) -> str:
-    lines = text.splitlines()
-    kept: list[str] = []
-    # The line before, read together with each line, so a label still masks a value on the next line.
-    previous = ""
-    hidden_through = -1
-    for index, line in enumerate(lines):
-        if index <= hidden_through:
-            continue
-        paired = redact_sensitive_text(f"{previous}\n{line}")
-        if paired != REDACTION_FAILED:
-            kept.append(paired.partition("\n")[2])
-            previous = line
-        elif redact_sensitive_text(line) == REDACTION_FAILED:
-            # A quote this line leaves open may close on a later line, and everything up to there is its value.
-            if _has_quote(line):
-                hidden_through = next(
-                    (later for later in range(index + 1, len(lines)) if _has_quote(lines[later])),
-                    index,
-                )
-            previous = ""
-        else:
-            # The line is the value of a key the line before left open; it still labels the line after it.
-            previous = line
-    return "\n".join(kept)
-
-
-def _has_quote(line: str) -> bool:
-    return '"' in line or "'" in line
 
 
 def one_line(text: str) -> str:
@@ -153,7 +103,7 @@ def conversation_lines(
     return [
         f"{_speaker(utterance.sender, agent_name, agent_for_sender)}: {text}"
         for utterance in utterances(run)
-        if (text := one_line(redact_conversation_text(utterance.unredacted.strip(), max_chars=max_line_chars)))
+        if (text := one_line(redact_sensitive_lines(utterance.unredacted.strip(), max_length=max_line_chars)))
     ]
 
 

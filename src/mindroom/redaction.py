@@ -25,6 +25,7 @@ __all__ = [
     "redact_config_text",
     "redact_log_event",
     "redact_sensitive_data",
+    "redact_sensitive_lines",
     "redact_sensitive_text",
     "truncate_review_text",
 ]
@@ -587,6 +588,51 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
         return _truncate_text(REDACTION_FAILED, max_length)
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
+
+
+def redact_sensitive_lines(value: str, *, max_length: int | None = None) -> str:
+    """Redact credential patterns line by line and then across lines, dropping only the lines it cannot read safely.
+
+    Each line is redacted on its own first, so a pattern spanning lines can never take the next line's key or label and
+    leave its value unmasked; the readable lines are then redacted together, so a label still masks a token on a later
+    line. A line is dropped when it cannot be redacted on its own, with the rest of a quoted value it opens through the
+    line that closes it, or through the end of what was read when the text was cut first, and when it holds the value of
+    a secret-named key that ends the line before it. With ``max_length``, the window ``redact_sensitive_text`` reads is
+    redacted and then clipped.
+    """
+    window = _bounded_redaction_input(value, max_length=max_length)
+    lines = window.splitlines()
+    kept: list[tuple[int, str, bool]] = []
+    # What the pass across lines reads: every readable line except one ending in a bare key, which it would refuse.
+    across = [""] * len(lines)
+    awaiting_value = False
+    hidden_through = -1
+    for index, line in enumerate(lines):
+        if index <= hidden_through:
+            continue
+        redacted = redact_sensitive_text(line)
+        if redacted == REDACTION_FAILED:
+            if _has_quote(line):
+                closing = next((later for later in range(index + 1, len(lines)) if _has_quote(lines[later])), None)
+                hidden_through = closing if closing is not None else len(lines) if len(window) < len(value) else index
+            awaiting_value = False
+            continue
+        value_line = awaiting_value
+        awaiting_value = line.rstrip().endswith((":", "=")) and redact_sensitive_text(f"{line}\n-") == REDACTION_FAILED
+        if not awaiting_value:
+            across[index] = redacted
+        if not value_line:
+            kept.append((index, redacted, awaiting_value))
+    together = redact_sensitive_text("\n".join(across)).split("\n")
+    if together == [REDACTION_FAILED] or len(together) != len(lines):
+        # Too long to read at once, or refused: each line stays as redacted on its own.
+        together = across
+    text = "\n".join(alone if bare_key else together[index] for index, alone, bare_key in kept)
+    return _truncate_text(text, max_length)
+
+
+def _has_quote(line: str) -> bool:
+    return '"' in line or "'" in line
 
 
 def redact_config_text(value: str) -> str:

@@ -12,8 +12,9 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from mindroom.history.conversation_text import Utterance, one_line, redact_conversation_text, utterances
+from mindroom.history.conversation_text import Utterance, one_line, utterances
 from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.redaction import redact_sensitive_lines
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
 _DIGEST_ASSISTANT_CHARS = 200
-# Redaction handles at most 64 KiB per call, so one rendered message stays below it.
+# One rendered message keeps at most this much of its start and end.
 _MAX_MESSAGE_CHARS = 60_000
 _MIN_MESSAGE_CHARS = 2_000
 # Room for the omission note inside a clipped message.
@@ -70,7 +71,7 @@ def render_transcript(messages: Sequence[Utterance], *, summary: str | None = No
     message_chars = min(_MAX_MESSAGE_CHARS, max(_MIN_MESSAGE_CHARS, budget_chars // 8))
     verbatim = [_render_message(message, message_chars) for message in recent]
     compacted = (
-        [redact_conversation_text(_clip(f"[Summary of earlier turns removed by compaction.]\n{text}", message_chars))]
+        [_clip(redact_sensitive_lines(f"[Summary of earlier turns removed by compaction.]\n{text}"), message_chars)]
         if summary and (text := summary.strip())
         else []
     )
@@ -102,12 +103,12 @@ def _digest_line(message: Utterance) -> str | None:
     if message.kind == "tool_result":
         return None
     # A digest line keeps a few hundred characters, so only that much of a long message is read.
-    text = one_line(redact_conversation_text(message.unredacted, max_chars=4 * _DIGEST_USER_CHARS))
+    text = one_line(redact_sensitive_lines(message.unredacted, max_length=4 * _DIGEST_USER_CHARS))
     if message.kind != "reply":
         return f"{_heading(message)} {text[:_DIGEST_USER_CHARS]}" if text else None
     parts = []
     if names := _tool_call_names(message.message):
-        parts.append(f"ASSISTANT[tools: {redact_conversation_text(', '.join(names))[:_DIGEST_ASSISTANT_CHARS]}]")
+        parts.append(f"ASSISTANT[tools: {', '.join(names)[:_DIGEST_ASSISTANT_CHARS]}]")
     if text:
         parts.append(f"ASSISTANT: {text[:_DIGEST_ASSISTANT_CHARS]}")
     return "\n".join(parts) or None
@@ -124,7 +125,7 @@ def _heading(message: Utterance) -> str:
 
 
 def _render_message(message: Utterance, limit: int) -> str:
-    """Keep the message's start and end, and redact what remains.
+    """Redact the message, then keep its start and end, so shortening never cuts a value redaction must read whole.
 
     The evidence is a conversation the agent's model already processed, so redaction is best-effort; learned files
     are checked again for credentials when they are written.
@@ -135,7 +136,7 @@ def _render_message(message: Utterance, limit: int) -> str:
         arguments = function.get("arguments")
         rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
         lines.append(f"-> calls {function.get('name', 'unknown tool')}({rendered})")
-    return redact_conversation_text(_clip("\n".join(lines), limit))
+    return _clip(redact_sensitive_lines("\n".join(lines)), limit)
 
 
 def _tool_call_names(message: Message) -> list[str]:

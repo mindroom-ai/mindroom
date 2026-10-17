@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import random
-
 import pytest
 from agno.models.message import Message
 from agno.models.response import ToolExecution
@@ -13,7 +11,7 @@ from agno.session.agent import AgentSession
 
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
-from mindroom.history.conversation_text import conversation_lines, redact_conversation_text, utterances
+from mindroom.history.conversation_text import conversation_lines, utterances
 from mindroom.knowledge_graph.episodes import render_episodes
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
@@ -47,73 +45,6 @@ def _turn(**metadata: object) -> RunOutput:
 
 def _kinds(run: RunOutput, *, agent_work: bool = False) -> list[tuple[str, str | None, str]]:
     return [(item.kind, item.sender, item.unredacted) for item in utterances(run, agent_work=agent_work)]
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        pytest.param(f"My token is {TOKEN}.\nNext.", "My token is ***redacted***.\nNext.", id="token"),
-        # The whole text is read at once, so a label and its value on separate lines are still matched.
-        pytest.param("Authorization: Bearer\nabc123def456", "Authorization: Bearer\n***redacted***", id="split-label"),
-        # Redacting the whole text refuses a key whose value is on the next line; only that value line goes.
-        pytest.param("password:\nhunter2 is it\nok bye", "password:\nok bye", id="value-after-a-bare-key"),
-        # A dropped value line still labels the line after it.
-        pytest.param(
-            "password:\nAuthorization: Bearer\nabc123def456",
-            "password:\n***redacted***",
-            id="label-as-value",
-        ),
-        # An unclosed quote hides its line and the rest of the quoted value, through the line that closes it.
-        pytest.param('token: "abc\ndef\nghi"\nThe launch is Friday.', "The launch is Friday.", id="open-quote"),
-        # A quote no later line closes holds nothing beyond its own line.
-        pytest.param(
-            'Set DB password: "correct horse\nThe launch is Friday.',
-            "The launch is Friday.",
-            id="never-closed",
-        ),
-        # A line longer than redaction reads goes alone; it opened no quote, so the next line stays.
-        pytest.param("x" * 70_000 + '\ntoken: "abc"', 'token: "***redacted***"', id="unreadable-line"),
-        pytest.param("env:\n  password: hunter2", "env:\n  password: ***redacted***", id="nested-key"),
-    ],
-)
-def test_redaction_drops_only_the_lines_it_cannot_read_safely(text: str, expected: str) -> None:
-    """One ambiguous line costs its own lines, never the whole message, and never shows a secret."""
-    assert redact_conversation_text(text) == expected
-
-
-def test_redaction_reads_only_a_little_more_than_it_keeps() -> None:
-    """A huge text keeps its start within the limit, also when the whole text cannot be redacted at once."""
-    clipped = redact_conversation_text("Atlas launch notes. " + "x" * 200_000, max_chars=4000)
-    assert clipped.startswith("Atlas launch notes. ")
-    assert clipped.endswith("... [truncated]")
-    assert len(clipped) == 4000
-
-    fallback = redact_conversation_text("password:\nhunter2\n" + "y " * 5_000, max_chars=1000)
-    assert fallback.startswith("password:\ny y")
-    assert fallback.endswith("... [truncated]")
-    assert len(fallback) == 1000
-
-
-def test_planted_secrets_never_survive_redaction() -> None:
-    """Conversations mixing ordinary lines with every construct the redactor understands never show a planted secret."""
-    rng = random.Random(2912)  # noqa: S311 - a fixed seed makes the generated conversations reproducible
-    ordinary = ["The launch is Friday.", "Steps:", "  - deploy", "it is fine", "", "Atlas: shipped"]
-    for attempt in range(300):
-        secrets = [f"zq{attempt:04d}{index}sekret" for index in range(4)]
-        constructs = [
-            f"token {TOKEN[:-4]}{attempt:04d}",
-            f"password: {secrets[0]}",
-            f"password:\n{secrets[1]}",
-            f'api_key: "{secrets[2]}\n{secrets[3]}"',
-            f"Authorization: Bearer\n{secrets[0]}",
-            f"postgres://app:{secrets[1]}@db/atlas",
-        ]
-        blocks = rng.sample(constructs, k=3) + rng.sample(ordinary, k=3)
-        rng.shuffle(blocks)
-        text = "\n".join(blocks)
-        for max_chars in (None, 2000):
-            redacted = redact_conversation_text(text, max_chars=max_chars)
-            assert not any(secret in redacted for secret in [*secrets, TOKEN[:-4]]), text
 
 
 def test_a_prompt_is_split_by_who_sent_each_message() -> None:

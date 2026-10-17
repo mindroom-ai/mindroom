@@ -609,6 +609,27 @@ def test_transcript_names_who_said_each_message() -> None:
     assert "<msg" not in transcript
 
 
+def test_transcript_never_shows_a_quoted_secret_its_shortening_cuts() -> None:
+    """Each message and the compaction summary are redacted before they are shortened, so no cut leaves a secret open."""
+    body = "".join(f"MIIEsecretline{index:03d}\n" for index in range(200))
+    pasted = f'API_TOKEN="-----BEGIN KEY-----\n{body}-----END KEY-----"\n' + "log line\n" * 3000
+    replies = [_run(f"r{index}", Message(role="assistant", content=f"reply {index}")) for index in range(2, 26)]
+    shown = _run("r26", Message(role="tool", content=pasted, tool_name="shell"))
+
+    transcript = _transcript(
+        _run("r1", Message(role="user", content=pasted)),
+        *replies,
+        shown,
+        summary=pasted,
+        budget_chars=20_000,
+    )
+
+    assert "USER (@alice:x): API_TOKEN=" not in transcript
+    assert "TOOL RESULT (shell):" in transcript
+    assert "characters omitted" in transcript
+    assert "secretline" not in transcript
+
+
 def test_long_tool_output_keeps_its_start_and_end() -> None:
     """A clipped tool result keeps the command's opening lines and the error or summary at its end."""
     output = "collected 900 items\n" + "PASSED\n" * 20_000 + "FAILED test_deploy.py::test_rollback - KeyError"

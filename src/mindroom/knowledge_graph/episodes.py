@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
-from mindroom.history.conversation_text import conversation_lines, redact_conversation_text, run_requester
+from mindroom.history.conversation_text import conversation_lines, run_requester
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
-from mindroom.redaction import redact_sensitive_data
+from mindroom.redaction import redact_sensitive_data, redact_sensitive_lines
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -212,7 +212,7 @@ def _episode(
 
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
     outcome = "error" if execution.tool_call_error else "result"
-    output = redact_conversation_text(str(execution.result or "").strip(), max_chars=settings.max_tool_result_chars)
+    output = redact_sensitive_lines(str(execution.result or "").strip(), max_length=settings.max_tool_result_chars)
     # Clipped to half a result, so arguments and result together stay within an episode.
     arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]
     return f"call {execution.tool_name}({arguments}) {outcome}: {output}"
