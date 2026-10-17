@@ -238,9 +238,11 @@ def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHi
             blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(metadata), "</run_metadata>"))
     for message in _compaction_replay_messages(run, history_settings):
         content = render_message_content(message)
-        if not content:
-            continue
-        blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
+        if content:
+            blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
+        if message.tool_calls:
+            # A result cut short still names the call and arguments that produced it.
+            blocks.append(_ExcerptBlock("<tool_calls>", stable_serialize(message.tool_calls), "</tool_calls>"))
     return blocks
 
 

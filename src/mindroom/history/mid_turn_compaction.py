@@ -356,6 +356,7 @@ async def _compact_scope(
         basis=basis,
         segment=segment,
         snapshots=_snapshots(run_response, layout, policy.inputs),
+        folded_messages=[message for exchange in layout.exchanges for message in exchange],
         # The size that triggered this compaction, so the history budget sees what the request needs.
         before_tokens=request_tokens,
         config=binding.config,
@@ -628,7 +629,9 @@ def _summary_units(exchanges: Sequence[Sequence[Message]]) -> list[list[Message]
 
     The request keeps a tool batch whole, but a parallel batch can exceed one summary input, and a result summarized
     apart from its call would lose which call, and which file or arguments, produced it. The call message's text and
-    reasoning, and any call without a result, go with the batch's first result.
+    reasoning, and any call without a result, go with the batch's first result. Results pair with calls by id, or by
+    position when the calls carry no ids (Ollama), since Agno returns a batch's results in call order; a batch neither
+    can pair stays one unit.
     """
     units: list[list[Message]] = []
     for exchange in exchanges:
@@ -636,18 +639,34 @@ def _summary_units(exchanges: Sequence[Sequence[Message]]) -> list[list[Message]
         if not head.tool_calls or not results:
             units.extend([message] for message in exchange)
             continue
-        calls = {call.get("id"): call for call in head.tool_calls}
-        answered = {result.tool_call_id for result in results}
-        unanswered = [call for call_id, call in calls.items() if call_id not in answered]
-        for index, result in enumerate(results):
-            call = calls.get(result.tool_call_id)
-            update: dict[str, Any] = {
-                "tool_calls": [*([call] if call is not None else []), *(unanswered if index == 0 else [])],
-            }
+        paired = _paired_calls(head.tool_calls, results)
+        if paired is None:
+            units.append(list(exchange))
+            continue
+        calls, unanswered = paired
+        for index, (call, result) in enumerate(zip(calls, results, strict=True)):
+            update: dict[str, Any] = {"tool_calls": [call, *(unanswered if index == 0 else [])]}
             if index:
                 update |= {"content": None, "reasoning_content": None, "redacted_reasoning_content": None}
             units.append([head.model_copy(update=update), result])
     return units
+
+
+def _paired_calls(
+    calls: list[dict[str, Any]],
+    results: Sequence[Message],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Return the call each result answers and the calls no result answers, or None when they cannot be paired."""
+    ids = [call.get("id") for call in calls]
+    if all(isinstance(call_id, str) and call_id for call_id in ids) and len(set(ids)) == len(ids):
+        by_id = dict(zip(ids, calls, strict=True))
+        if all(result.tool_call_id in by_id for result in results):
+            answered = {result.tool_call_id for result in results}
+            return [by_id[result.tool_call_id] for result in results], [
+                call for call_id, call in by_id.items() if call_id not in answered
+            ]
+        return None
+    return (list(calls), []) if len(calls) == len(results) else None
 
 
 def _history_snapshot(run_response: RunOutput | TeamRunOutput, layout: _Layout) -> list[RunOutput | TeamRunOutput]:

@@ -2004,11 +2004,16 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
     hook_context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
 
     with tool_runtime_context(hook_context):
-        await _run_in_session(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+        await _run_in_session(
+            _scoped_agent(_ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
+            "Do the task",
+        )
 
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
     # The hooks see the running turn's folded tool work, not only the earlier runs.
     assert any(message.role == "tool" for message in observed[0].messages)
+    # They see each folded message once, not the per-call copies the summarizer reads.
+    assert len({message.id for message in observed[0].messages}) == len(observed[0].messages)
     assert observed[1].token_count_after is not None
     assert observed[1].token_count_after < observed[1].token_count_before
 
@@ -2380,3 +2385,22 @@ def test_a_tool_batch_splits_into_summary_units_that_each_keep_their_own_call() 
     assert units[1][1] is second
     assert head.tool_calls is not None
     assert len(head.tool_calls) == 3
+    # A result naming no call of the batch cannot be paired, so the batch stays one unit.
+    stray = Message(role="tool", tool_call_id="other", content="X")
+    assert mid_turn_compaction._summary_units([(head, first, stray)]) == [[head, first, stray]]
+
+
+def test_tool_calls_without_ids_pair_by_position_or_stay_whole() -> None:
+    """Some providers, such as Ollama, give calls no ids, so results pair with calls by position, or not at all."""
+    calls = [
+        {"type": "function", "function": {"name": "read_file", "arguments": f'{{"path": "{name}"}}'}} for name in "abc"
+    ]
+    head = Message(role="assistant", tool_calls=calls)
+    results = tuple(Message(role="tool", content=f"SECRET_OF_{name}") for name in "abc")
+
+    units = mid_turn_compaction._summary_units([(head, *results)])
+
+    assert [unit[0].tool_calls for unit in units] == [[call] for call in calls]
+    assert [unit[1].content for unit in units] == ["SECRET_OF_a", "SECRET_OF_b", "SECRET_OF_c"]
+    # Without ids and with a result missing, nothing tells which call each result answers, so the batch stays whole.
+    assert mid_turn_compaction._summary_units([(head, *results[:2])]) == [[head, *results[:2]]]

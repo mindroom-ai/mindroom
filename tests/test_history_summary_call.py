@@ -726,3 +726,34 @@ def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
     error = _CompactionSummaryTimeoutError("deadline expired")
     assert SummaryRetryPolicy().should_shrink(error)
     assert _compaction_failure_status(error) == "timeout"
+
+
+def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -> None:
+    """A tool result cut short still names the call and arguments that produced it."""
+    run = _completed_run(
+        "run-big-result",
+        messages=[
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path": "big_a.py"}'},
+                    },
+                ],
+            ),
+            Message(role="tool", tool_call_id="c1", content="x" * 4_000),
+        ],
+    )
+
+    summary_input, included_runs = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=300,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert [included_run.run_id for included_run in included_runs] == ["run-big-result"]
+    assert "Run truncated to fit compaction budget." in summary_input
+    assert "big_a.py" in summary_input

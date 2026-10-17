@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.models.base import Model
+    from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
@@ -719,6 +720,7 @@ async def compact_scope_mid_turn(
     basis: FoldBasis,
     segment: Segment,
     snapshots: Sequence[RunOutput | TeamRunOutput],
+    folded_messages: Sequence[Message],
     before_tokens: int,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -748,6 +750,7 @@ async def compact_scope_mid_turn(
             basis=basis,
             segment=segment,
             snapshots=snapshots,
+            folded_messages=folded_messages,
             history_settings=inputs.history_settings,
             summary_model=summary_model,
             fallback_summary_model=fallback_model,

@@ -10,6 +10,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from agno.run.agent import RunOutput
 from agno.session.summary import SessionSummary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
@@ -60,7 +61,6 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.models.message import Message
     from agno.models.response import ModelResponse
-    from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
@@ -596,6 +596,7 @@ async def compact_running_turn(
     basis: FoldBasis,
     segment: Segment,
     snapshots: Sequence[RunOutput | TeamRunOutput],
+    folded_messages: Sequence[Message],
     history_settings: ResolvedHistorySettings,
     summary_model: SummaryModel,
     fallback_summary_model: SummaryModel | None,
@@ -618,7 +619,9 @@ async def compact_running_turn(
     # The summary's usage row and summary row reference the session row, which a first turn has not written yet.
     await run_blocking_until_complete(partial(ensure_scope_session_row, storage, session, scope))
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
-    messages = tuple(messages_for_runs(runs, history_settings)) if collect_compaction_hook_messages else ()
+    # Hooks see the folded messages themselves, not the per-call units the summarizer reads.
+    hook_runs = [*basis.runs, RunOutput(messages=list(folded_messages))]
+    messages = tuple(messages_for_runs(hook_runs, history_settings)) if collect_compaction_hook_messages else ()
     await _emit_compaction_hook(
         event_name=EVENT_COMPACTION_BEFORE,
         scope=scope,
