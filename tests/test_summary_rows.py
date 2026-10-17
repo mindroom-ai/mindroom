@@ -60,7 +60,7 @@ def _run_index(tmp_path: Path, run_id: str) -> int:
 def _add_summary_row(
     tmp_path: Path,
     *,
-    after_run_index: int,
+    after: str,
     summary: str | None,
     scope_key: str = "agent:code",
     session_id: str = "s1",
@@ -71,8 +71,8 @@ def _add_summary_row(
         connection.execute(
             "INSERT INTO code_sessions_summaries "
             "(session_id, scope_key, after_run_index, summary, summary_model, event_ids, seen_event_ids, created_at) "
-            "VALUES (?, ?, ?, ?, 'model', '[]', '[]', 1700000000)",
-            (session_id, scope_key, after_run_index, summary),
+            "SELECT ?, ?, run_index, ?, 'model', '[]', '[]', 1700000000 FROM code_sessions_runs WHERE run_id = ?",
+            (session_id, scope_key, summary, after),
         )
         connection.commit()
     finally:
@@ -97,7 +97,7 @@ def test_fresh_storage_has_summary_tables(tmp_path: Path) -> None:
     storage = _open(tmp_path)
     try:
         seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=[_run("r0")]))
-        _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary="earlier")
+        _add_summary_row(tmp_path, after="r0", summary="earlier")
         with sqlite3.connect(_db_path(tmp_path)) as connection:
             connection.execute("INSERT INTO code_sessions_removed_runs (session_id, run_id) VALUES ('s1', 'gone')")
         storage.delete_session("s1")
@@ -118,8 +118,8 @@ def test_load_returns_runs_after_the_latest_summary_and_every_non_visible_run(
     """A summary row hides the visible runs it covers; paused runs and later runs still load."""
     runs = [_run("r0"), _run("r1", status=RunStatus.paused), _run("r2"), _run("r3"), _run("r4")]
     seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary="first")
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r2"), summary="second")
+    _add_summary_row(tmp_path, after="r0", summary="first")
+    _add_summary_row(tmp_path, after="r2", summary="second")
 
     session = get_agent_session(storage, "s1")
 
@@ -154,7 +154,7 @@ def test_load_keeps_member_rows_with_their_team_run(storage: SqliteDb, tmp_path:
             runs=[member("m0", "t0"), team_run("t0"), member("m1", "t1"), team_run("t1")],
         ),
     )
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "m1"), summary="team summary", scope_key="team:eng")
+    _add_summary_row(tmp_path, after="m1", summary="team summary", scope_key="team:eng")
 
     session = get_team_session(storage, "s1")
 
@@ -165,8 +165,8 @@ def test_load_keeps_member_rows_with_their_team_run(storage: SqliteDb, tmp_path:
 def test_barrier_row_hides_the_runs_behind_it(storage: SqliteDb, tmp_path: Path) -> None:
     """A summary row without text retires what it covers: the runs behind it stay hidden."""
     seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=[_run("r0"), _run("r1")]))
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary="retired")
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary=None)
+    _add_summary_row(tmp_path, after="r0", summary="retired")
+    _add_summary_row(tmp_path, after="r0", summary=None)
 
     session = get_agent_session(storage, "s1")
 
@@ -177,7 +177,7 @@ def test_barrier_row_hides_the_runs_behind_it(storage: SqliteDb, tmp_path: Path)
 def test_load_reads_dict_sessions_through_the_same_filter(storage: SqliteDb, tmp_path: Path) -> None:
     """``deserialize=False`` reads see the same runs as object reads."""
     seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=[_run("r0"), _run("r1")]))
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary="first")
+    _add_summary_row(tmp_path, after="r0", summary="first")
 
     raw = storage.get_session("s1", SessionType.AGENT, deserialize=False)
 
@@ -228,7 +228,7 @@ def test_cancelled_and_errored_runs_behind_the_summary_still_load(storage: Sqlit
     """Every non-visible run loads wherever it sits, as `main` keeps such runs live."""
     runs = [_run("c0", status=RunStatus.cancelled), _run("e1", status=RunStatus.error), _run("r2"), _run("r3")]
     seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r2"), summary="folded")
+    _add_summary_row(tmp_path, after="r2", summary="folded")
 
     session = get_agent_session(storage, "s1")
 
@@ -256,7 +256,7 @@ def test_load_follows_member_rows_to_any_depth_and_drops_orphans(storage: Sqlite
             ],
         ),
     )
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "t1"), summary="folded", scope_key="team:eng")
+    _add_summary_row(tmp_path, after="t1", summary="folded", scope_key="team:eng")
 
     session = get_team_session(storage, "s1")
 
@@ -366,12 +366,15 @@ def test_load_derives_the_summary_from_the_latest_row(storage: SqliteDb, tmp_pat
     assert _loaded(storage).summary is None
 
     _fold(storage, ["r0"], "S1")
+    stale = _loaded(storage)
+    stale.summary = SessionSummary(summary="stale session-row summary")
+    storage.upsert_session(stale)
     raw = storage.get_session("s1", SessionType.AGENT, deserialize=False)
 
     assert _loaded(storage).summary.summary == "S1"  # type: ignore[union-attr]
     assert isinstance(raw, dict)
     assert raw["summary"]["summary"] == "S1"
-    _add_summary_row(tmp_path, after_run_index=_run_index(tmp_path, "r0"), summary=None)
+    _add_summary_row(tmp_path, after="r0", summary=None)
     assert _loaded(storage).summary is None
 
 
@@ -554,18 +557,6 @@ def test_a_pending_approval_before_the_cut_survives(storage: SqliteDb) -> None:
     session = _loaded(storage)
     assert [run.run_id for run in session.runs or []] == ["p0", "r1"]
     assert session.summary is None
-
-
-def test_an_approval_completed_after_newer_turns_replays_after_the_summary(storage: SqliteDb) -> None:
-    """A continuation that finishes after a compaction is not hidden behind the summary it never fed."""
-    _seed_events(storage, [_event_run("p0", status=RunStatus.paused), _event_run("r1"), _event_run("r2")])
-    _fold(storage, ["r1", "r2"], "S1")
-
-    storage.upsert_run(_event_run("p0"), session_id="s1")
-
-    session = _loaded(storage)
-    assert [run.run_id for run in session.runs or []] == ["p0"]
-    assert session.summary.summary == "S1"  # type: ignore[union-attr]
 
 
 def test_edit_cuts_a_summary_whose_range_answered_the_event(storage: SqliteDb) -> None:

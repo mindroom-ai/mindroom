@@ -275,24 +275,6 @@ def test_a_stale_save_of_a_folded_run_and_its_member_runs_changes_neither(tmp_pa
     storage.close()
 
 
-def test_a_stale_session_row_summary_never_replays(tmp_path: Path) -> None:
-    """A stale session write cannot detach replay from the latest summary row."""
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
-    compact_runs(storage, session, _SCOPE, ["run-1"], "folded summary")
-    stale = get_agent_session(storage, "session-1")
-    assert stale is not None
-    stale.summary = SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
-    storage.upsert_session(stale)
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert persisted.summary is not None
-    assert persisted.summary.summary == "folded summary"
-    storage.close()
-
-
 def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: Path) -> None:
     """The update callable sees the latest persisted state, and the write lands on that row."""
     config, runtime_paths = _make_config(tmp_path)
