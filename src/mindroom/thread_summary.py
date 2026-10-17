@@ -155,6 +155,7 @@ def _summary_model_requires_provider_temperature(model: object) -> bool:
         isinstance(model, _IdentifiedModel)
         and (
             model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+            # OpenRouter-style IDs carry a provider prefix, such as openai/gpt-5-mini.
             or model.id.casefold().rsplit("/", 1)[-1].startswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
             or (
                 isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS)
