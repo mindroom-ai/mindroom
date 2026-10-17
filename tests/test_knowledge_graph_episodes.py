@@ -158,15 +158,26 @@ def test_prompts_mindroom_wrote_are_nobodys_words() -> None:
     )
     assert follow_up.metadata is not None
     follow_up.metadata[TURN_INTENT_RUN_METADATA_KEY] = "job_follow_up"
-    automation = _run("r2", created_at=1_760_000_060, hook_source="automation/todo_poke", answer="Poked.")
+    automation = _run(
+        "r2",
+        created_at=1_760_000_060,
+        hook_source="automation/todo_poke",
+        answer="Poked.",
+        tools=[_tool("list_todos", "3 open todos for Atlas")],
+    )
 
-    conversation = _episodes([_run("r0", created_at=1_759_999_000), follow_up, automation], "conversation")
+    conversation, tool_results = _episodes(
+        [_run("r0", created_at=1_759_999_000), follow_up, automation],
+        "conversation",
+    )
 
-    assert conversation[0].episode.body.splitlines() == [
+    assert conversation.episode.body.splitlines() == [
         "person @alice (example.test): When does Atlas ship?",
         "agent mind: Atlas ships Friday.",
         "agent mind: The deploy finished.",
     ]
+    # The automation's tool results are still observations.
+    assert "3 open todos for Atlas" in tool_results.episode.body
 
 
 def test_exploration_thread_renders_only_tool_results() -> None:
