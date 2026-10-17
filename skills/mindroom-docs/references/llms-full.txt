@@ -3910,7 +3910,7 @@ Changing the embedder starts a new, empty graph that fills again from conversati
 ## What Goes Into the Graph
 
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
-- From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads and tasks another agent delegated to it, only the tool calls and their results, never the agent's own summary.
+- From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
 Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.

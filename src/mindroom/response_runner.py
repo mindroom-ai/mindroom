@@ -460,9 +460,13 @@ def _split_delivery_tool_trace(
     return completed, interrupted
 
 
-def _run_metadata_with_origin(metadata: dict[str, Any] | None, envelope: MessageEnvelope) -> dict[str, Any]:
-    """Record what started this turn, so stored runs show which automation asked or that MindRoom wrote the prompt."""
-    recorded = {**(metadata or {}), TURN_INTENT_RUN_METADATA_KEY: envelope.origin.intent.value}
+def _agent_run_metadata(request: ResponseRequest) -> dict[str, Any]:
+    """Record what started this turn, so stored runs show which automation asked or that MindRoom wrote the prompt.
+
+    The turn recorder gets it too, so a turn stopped before its run starts keeps it.
+    """
+    envelope = request.response_envelope
+    recorded = {**(request.matrix_run_metadata or {}), TURN_INTENT_RUN_METADATA_KEY: envelope.origin.intent.value}
     if envelope.hook_source is not None:
         recorded[HOOK_SOURCE_RUN_METADATA_KEY] = envelope.hook_source
     return recorded
@@ -3944,10 +3948,7 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_run_metadata_with_origin(
-                _materialize_matrix_run_metadata(request.matrix_run_metadata),
-                request.response_envelope,
-            ),
+            matrix_run_metadata=_agent_run_metadata(request),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
@@ -5529,7 +5530,7 @@ class ResponseRunner:
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_agent_run_metadata(request),
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
@@ -5672,7 +5673,7 @@ class ResponseRunner:
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_agent_run_metadata(request),
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:

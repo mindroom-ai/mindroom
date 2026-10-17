@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -19,6 +20,10 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
+
+
+class _BuiltRecorder(Exception):  # noqa: N818
+    """Stops a turn as soon as its recorder is built."""
 
 
 async def _turn(
@@ -64,3 +69,28 @@ async def test_agent_turn_records_its_intent_in_run_metadata(tmp_path: Path, int
     turn = await _turn(tmp_path, None, intent)
     assert turn.matrix_run_metadata is not None
     assert turn.matrix_run_metadata[TURN_INTENT_RUN_METADATA_KEY] == intent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["_process_and_respond", "_process_and_respond_streaming"])
+async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: Path, method: str) -> None:
+    """The turn recorder starts with the turn's origin, so a turn interrupted while it prepares is stored with it."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(MessageTarget.resolve("!room:localhost", "$thread", "$event"))
+    envelope = request.response_envelope
+    envelope = replace(
+        envelope,
+        hook_source="automation/exploration",
+        origin=replace(envelope.origin, intent=TurnIntent.JOB_FOLLOW_UP),
+    )
+    request = replace(request, response_envelope=envelope)
+
+    with (
+        patch.object(runner, "_build_turn_recorder", side_effect=_BuiltRecorder) as build,
+        pytest.raises(_BuiltRecorder),
+    ):
+        await getattr(runner, method)(request)
+
+    metadata = build.call_args.kwargs["matrix_run_metadata"]
+    assert metadata[TURN_INTENT_RUN_METADATA_KEY] == TurnIntent.JOB_FOLLOW_UP
+    assert metadata[HOOK_SOURCE_RUN_METADATA_KEY] == "automation/exploration"

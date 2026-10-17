@@ -1128,6 +1128,7 @@ visibility = [
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
+    "mindroom.history.claude_replay_compat",
 ]
 
 [[modules]]
@@ -7457,7 +7458,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.history.claude_replay_compat"
-depends_on = []
+depends_on = ["mindroom.history.run_visibility"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 
 [[modules]]
@@ -7530,7 +7531,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.knowledge_graph.episodes",
-    "mindroom.memory.auto_flush",
     "mindroom.skill_learning.transcript",
 ]
 

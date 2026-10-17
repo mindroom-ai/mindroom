@@ -20,7 +20,12 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
-from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import (
+    QUEUED_MESSAGE_NOTICE_MARKER_KEY,
+    QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+    is_model_history_visible_run,
+    is_queued_notice_message,
+)
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.agent_storage import runs_without, save_runs
@@ -112,8 +117,6 @@ def stream_attempt_with_model[ChunkT](
     )
 
 
-_QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
-_QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER = "persisted"
 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
 
@@ -199,20 +202,12 @@ def bind_mid_turn_conversation_context(
         notice.mid_turn_gate.bind_conversation_context(context_factory())
 
 
-def _has_queued_notice_marker(message: Message) -> bool:
-    provider_data = message.provider_data
-    return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
-        True,
-        _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
-    )
-
-
 def _queued_notice_marker(message: Message) -> bool | str | None:
     provider_data = message.provider_data
     if not isinstance(provider_data, dict):
         return None
-    marker = provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY)
-    return marker if marker in (True, _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER) else None
+    marker = provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
+    return marker if marker in (True, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER) else None
 
 
 def _queued_notice_response_turn_id(message: Message) -> str | None:
@@ -229,7 +224,7 @@ def _is_queued_notice_message(
     response_turn_id: str | None = None,
 ) -> bool:
     """Return whether one Agno message is the hidden queued-message notice."""
-    if not _has_queued_notice_marker(message):
+    if not is_queued_notice_message(message):
         return False
     if response_turn_id is None:
         return True
@@ -282,7 +277,7 @@ def _append_queued_notice_if_needed(
             role="user",
             content=notice_text,
             provider_data={
-                _QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
+                QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
                 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
             },
         ),
@@ -448,7 +443,7 @@ def _new_persisted_queued_notice(response_turn_id: str, notice_text: str) -> Mes
         role="user",
         content=notice_text,
         provider_data={
-            _QUEUED_MESSAGE_NOTICE_MARKER_KEY: _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+            QUEUED_MESSAGE_NOTICE_MARKER_KEY: QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
             _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
         },
     )
@@ -472,7 +467,7 @@ def _queued_notice_text_to_persist(
         (
             message
             for message in destination_matches
-            if _queued_notice_marker(message) == _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+            if _queued_notice_marker(message) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
             and isinstance(message.content, str)
         ),
         None,
@@ -528,7 +523,7 @@ def _finalize_queued_notice_in_runs(
         notice_text is not None
         and len(all_matches) == 1
         and len(destination_matches) == 1
-        and _queued_notice_marker(destination_matches[0]) == _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+        and _queued_notice_marker(destination_matches[0]) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
         and destination_matches[0].content == notice_text
     ):
         return []
@@ -690,7 +685,7 @@ def _queued_notice_response_turn_ids(
 def _run_output_notice_messages_for_any_response(
     run_output: RunOutput | TeamRunOutput,
 ) -> list[Message]:
-    matches = [message for message in run_output.messages or [] if _has_queued_notice_marker(message)]
+    matches = [message for message in run_output.messages or [] if is_queued_notice_message(message)]
     if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
         for member_response in run_output.member_responses:
             if isinstance(member_response, RunOutput | TeamRunOutput):
@@ -734,7 +729,7 @@ def _recover_prior_queued_notices(
         if _has_notice_marker_for_response(
             runs,
             response_turn_id=response_turn_id,
-            marker=_QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+            marker=QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
         ):
             continue
         for edited_run in _finalize_queued_notice_in_runs(runs, response_turn_id=response_turn_id):

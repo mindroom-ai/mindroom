@@ -10,6 +10,7 @@ compaction summary of removed turns.
 from __future__ import annotations
 
 import json
+from itertools import groupby
 from typing import TYPE_CHECKING
 
 from mindroom.history.conversation_text import Utterance, one_line, utterances
@@ -33,9 +34,16 @@ _MIN_MESSAGE_CHARS = 2_000
 _CLIP_NOTE_CHARS = 64
 
 
-def conversation_messages(session: AgentSession) -> list[Utterance]:
-    """Return what was said and done in this session's turns, in order, with the agent's tool calls and results."""
-    return [utterance for run in session.runs or [] for utterance in utterances(run, agent_work=True)]
+def conversation_messages(session: AgentSession) -> list[list[Utterance]]:
+    """Return each stored message of this session's turns, in order, as what was said in it, with tool calls and results.
+
+    A prompt holding several people's messages stays one entry, so it is redacted as a whole like any stored message.
+    """
+    return [
+        list(parts)
+        for run in session.runs or []
+        for _, parts in groupby(utterances(run, agent_work=True), key=lambda utterance: id(utterance.message))
+    ]
 
 
 def count_model_replies(run: RunOutput | None) -> tuple[int, bool]:
@@ -57,13 +65,18 @@ def count_model_replies(run: RunOutput | None) -> tuple[int, bool]:
     return replies, restarted
 
 
-def render_transcript(messages: Sequence[Utterance], *, summary: str | None = None, budget_chars: int) -> str:
+def render_transcript(
+    messages: Sequence[Sequence[Utterance]],
+    *,
+    summary: str | None = None,
+    budget_chars: int,
+) -> str:
     """Render the compaction summary, digest lines for older turns, and the newest messages within ``budget_chars``.
 
     The summary is the only record of compacted turns, so it is shortened rather than dropped.
     """
     tail = _TAIL_MESSAGES
-    while len(messages) > tail and messages[-tail].kind == "tool_result":
+    while len(messages) > tail and messages[-tail][0].kind == "tool_result":
         # A kept run never starts on a tool result whose call was digested away.
         tail += 1
     older, recent = messages[: max(0, len(messages) - tail)], messages[-tail:]
@@ -99,15 +112,17 @@ def render_transcript(messages: Sequence[Utterance], *, summary: str | None = No
     return "\n\n".join(sections)
 
 
-def _digest_line(message: Utterance) -> str | None:
-    if message.kind == "tool_result":
+def _digest_line(message: Sequence[Utterance]) -> str | None:
+    first = message[0]
+    if first.kind == "tool_result":
         return None
-    # A digest line keeps a few hundred characters, so only that much of a long message is normalized.
-    text = one_line(message.unredacted[: 4 * _DIGEST_USER_CHARS])
-    if message.kind != "reply":
-        return redact_sensitive_text(f"{_heading(message)} {text[:_DIGEST_USER_CHARS]}") if text else None
+    if first.kind != "reply":
+        # A digest line keeps a few hundred characters, so only that much of a long message is normalized.
+        said = one_line(" ".join(f"{_heading(part)} {part.unredacted}" for part in message)[: 4 * _DIGEST_USER_CHARS])
+        return redact_sensitive_text(said[:_DIGEST_USER_CHARS])
+    text = one_line(first.unredacted[: 4 * _DIGEST_USER_CHARS])
     parts = []
-    if names := _tool_call_names(message.message):
+    if names := _tool_call_names(first.message):
         parts.append(f"ASSISTANT[tools: {', '.join(names)[:_DIGEST_ASSISTANT_CHARS]}]")
     if text:
         parts.append(f"ASSISTANT: {text[:_DIGEST_ASSISTANT_CHARS]}")
@@ -124,9 +139,9 @@ def _heading(message: Utterance) -> str:
     return "ASSISTANT:"
 
 
-def _render_message(message: Utterance, limit: int) -> str:
-    lines = [_heading(message), message.unredacted]
-    for call in message.message.tool_calls or []:
+def _render_message(message: Sequence[Utterance], limit: int) -> str:
+    lines = [line for part in message for line in (_heading(part), part.unredacted)]
+    for call in message[0].message.tool_calls or []:
         function = call.get("function") or {}
         arguments = function.get("arguments")
         rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)

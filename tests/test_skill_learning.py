@@ -599,13 +599,27 @@ def test_transcript_names_who_said_each_message() -> None:
     transcript = _transcript(asked, follow_up, *recent, budget_chars=100_000)
 
     digest = transcript.split("\n\n")[0].splitlines()
-    assert digest[1:5] == [
-        "USER (@bob:x): Atlas ships Friday.",
-        "USER (@mindroom_research:x): Checked the tracker.",
+    # A prompt is one stored message, so its messages share one digest line.
+    assert digest[1:4] == [
+        "USER (@bob:x): Atlas ships Friday. USER (@mindroom_research:x): Checked the tracker.",
         "ASSISTANT: Noted.",
         "RUNTIME: [RUNTIME UPDATE, NOT A USER MESSAGE] Collect the jobs.",
     ]
     assert "<msg" not in transcript
+
+
+def test_a_prompt_holding_several_messages_is_redacted_as_one_stored_message() -> None:
+    """A secret split over two messages of one prompt stays hidden, as it did when the prompt was shown as raw tags."""
+    prompt = (
+        "<messages>"
+        + render_msg_tag(sender="@alice:x", body="Here is the config:\npassword:\n")
+        + render_msg_tag(sender="@alice:x", body="MangoRiver42!")
+        + "</messages>"
+    )
+
+    transcript = _transcript(_run("r1", Message(role="user", content=prompt)), budget_chars=100_000)
+
+    assert "MangoRiver42" not in transcript
 
 
 def test_long_tool_output_keeps_its_start_and_end() -> None:

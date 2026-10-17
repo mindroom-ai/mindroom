@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
-from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.redaction import redact_sensitive_text
 from mindroom.turn_origin import TurnIntent
@@ -73,10 +73,12 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
         content = message.content if isinstance(message.content, str) else ""
         if message.from_history:
             continue
-        if message.role == "user" and (agent_work or not runtime_prompt):
+        # A queued-message notice is MindRoom's instruction to pause for a newer message, stored as a user message.
+        mindroom_wrote = runtime_prompt or is_queued_notice_message(message)
+        if message.role == "user" and (agent_work or not mindroom_wrote):
             said.extend(
                 Utterance("runtime", None, body, message)
-                if runtime_prompt
+                if mindroom_wrote
                 else Utterance("said", sender, body, message)
                 for sender, body in parse_msg_tags(content, default_sender=requester)
                 if body.strip()
@@ -100,9 +102,9 @@ def conversation_lines(
     ``agent_for_sender`` names the configured agent behind a Matrix ID, so agents' messages are not labeled as people's.
     """
     return [
-        f"{_speaker(utterance.sender, agent_name, agent_for_sender)}: {text}"
+        f"{_speaker(utterance.sender, agent_name, agent_for_sender)}: "
+        f"{one_line(redact_sensitive_text(utterance.unredacted.strip(), max_length=max_line_chars))}"
         for utterance in utterances(run)
-        if (text := one_line(redact_sensitive_text(utterance.unredacted.strip(), max_length=max_line_chars)))
     ]
 
 

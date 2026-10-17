@@ -12,6 +12,7 @@ from agno.session.agent import AgentSession
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import conversation_lines, utterances
+from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
 from mindroom.knowledge_graph.episodes import render_episodes
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
@@ -141,6 +142,28 @@ def test_runtime_prompts_and_stopped_summaries_are_nobodys_words(
     run = _turn(**metadata)
     assert [kind for kind, _, _ in _kinds(run)] == conversation
     assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == agent_work
+
+
+def test_a_queued_message_notice_is_nobodys_words() -> None:
+    """The pause notice MindRoom stores as a user message when someone writes mid-turn is not the requester's."""
+    notice = Message(
+        role="user",
+        content="[SYSTEM NOTICE] A newer message arrived; pause here.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER},
+    )
+    run = _run(
+        Message(role="user", content="Deploy it."),
+        Message(role="assistant", content="Deploying."),
+        notice,
+        Message(role="assistant", content="Paused."),
+    )
+
+    assert _kinds(run) == [
+        ("said", "@alice:x", "Deploy it."),
+        ("reply", None, "Deploying."),
+        ("reply", None, "Paused."),
+    ]
+    assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == ["said", "reply", "runtime", "reply"]
 
 
 def test_conversation_lines_label_each_speaker_on_one_redacted_line() -> None:
