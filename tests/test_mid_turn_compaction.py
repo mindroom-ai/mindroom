@@ -664,12 +664,23 @@ async def test_a_parallel_tool_batch_larger_than_one_summary_input_folds_without
 ) -> None:
     """A batch is kept whole in the request, but its results reach the summarizer across chunks, none cut short."""
     config, paths = _config(tmp_path, context_window=8_000, summary_context_window=6_000)
-    model = _ToolLoopModel(tool_rounds=2, calls_per_round=4)
-    facts = iter(range(100))
 
-    def probe() -> str:
+    class _PathLoop(_ToolLoopModel):
+        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
+            response = await super().ainvoke(messages, **kwargs)
+            for call in response.tool_calls or []:
+                call["function"]["arguments"] = json.dumps({"path": f"{call['id']}.txt"})
+            return response
+
+    model = _PathLoop(tool_rounds=2, calls_per_round=4)
+    facts = iter(range(100))
+    fact_paths: dict[str, str] = {}
+
+    def probe(path: str) -> str:
         """Return one tool result carrying a distinct fact at its end."""
-        return "r" * 4_000 + f" FACT-{next(facts):02d}"
+        fact = f"FACT-{next(facts):02d}"
+        fact_paths[fact] = path
+        return "r" * 4_000 + f" {fact}"
 
     agent = _agent(model, config, paths)
     agent.tools = [probe]
@@ -679,7 +690,10 @@ async def test_a_parallel_tool_batch_larger_than_one_summary_input_folds_without
     assert str(output.content).endswith("done")
     summary_inputs = "\n".join(summary_calls.inputs)
     assert "Run truncated to fit compaction budget." not in summary_inputs
-    assert all(f"FACT-{index:02d}" in summary_inputs for index in range(8))
+    assert len(fact_paths) == 8
+    # Each result reaches the summarizer beside its own call, so the summary can tell which file it came from.
+    for fact, path in fact_paths.items():
+        assert any(fact in summary_input and path in summary_input for summary_input in summary_calls.inputs), fact
 
 
 @pytest.mark.asyncio
@@ -1569,7 +1583,7 @@ async def test_the_turns_metadata_reaches_the_summary_once(
 
     await agent.arun("Do the task", session_id="session-1", metadata={"matrix_seen_event_ids": ["$x"]})
 
-    snapshots = [run for run in summary_calls.inputs[0].split("<run ") if ":exchange:" in run]
+    snapshots = [run for run in summary_calls.inputs[0].split("<run ") if ":fold:" in run]
     assert len(snapshots) >= 2
     assert sum("<run_metadata>" in run for run in snapshots) == 1
 
@@ -2334,3 +2348,35 @@ def test_a_team_fold_summarizes_the_tool_calls_of_the_members_it_delegated_to() 
     segment = mid_turn_compaction._segment(run_response, layout, set())
 
     assert folded_tool_call_ids(segment.payload()) == {"delegate", "member-call", "deep-call"}
+
+
+def test_a_tool_batch_splits_into_summary_units_that_each_keep_their_own_call() -> None:
+    """Each result sits beside its call; the call text and any call still without a result stay with the first."""
+    head = Message(
+        role="assistant",
+        content="Reading both files",
+        tool_calls=[
+            {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'}},
+            {"id": "c2", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "b.txt"}'}},
+            {"id": "c3", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "c.txt"}'}},
+        ],
+    )
+    first = Message(role="tool", tool_call_id="c1", content="A")
+    second = Message(role="tool", tool_call_id="c2", content="B")
+    note = Message(role="user", content="queued note")
+
+    units = mid_turn_compaction._summary_units([(head, first, second), (note,)])
+
+    assert [[message.role for message in unit] for unit in units] == [
+        ["assistant", "tool"],
+        ["assistant", "tool"],
+        ["user"],
+    ]
+    assert [call["id"] for call in units[0][0].tool_calls or []] == ["c1", "c3"]
+    assert [call["id"] for call in units[1][0].tool_calls or []] == ["c2"]
+    assert units[0][0].content == "Reading both files"
+    assert units[1][0].content is None
+    assert units[0][1] is first
+    assert units[1][1] is second
+    assert head.tool_calls is not None
+    assert len(head.tool_calls) == 3

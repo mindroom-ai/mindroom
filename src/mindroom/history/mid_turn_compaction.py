@@ -608,27 +608,51 @@ def _snapshots(
     layout: _Layout,
     inputs: HistoryPreparationInputs,
 ) -> list[RunOutput | TeamRunOutput]:
-    """Return one completed run per folded message, oldest first, the first led by the prompt and the run's metadata.
+    """Return one completed run per summary unit, oldest first, the first led by the prompt and the run's metadata.
 
     Separate runs let the summary chunker size the turn with the summary model's own estimator and summarize it in
-    as many chunks as it needs, without truncating any message that fits a summary input by itself. A tool batch
-    stays whole in the request, but its results are summarized one by one, each naming its call id, so a parallel
-    batch larger than one summary input is never cut short.
+    as many chunks as it needs, without truncating any unit that fits a summary input by itself.
     """
     snapshots: list[RunOutput | TeamRunOutput] = []
     budget_tokens = inputs.execution_plan.summary_input_budget_tokens or 0
-    folded = [message for exchange in layout.exchanges for message in exchange]
-    for index, message in enumerate(folded):
+    for index, unit in enumerate(_summary_units(layout.exchanges)):
         lead = (_prompt_context(layout.prompt, budget_tokens),) if index == 0 and layout.prompt is not None else ()
-        # The run's metadata is the same for every message, so only the first snapshot shows it to the summarizer.
+        # The run's metadata is the same for every unit, so only the first snapshot shows it to the summarizer.
         metadata = deepcopy(run_response.metadata) if index == 0 else None
-        snapshots.append(_snapshot_run(run_response, [*lead, message], metadata))
+        snapshots.append(_snapshot_run(run_response, [*lead, *unit], metadata))
     return snapshots
 
 
+def _summary_units(exchanges: Sequence[Sequence[Message]]) -> list[list[Message]]:
+    """Split exchanges into summary units: each tool result beside the call it answers, any other message alone.
+
+    The request keeps a tool batch whole, but a parallel batch can exceed one summary input, and a result summarized
+    apart from its call would lose which call, and which file or arguments, produced it. The call message's text and
+    reasoning, and any call without a result, go with the batch's first result.
+    """
+    units: list[list[Message]] = []
+    for exchange in exchanges:
+        head, results = exchange[0], exchange[1:]
+        if not head.tool_calls or not results:
+            units.extend([message] for message in exchange)
+            continue
+        calls = {call.get("id"): call for call in head.tool_calls}
+        answered = {result.tool_call_id for result in results}
+        unanswered = [call for call_id, call in calls.items() if call_id not in answered]
+        for index, result in enumerate(results):
+            call = calls.get(result.tool_call_id)
+            update: dict[str, Any] = {
+                "tool_calls": [*([call] if call is not None else []), *(unanswered if index == 0 else [])],
+            }
+            if index:
+                update |= {"content": None, "reasoning_content": None, "redacted_reasoning_content": None}
+            units.append([head.model_copy(update=update), result])
+    return units
+
+
 def _history_snapshot(run_response: RunOutput | TeamRunOutput, layout: _Layout) -> list[RunOutput | TeamRunOutput]:
-    """Return the request's replayed history as completed runs to summarize, one per message, as ``_snapshots`` does."""
-    return [_snapshot_run(run_response, [message], None) for message in layout.history]
+    """Return the request's replayed history as completed runs to summarize, one per summary unit."""
+    return [_snapshot_run(run_response, unit, None) for unit in _summary_units(_exchanges(layout.history))]
 
 
 def _snapshot_run(
@@ -637,7 +661,7 @@ def _snapshot_run(
     metadata: dict[str, Any] | None,
 ) -> RunOutput | TeamRunOutput:
     """Return a completed copy of part of the running turn under a fresh snapshot run id."""
-    run_id = f"{run_response.run_id or ''}:exchange:{uuid4().hex}"
+    run_id = f"{run_response.run_id or ''}:fold:{uuid4().hex}"
     copies = [message.model_copy(deep=True) for message in messages]
     if isinstance(run_response, TeamRunOutput):
         return TeamRunOutput(
@@ -661,7 +685,7 @@ def _snapshot_run(
 
 
 def _prompt_context(prompt: Message, budget_tokens: int) -> Message:
-    """Return a copy of the prompt for the summarizer's context, bounded so the exchange beside it always fits.
+    """Return a copy of the prompt for the summarizer's context, bounded so the unit beside it always fits.
 
     The prompt stays in the request verbatim, so the summary only needs enough of it to know what the work was for.
     A quarter as many characters as budget tokens keeps it within a quarter of the input even when the summary
