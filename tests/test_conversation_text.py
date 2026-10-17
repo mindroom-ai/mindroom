@@ -111,14 +111,23 @@ def test_planted_secrets_never_survive_redaction() -> None:
 
 
 def test_a_prompt_is_split_by_who_sent_each_message() -> None:
-    """Each tagged message is its sender's, an untagged prompt is the requester's, and a reply is the agent's."""
+    """Each tagged message is its sender's, an untagged prompt is the requester's, and a reply is the agent's.
+
+    Empty messages and non-text content are not conversation.
+    """
     prompt = (
         "<messages>"
         + render_msg_tag(sender="@bob:x", body="Bob owns Atlas.")
         + render_msg_tag(sender="@mindroom_research:x", body="Checked: Carol does.")
+        + render_msg_tag(sender="@carol:x", body="  ")
         + "</messages>"
     )
-    run = _run(Message(role="user", content=prompt), Message(role="assistant", content="Noted."), requester_id="@bob:x")
+    run = _run(
+        Message(role="user", content=prompt),
+        Message(role="assistant", content=[{"type": "text", "text": "Thinking."}]),
+        Message(role="assistant", content="Noted."),
+        requester_id="@bob:x",
+    )
     assert _kinds(run) == [
         ("said", "@bob:x", "Bob owns Atlas."),
         ("said", "@mindroom_research:x", "Checked: Carol does."),
