@@ -473,6 +473,27 @@ async def test_a_turn_waiting_for_approval_holds_back_later_turns_until_it_finis
 
 
 @pytest.mark.asyncio
+async def test_a_turn_whose_approval_expired_releases_the_turns_after_it_without_news(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """Once every approval a paused turn could get has expired, the conversation is read again and moves on."""
+    config, clock = _config(tmp_path), _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("asks", session, T0 + 10, status=RunStatus.paused), _run("after", session, T0 + 20)])
+
+    await worker._run_cycle(config)
+    assert extractor.calls == []
+
+    clock.now = T0 + 10 + config.tool_approval.timeout_days * 86_400 + 3600
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("after")]
+
+
+@pytest.mark.asyncio
 async def test_delegated_task_sessions_are_not_flushed(tmp_path: Path, extractor: _Extractor) -> None:
     """A task another agent delegated is the delegating agent's conversation, not the delegate's."""
     config, clock = _config(tmp_path), _Clock()
@@ -572,6 +593,43 @@ async def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_each_turn_is_read_as_its_own_user_and_assistant_lines(tmp_path: Path, extractor: _Extractor) -> None:
+    """History replayed into a turn, system and tool messages, and blank text are left out, and long messages are cut."""
+    config, clock = _config(tmp_path), _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    session = _thread("t1")
+    messages = [
+        Message(role="system", content="system prompt"),
+        Message(role="user", content="earlier question", from_history=True),
+        Message(role="user", content="question   with\n spaces"),
+        Message(role="tool", content="tool output"),
+        Message(role="assistant", content="x" * 600),
+        Message(role="assistant", content="   "),
+    ]
+    _seed(config, session, [_run("r1", session, T0 + 10, messages=messages)])
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [["user: question with spaces", f"assistant: {'x' * 497}..."]]
+
+
+@pytest.mark.asyncio
+async def test_the_character_limit_bounds_each_extraction(tmp_path: Path, extractor: _Extractor) -> None:
+    """``max_chars_per_flush`` ends a batch, and a single turn over it keeps only its newest lines."""
+    config, clock = _config(tmp_path, extractor={"max_chars_per_flush": 30}), _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10), _run("r2", session, T0 + 20)])
+
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [["assistant: answer r1"], ["assistant: answer r2"]]
+
+
+@pytest.mark.asyncio
 async def test_failures_back_off_from_when_they_happen_and_are_given_up_after_the_stale_ttl(
     tmp_path: Path,
     extractor: _Extractor,
@@ -610,14 +668,19 @@ async def test_failures_back_off_from_when_they_happen_and_are_given_up_after_th
 
 
 @pytest.mark.asyncio
-async def test_a_timed_out_extraction_backs_off(tmp_path: Path, extractor: _Extractor) -> None:
+async def test_a_timed_out_extraction_backs_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An extraction over ``max_extraction_seconds`` is abandoned and retried after the cooldown."""
     config, clock = _config(tmp_path, extractor={"max_extraction_seconds": 1}), _Clock()
     worker = _worker(config, clock)
     await _started(worker, config, clock)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
-    extractor.error = TimeoutError()
+
+    async def slow(**_: object) -> str:
+        await asyncio.sleep(5)
+        return "too late"
+
+    monkeypatch.setattr(auto_flush, "_extract_memory_summary", slow)
 
     await worker._run_cycle(config)
 
