@@ -638,23 +638,26 @@ async def test_a_long_backlog_is_flushed_oldest_first_over_passes(tmp_path: Path
 
 
 def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_path: Path) -> None:
-    """A single turn over the limits is sent alone with its newest lines."""
+    """A single turn over the limits is sent alone with its newest lines, after any turns with nothing said."""
     settings = _config(tmp_path, extractor={"max_messages_per_flush": 2}).memory.auto_flush
     session = _thread("t1")
+    automation = _run("auto", session, T0 + 5, hook_source="automation/dreaming")
     messages = [Message(role="user", content=f"part {index}") for index in range(4)]
     long_turn, following = _run("long", session, T0 + 10, messages=messages), _run("next", session, T0 + 20)
 
-    assert auto_flush._next_batch([long_turn, following], settings) == (
-        [long_turn],
+    assert auto_flush._next_batch([automation, long_turn, following], settings) == (
+        [automation, long_turn],
         [f"{ALICE}: part 2", f"{ALICE}: part 3"],
     )
 
 
-def test_each_turn_is_read_as_its_own_user_and_assistant_lines() -> None:
-    """History replayed into a turn, system and tool messages, and blank text are left out, and long messages are cut."""
+def test_each_turn_is_read_as_who_said_what() -> None:
+    """Each line names its sender; history replayed into a turn, system and tool messages, and blank text are left out."""
+    coalesced = "<messages>" + render_msg_tag(sender=BOB, body="Bob owns Atlas.") + "</messages>"
     messages = [
         Message(role="system", content="system prompt"),
         Message(role="user", content="earlier question", from_history=True),
+        Message(role="user", content=coalesced),
         Message(role="user", content="question   with\n spaces"),
         Message(role="tool", content="tool output"),
         Message(role="assistant", content="x" * 600),
@@ -663,7 +666,7 @@ def test_each_turn_is_read_as_its_own_user_and_assistant_lines() -> None:
 
     lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
 
-    assert lines == [f"{ALICE}: question with spaces", f"assistant: {'x' * 497}..."]
+    assert lines == [f"{BOB}: Bob owns Atlas.", f"{ALICE}: question with spaces", f"assistant: {'x' * 497}..."]
 
 
 def test_the_character_limit_bounds_each_extraction(tmp_path: Path) -> None:
@@ -1039,18 +1042,6 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
     context = cast("str", call["existing_context"])
     assert "Alice-authored shared memory" in context
     assert "Shared daily memory" in context
-
-
-def test_each_line_names_who_said_it() -> None:
-    """A coalesced prompt is read by sender, so a shared agent's notes say who said what."""
-    prompt = (
-        "<messages>" + render_msg_tag(sender=BOB, body="Bob owns Atlas.") + render_msg_tag(sender=ALICE, body="Agreed.")
-    )
-    messages = [Message(role="user", content=f"{prompt}</messages>"), Message(role="assistant", content="Noted.")]
-
-    lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
-
-    assert lines == [f"{BOB}: Bob owns Atlas.", f"{ALICE}: Agreed.", "assistant: Noted."]
 
 
 def test_credentials_are_removed_before_the_extractor() -> None:
