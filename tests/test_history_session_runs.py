@@ -11,8 +11,9 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
+from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.history import archive
-from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
+from mindroom.history.session_runs import session_runs, unredacted_runs, updated_sessions
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
 
@@ -100,3 +101,24 @@ def test_updated_sessions_lists_sessions_changed_after_the_cursor(storage: Sqlit
 
     assert [session_id for session_id, _ in listed] == ["!a:x:$t1"]
     assert updated_sessions(storage, "mind", since=listed[0][1]) == []
+
+
+@pytest.mark.asyncio
+async def test_unredacted_runs_drop_redacted_turns_or_wait_while_the_agent_cannot_tell() -> None:
+    """A turn that answered a redacted event is dropped, and nothing is returned while a room's redactions are unknown."""
+    kept, redacted = _run("kept", 100), _run("gone", 200)
+    kept.metadata = {**(kept.metadata or {}), MATRIX_EVENT_ID_METADATA_KEY: "$kept"}
+    redacted.metadata = {**(redacted.metadata or {}), MATRIX_EVENT_ID_METADATA_KEY: "$gone"}
+    asked: list[tuple[str, str, tuple[str, ...]]] = []
+
+    async def journal(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        asked.append((agent_name, room_id, event_ids))
+        return frozenset({"$gone"})
+
+    async def not_running(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, room_id, event_ids
+        return None
+
+    assert await unredacted_runs([kept, redacted], "mind", journal) == [kept]
+    assert asked == [("mind", ROOM, ("$gone", "$kept"))]
+    assert await unredacted_runs([kept, redacted], "mind", not_running) is None

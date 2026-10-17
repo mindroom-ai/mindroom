@@ -982,7 +982,7 @@ visibility = [
     "mindroom.skill_learning.runner",
     "mindroom.tool_jobs.consumption",
     "mindroom.knowledge_graph.clients",
-    "mindroom.knowledge_graph.session_runs",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.ingestion",
     "mindroom.automations.exploration",
     "mindroom.memory._mem0_backend",
@@ -9127,19 +9127,23 @@ depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.store",
     "mindroom.prompt_message_tags",
     "mindroom.redaction",
 ]
 
 [[modules]]
-path = "mindroom.knowledge_graph.session_runs"
+path = "mindroom.history.session_runs"
 depends_on = [
     "mindroom.history.storage",
-    "mindroom.knowledge_graph.episodes",
     "mindroom.session_storage.agent_storage",
 ]
-visibility = ["mindroom.automations.exploration", "mindroom.knowledge_graph.ingestion"]
+visibility = [
+    "mindroom.automations.exploration",
+    "mindroom.knowledge_graph.episodes",
+    "mindroom.knowledge_graph.ingestion",
+]
 
 [[modules]]
 path = "mindroom.knowledge_graph.ingestion"
@@ -9147,10 +9151,9 @@ depends_on = [
     "mindroom.automations.threads",
     "mindroom.durable_write",
     "mindroom.entity_resolution",
-    "mindroom.history.storage",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.scope",
-    "mindroom.knowledge_graph.session_runs",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",
     "mindroom.logging_config",
@@ -9184,9 +9187,9 @@ depends_on = [
     "mindroom.automations.threads",
     "mindroom.config.automations",
     "mindroom.durable_write",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.ingestion",
-    "mindroom.knowledge_graph.session_runs",
     "mindroom.session_storage.agent_storage",
 ]
 visibility = ["mindroom.automations.registry"]

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge_graph.ingestion import RedactedEventIds
+    from mindroom.history.session_runs import RedactedEventIds
 
 
 @dataclass

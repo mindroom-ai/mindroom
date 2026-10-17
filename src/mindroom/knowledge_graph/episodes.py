@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.session_runs import run_key
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.prompt_message_tags import cdata_body_text
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -78,11 +79,6 @@ def is_evidence(execution: ToolExecution) -> bool:
     # whole arguments are searched, since the rendered ones are clipped.
     arguments = json.dumps(execution.tool_args or {}, default=str)
     return not any(name in arguments for name in _GRAPH_FUNCTIONS)
-
-
-def run_key(run: RunOutput) -> tuple[int, str]:
-    """Return a run's position in its session."""
-    return (run.created_at or 0, run.run_id or "")
 
 
 def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) -> _ThreadKind:

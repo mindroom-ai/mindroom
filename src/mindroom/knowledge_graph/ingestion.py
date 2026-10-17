@@ -13,48 +13,41 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
-from agno.run.base import RunStatus
-
 from mindroom.automations.threads import automation_threads
 from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
-from mindroom.history.storage import run_event_ids
+from mindroom.history.session_runs import finished_runs, run_key, session_runs, unredacted_runs, updated_sessions
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
     Progress,
     RenderedEpisode,
     classify_thread,
     render_episodes,
-    run_key,
 )
 from mindroom.knowledge_graph.scope import graph_scopes
-from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
 from mindroom.knowledge_graph.store import UnusableExtractionError, record_knowledge_graph_failure
 from mindroom.knowledge_graph.usage import UsageTarget
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_session_storage
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
     from agno.run.agent import RunOutput
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.session_runs import RedactedEventIds
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import GraphStore
 
 logger = get_logger(__name__)
 
-# Which of a room's events an agent's journal saw redacted, or None while that agent's bot is not running.
-type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozenset[str] | None]]
-
 _DAY_SECONDS = 86_400
 _IDLE_POLL_SECONDS = 30
 _FIRST_RETRY_SECONDS = 60
 _MAX_RETRY_SECONDS = 3600
-_APPROVAL_GRACE_SECONDS = 3600
 # An episode whose extraction output is unusable this often, or that has failed for this long, is dropped, so it
 # cannot cost model calls forever; an outage shorter than that loses nothing.
 _MAX_BAD_OUTPUTS = 5
@@ -115,37 +108,6 @@ def _new_session_state() -> _SessionState:
         "retry_at": 0,
         "recheck_at": 0,
     }
-
-
-def _approval_window_seconds(config: Config) -> float:
-    """Return how long a turn can wait for approval before every approval it could get has expired and resumed it."""
-    approval = config.tool_approval
-    days = max([approval.timeout_days, *(rule.timeout_days for rule in approval.rules if rule.timeout_days)])
-    # The card's expiry counts from when it was posted, a little after the newest message, and then resumes the turn.
-    return days * _DAY_SECONDS + _APPROVAL_GRACE_SECONDS
-
-
-def _finished_runs(
-    runs: list[RunOutput],
-    now: float,
-    approval_window: float,
-) -> tuple[list[RunOutput], float | None]:
-    """Return the finished runs before the first one that can still finish later, and when that one stops waiting.
-
-    A turn waiting for approval finishes in place with its original, earlier creation time, so nothing after it is
-    ingested yet; once its approval window has passed it can no longer finish and is skipped.
-    """
-    finished: list[RunOutput] = []
-    for run in runs:
-        if run.status == RunStatus.paused:
-            # Its newest message is the call waiting for approval, whose card expires counting from when it was posted.
-            asked_at = max([run.created_at or 0, *((message.created_at or 0) for message in run.messages or [])])
-            expires_at = asked_at + approval_window
-            if now < expires_at:
-                return finished, expires_at
-            continue
-        finished.append(run)
-    return finished, None
 
 
 def _start_after_backfill_window(entry: _SessionState, runs: list[RunOutput], *, cutoff: float) -> None:
@@ -302,12 +264,11 @@ class KnowledgeGraphIngestionWorker:
         Return None when its agent cannot say yet what was redacted, which leaves the conversation for a later pass.
         """
         settings = config.knowledge_graph.ingest
-        finished, blocked_until = _finished_runs(session.runs, now, _approval_window_seconds(config))
-        redacted = await self._redacted(scope.agent_name, finished)
-        if redacted is None:
+        finished, blocked_until = finished_runs(session.runs, config, now=now)
+        unredacted = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+        if unredacted is None:
             return None
-        # A redaction removes a turn from stored history only when the agent next replies there, so it is skipped here.
-        finished = [run for run in finished if not run_event_ids(run) & redacted]
+        finished = unredacted
         entry = state["sessions"].get(session.session_id)
         if entry is None:
             entry = state["sessions"][session.session_id] = _new_session_state()
@@ -364,21 +325,6 @@ class KnowledgeGraphIngestionWorker:
         )
         await self._persist(scope.graph_name, state)
         return clean
-
-    async def _redacted(self, agent_name: str, runs: list[RunOutput]) -> frozenset[str] | None:
-        """Return the events the runs derive from that were redacted, or None while the agent cannot tell."""
-        by_room: dict[str, set[str]] = {}
-        for run in runs:
-            by_room.setdefault(str((run.metadata or {}).get("room_id")), set()).update(run_event_ids(run))
-        redacted: set[str] = set()
-        for room_id, event_ids in by_room.items():
-            if not event_ids:
-                continue
-            found = await self.redacted_event_ids(agent_name, room_id, tuple(sorted(event_ids)))
-            if found is None:
-                return None
-            redacted |= found
-        return frozenset(redacted)
 
     async def _add(
         self,

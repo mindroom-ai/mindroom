@@ -186,7 +186,7 @@ Matrix sync callback
 | `knowledge_graph/usage.py` | Which conversation an extraction call's tokens are charged to |
 | `knowledge_graph/embedded_server.py` | The embedded FalkorDB server MindRoom starts, stops, and recovers after a crash |
 | `knowledge_graph/episodes.py` | Stored runs rendered as `conversation` and `tool_results` episodes, and thread classification |
-| `knowledge_graph/session_runs.py` | Finished and approval-waiting Matrix turns of a conversation, live and compacted |
+| `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
 | `knowledge_graph/ingestion.py` | Background ingestion passes with per-kind markers, backoff, and dropped episodes |
 | `knowledge_graph/runtime.py` | Starts and stops the store and ingestion worker as agents enable the graph |
 | `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model and ingestion settings |
