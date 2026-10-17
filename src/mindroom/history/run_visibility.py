@@ -22,10 +22,13 @@ QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER = "persisted"
 
 
+def queued_notice_marker(message: Message) -> bool | str | None:
+    """Return a queued-message notice's marker, True while live or persisted once stored, or None for other messages."""
+    provider_data = message.provider_data
+    marker = provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY) if isinstance(provider_data, dict) else None
+    return marker if marker in (True, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER) else None
+
+
 def is_queued_notice_message(message: Message) -> bool:
     """Return whether a message is a queued-message notice MindRoom wrote, live or persisted."""
-    provider_data = message.provider_data
-    return isinstance(provider_data, dict) and provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
-        True,
-        QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
-    )
+    return queued_notice_marker(message) is not None

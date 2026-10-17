@@ -25,6 +25,7 @@ from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
     is_model_history_visible_run,
     is_queued_notice_message,
+    queued_notice_marker,
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
@@ -200,14 +201,6 @@ def bind_mid_turn_conversation_context(
     notice = _queued_message_notice_context.get()
     if notice is not None and notice.mid_turn_gate is not None:
         notice.mid_turn_gate.bind_conversation_context(context_factory())
-
-
-def _queued_notice_marker(message: Message) -> bool | str | None:
-    provider_data = message.provider_data
-    if not isinstance(provider_data, dict):
-        return None
-    marker = provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
-    return marker if marker in (True, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER) else None
 
 
 def _queued_notice_response_turn_id(message: Message) -> str | None:
@@ -457,7 +450,7 @@ def _queued_notice_text_to_persist(
         (
             message
             for message in destination_matches
-            if _queued_notice_marker(message) is True and isinstance(message.content, str)
+            if queued_notice_marker(message) is True and isinstance(message.content, str)
         ),
         None,
     )
@@ -467,7 +460,7 @@ def _queued_notice_text_to_persist(
         (
             message
             for message in destination_matches
-            if _queued_notice_marker(message) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+            if queued_notice_marker(message) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
             and isinstance(message.content, str)
         ),
         None,
@@ -523,7 +516,7 @@ def _finalize_queued_notice_in_runs(
         notice_text is not None
         and len(all_matches) == 1
         and len(destination_matches) == 1
-        and _queued_notice_marker(destination_matches[0]) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+        and queued_notice_marker(destination_matches[0]) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
         and destination_matches[0].content == notice_text
     ):
         return []
@@ -700,7 +693,7 @@ def _has_notice_marker_for_response(
     marker: bool | str,
 ) -> bool:
     return any(
-        _queued_notice_marker(message) == marker
+        queued_notice_marker(message) == marker
         for run in runs
         for message in _run_output_notice_messages(
             run,

@@ -1380,7 +1380,7 @@ def test_transcript_keeps_the_compaction_summary_when_trimming() -> None:
     older = [Message(role="user", content=f"old request {index} " + "x" * 400) for index in range(40)]
     recent = [Message(role="assistant", content="latest answer")]
     transcript = _transcript(
-        _run("r1", *older, *[Message(role="user", content="recent")] * 24, *recent),
+        _run("r1", *older, *[Message(role="user", content="recent") for _ in range(24)], *recent),
         summary="Deploys go through canary. password: hunter2hunter2",
         budget_chars=3_000,
     )

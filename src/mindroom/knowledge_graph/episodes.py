@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
-from mindroom.history.conversation_text import conversation_lines, run_requester
+from mindroom.history.conversation_text import one_line, run_requester, utterances
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -175,17 +175,25 @@ def _episode_items(
 ) -> list[tuple[str, str | None]]:
     """Return a run's lines of one kind, each tool result with the call it lists in the episode description."""
     if episode_kind == "conversation":
-        lines = conversation_lines(
-            run,
-            agent_name=agent_name,
-            agent_for_sender=agent_for_sender,
-            max_line_chars=settings.max_episode_chars,
-        )
-        return [(line, None) for line in lines]
+        cap = settings.max_episode_chars
+        return [
+            (f"{_speaker(said.sender, agent_name, agent_for_sender)}: {one_line(_clean(said.unredacted, cap))}", None)
+            for said in utterances(run)
+        ]
     executions = [execution for execution in run.tools or [] if is_evidence(execution)]
     return [
         (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}") for execution in executions
     ]
+
+
+def _speaker(sender: str | None, agent_name: str, agent_for_sender: Callable[[str], str | None]) -> str:
+    """Label a sender as an agent or a person with no colon, since Graphiti reads a speaker up to the first colon."""
+    if sender is None:
+        return f"agent {agent_name}"
+    if (agent := agent_for_sender(sender)) is not None:
+        return f"agent {agent}"
+    user, separator, server = sender.partition(":")
+    return f"person {user} ({server})" if separator else f"person {sender}"
 
 
 def _episode(

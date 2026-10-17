@@ -1,8 +1,8 @@
-"""What people and agents said in stored turns, as text a background model call reads.
+"""What people and agents said in stored turns, for background model calls.
 
-Skill reviews and the knowledge graph, and file-memory auto-flush once it reads stored turns, each send stored turns to
-a model. This module owns the decisions they share: which turns and messages are conversation and who said each
-message, so a prompt MindRoom wrote is never read as someone's words. Each reader redacts the text it renders.
+Skill reviews and the knowledge graph each send stored turns to a model. This module owns the decisions they share:
+which turns and messages are conversation and who said each message, so a prompt MindRoom wrote is never read as
+someone's words. Each reader renders and redacts the text itself.
 """
 
 from __future__ import annotations
@@ -15,12 +15,9 @@ from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_MET
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
 from mindroom.prompt_message_tags import parse_msg_tags
-from mindroom.redaction import redact_sensitive_text
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from agno.models.message import Message
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
@@ -73,7 +70,6 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
         content = message.content if isinstance(message.content, str) else ""
         if message.from_history:
             continue
-        # A queued-message notice is MindRoom's instruction to pause for a newer message, stored as a user message.
         mindroom_wrote = runtime_prompt or is_queued_notice_message(message)
         if message.role == "user" and (agent_work or not mindroom_wrote):
             said.extend(
@@ -88,31 +84,3 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
         elif message.role == "tool" and agent_work:
             said.append(Utterance("tool_result", None, message.get_content_string(), message))
     return said
-
-
-def conversation_lines(
-    run: RunOutput | TeamRunOutput,
-    *,
-    agent_name: str,
-    agent_for_sender: Callable[[str], str | None],
-    max_line_chars: int,
-) -> list[str]:
-    """Return one ``<speaker>: <text>`` line per message of a stored turn, each text redacted to ``max_line_chars``.
-
-    ``agent_for_sender`` names the configured agent behind a Matrix ID, so agents' messages are not labeled as people's.
-    """
-    return [
-        f"{_speaker(utterance.sender, agent_name, agent_for_sender)}: "
-        f"{one_line(redact_sensitive_text(utterance.unredacted.strip(), max_length=max_line_chars))}"
-        for utterance in utterances(run)
-    ]
-
-
-def _speaker(sender: str | None, agent_name: str, agent_for_sender: Callable[[str], str | None]) -> str:
-    """Label a sender as an agent or a person with no colon, since Graphiti reads a speaker up to the first colon."""
-    if sender is None:
-        return f"agent {agent_name}"
-    if (agent := agent_for_sender(sender)) is not None:
-        return f"agent {agent}"
-    user, separator, server = sender.partition(":")
-    return f"person {user} ({server})" if separator else f"person {sender}"

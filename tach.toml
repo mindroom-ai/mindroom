@@ -7526,7 +7526,6 @@ depends_on = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_visibility",
     "mindroom.prompt_message_tags",
-    "mindroom.redaction",
     "mindroom.turn_origin",
 ]
 visibility = [

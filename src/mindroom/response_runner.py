@@ -472,15 +472,6 @@ def _agent_run_metadata(request: ResponseRequest) -> dict[str, Any]:
     return recorded
 
 
-def _materialize_matrix_run_metadata(
-    matrix_run_metadata: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Return a concrete metadata dict for downstream APIs that require one."""
-    if matrix_run_metadata is None:
-        return None
-    return dict(matrix_run_metadata)
-
-
 def _reply_authorization_entity_names(
     config: Config,
     owner_entity_name: str,
@@ -4775,7 +4766,7 @@ class ResponseRunner:
         response_run_id = str(uuid4())
         team_run_metadata_content: dict[str, Any] = {}
         progress = _DeliveryProgress()
-        matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
+        matrix_run_metadata = None if request.matrix_run_metadata is None else dict(request.matrix_run_metadata)
         active_event_ids = await self._active_response_event_ids(request.room_id)
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
