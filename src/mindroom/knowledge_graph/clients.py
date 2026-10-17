@@ -1,4 +1,4 @@
-"""Graphiti's model, embedder, reranker, and database clients, backed by MindRoom's own model and embedder construction.
+"""Graphiti's model, embedder, reranker, and database clients; the model and embedder use MindRoom's own construction.
 
 Every provider, credential rule, and base URL MindRoom supports then works for extraction without a second provider
 mapping, and each extraction call is an Agno run whose tokens are recorded like other helper work.
@@ -46,7 +46,9 @@ _EMBED_CONCURRENCY = 8
 # Reason: the entity and fact return clauses select `properties(n)` and `properties(e)`, which include
 # `name_embedding` and `fact_embedding`, and building the records pops them unused. With 3072-dimension embeddings
 # the reply parsing took about 15 ms of event loop time per returned row, so ingestion stalled every agent's replies.
-# Upstream issue: tracking gap; no issue or PR in getzep/graphiti covers it as of 0.31.1.
+# Upstream issue: https://github.com/getzep/graphiti/issues/2021
+# Upstream PR: none yet for the search return clauses; https://github.com/getzep/graphiti/pull/1234 only adds an
+# opt-in lightweight mode to `get_by_group_ids`.
 # Remove when: the pinned Graphiti's FalkorDB searches no longer read embeddings back.
 # Coverage: tests/test_knowledge_graph_store.py::test_lookups_do_not_read_embeddings_back
 _WITHOUT_EMBEDDINGS = (
@@ -200,7 +202,6 @@ class MindRoomFalkorDriver(FalkorDriver):
         """Address another graph over the same connection; Graphiti's own clone would build a plain driver."""
         if database == self._database:
             return self
-        return MindRoomFalkorDriver(
-            falkor_db=self.client,
-            database="default_db" if database == self.default_group_id else database,
-        )
+        if database == self.default_group_id:
+            return MindRoomFalkorDriver(falkor_db=self.client)
+        return MindRoomFalkorDriver(falkor_db=self.client, database=database)
