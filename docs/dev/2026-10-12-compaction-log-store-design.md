@@ -15,7 +15,7 @@ The user's direction: store each scope's history as one ordered, append-only log
 
 ## Decision
 
-- Agno's runs table, unchanged in schema, is the log of turns, and compaction never deletes or moves a run.
+- Agno's runs table, unchanged in schema, is the log of turns, and compaction never deletes a run or moves one out of it; a mid-turn fold only moves its own stored run after its row.
 - A MindRoom table beside it holds summary rows, each positioned right after the newest run it covers; replay is the latest summary plus every run after it.
 - A mid-turn compaction (the rework) stores what it folded out of the running turn on its summary row, because the two are written together and a cut must delete them together.
 - Every lifecycle event is an append, a load, or a cut (delete one element and everything after it); one insertion rule moves a run that becomes visible to the end.
@@ -87,6 +87,8 @@ Summaries written when compaction deleted runs cannot be split by run, so `main`
 
 ## Mid-turn compaction on the log (the #2798 rework)
 
+Implemented in #2798 on top of PR A; the summary rows' `segment_run_id` and `segment` columns, created by PR A, hold each fold's segment.
+
 - Each fold reads, in its own transaction, the scope's latest summary row and the visible stored runs after it, excluding the running run, and seeds the summary from that row's text; with no stored run and no summary row, its row sits before every run.
 - A first-turn fold creates the session row the summaries table cascades from, as `save_independent_usage(initial_session=...)` does, since Agno writes it only when the run ends; Agno's live session keeps every run it loaded at the start of the turn, so reading it again would summarize stored runs a first fold of the same turn already covered.
 - The fold builds its segment (the folded messages, the tool executions they hold, and the member responses attached so far, from the live tree because Agno writes member rows only when the team run ends) from the live request messages, because `RunOutput.messages` is not current inside Agno's model loop.
@@ -98,15 +100,13 @@ Summaries written when compaction deleted runs cannot be split by run, so `main`
 - The fold's in-memory effects (the recorder's folded set, the live `session.summary`, the usage carry-over, the request rewrite) complete together with the commit even when the turn is cancelled during it.
 - A continuation interrupted after its fold does not resume from its paused row: an approved run cut short releases its continuation and the reply replays as a new attempt, and CLI recovery restarts from the checkpoint row, which loads without the folded messages.
 - Interrupted records keep one filter, not zero: resetting accumulators does not work, because the recorder's tool lists are replaced wholesale from the streaming tool tracker on every update (`ai_turn_state.py`), team interruption resynchronizes from the presentation tracker (`teams.py`), CLI recovery seeds its presentation from the paused trace (`agent_cli/cli_approval_recovery.py`), and Agno merges `tool_executions` back into `run_response.tools` (`agent/_response.py`); `run_response.tools` stays untouched because the final reply, the paused-approval message, and team traces render from it, and #2798 promises the visible reply lists every tool call.
-  `build_interrupted_replay_snapshot` leaves out every call the run's segments folded (tool-call ids in their messages, their tool executions, the tools of the member responses they hold, recursively, and entries whose `parent_bash_call_id` is folded); the recorder keeps the folded set each fold's commit returns, voice calls take `interrupted_snapshot()`, and CLI approval recovery rebuilds the set from the run's summary rows so it holds after a restart.
+  `build_interrupted_replay_snapshot` leaves out every call the run's segments folded (tool-call ids in their messages, their tool executions, the tools of the member responses they hold, recursively, and entries whose `parent_bash_call_id` is folded); the recorder keeps the folded set each fold's commit returns, voice calls take `interrupted_snapshot()`, and every interrupted record write also leaves out what the run's summary rows hold, which covers paths without a turn recorder (the OpenAI-compatible API, approval follow-ups) and CLI approval recovery after a restart.
 - Deleted by the rework: positioned generations (`through_run_id`, `covered_run_ids`, generation event ids), the applied, unapplied, and orphaned settlement, materialization, `mindroom_mid_turn_generation`, archived `run_index`, resurrection guards, reconciling in the builder before continuations, and four of the five folded-tool filters.
 - Kept by the rework: the summary as the first history message, the request hook (`agno_compat_model_hooks.install_request_preparation`), run-local compaction for unscoped targets, the content-free request usage carry-over in run metadata (`mindroom_compacted_requests`), the removal of Vertex AI Claude per-request trimming, and the `LEGACY_COMPAT` handling of runs paused with an embedded summary block.
-- The staged deletion of `docs/dev/2026-10-10-compaction-unification-plan.md` in the #2798 worktree lands with the rework.
-- Tests to bring over: a second fold with no row write, then a load; #2798's edit tests for a fold covering an older resumed run's input, a retried turn's second attempt folding the first, and a later bot-triggered turn's fold covering the edited turn; a fold or chunk racing a retirement; two folds in one run; a pre-reply compaction committing during a long mid-turn run; a fold followed by a crash and by a delayed pre-fold save; the two-fold approval redaction; retirement after a fold; interrupted records on all four paths; a team fold with members delegated in the current leg, then a stop and then a crash, with nested members and shell-child tools; and run-local folds' usage.
 
-## Open question: a crash after a mid-turn compaction
+## A crash after a mid-turn compaction
 
-In the log, the segment and its summary row are stored when the fold commits, so after a crash they survive, and the restarted attempt (restarts continue in place, #2639) replays the summary of the work before the fold; #2798 deletes such a summary because the crashed run never recorded it.
+In the log, the segment and its summary row are stored when the fold commits, so after a crash they survive, and the restarted attempt (restarts continue in place, #2639) replays the summary of the work before the fold; #2798 before the rework deleted such a summary because the crashed run never recorded it.
 
-- **Keep (recommended)**: no code; the restarted attempt knows which tool calls ran and their results, beyond the visible account its prompt carries, so it does not redo them; an edit or redaction of the turn's message still cuts the row through its segment.
-- **Discard**: needs a liveness rule telling a crashed turn from one still running, which is the unapplied and orphaned machinery this design removes.
+- **Kept** (implemented, and reversible on request): no code; the restarted attempt knows which tool calls ran and their results, beyond the visible account its prompt carries, so it does not redo them; an edit or redaction of the turn's message still cuts the row through its segment.
+- **Rejected, discard**: needs a liveness rule telling a crashed turn from one still running, which is the unapplied and orphaned machinery this design removes.

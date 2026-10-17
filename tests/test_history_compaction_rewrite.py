@@ -30,6 +30,7 @@ from mindroom.history.compaction import (
     _emit_compaction_hook,
     _rewrite_working_session_for_compaction,
     compact_scope_history,
+    summarize_runs,
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.storage import (
@@ -1850,3 +1851,52 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
     assert progress_events[0].compacted_run_count == 1
     assert progress_events[0].runs_before == 2
     assert progress_events[0].runs_remaining == 1
+
+
+@pytest.mark.asyncio
+async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None:
+    """Chunked run-local summaries switch once to the fallback, which then writes every later chunk."""
+    runs = [
+        _completed_run(
+            f"run-{index}",
+            messages=[
+                Message(role="user", content=f"RUN{index}-MARKER " + ("u" * 16_000)),
+                Message(role="assistant", content="a" * 16_000),
+            ],
+        )
+        for index in (1, 2)
+    ]
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    summary_mock = AsyncMock(
+        side_effect=[
+            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
+            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
+            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+        ],
+    )
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+        summary = await summarize_runs(
+            summary_model=SummaryModel(model=primary, name="summary-model", input_budget_tokens=6_000),
+            fallback_summary_model=SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
+            previous_summary=None,
+            runs=runs,
+            session_id="session-1",
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            summary_prompt="Summarize.",
+            timeout_seconds=30,
+            on_response=None,
+        )
+
+    assert summary.summary == "merged summary"
+    assert summary.served_by.name == "fallback-model"
+    assert [call.kwargs["model"] for call in summary_mock.await_args_list] == [primary, fallback, fallback]
+    summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
+    assert "RUN1-MARKER" in summary_inputs[1]
+    assert "RUN2-MARKER" in summary_inputs[2]
+    assert "first chunk summary" in summary_inputs[2]

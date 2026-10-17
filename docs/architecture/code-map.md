@@ -221,6 +221,8 @@ Matrix sync callback
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks, the event ids each row folds, and edit and redaction cuts |
 | `history/summary_rows_schema.py` | Summary-row table layout and the shared SQL for which runs a session load returns |
 | `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
+| `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
+| `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |

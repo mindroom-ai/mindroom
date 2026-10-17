@@ -24,6 +24,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests, project_usage
 from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
@@ -275,3 +276,21 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Sqlite
     assert session.runs == []
     usage_db.close()
     assert list(iter_usage_storage_rows(source)) == before
+
+
+def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved() -> None:
+    """A failed reply can keep the messages a compaction folded; their carried usage must not count twice."""
+    folded = Message(role="assistant", content="step", metrics=MessageMetrics(input_tokens=100, output_tokens=1))
+    later = Message(role="assistant", content="done", metrics=MessageMetrics(input_tokens=50, output_tokens=1))
+    carried = [{**request, "message_id": folded.id} for request in project_requests([folded.to_dict()]) or []]
+    run = RunOutput(
+        run_id="run",
+        status=RunStatus.error,
+        messages=[folded, later],
+        metadata={COMPACTED_REQUESTS_METADATA_KEY: carried},
+    )
+
+    requests = project_usage(run.to_dict())["requests"]
+
+    assert [request["metrics"]["input_tokens"] for request in requests] == [100, 50]
+    assert all("message_id" not in request for request in requests)

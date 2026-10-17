@@ -8,11 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY
+
 if TYPE_CHECKING:
     from agno.models.message import Message
-
-
-_QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 
 
 def strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
@@ -20,7 +19,7 @@ def strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
     last_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         provider_data = messages[i].provider_data
-        is_queued_notice = isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
+        is_queued_notice = isinstance(provider_data, dict) and provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
             True,
             "persisted",
         )

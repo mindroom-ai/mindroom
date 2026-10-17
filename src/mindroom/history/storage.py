@@ -18,7 +18,8 @@ history represents are derived from them when seen ids are read. Metadata seen i
 have no summary-row counterpart, so a stale whole-row write can restore ids a
 redaction dropped; that only withholds those messages from unseen thread context.
 
-Compaction appends summary rows and never moves or deletes a run; edits and
+Compaction appends summary rows and never deletes a run (a mid-turn fold moves
+only its own stored run after its row); edits and
 redactions cut the log, deleting one element and everything after it, which
 returns the runs a deleted summary covered to replay (see
 ``tests/test_compaction_fuzz.py`` for the invariants).
@@ -51,6 +52,7 @@ from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import (
+    ensure_session_row,
     save_compaction_usage,
     save_runs,
 )
@@ -494,8 +496,7 @@ def _latest_persisted_session(
     session: AgentSession | TeamSession,
 ) -> AgentSession | TeamSession:
     """Return the freshest stored row for one session, or the given session when unavailable."""
-    session_type = SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
-    latest_session = storage.get_session(session_id=session.session_id, session_type=session_type)
+    latest_session = storage.get_session(session_id=session.session_id, session_type=_session_type(session))
     return latest_session if isinstance(latest_session, type(session)) else session
 
 
@@ -588,6 +589,93 @@ def append_compaction_chunk(
         return False
     _adopt_session_fields(session, _latest_persisted_session(storage, session))
     return True
+
+
+@dataclass(frozen=True)
+class FoldBasis:
+    """What a mid-turn fold builds on: the scope's latest summary row and the stored runs after it, as read."""
+
+    based_on: int | None
+    summary: str | None
+    runs: tuple[RunOutput | TeamRunOutput, ...]
+    covered: tuple[summary_rows.CoveredRun, ...]
+
+
+def read_fold_basis(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> FoldBasis | None:
+    """Read the latest summary row and the visible stored runs after it.
+
+    The running loop's own session still holds every run it loaded when the turn started, so an earlier
+    fold of the same turn would be summarized again; the stored log knows what that fold covered. A stored
+    copy of the running run is paused or cancelled, so it never counts as visible.
+    Returns ``None`` when the stored history changed between the reads.
+    """
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
+    stored = storage.get_session(session_id=session.session_id, session_type=_session_type(session))
+    runs = [
+        run
+        for run in (stored.runs or [] if isinstance(stored, (AgentSession, TeamSession)) else [])
+        if is_model_history_visible_run(run) and _scope_for_run(run) == scope
+    ]
+    run_ids = [run.run_id for run in runs if run.run_id]
+    covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
+    if {run.run_id for run in covered if run.visible} != set(run_ids):
+        return None
+    return FoldBasis(
+        based_on=latest.id if latest is not None else None,
+        summary=(latest.summary or "").strip() or None if latest is not None else None,
+        runs=tuple(runs),
+        covered=covered,
+    )
+
+
+def append_fold(
+    storage: BaseDb,
+    *,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    basis: FoldBasis,
+    summary: str,
+    summary_model: str,
+    segment: summary_rows.Segment,
+) -> bool:
+    """Append a mid-turn fold's summary row with its segment, unless its basis went stale or a cut removed its run."""
+    return (
+        summary_rows.append_summary(
+            storage,
+            session_id=session.session_id,
+            scope_key=scope.key,
+            based_on=basis.based_on,
+            covered=basis.covered,
+            summary=summary,
+            summary_model=summary_model,
+            segment=segment,
+        )
+        is not None
+    )
+
+
+def run_folded_tool_call_ids(storage: BaseDb, *, session_id: str, run_id: str) -> set[str]:
+    """Return the tool calls the run's mid-turn folds summarized, from their summary rows."""
+    # Summary rows live in SQLite session storage only.
+    if not isinstance(storage, SqliteDb):
+        return set()
+    return summary_rows.segment_tool_call_ids(storage, session_id=session_id, run_id=run_id)
+
+
+def ensure_scope_session_row(storage: BaseDb, session: AgentSession | TeamSession, scope: HistoryScope) -> None:
+    """Create the session row a first turn's fold writes against; Agno writes its own when the run ends."""
+    ensure_session_row(
+        storage,
+        new_scope_session(session_id=session.session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
+    )
+
+
+def _session_type(session: AgentSession | TeamSession) -> SessionType:
+    return SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
 
 
 def save_working_run_changes(

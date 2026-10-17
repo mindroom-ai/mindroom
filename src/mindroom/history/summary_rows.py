@@ -4,12 +4,17 @@ A scope's history is Agno's runs table in ``run_index`` order with summary rows
 between its runs. A row's key is ``(after_run_index, id)``; a top-level run's key
 is ``(run_index, 0)``, and member runs follow their parent. Loading replays the
 scope's latest summary row and the runs after it, so compaction only appends
-rows and never moves or deletes a run. Edits and redactions cut: they delete
+rows and never deletes a run; a mid-turn fold moves only its own stored run, a
+paused or checkpointed copy, after its row. Edits and redactions cut: they delete
 one element and everything after it, which also returns the runs a deleted
 summary covered to replay.
 
 Each row keeps the event ids of the runs its own chunk folded, so redaction can
 check compacted history on every response without reading the folded runs.
+
+A mid-turn fold's row also holds its segment: what the fold took out of the
+running run. The run sorts after the row and loads without the segment's
+messages, and a cut or retirement that removes either removes both.
 """
 
 from __future__ import annotations
@@ -59,6 +64,32 @@ class _SummaryRow:
     summary: str | None
     legacy: bool
     event_ids: frozenset[str]
+    segment_run_id: str | None
+
+
+@dataclass(frozen=True)
+class Segment:
+    """What a mid-turn fold took out of its running run, stored on the fold's summary row.
+
+    ``metadata`` is the run's metadata at the fold, so the row counts the events the run read and
+    answered even when the run never saves; the rest are the folded messages, the tool executions
+    they hold, and the member responses attached so far, as Agno serializes them.
+    """
+
+    run_id: str
+    metadata: Mapping[str, Any]
+    messages: Sequence[Mapping[str, Any]]
+    tools: Sequence[Mapping[str, Any]]
+    member_responses: Sequence[Mapping[str, Any]]
+
+    def payload(self) -> dict[str, Any]:
+        """Return the row's ``segment`` column value, before encoding."""
+        return {
+            "metadata": self.metadata,
+            "messages": self.messages,
+            "tools": self.tools,
+            "member_responses": self.member_responses,
+        }
 
 
 @dataclass(frozen=True)
@@ -168,13 +199,15 @@ def append_summary(
     covered: Sequence[CoveredRun],
     summary: str,
     summary_model: str,
+    segment: Segment | None = None,
 ) -> int | None:
     """Append one summary row after the newest covered run, unless its input went stale; return its id.
 
     The input is stale when the scope's latest row is no longer ``based_on``, a covered run is gone or
-    changed status or place since it was read, or a covered run sorts at or behind the latest row. The
-    row's event sets come from the covered rows as they are stored now, so metadata written during the
-    summary call, such as a reply's response event id, counts.
+    changed status or place since it was read, a covered run sorts at or behind the latest row, or a cut
+    removed the segment's run. The row's event sets come from the covered rows as they are stored now, so
+    metadata written during the summary call, such as a reply's response event id, counts. A segment's
+    run, when stored, moves after the new row, since what it still holds follows what the row folded.
     """
     db = _sqlite(storage)
     tables = _tables(db)
@@ -185,6 +218,8 @@ def append_summary(
         previous_index = rows[-1].after_run_index if rows else -1
         # A row never sorts behind the latest one: that would return what it folded to replay.
         if (rows[-1].id if rows else None) != based_on or any(run.run_index <= previous_index for run in covered):
+            return None
+        if segment is not None and _is_removed(connection, tables, segment.run_id):
             return None
         stored = {
             run_id: (run_index, status, metadata)
@@ -199,14 +234,18 @@ def append_summary(
             return None
         event_ids: set[str] = set()
         seen: set[str] = set()
-        for _run_index, _status, metadata in stored.values():
+        metadata_sets = [metadata for _run_index, _status, metadata in stored.values()]
+        if segment is not None:
+            # The running run's events count even when it later ends paused, cancelled, or failed.
+            metadata_sets.append(segment.metadata)
+        for metadata in metadata_sets:
             seen |= seen_event_ids(metadata)
             event_ids |= seen_event_ids(metadata) | source_event_ids(metadata)
         # With nothing covered, the row sorts where the latest one does.
         after_run_index = max((run.run_index for run in covered), default=previous_index)
         row_id = connection.exec_driver_sql(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, after_run_index, summary, summary_model, "  # noqa: S608
-            "event_ids, seen_event_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "event_ids, seen_event_ids, created_at, segment_run_id, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 scope_key,
@@ -216,10 +255,57 @@ def append_summary(
                 json.dumps(sorted(event_ids)),
                 json.dumps(sorted(seen)),
                 int(time.time()),
+                segment.run_id if segment is not None else None,
+                json.dumps(segment.payload()) if segment is not None else None,
             ),
         ).lastrowid
+        if segment is not None:
+            # A resumed approval or a CLI checkpoint stored the run before this fold.
+            connection.exec_driver_sql(
+                f"UPDATE {tables.runs} SET run_index = (SELECT MAX(COALESCE((SELECT MAX(run_index) FROM {tables.runs} "  # noqa: S608
+                f"WHERE session_id = ?), -1), (SELECT MAX(after_run_index) FROM {tables.summaries} "
+                "WHERE session_id = ?)) + 1) WHERE session_id = ? AND run_id = ?",
+                (session_id, session_id, session_id, segment.run_id),
+            )
         connection.commit()
     return row_id
+
+
+def segment_tool_call_ids(storage: BaseDb, *, session_id: str, run_id: str) -> set[str]:
+    """Return the tool calls every mid-turn fold of ``run_id`` folded, from their summary rows."""
+    db = _sqlite(storage)
+    tables = _tables(db)
+    with db.db_engine.begin() as connection:
+        _ensure_tables(connection, db)
+        segments = connection.exec_driver_sql(
+            f"SELECT segment FROM {tables.summaries} WHERE session_id = ? AND segment_run_id = ?",  # noqa: S608
+            (session_id, run_id),
+        ).fetchall()
+    return set().union(*(folded_tool_call_ids(json.loads(segment)) for (segment,) in segments))
+
+
+def folded_tool_call_ids(segment: Mapping[str, Any]) -> set[str]:
+    """Return the tool calls one segment folded: its messages' calls and executions, and its members' tools.
+
+    The whole turn folds, so each member response attached so far goes with its delegation, nested members too.
+    """
+    call_ids = {
+        call["id"]
+        for message in segment.get("messages") or []
+        for call in message.get("tool_calls") or []
+        if isinstance(call.get("id"), str)
+    }
+    call_ids |= {
+        tool["tool_call_id"] for tool in segment.get("tools") or [] if isinstance(tool.get("tool_call_id"), str)
+    }
+    members = list(segment.get("member_responses") or [])
+    while members:
+        member = members.pop()
+        call_ids |= {
+            tool["tool_call_id"] for tool in member.get("tools") or [] if isinstance(tool.get("tool_call_id"), str)
+        }
+        members.extend(member.get("member_responses") or [])
+    return call_ids
 
 
 def history_event_ids(
@@ -322,7 +408,11 @@ def cut_at_legacy_row(storage: BaseDb, *, session_id: str, scope_key: str) -> No
 
 
 def retire(storage: BaseDb, *, session_id: str, scope_key: str) -> None:
-    """Stop every summary of the scope from replaying or counting as seen, keeping the runs stored."""
+    """Stop every summary of the scope from replaying or counting as seen, keeping the runs stored.
+
+    A run that folded mid-turn goes with its descendants, since its stored part would replay without
+    what it built on.
+    """
     db = _sqlite(storage)
     tables = _tables(db)
     with db.db_engine.connect() as connection:
@@ -334,6 +424,9 @@ def retire(storage: BaseDb, *, session_id: str, scope_key: str) -> None:
             "VALUES (?, ?, ?, ?)",
             (session_id, scope_key, rows[-1].after_run_index if rows else -1, int(time.time())),
         )
+        owners = {row.segment_run_id for row in rows if row.segment_run_id is not None}
+        removed = agno_compat_sqlite.delete_run_subtrees(connection, tables.runs, owners, session_id=session_id)
+        _record_removed(connection, tables, session_id, owners | removed)
         connection.commit()
 
 
@@ -345,21 +438,48 @@ def _cut(
     rows: Sequence[_SummaryRow],
     cut: _Key,
 ) -> None:
-    """Delete every top-level run and non-barrier row at or after ``cut``, with descendants, and record the removed runs."""
-    top_level = set(_top_level_from(connection, tables, session_id, scope_key, cut))
-    deleted_rows = [row for row in rows if row.summary is not None and (row.after_run_index, row.id) >= cut]
-    removed = sorted(agno_compat_sqlite.delete_run_subtrees(connection, tables.runs, top_level, session_id=session_id))
+    """Delete every top-level run and non-barrier row at or after ``cut``, with descendants, and record the removed runs.
+
+    A run goes whole: when a deleted run, or the run of a deleted segment, holds a segment on an earlier
+    row, the cut starts at that row instead. The run of every deleted segment counts as removed, which
+    fences a running run that has not stored a row yet.
+    """
+    while True:
+        top_level = set(_top_level_from(connection, tables, session_id, scope_key, cut))
+        deleted_rows = [row for row in rows if row.summary is not None and (row.after_run_index, row.id) >= cut]
+        owners = top_level | {row.segment_run_id for row in deleted_rows if row.segment_run_id is not None}
+        earlier = [
+            (row.after_run_index, row.id)
+            for row in rows
+            if row.segment_run_id in owners and (row.after_run_index, row.id) < cut
+        ]
+        if not earlier:
+            break
+        cut = min(earlier)
+    removed = agno_compat_sqlite.delete_run_subtrees(connection, tables.runs, top_level, session_id=session_id)
+    _record_removed(connection, tables, session_id, removed | owners)
+    if deleted_rows:
+        connection.exec_driver_sql(
+            f"DELETE FROM {tables.summaries} WHERE id IN ({', '.join('?' for _ in deleted_rows)})",  # noqa: S608
+            tuple(row.id for row in deleted_rows),
+        )
+
+
+def _record_removed(connection: Connection, tables: _Tables, session_id: str, run_ids: Collection[str]) -> None:
+    removed = sorted(run_ids)
     for start in range(0, len(removed), _ID_CHUNK_SIZE):
         chunk = removed[start : start + _ID_CHUNK_SIZE]
         connection.exec_driver_sql(
             f"INSERT OR IGNORE INTO {tables.removed} (run_id, session_id) VALUES {', '.join('(?, ?)' for _ in chunk)}",  # noqa: S608
             tuple(value for run_id in chunk for value in (run_id, session_id)),
         )
-    if deleted_rows:
-        connection.exec_driver_sql(
-            f"DELETE FROM {tables.summaries} WHERE id IN ({', '.join('?' for _ in deleted_rows)})",  # noqa: S608
-            tuple(row.id for row in deleted_rows),
-        )
+
+
+def _is_removed(connection: Connection, tables: _Tables, run_id: str) -> bool:
+    return (
+        connection.exec_driver_sql(f"SELECT 1 FROM {tables.removed} WHERE run_id = ?", (run_id,)).first()  # noqa: S608
+        is not None
+    )
 
 
 def _top_level_from(connection: Connection, tables: _Tables, session_id: str, scope_key: str, cut: _Key) -> list[str]:
@@ -386,7 +506,10 @@ def _folded_holder(
     event_id: str,
     match: Literal["answered", "any"],
 ) -> _Key | None:
-    """Return the key of the earliest folded element holding the event, searching rows after the latest barrier."""
+    """Return the key of the earliest folded element holding the event, searching rows after the latest barrier.
+
+    A row's segment sorts after the runs the row folded, so a segment holding the event cuts at its row.
+    """
     barrier = max((row.id for row in rows if row.summary is None), default=0)
     previous_index: int | None = None
     for row in rows:
@@ -397,7 +520,17 @@ def _folded_holder(
         for run_index, metadata in _range_runs(connection, tables, session_id, scope_key, start, row.after_run_index):
             if _holds(metadata, event_id, match):
                 return (run_index, 0)
+        if row.segment_run_id is not None and _holds(_segment_metadata(connection, tables, row.id), event_id, match):
+            return (row.after_run_index, row.id)
     return None
+
+
+def _segment_metadata(connection: Connection, tables: _Tables, row_id: int) -> object:
+    (metadata,) = connection.exec_driver_sql(
+        f"SELECT json_extract(segment, '$.metadata') FROM {tables.summaries} WHERE id = ?",  # noqa: S608
+        (row_id,),
+    ).one()
+    return json.loads(metadata) if metadata is not None else None
 
 
 def _range_runs(
@@ -461,7 +594,7 @@ def _run_metadata(
     return found
 
 
-def _holds(metadata: Mapping[str, Any] | None, event_id: str, match: Literal["answered", "any"]) -> bool:
+def _holds(metadata: object, event_id: str, match: Literal["answered", "any"]) -> bool:
     if event_id in source_event_ids(metadata):
         return True
     return match == "any" and event_id in seen_event_ids(metadata)
@@ -483,9 +616,10 @@ def _rows(
             summary=summary,
             legacy=bool(legacy),
             event_ids=frozenset(json.loads(event_ids)),
+            segment_run_id=segment_run_id,
         )
-        for row_id, after_run_index, summary, legacy, event_ids in connection.exec_driver_sql(
-            f"SELECT id, after_run_index, summary, legacy, event_ids FROM {tables.summaries} "  # noqa: S608
+        for row_id, after_run_index, summary, legacy, event_ids, segment_run_id in connection.exec_driver_sql(
+            f"SELECT id, after_run_index, summary, legacy, event_ids, segment_run_id FROM {tables.summaries} "  # noqa: S608
             f"WHERE session_id = ? AND scope_key = ? ORDER BY id DESC{' LIMIT 1' if latest_only else ''}",
             (session_id, scope_key),
         )

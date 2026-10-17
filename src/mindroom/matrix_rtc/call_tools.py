@@ -997,13 +997,17 @@ def _call_agent_run_state(
     session_id: str,
     fallback_run_id: str,
 ) -> _CallAgentRunState:
-    """Snapshot one real Agno run for later spoken-text reconciliation."""
+    """Snapshot one real Agno run for later spoken-text reconciliation.
+
+    The recorder's snapshot leaves out the calls a mid-turn fold summarized, as any interrupted record does.
+    """
+    snapshot = recorder.interrupted_snapshot()
     return _CallAgentRunState(
         session_id=session_id,
         run_id=recorder.run_id or fallback_run_id,
         user_message=recorder.user_message,
-        completed_tools=tuple(recorder.completed_tools),
-        interrupted_tools=tuple(recorder.interrupted_tools),
+        completed_tools=snapshot.completed_tools,
+        interrupted_tools=snapshot.interrupted_tools,
         run_metadata=dict(recorder.run_metadata or {}),
         outcome=recorder.outcome,
         original_status=recorder.original_status,

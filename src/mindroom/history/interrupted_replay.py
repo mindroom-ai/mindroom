@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +14,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.storage import new_scope_session
+from mindroom.history.storage import new_scope_session, run_folded_tool_call_ids
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.agent_storage import get_agent_session, get_team_session, save_runs
@@ -25,7 +25,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from agno.db.base import BaseDb
     from agno.models.response import ToolExecution
@@ -282,8 +282,12 @@ def build_interrupted_replay_snapshot(
     run_metadata: Mapping[str, object] | None,
     response_event_id: str | None = None,
     original_status: RunStatus = RunStatus.cancelled,
+    folded_tool_call_ids: Collection[str] = (),
 ) -> InterruptedReplaySnapshot:
-    """Build one canonical interrupted replay snapshot from trusted runtime state."""
+    """Build one canonical interrupted replay snapshot from trusted runtime state.
+
+    Calls a mid-turn fold already summarized, and tools nested in a folded shell call, are left out.
+    """
     metadata = dict(run_metadata) if isinstance(run_metadata, Mapping) else {}
     raw_response_event_id = response_event_id or metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     if isinstance(raw_response_event_id, str) and raw_response_event_id:
@@ -293,11 +297,19 @@ def build_interrupted_replay_snapshot(
     return InterruptedReplaySnapshot(
         user_message=(user_message or "").strip(),
         partial_text=(partial_text or "").strip(),
-        completed_tools=tuple(completed_tools),
-        interrupted_tools=tuple(interrupted_tools),
+        completed_tools=_unfolded(completed_tools, folded_tool_call_ids),
+        interrupted_tools=_unfolded(interrupted_tools, folded_tool_call_ids),
         run_metadata=metadata,
         user_message_is_structured=user_message_is_structured,
         original_status=original_status,
+    )
+
+
+def _unfolded(tools: Sequence[ToolTraceEntry], folded_tool_call_ids: Collection[str]) -> tuple[ToolTraceEntry, ...]:
+    return tuple(
+        tool
+        for tool in tools
+        if tool.tool_call_id not in folded_tool_call_ids and tool.parent_bash_call_id not in folded_tool_call_ids
     )
 
 
@@ -311,7 +323,16 @@ def persist_interrupted_replay_snapshot(
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
 ) -> None:
-    """Persist one canonical interrupted replay snapshot into session history."""
+    """Persist one canonical interrupted replay snapshot into session history.
+
+    Calls the run's mid-turn folds already summarized stay out, whichever path built the snapshot.
+    """
+    folded = run_folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
+    snapshot = replace(
+        snapshot,
+        completed_tools=_unfolded(snapshot.completed_tools, folded),
+        interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
+    )
     persisted_session = _load_persisted_session(
         storage=storage,
         session_id=session_id,

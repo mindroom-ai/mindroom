@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
+    from sqlalchemy.sql.dml import Insert
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -63,6 +64,7 @@ __all__ = [
     "create_session_storage",
     "create_state_engine",
     "create_state_storage",
+    "ensure_session_row",
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
@@ -83,6 +85,7 @@ def save_compaction_usage(
     model_provider: str,
     model: str,
     metrics: Mapping[str, object],
+    initial_session: AgentSession | TeamSession | None = None,
 ) -> None:
     """Persist one incurred summary response independently of conversation changes."""
     created_at = time.time()
@@ -92,6 +95,7 @@ def save_compaction_usage(
         usage_id=f"compaction:{uuid4()}",
         kind="compaction_summary",
         requester_id=requester_id,
+        initial_session=initial_session,
         run={
             "model_provider": model_provider,
             "model": model,
@@ -120,23 +124,7 @@ def save_independent_usage(
         {**run, "run_id": usage_id, "user_id": requester_id, "metadata": None, "parent_run_id": None, "team_id": None},
     )
     snapshot["kind"] = kind
-    session_insert = None
-    if initial_session is not None:
-        is_team = isinstance(initial_session, TeamSession)
-        values = {
-            "session_id": session_id,
-            "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
-            "team_id" if is_team else "agent_id": (
-                initial_session.team_id if isinstance(initial_session, TeamSession) else initial_session.agent_id
-            ),
-            "created_at": initial_session.created_at,
-            "updated_at": initial_session.updated_at,
-        }
-        session_insert = (
-            insert(agno_compat_sqlite.owned_table(storage, "sessions"))
-            .values(**values)
-            .on_conflict_do_nothing(index_elements=["session_id"])
-        )
+    session_insert = _session_row_insert(storage, session_id, initial_session) if initial_session is not None else None
     with storage.db_engine.begin() as connection:
         if session_insert is not None:
             connection.execute(session_insert)
@@ -145,6 +133,31 @@ def save_independent_usage(
             usage_upsert_sql(storage.session_table_name),
             (session_id, usage_id, json.dumps(snapshot)),
         )
+
+
+def ensure_session_row(storage: BaseDb, session: AgentSession | TeamSession) -> None:
+    """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile."""
+    if not isinstance(storage, SqliteDb):
+        msg = "Session rows require SQLite session storage"
+        raise TypeError(msg)
+    with storage.db_engine.begin() as connection:
+        connection.execute(_session_row_insert(storage, session.session_id, session))
+
+
+def _session_row_insert(storage: SqliteDb, session_id: str, session: AgentSession | TeamSession) -> Insert:
+    is_team = isinstance(session, TeamSession)
+    values = {
+        "session_id": session_id,
+        "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
+        "team_id" if is_team else "agent_id": session.team_id if isinstance(session, TeamSession) else session.agent_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+    return (
+        insert(agno_compat_sqlite.owned_table(storage, "sessions"))
+        .values(**values)
+        .on_conflict_do_nothing(index_elements=["session_id"])
+    )
 
 
 async def run_session_storage_operation[Result](

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from contextlib import contextmanager
@@ -296,11 +297,15 @@ def delete_run_subtrees(
 # last N), so it cannot stop at the latest summary row, and pysqlite opens no transaction for reads,
 # so its session-row and run reads can straddle a concurrent commit. Building the session here
 # reuses Agno's deserialization and its private run-object cache, as SqliteDb.get_session does.
+# A run that folded mid-turn loads without the messages its segments hold, on a per-read copy, because
+# the run-object cache keys on the stored text alone and a copy saved before a fold still holds them.
 # Upstream issue: Tracking gap; no matching issue for boundary-filtered or snapshot session reads.
 # Upstream PR: None identified.
 # Remove when: Agno reads a session's row and a caller-filtered run set in one snapshot; keep the
-# owner's filter (runs after the scope's latest summary row, non-visible runs, and their descendants).
+# owner's filter (runs after the scope's latest summary row, non-visible runs, and their descendants)
+# and the removal of folded messages.
 # Coverage: tests/test_summary_rows.py::test_load_returns_runs_after_the_latest_summary_and_every_non_visible_run,
+# tests/test_mid_turn_log.py::test_a_run_loads_without_the_messages_its_segments_hold,
 # tests/test_summary_rows.py::test_load_keeps_member_rows_with_their_team_run,
 # tests/test_summary_rows.py::test_load_reads_one_snapshot, and
 # tests/test_summary_rows.py::test_load_finds_member_rows_without_scanning_the_session_per_run.
@@ -341,6 +346,16 @@ def read_session(
                     session_id,
                 )
             )
+            folded = (
+                _folded_message_ids(
+                    connection,
+                    quote_identifier(summaries),
+                    session_id,
+                    [run_id for run_id, _run_data in run_rows],
+                )
+                if has_summaries
+                else {}
+            )
             session_raw = deserialize_session_json_fields(dict(row._mapping))
             owner = owner_scope_key(
                 session_raw.get("session_type"),
@@ -365,7 +380,11 @@ def read_session(
         else None
     )
     cached_runs = deserialize and session_raw.get("session_type") == SessionType.AGENT.value
-    session_raw["runs"] = None if cached_runs else [json.loads(run_data) for _run_id, run_data in run_rows]
+    session_raw["runs"] = (
+        None
+        if cached_runs
+        else [_without_folded_messages(json.loads(run_data), folded.get(run_id)) for run_id, run_data in run_rows]
+    )
     if not deserialize:
         session_raw["summary"] = summary.to_dict() if summary is not None else None
         return session_raw
@@ -374,8 +393,51 @@ def read_session(
     if isinstance(session, (AgentSession, TeamSession)):
         session.summary = summary
     if cached_runs:
-        session.runs = db._run_object_cache.runs_from_rows(session_id, run_rows)  # type: ignore[union-attr]
+        assert isinstance(session, AgentSession)
+        runs = db._run_object_cache.runs_from_rows(session_id, run_rows)
+        # Cached run objects are shared and immutable by contract, so a folded run loads as a copy.
+        session.runs = [
+            _without_folded_messages_copy(run, folded[run.run_id]) if run.run_id in folded else run for run in runs
+        ]
     return session
+
+
+def _folded_message_ids(
+    connection: Connection,
+    summaries: str,
+    session_id: str,
+    run_ids: list[str],
+) -> dict[str, set[str]]:
+    """Return, for each of ``run_ids`` that folded mid-turn, the ids of the messages its segments hold."""
+    folded: dict[str, set[str]] = {}
+    for start in range(0, len(run_ids), _ID_CHUNK_SIZE):
+        chunk = run_ids[start : start + _ID_CHUNK_SIZE]
+        for run_id, message_id in connection.exec_driver_sql(
+            f"SELECT row.segment_run_id, json_extract(message.value, '$.id') FROM {summaries} AS row, "  # noqa: S608
+            "json_each(row.segment, '$.messages') AS message WHERE row.session_id = ? "
+            f"AND row.segment_run_id IN ({', '.join('?' for _ in chunk)})",
+            (session_id, *chunk),
+        ):
+            if isinstance(message_id, str):
+                folded.setdefault(run_id, set()).add(message_id)
+    return folded
+
+
+def _without_folded_messages(run_data: dict[str, Any], folded: set[str] | None) -> dict[str, Any]:
+    if folded and isinstance(run_data.get("messages"), list):
+        run_data["messages"] = [
+            message
+            for message in run_data["messages"]
+            if not (isinstance(message, dict) and message.get("id") in folded)
+        ]
+    return run_data
+
+
+def _without_folded_messages_copy(run: RunOutput, folded: set[str]) -> RunOutput:
+    stripped = copy.copy(run)
+    if run.messages is not None:
+        stripped.messages = [message for message in run.messages if message.id not in folded]
+    return stripped
 
 
 def _loaded_run_rows(
