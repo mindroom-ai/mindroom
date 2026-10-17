@@ -320,7 +320,7 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
     tmp_path: Path,
     extractor: _Extractor,
 ) -> None:
-    """A scope first seen after the start begins one pass before it was seen, so its older history is never flushed."""
+    """A scope first seen after the start begins at the previous listing, so its older history is never flushed."""
     agents = {
         "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
         "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
@@ -328,8 +328,10 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
     config, clock = _config(tmp_path, agents=agents), _Clock()
     worker = _worker(config, clock)
     await _started(worker, config, clock)
-    clock.now = T0 + 90 * 86_400
     interval = config.memory.auto_flush.flush_interval_seconds
+    clock.now = T0 + 90 * 86_400 - interval
+    await worker._run_cycle(config)
+    clock.now += interval
     session = _thread("t1")
     older = [_run(f"m{index}", session, T0 + 100 + index) for index in range(3)]
     recent = _run("recent", session, int(clock.now) - interval // 2)
@@ -344,6 +346,84 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
     # A conversation last updated before the scope's start is not even read.
     with pytest.raises(StopIteration):
         _entry(tmp_path, stale)
+
+
+@pytest.mark.asyncio
+async def test_a_private_instance_created_during_a_long_pass_keeps_its_first_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new scope starts when the previous pass listed scopes, so a pass's own duration never hides turns."""
+    config, clock = _private_config(tmp_path), _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    alice, bob = _requester(config, ALICE), _requester(config, BOB)
+    _seed(config, _thread("a"), [_run("a1", _thread("a"), int(clock.now) - 100)], agent="mind", identity=alice)
+    seeded: list[int] = []
+
+    class SlowExtractor(_Extractor):
+        async def __call__(self, **kwargs: object) -> str | None:
+            # During a minute-long extraction, Bob talks to his private instance for the first time.
+            clock.now += 30
+            if not seeded:
+                seeded.append(int(clock.now))
+                _seed(config, _thread("b"), [_run("b1", _thread("b"), seeded[0])], agent="mind", identity=bob)
+            clock.now += 30
+            return await super().__call__(**kwargs)
+
+    extractor = SlowExtractor()
+    monkeypatch.setattr(auto_flush, "_extract_memory_summary", extractor)
+    await worker._run_cycle(config)
+    clock.now += config.memory.auto_flush.flush_interval_seconds
+
+    await worker._run_cycle(config)
+
+    assert [
+        (cast("ToolExecutionIdentity", call["execution_identity"]).requester_id, call["lines"])
+        for call in extractor.calls
+    ] == [(ALICE, _lines("a1")), (BOB, _lines("b1"))]
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_updated_in_the_start_second_is_flushed(tmp_path: Path, extractor: _Extractor) -> None:
+    """Update times are whole seconds, so a turn finished just after the start, in the same second, still counts."""
+    config, clock = _config(tmp_path), _Clock()
+    clock.now = T0 + 0.5
+    worker = _worker(config, clock)
+    await worker._run_cycle(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0)], updated_at=T0)
+    clock.now = T0 + 1000
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r1")]
+
+
+@pytest.mark.asyncio
+async def test_conversations_without_matrix_turns_leave_the_pass_to_others(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A conversation with nothing to flush, such as one through the OpenAI-compatible API, takes no place in a pass."""
+    config, clock = _config(tmp_path, batch={"max_sessions_per_agent_per_cycle": 1}), _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    for index in range(3):
+        api_session = f"api-{index}"
+        api_run = _run(f"x{index}", api_session, T0 + 10 + index)
+        cast("dict[str, object]", api_run.metadata).pop("room_id")
+        _seed(config, api_session, [api_run])
+    automation = _thread("automation")
+    _seed(config, automation, [_run("auto", automation, T0 + 20, hook_source="automation/daily")])
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 30)])
+
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r1")]
+    assert _entry(tmp_path, "api-0")["updated_at"] == T0 + 11
 
 
 @pytest.mark.asyncio
@@ -410,17 +490,17 @@ async def test_a_retry_after_a_failed_progress_write_never_writes_a_note_twice(
     first = _run("r1", session, T0 + 10)
     _seed(config, session, [first])
     real_write = auto_flush.write_json_file_durable
-    writes = 0
+    failed = False
 
-    def first_write_fails(path: Path, payload: object, **kwargs: object) -> None:
-        nonlocal writes
-        writes += 1
-        if writes == 1:
+    def first_progress_write_fails(path: Path, payload: object, **kwargs: object) -> None:
+        nonlocal failed
+        if extractor.calls and not failed:
+            failed = True
             msg = "disk full"
             raise OSError(msg)
         real_write(path, payload, **kwargs)
 
-    monkeypatch.setattr(auto_flush, "write_json_file_durable", first_write_fails)
+    monkeypatch.setattr(auto_flush, "write_json_file_durable", first_progress_write_fails)
 
     await worker._run_cycle(config)
     assert extractor.lines() == [_lines("r1")]
@@ -1002,7 +1082,7 @@ async def test_an_unreadable_progress_file_starts_over_without_flushing_history(
 
     assert extractor.calls == []
     state = json.loads((tmp_path / "tracking" / "memory_auto_flush.json").read_text(encoding="utf-8"))
-    assert state["started_at"] == clock.now
+    assert state["listed_at"] == clock.now
 
 
 @pytest.mark.asyncio

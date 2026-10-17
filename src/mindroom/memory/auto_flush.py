@@ -87,13 +87,14 @@ class _ConversationState(TypedDict):
 
 
 class _ScopeState(TypedDict):
-    # Turns created before this are never flushed.
-    started_at: float
+    # Turns created before this second are never flushed.
+    started_at: int
     conversations: dict[str, _ConversationState]
 
 
 class _FlushState(TypedDict):
-    started_at: float
+    # The second of the last scope listing; a scope first seen in a later listing starts there.
+    listed_at: int
     scopes: dict[str, _ScopeState]
 
 
@@ -134,7 +135,7 @@ def _new_conversation() -> _ConversationState:
     return {"updated_at": 0, "marker": [], "failures": 0, "failing_since": 0, "retry_at": 0, "recheck_at": 0}
 
 
-def _start(entry: _ConversationState, runs: list[RunOutput], started_at: float) -> tuple[int, str] | None:
+def _start(entry: _ConversationState, runs: list[RunOutput], started_at: int) -> tuple[int, str] | None:
     """Return the run key the conversation's unflushed turns follow, or None when all of them are unflushed."""
     if entry["marker"]:
         return (int(entry["marker"][0]), str(entry["marker"][1]))
@@ -411,16 +412,12 @@ class MemoryAutoFlushWorker:
         now = self.clock()
         state = await asyncio.to_thread(self._load_state, now)
         scopes = await asyncio.to_thread(_flush_scopes, config, self.runtime_paths)
-        # A scope first seen after the start, such as an agent switched to file memory, starts one pass before it was
-        # seen, so a new private instance keeps the turns since the previous pass but no older history is flushed.
-        new_scopes = [scope for scope in scopes if scope.key not in state["scopes"]]
-        for scope in new_scopes:
-            state["scopes"][scope.key] = {
-                "started_at": max(state["started_at"], now - settings.flush_interval_seconds),
-                "conversations": {},
-            }
-        if new_scopes:
-            await self._persist(state)
+        # A scope first seen after the start, such as an agent switched to file memory, starts at the previous listing,
+        # so a new private instance keeps every turn since then but no older history is flushed.
+        for scope in scopes:
+            state["scopes"].setdefault(scope.key, {"started_at": state["listed_at"], "conversations": {}})
+        state["listed_at"] = int(now)
+        await self._persist(state)
         budget = settings.batch.max_sessions_per_cycle
         # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
         start = self._passes % len(scopes) if scopes else 0
@@ -432,8 +429,8 @@ class MemoryAutoFlushWorker:
             try:
                 scope_state = state["scopes"][scope.key]
                 limit = min(budget, settings.batch.max_sessions_per_agent_per_cycle)
-                due, failed_reads = await asyncio.to_thread(self._due, config, scope, scope_state, now, limit)
-                if failed_reads:
+                due, changed = await asyncio.to_thread(self._due, config, scope, scope_state, now, limit)
+                if changed:
                     await self._persist(state)
                 for conversation in due:
                     budget -= await self._flush(config, scope, state, scope_state, conversation, now)
@@ -448,7 +445,7 @@ class MemoryAutoFlushWorker:
         now: float,
         limit: int,
     ) -> tuple[list[_DueConversation], bool]:
-        """Return up to ``limit`` quiet conversations with new turns, and whether a failed read changed the progress."""
+        """Return up to ``limit`` quiet conversations with new turns, and whether listing them changed the progress."""
         settings = config.memory.auto_flush
         # At least a second, so a conversation updated after a pass always carries a later update time than it had then.
         idle_seconds = max(settings.idle_seconds, 1)
@@ -461,11 +458,12 @@ class MemoryAutoFlushWorker:
         conversations = scope_state["conversations"]
         try:
             due: list[_DueConversation] = []
-            failed_reads = False
+            changed = False
             for session_id, updated_at in updated_sessions(
                 storage,
                 scope.agent_name,
-                since=int(scope_state["started_at"]),
+                # Update times are whole seconds, so one in the start's own second is listed too.
+                since=scope_state["started_at"] - 1,
             ):
                 if len(due) >= limit:
                     break
@@ -489,10 +487,16 @@ class MemoryAutoFlushWorker:
                     )
                     entry = conversations.setdefault(session_id, _new_conversation())
                     _record_unreadable(entry, settings, updated_at, self.clock())
-                    failed_reads = True
+                    changed = True
+                    continue
+                if not runs:
+                    # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
+                    # flush, so it does not take a place in the pass.
+                    conversations.setdefault(session_id, _new_conversation())["updated_at"] = updated_at
+                    changed = True
                     continue
                 due.append(_DueConversation(session_id, updated_at, runs))
-            return due, failed_reads
+            return due, changed
         finally:
             storage.close()
 
@@ -618,7 +622,7 @@ class MemoryAutoFlushWorker:
             # Starting over skips turns not flushed yet but never flushes earlier conversation again.
             logger.warning("Memory auto-flush progress was unreadable; starting over")
         # Saved at once, so turns from before this start are never flushed, even for conversations first seen later.
-        state: _FlushState = {"started_at": now, "scopes": {}}
+        state: _FlushState = {"listed_at": int(now), "scopes": {}}
         write_json_file_durable(self._state_path(), state)
         return state
 
