@@ -911,7 +911,7 @@ async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
 
 @pytest.mark.asyncio
 async def test_memory_addition_outside_a_reply_counts_as_internal_usage(storage_path: Path, config: Config) -> None:
-    """An addition with no reply to charge, such as a voice-call transcript, is reported as internal work."""
+    """An addition with no reply or call to charge is reported as internal work."""
     recorded, record = _recorder()
 
     with (

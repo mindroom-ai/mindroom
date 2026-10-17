@@ -420,7 +420,7 @@ class Mem0MemoryBackend:
                 await _run_mem0_embedder_mutation(add_memory, health_recorder)
             finally:
                 # Extraction tokens are spent even when storing the extracted facts fails afterwards.
-                # The memory tool runs inside a reply, whose conversation is the bound owner.
+                # The reply running the memory tool, or the call whose transcript this is, binds the owner.
                 await self._record_extraction_usage(
                     calls,
                     get_helper_usage_owner(),
