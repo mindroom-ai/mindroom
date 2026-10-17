@@ -691,7 +691,7 @@ async def test_a_parallel_tool_batch_larger_than_one_summary_input_folds_without
     summary_inputs = "\n".join(summary_calls.inputs)
     assert "Run truncated to fit compaction budget." not in summary_inputs
     assert len(fact_paths) == 8
-    # Each result reaches the summarizer beside its own call, so the summary can tell which file it came from.
+    # Each result names its own call's arguments, so the summary can tell which file it came from.
     for fact, path in fact_paths.items():
         assert any(fact in summary_input and path in summary_input for summary_input in summary_calls.inputs), fact
 

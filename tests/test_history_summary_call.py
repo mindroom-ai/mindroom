@@ -757,6 +757,23 @@ def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -
     assert [included_run.run_id for included_run in included_runs] == ["run-big-result"]
     assert "Run truncated to fit compaction budget." in summary_input
     assert "big_a.py" in summary_input
+    # A mid-turn fold summarizes a result apart from its call message; its own arguments still name the file.
+    result_only = _completed_run(
+        "run-big-lone-result",
+        messages=[
+            Message(role="tool", tool_name="read_file", tool_args={"path": "big_b.py"}, content="y" * 4_000),
+        ],
+    )
+
+    summary_input, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[result_only],
+        max_input_tokens=300,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert "Run truncated to fit compaction budget." in summary_input
+    assert "big_b.py" in summary_input
 
 
 def test_each_tool_result_names_its_own_call_in_the_summary_input() -> None:
