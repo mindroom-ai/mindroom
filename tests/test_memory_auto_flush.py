@@ -320,7 +320,7 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
     tmp_path: Path,
     extractor: _Extractor,
 ) -> None:
-    """A scope first seen after the start begins at the previous listing, so its older history is never flushed."""
+    """An agent first seen after the start begins one pass before it was seen, so its older history is never flushed."""
     agents = {
         "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
         "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
@@ -328,10 +328,8 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
     config, clock = _config(tmp_path, agents=agents), _Clock()
     worker = _worker(config, clock)
     await _started(worker, config, clock)
+    clock.now = T0 + 90 * 86_400
     interval = config.memory.auto_flush.flush_interval_seconds
-    clock.now = T0 + 90 * 86_400 - interval
-    await worker._run_cycle(config)
-    clock.now += interval
     session = _thread("t1")
     older = [_run(f"m{index}", session, T0 + 100 + index) for index in range(3)]
     recent = _run("recent", session, int(clock.now) - interval // 2)
@@ -349,39 +347,20 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
 
 
 @pytest.mark.asyncio
-async def test_a_private_instance_created_during_a_long_pass_keeps_its_first_turn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A new scope starts when the previous pass listed scopes, so a pass's own duration never hides turns."""
+async def test_a_private_instance_first_listed_late_keeps_every_turn(tmp_path: Path, extractor: _Extractor) -> None:
+    """Instances share their agent's start, so one listed passes after it appeared, or after a long pass, loses nothing."""
     config, clock = _private_config(tmp_path), _Clock()
     worker = _worker(config, clock)
     await _started(worker, config, clock)
-    alice, bob = _requester(config, ALICE), _requester(config, BOB)
-    _seed(config, _thread("a"), [_run("a1", _thread("a"), int(clock.now) - 100)], agent="mind", identity=alice)
-    seeded: list[int] = []
-
-    class SlowExtractor(_Extractor):
-        async def __call__(self, **kwargs: object) -> str | None:
-            # During a minute-long extraction, Bob talks to his private instance for the first time.
-            clock.now += 30
-            if not seeded:
-                seeded.append(int(clock.now))
-                _seed(config, _thread("b"), [_run("b1", _thread("b"), seeded[0])], agent="mind", identity=bob)
-            clock.now += 30
-            return await super().__call__(**kwargs)
-
-    extractor = SlowExtractor()
-    monkeypatch.setattr(auto_flush, "_extract_memory_summary", extractor)
-    await worker._run_cycle(config)
-    clock.now += config.memory.auto_flush.flush_interval_seconds
+    bob = _requester(config, BOB)
+    _seed(config, _thread("b"), [_run("b1", _thread("b"), T0 + 10)], agent="mind", identity=bob)
 
     await worker._run_cycle(config)
 
     assert [
         (cast("ToolExecutionIdentity", call["execution_identity"]).requester_id, call["lines"])
         for call in extractor.calls
-    ] == [(ALICE, _lines("a1")), (BOB, _lines("b1"))]
+    ] == [(BOB, _lines("b1"))]
 
 
 @pytest.mark.asyncio
@@ -427,8 +406,8 @@ async def test_conversations_without_matrix_turns_leave_the_pass_to_others(
 
 
 @pytest.mark.asyncio
-async def test_a_scope_keeps_the_start_it_was_first_seen_with(tmp_path: Path, extractor: _Extractor) -> None:
-    """The start of a newly seen scope is saved, so a late next pass still flushes the turns made since it appeared."""
+async def test_an_agent_keeps_the_start_it_was_first_seen_with(tmp_path: Path, extractor: _Extractor) -> None:
+    """The start of a newly seen agent is saved, so a late next pass still flushes the turns made since it appeared."""
     agents = {
         "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
         "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
@@ -1082,7 +1061,7 @@ async def test_an_unreadable_progress_file_starts_over_without_flushing_history(
 
     assert extractor.calls == []
     state = json.loads((tmp_path / "tracking" / "memory_auto_flush.json").read_text(encoding="utf-8"))
-    assert state["listed_at"] == clock.now
+    assert state["started_at"] == clock.now
 
 
 @pytest.mark.asyncio

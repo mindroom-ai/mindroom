@@ -87,14 +87,15 @@ class _ConversationState(TypedDict):
 
 
 class _ScopeState(TypedDict):
-    # Turns created before this second are never flushed.
+    # Turns created before this second, its agent's start, are never flushed.
     started_at: int
     conversations: dict[str, _ConversationState]
 
 
 class _FlushState(TypedDict):
-    # The second of the last scope listing; a scope first seen in a later listing starts there.
-    listed_at: int
+    started_at: int
+    # Each file-memory agent's start, which every scope of the agent shares.
+    agents: dict[str, int]
     scopes: dict[str, _ScopeState]
 
 
@@ -110,9 +111,12 @@ def auto_flush_enabled(config: Config) -> bool:
     return config.memory.auto_flush.enabled and config.uses_file_memory()
 
 
-def _flush_scopes(config: Config, runtime_paths: RuntimePaths) -> list[_FlushScope]:
-    """Return every file-memory agent and each private instance of a private one."""
-    agent_names = [name for name in config.agents if config.resolve_entity(name).memory_backend == "file"]
+def _file_memory_agents(config: Config) -> list[str]:
+    return [name for name in config.agents if config.resolve_entity(name).memory_backend == "file"]
+
+
+def _flush_scopes(config: Config, runtime_paths: RuntimePaths, agent_names: list[str]) -> list[_FlushScope]:
+    """Return each shared agent and each private instance of a private one."""
     storage_root = runtime_paths.storage_root.expanduser().resolve()
     scopes: list[_FlushScope] = []
     for agent_name, requester_id in agent_instances(config, runtime_paths, agent_names):
@@ -411,13 +415,21 @@ class MemoryAutoFlushWorker:
         settings = config.memory.auto_flush
         now = self.clock()
         state = await asyncio.to_thread(self._load_state, now)
-        scopes = await asyncio.to_thread(_flush_scopes, config, self.runtime_paths)
-        # A scope first seen after the start, such as an agent switched to file memory, starts at the previous listing,
-        # so a new private instance keeps every turn since then but no older history is flushed.
+        agent_names = _file_memory_agents(config)
+        # An agent first seen after the start, such as one switched to file memory, starts one pass interval before it
+        # was seen, so its older history is never flushed. Its private instances share that start, so an instance keeps
+        # all its turns however late it is first listed.
+        new_agents = [name for name in agent_names if name not in state["agents"]]
+        for name in new_agents:
+            state["agents"][name] = max(state["started_at"], int(now) - settings.flush_interval_seconds)
+        if new_agents:
+            await self._persist(state)
+        scopes = await asyncio.to_thread(_flush_scopes, config, self.runtime_paths, agent_names)
         for scope in scopes:
-            state["scopes"].setdefault(scope.key, {"started_at": state["listed_at"], "conversations": {}})
-        state["listed_at"] = int(now)
-        await self._persist(state)
+            state["scopes"].setdefault(
+                scope.key,
+                {"started_at": state["agents"][scope.agent_name], "conversations": {}},
+            )
         budget = settings.batch.max_sessions_per_cycle
         # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
         start = self._passes % len(scopes) if scopes else 0
@@ -622,7 +634,7 @@ class MemoryAutoFlushWorker:
             # Starting over skips turns not flushed yet but never flushes earlier conversation again.
             logger.warning("Memory auto-flush progress was unreadable; starting over")
         # Saved at once, so turns from before this start are never flushed, even for conversations first seen later.
-        state: _FlushState = {"listed_at": int(now), "scopes": {}}
+        state: _FlushState = {"started_at": int(now), "agents": {}, "scopes": {}}
         write_json_file_durable(self._state_path(), state)
         return state
 
