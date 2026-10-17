@@ -2614,7 +2614,7 @@ depends_on = [
     "mindroom.session_storage.agno_compat_sqlite",
     "mindroom.usage.storage",
 ]
-visibility = ["mindroom.history.storage", "mindroom.agent_cli.cli_approval_recovery", "mindroom.history.mid_turn_compaction"]
+visibility = ["mindroom.history.storage", "mindroom.history.mid_turn_compaction"]
 
 [[modules]]
 path = "mindroom.history.summary_rows_schema"
@@ -8468,8 +8468,6 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
-    "mindroom.constants",
-    "mindroom.history.summary_rows",
 ]
 visibility = [
     "mindroom.approval.execution",

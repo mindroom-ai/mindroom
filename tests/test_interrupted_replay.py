@@ -25,10 +25,12 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
 )
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session, save_runs
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
+from tests.history_helpers import store_fold
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -699,3 +701,46 @@ def test_a_stopped_reply_keeps_only_tool_calls_its_fold_did_not_summarize() -> N
 
     assert [tool.tool_call_id for tool in snapshot.completed_tools] == ["after"]
     assert [tool.tool_call_id for tool in snapshot.interrupted_tools] == ["running"]
+
+
+def test_an_interrupted_record_without_a_turn_recorder_leaves_out_what_its_folds_summarized(tmp_path: Path) -> None:
+    """Paths with no turn recorder, such as the OpenAI-compatible API, still drop the calls a mid-turn fold holds."""
+    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    try:
+        store_fold(
+            storage,
+            "session-1",
+            HistoryScope(kind="agent", scope_id="test_agent"),
+            "stopped-run",
+            tools=[{"tool_call_id": "folded-call"}],
+        )
+        snapshot = build_interrupted_replay_snapshot(
+            user_message="Please continue",
+            user_message_is_structured=False,
+            partial_text="",
+            completed_tools=(
+                ToolTraceEntry(type="tool_call_completed", tool_name="folded_lookup", tool_call_id="folded-call"),
+                ToolTraceEntry(type="tool_call_completed", tool_name="later_lookup", tool_call_id="later-call"),
+            ),
+            interrupted_tools=(),
+            run_metadata=None,
+        )
+
+        persist_interrupted_replay_snapshot(
+            storage=storage,
+            session=None,
+            session_id="session-1",
+            scope_id="test_agent",
+            run_id="stopped-run",
+            snapshot=snapshot,
+            is_team=False,
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        [record] = persisted.runs or []
+        text = _assistant_text(record)
+        assert "later_lookup" in text
+        assert "folded_lookup" not in text
+    finally:
+        storage.close()

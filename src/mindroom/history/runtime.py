@@ -639,7 +639,7 @@ async def summarize_run_locally(
     runtime_paths: RuntimePaths,
     on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None,
 ) -> str:
-    """Summarize one run's own folded messages, oldest first, with the scope's summary model, outside any archive."""
+    """Summarize one run's own folded messages, oldest first, with the scope's summary model, storing nothing."""
     execution_plan = resolved_inputs.execution_plan
     session_id = snapshots[0].session_id or ""
     summary_model, fallback_model = _load_summary_models(

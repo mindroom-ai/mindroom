@@ -545,7 +545,7 @@ async def summarize_runs(
     timeout_seconds: float,
     on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None,
 ) -> _RunsSummary:
-    """Summarize runs into one cumulative summary without touching the archive.
+    """Summarize runs into one cumulative summary without writing anything.
 
     Runs that do not fit one summary input are summarized in further chunks, each merged into the summary so far.
     """

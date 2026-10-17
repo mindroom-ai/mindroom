@@ -150,7 +150,7 @@ class _Layout:
 
     leading: int
     kept: tuple[Message, ...]
-    # Replayed messages of earlier turns, which the scope summary or the archive already covers.
+    # Replayed messages of earlier turns, which the scope summary or the stored runs it folds already cover.
     history: tuple[Message, ...]
     # This turn's folded messages, each with the tool results that answer it, oldest first.
     exchanges: tuple[tuple[Message, ...], ...]
@@ -387,7 +387,8 @@ def _segment(
     )
     return Segment(
         run_id=run_response.run_id or "",
-        metadata=deepcopy(run_response.metadata or {}),
+        # Folded usage stays in the run's metadata; the segment needs only the events the run read and answered.
+        metadata=without_fold_records(deepcopy(run_response.metadata)) or {},
         messages=[message.to_dict() for message in folded],
         tools=[tool.to_dict() for tool in run_response.tools or [] if tool.tool_call_id in call_ids],
         member_responses=[member.to_dict() for member in members],
@@ -616,7 +617,7 @@ def _snapshots(
     budget_tokens = inputs.execution_plan.summary_input_budget_tokens or 0
     for index, exchange in enumerate(layout.exchanges):
         lead = (_prompt_context(layout.prompt, budget_tokens),) if index == 0 and layout.prompt is not None else ()
-        # The run's metadata (provenance for redaction) is the same for every exchange, so the first snapshot holds it.
+        # The run's metadata is the same for every exchange, so only the first snapshot shows it to the summarizer.
         metadata = deepcopy(run_response.metadata) if index == 0 else None
         snapshots.append(_snapshot_run(run_response, [*lead, *exchange], metadata))
     return snapshots
@@ -680,7 +681,7 @@ async def _summarize_run_locally(
         kind="team" if isinstance(run_response, TeamRunOutput) else "agent",
         scope_id=binding.target.id or "",
     )
-    # Without a stored session to archive into, replayed history is summarized together with the turn's exchanges.
+    # Without a stored session to append a summary row to, replayed history is summarized with the turn's exchanges.
     history = _history_snapshot(run_response, layout)
     summary = await summarize_run_locally(
         resolved_inputs=inputs,

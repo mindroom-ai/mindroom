@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +14,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.storage import new_scope_session
+from mindroom.history.storage import new_scope_session, run_folded_tool_call_ids
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.agent_storage import get_agent_session, get_team_session, save_runs
@@ -323,7 +323,16 @@ def persist_interrupted_replay_snapshot(
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
 ) -> None:
-    """Persist one canonical interrupted replay snapshot into session history."""
+    """Persist one canonical interrupted replay snapshot into session history.
+
+    Calls the run's mid-turn folds already summarized stay out, whichever path built the snapshot.
+    """
+    folded = run_folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
+    snapshot = replace(
+        snapshot,
+        completed_tools=_unfolded(snapshot.completed_tools, folded),
+        interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
+    )
     persisted_session = _load_persisted_session(
         storage=storage,
         session_id=session_id,

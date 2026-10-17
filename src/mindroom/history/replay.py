@@ -166,7 +166,7 @@ _RUN_LOCAL_SUMMARY = "run"
 def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
     """Render one compaction summary as the user message that replaces the history it covers.
 
-    The scope's summary is rebuilt from the archive for every request, so it is history; a run-local summary is
+    The scope's summary is rebuilt from its latest summary row for every request, so it is history; a run-local summary is
     stored with its run. The marker keeps that kind when Agno later replays the run and marks its messages history.
     """
     return Message(

@@ -657,6 +657,14 @@ def append_fold(
     )
 
 
+def run_folded_tool_call_ids(storage: BaseDb, *, session_id: str, run_id: str) -> set[str]:
+    """Return the tool calls the run's mid-turn folds summarized, from their summary rows."""
+    # Summary rows live in SQLite session storage only.
+    if not isinstance(storage, SqliteDb):
+        return set()
+    return summary_rows.segment_tool_call_ids(storage, session_id=session_id, run_id=run_id)
+
+
 def ensure_scope_session_row(storage: BaseDb, session: AgentSession | TeamSession, scope: HistoryScope) -> None:
     """Create the session row a first turn's fold writes against; Agno writes its own when the run ends."""
     ensure_session_row(

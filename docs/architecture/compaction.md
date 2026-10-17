@@ -28,7 +28,7 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 - A cut removes a run whole: when a removed run holds a segment on an earlier row, the cut starts at that row, and the run of every removed segment is fenced, which covers a running turn that has not stored a row yet.
   Retiring summaries also removes every run that folded mid-turn, because its stored part starts mid-turn and would replay without what it built on.
 - The fold's in-memory effects (the request rewrite, the recorder's folded tool calls, the folded requests' usage in run metadata, and the live session summary) happen together with its commit, even when the turn is cancelled meanwhile.
-  An interrupted record therefore leaves out exactly the calls the stored summary holds; CLI approval recovery rebuilds that set from the run's summary rows so it holds after a restart.
+  An interrupted record therefore leaves out exactly the calls the stored summary holds; its write also reads that set from the run's summary rows, so paths without a turn recorder and a restarted CLI approval recovery leave them out too.
 - A fold survives a crash of its turn: the restarted attempt replays its summary and knows which tool calls already ran and what they returned, and an edit or redaction of the turn's message still removes it through its segment.
 - A request without persisted replay (team members, workflow participants, scheduled tasks with `history_limit: 0`) compacts run-locally: its summary is an ordinary message of its own run and is stored with it.
 

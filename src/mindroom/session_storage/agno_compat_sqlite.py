@@ -297,15 +297,15 @@ def delete_run_subtrees(
 # last N), so it cannot stop at the latest summary row, and pysqlite opens no transaction for reads,
 # so its session-row and run reads can straddle a concurrent commit. Building the session here
 # reuses Agno's deserialization and its private run-object cache, as SqliteDb.get_session does.
-# Upstream issue: Tracking gap; no matching issue for boundary-filtered or snapshot session reads.
-# Upstream PR: None identified.
 # A run that folded mid-turn loads without the messages its segments hold, on a per-read copy, because
 # the run-object cache keys on the stored text alone and a copy saved before a fold still holds them.
+# Upstream issue: Tracking gap; no matching issue for boundary-filtered or snapshot session reads.
+# Upstream PR: None identified.
 # Remove when: Agno reads a session's row and a caller-filtered run set in one snapshot; keep the
 # owner's filter (runs after the scope's latest summary row, non-visible runs, and their descendants)
 # and the removal of folded messages.
 # Coverage: tests/test_summary_rows.py::test_load_returns_runs_after_the_latest_summary_and_every_non_visible_run,
-# tests/test_summary_rows.py::test_a_run_loads_without_the_messages_its_segments_hold,
+# tests/test_mid_turn_log.py::test_a_run_loads_without_the_messages_its_segments_hold,
 # tests/test_summary_rows.py::test_load_keeps_member_rows_with_their_team_run,
 # tests/test_summary_rows.py::test_load_reads_one_snapshot, and
 # tests/test_summary_rows.py::test_load_finds_member_rows_without_scanning_the_session_per_run.
