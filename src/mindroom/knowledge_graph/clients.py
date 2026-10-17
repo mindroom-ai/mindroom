@@ -47,8 +47,8 @@ _EMBED_CONCURRENCY = 8
 # `name_embedding` and `fact_embedding`, and building the records pops them unused. With 3072-dimension embeddings
 # the reply parsing took about 15 ms of event loop time per returned row, so ingestion stalled every agent's replies.
 # Upstream issue: https://github.com/getzep/graphiti/issues/2021
-# Upstream PR: none yet for the search return clauses; https://github.com/getzep/graphiti/pull/1234 only adds an
-# opt-in lightweight mode to `get_by_group_ids`.
+# Upstream PR: https://github.com/getzep/graphiti/pull/2022 (https://github.com/getzep/graphiti/pull/1234 only adds
+# an opt-in lightweight mode to `get_by_group_ids`).
 # Remove when: the pinned Graphiti's FalkorDB searches no longer read embeddings back.
 # Coverage: tests/test_knowledge_graph_store.py::test_lookups_do_not_read_embeddings_back
 _WITHOUT_EMBEDDINGS = (
