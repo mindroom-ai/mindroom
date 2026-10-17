@@ -608,24 +608,27 @@ def _snapshots(
     layout: _Layout,
     inputs: HistoryPreparationInputs,
 ) -> list[RunOutput | TeamRunOutput]:
-    """Return one completed run per folded exchange, oldest first, the first led by the prompt and the run's metadata.
+    """Return one completed run per folded message, oldest first, the first led by the prompt and the run's metadata.
 
     Separate runs let the summary chunker size the turn with the summary model's own estimator and summarize it in
-    as many chunks as it needs, without truncating any exchange that fits a summary input by itself.
+    as many chunks as it needs, without truncating any message that fits a summary input by itself. A tool batch
+    stays whole in the request, but its results are summarized one by one, each naming its call id, so a parallel
+    batch larger than one summary input is never cut short.
     """
     snapshots: list[RunOutput | TeamRunOutput] = []
     budget_tokens = inputs.execution_plan.summary_input_budget_tokens or 0
-    for index, exchange in enumerate(layout.exchanges):
+    folded = [message for exchange in layout.exchanges for message in exchange]
+    for index, message in enumerate(folded):
         lead = (_prompt_context(layout.prompt, budget_tokens),) if index == 0 and layout.prompt is not None else ()
-        # The run's metadata is the same for every exchange, so only the first snapshot shows it to the summarizer.
+        # The run's metadata is the same for every message, so only the first snapshot shows it to the summarizer.
         metadata = deepcopy(run_response.metadata) if index == 0 else None
-        snapshots.append(_snapshot_run(run_response, [*lead, *exchange], metadata))
+        snapshots.append(_snapshot_run(run_response, [*lead, message], metadata))
     return snapshots
 
 
 def _history_snapshot(run_response: RunOutput | TeamRunOutput, layout: _Layout) -> list[RunOutput | TeamRunOutput]:
-    """Return the request's replayed history as one completed run to summarize, or nothing when there is none."""
-    return [_snapshot_run(run_response, layout.history, None)] if layout.history else []
+    """Return the request's replayed history as completed runs to summarize, one per message, as ``_snapshots`` does."""
+    return [_snapshot_run(run_response, [message], None) for message in layout.history]
 
 
 def _snapshot_run(

@@ -658,6 +658,31 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
 
 
 @pytest.mark.asyncio
+async def test_a_parallel_tool_batch_larger_than_one_summary_input_folds_without_truncation(
+    tmp_path: Path,
+    summary_calls: _SummaryCalls,
+) -> None:
+    """A batch is kept whole in the request, but its results reach the summarizer across chunks, none cut short."""
+    config, paths = _config(tmp_path, context_window=8_000, summary_context_window=6_000)
+    model = _ToolLoopModel(tool_rounds=2, calls_per_round=4)
+    facts = iter(range(100))
+
+    def probe() -> str:
+        """Return one tool result carrying a distinct fact at its end."""
+        return "r" * 4_000 + f" FACT-{next(facts):02d}"
+
+    agent = _agent(model, config, paths)
+    agent.tools = [probe]
+
+    output = await _run(agent, "Do the task")
+
+    assert str(output.content).endswith("done")
+    summary_inputs = "\n".join(summary_calls.inputs)
+    assert "Run truncated to fit compaction budget." not in summary_inputs
+    assert all(f"FACT-{index:02d}" in summary_inputs for index in range(8))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("scoped", [False, True])
 async def test_a_prompt_larger_than_the_summary_input_keeps_the_first_exchange_in_the_summary(
     tmp_path: Path,
