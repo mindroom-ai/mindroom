@@ -17,9 +17,15 @@ from agno.session.agent import AgentSession
 import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
+from mindroom.constants import (
+    HOOK_SOURCE_RUN_METADATA_KEY,
+    MATRIX_EVENT_ID_METADATA_KEY,
+    TURN_INTENT_RUN_METADATA_KEY,
+    resolve_runtime_paths,
+)
 from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
 from mindroom.memory.functions import append_agent_daily_memory
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -175,7 +181,7 @@ class _Extractor:
 
 
 def _lines(*run_ids: str) -> list[str]:
-    return [line for run_id in run_ids for line in (f"user: question {run_id}", f"assistant: answer {run_id}")]
+    return [line for run_id in run_ids for line in (f"{ALICE}: question {run_id}", f"assistant: answer {run_id}")]
 
 
 def _worker(
@@ -643,7 +649,10 @@ def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_path: Pat
     messages = [Message(role="user", content=f"part {index}") for index in range(4)]
     long_turn, following = _run("long", session, T0 + 10, messages=messages), _run("next", session, T0 + 20)
 
-    assert auto_flush._next_batch([long_turn, following], settings) == ([long_turn], ["user: part 2", "user: part 3"])
+    assert auto_flush._next_batch([long_turn, following], settings) == (
+        [long_turn],
+        [f"{ALICE}: part 2", f"{ALICE}: part 3"],
+    )
 
 
 def test_each_turn_is_read_as_its_own_user_and_assistant_lines() -> None:
@@ -659,7 +668,7 @@ def test_each_turn_is_read_as_its_own_user_and_assistant_lines() -> None:
 
     lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
 
-    assert lines == ["user: question with spaces", f"assistant: {'x' * 497}..."]
+    assert lines == [f"{ALICE}: question with spaces", f"assistant: {'x' * 497}..."]
 
 
 def test_the_character_limit_bounds_each_extraction(tmp_path: Path) -> None:
@@ -1035,6 +1044,33 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
     context = cast("str", call["existing_context"])
     assert "Alice-authored shared memory" in context
     assert "Shared daily memory" in context
+
+
+def test_each_line_names_who_said_it_and_prompts_mindroom_wrote_are_left_out() -> None:
+    """A coalesced prompt is read by sender, and a job follow-up's prompt is MindRoom's, so only its reply counts."""
+    session = _thread("t1")
+    prompt = (
+        "<messages>" + render_msg_tag(sender=BOB, body="Bob owns Atlas.") + render_msg_tag(sender=ALICE, body="Agreed.")
+    )
+    asked = _run(
+        "r1",
+        session,
+        T0 + 10,
+        messages=[Message(role="user", content=f"{prompt}</messages>"), Message(role="assistant", content="Noted.")],
+    )
+    follow_up = _run(
+        "r2",
+        session,
+        T0 + 20,
+        messages=[
+            Message(role="user", content="[RUNTIME UPDATE] Collect the background jobs."),
+            Message(role="assistant", content="The deploy finished."),
+        ],
+    )
+    cast("dict[str, object]", follow_up.metadata)[TURN_INTENT_RUN_METADATA_KEY] = "job_follow_up"
+
+    assert auto_flush._run_lines(asked) == [f"{BOB}: Bob owns Atlas.", f"{ALICE}: Agreed.", "assistant: Noted."]
+    assert auto_flush._run_lines(follow_up) == ["assistant: The deploy finished."]
 
 
 def test_credentials_are_removed_before_the_extractor() -> None:

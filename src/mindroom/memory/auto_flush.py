@@ -19,10 +19,10 @@ from uuid import uuid4
 
 from agno.agent import Agent
 
-from mindroom.automations.steps import is_automation_hook_source
-from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, tracking_dir
+from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
+from mindroom.history.conversation_text import utterances
 from mindroom.history.session_runs import (
     DELEGATION_SESSION_PREFIX,
     finished_runs,
@@ -143,24 +143,16 @@ def _start(entry: _ConversationState, runs: list[RunOutput], started_at: int) ->
     return run_key(older[-1]) if older else None
 
 
-def _is_automation_turn(run: RunOutput) -> bool:
-    """Return whether an automation started the turn; its maintenance work, such as a memory proposal, is not memory."""
-    hook_source = (run.metadata or {}).get(HOOK_SOURCE_RUN_METADATA_KEY)
-    return isinstance(hook_source, str) and is_automation_hook_source(hook_source)
-
-
 def _run_lines(run: RunOutput) -> list[str]:
-    """Return one turn as the ``role: text`` lines auto-flush extracts memories from."""
+    """Return what was said in one turn as the ``speaker: text`` lines auto-flush extracts memories from."""
     lines: list[str] = []
-    for message in run.messages or []:
-        if message.from_history or message.role not in {"user", "assistant"} or not isinstance(message.content, str):
-            continue
-        cleaned = " ".join(redact_memory_text(message.content).split())
+    for said in utterances(run):
+        cleaned = " ".join(redact_memory_text(said.unredacted).split())
         if not cleaned:
             continue
         if len(cleaned) > _MAX_LINE_CHARS:
             cleaned = f"{cleaned[: _MAX_LINE_CHARS - 3]}..."
-        lines.append(f"{message.role}: {cleaned}")
+        lines.append(f"{said.sender or 'assistant'}: {cleaned}")
     return lines
 
 
@@ -508,7 +500,8 @@ class MemoryAutoFlushWorker:
         entry = conversations.setdefault(session_id, _new_conversation())
         start = _start(entry, runs, state["agents"][scope.agent_name])
         pending = [run for run in runs if start is None or run_key(run) > start]
-        flushable = [run for run in pending if not _is_automation_turn(run)]
+        # A turn with nothing anyone said, such as an automation's, only moves the marker.
+        flushable = [run for run in pending if _run_lines(run)]
         skipped = 0
         batch: list[RunOutput] = []
         try:
