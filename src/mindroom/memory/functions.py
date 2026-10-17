@@ -66,8 +66,6 @@ def append_agent_daily_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
     """Append one memory entry to today's per-agent daily memory file."""
     return append_agent_daily_file_memory(
@@ -76,7 +74,6 @@ def append_agent_daily_memory(
         storage_path,
         config,
         runtime_paths,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
         execution_identity=execution_identity,
     )
 
@@ -111,8 +108,6 @@ async def list_all_agent_memories(
     runtime_paths: RuntimePaths,
     limit: int = 100,
     execution_identity: ToolExecutionIdentity | None = None,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ) -> list[MemoryResult]:
     """List all memories for an agent."""
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
@@ -122,7 +117,6 @@ async def list_all_agent_memories(
         storage_path,
         config,
         limit=limit,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
         execution_identity=execution_identity,
     )
 

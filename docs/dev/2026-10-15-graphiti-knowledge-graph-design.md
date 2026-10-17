@@ -28,8 +28,10 @@ A labeled evaluation of extracted facts against their sources measures precision
 
 Episodes come from stored sessions, never from a model-callable write function.
 Ordinary conversations ingest user, assistant, and tool messages with speaker labels, because a person confirming or correcting the agent is evidence.
+A background job follow-up's prompt is MindRoom's instruction to collect the results, not its requester's words, so only its reply is ingested; stored runs record their turn intent so ingestion can tell.
 Exploration threads and delegated tasks ingest only tool calls and their results, because their prompts come from an agent, not a person, and their answers are the agent's own synthesis.
 Other automation threads (`dreaming`, `prompt_curation`, plugin automations) are not ingested.
+An automation turn inside an ordinary conversation thread adds no conversation lines, because its prompt is an automation's and not a person's, but its tool results are still ingested like any turn's.
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
 Calls to the `knowledge_graph` tool and their results, including lookups through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze`, subagents', workflow participants', and Claude Code's answers, and results collected from background jobs, which no longer name the tool that produced them, are left out because they are or can be a model's prose.
 Each message is joined onto one line, because Graphiti reads every dialogue line as a new speaker's, so a line break in someone's message cannot put words in another person's mouth.

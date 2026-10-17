@@ -412,7 +412,6 @@ class _MultiAgentOrchestrator:
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _permanently_failed_entities: set[str] = field(default_factory=set, init=False)
-    _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _skill_reviews: SkillReviewRunner = field(init=False, repr=False)
     _automations: AutomationRunner = field(init=False, repr=False)
@@ -618,24 +617,18 @@ class _MultiAgentOrchestrator:
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
-        worker = self._memory_auto_flush_worker
         task = self._memory_auto_flush_task
-        self._memory_auto_flush_worker = None
         self._memory_auto_flush_task = None
-
-        if worker is not None:
-            worker.stop()
         if task is not None:
+            # A pass saves each conversation's progress and a retried note is never written twice, so cancelling loses
+            # nothing.
+            task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
     async def _sync_memory_auto_flush_worker(self) -> None:
         """Start or stop background memory auto-flush worker based on current config."""
         config = self.config
-        if config is None:
-            await self._stop_memory_auto_flush_worker()
-            return
-
-        if not auto_flush_enabled(config):
+        if config is None or not auto_flush_enabled(config):
             await self._stop_memory_auto_flush_worker()
             return
 
@@ -644,11 +637,10 @@ class _MultiAgentOrchestrator:
             return
 
         worker = MemoryAutoFlushWorker(
-            storage_path=self.storage_path,
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
+            redacted_event_ids=self.redacted_event_ids,
         )
-        self._memory_auto_flush_worker = worker
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
 
     def _reset_runtime_shutdown_event(self) -> asyncio.Event:

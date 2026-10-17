@@ -35,12 +35,13 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.history import summary_rows
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.model_loading import get_model_instance
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.providers.tool_policy import provider_tools_disabled
@@ -52,7 +53,7 @@ from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture,
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
-from mindroom.skill_learning.transcript import count_model_replies, render_transcript
+from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -545,6 +546,14 @@ def test_archive_moves_only_inactive_learned_skills(tmp_path: Path) -> None:
     assert library.archive_unused_skills(root, archive_after_days=0, now=now + timedelta(days=90)) == []
 
 
+def _transcript(*runs: RunOutput, summary: str | None = None, budget_chars: int) -> str:
+    """Render stored runs the way a replayed review reads them."""
+    for run in runs:
+        run.user_id = "@alice:x"
+    session = AgentSession(session_id="session", agent_id="mind", runs=list(runs))
+    return render_transcript(conversation_messages(session), summary=summary, budget_chars=budget_chars)
+
+
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:
     """Hermes' digest keeps the newest messages whole, never opens on a tool result, and marks omissions."""
     older = [Message(role="user", content=f"old request {index} " + "x" * 400) for index in range(30)]
@@ -557,23 +566,66 @@ def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> 
         *[Message(role="tool", content=f"result {index}", tool_name="shell") for index in range(24)],
         Message(role="assistant", content="password: hunter2hunter2 was used"),
     ]
-    transcript = render_transcript([*older, *recent], budget_chars=100_000)
+    transcript = _transcript(_run("r1", *older, *recent), budget_chars=100_000)
     digest, _, verbatim = transcript.partition("\n\nASSISTANT:\n")
-    assert "USER: old request 0" in digest
+    assert "USER (@alice:x): old request 0" in digest
     assert "x" * 301 not in digest
     assert verbatim.startswith('\n-> calls shell({"cmd": "make"})')
     assert "TOOL RESULT (shell):\nresult 23" in verbatim
     assert "hunter2hunter2" not in transcript
 
-    small = render_transcript([*older, *recent], budget_chars=3_000)
+    small = _transcript(_run("r1", *older, *recent), budget_chars=3_000)
     assert "earlier turns omitted" in small
     assert len(small) < 3_500
+
+
+def test_transcript_names_who_said_each_message() -> None:
+    """A prompt's messages read as their senders' words, a follow-up's prompt as MindRoom's, never as raw tags."""
+    prompt = (
+        "<messages>"
+        + render_msg_tag(sender="@bob:x", body="Atlas ships\nFriday.", ts="2026-10-17 09:00")
+        + render_msg_tag(sender="@mindroom_research:x", body="Checked the tracker.")
+        + "</messages>"
+    )
+    asked = _run("r1", Message(role="user", content=prompt), Message(role="assistant", content="Noted."))
+    follow_up = _run(
+        "r2",
+        Message(role="user", content="[RUNTIME UPDATE, NOT A USER MESSAGE] Collect the jobs."),
+        Message(role="assistant", content="The deploy finished."),
+    )
+    follow_up.metadata = {TURN_INTENT_RUN_METADATA_KEY: "job_follow_up"}
+    recent = [_run(f"r{index}", Message(role="assistant", content=f"reply {index}")) for index in range(3, 30)]
+
+    transcript = _transcript(asked, follow_up, *recent, budget_chars=100_000)
+
+    digest = transcript.split("\n\n")[0].splitlines()
+    # A prompt is one stored message, so its messages share one digest line.
+    assert digest[1:4] == [
+        "USER (@bob:x): Atlas ships Friday. USER (@mindroom_research:x): Checked the tracker.",
+        "ASSISTANT: Noted.",
+        "RUNTIME: [RUNTIME UPDATE, NOT A USER MESSAGE] Collect the jobs.",
+    ]
+    assert "<msg" not in transcript
+
+
+def test_a_prompt_holding_several_messages_is_redacted_as_one_stored_message() -> None:
+    """A secret split over two messages of one prompt stays hidden, as it did when the prompt was shown as raw tags."""
+    prompt = (
+        "<messages>"
+        + render_msg_tag(sender="@alice:x", body="Here is the config:\npassword:\n")
+        + render_msg_tag(sender="@alice:x", body="MangoRiver42!")
+        + "</messages>"
+    )
+
+    transcript = _transcript(_run("r1", Message(role="user", content=prompt)), budget_chars=100_000)
+
+    assert "MangoRiver42" not in transcript
 
 
 def test_long_tool_output_keeps_its_start_and_end() -> None:
     """A clipped tool result keeps the command's opening lines and the error or summary at its end."""
     output = "collected 900 items\n" + "PASSED\n" * 20_000 + "FAILED test_deploy.py::test_rollback - KeyError"
-    transcript = render_transcript([Message(role="tool", content=output, tool_name="shell")], budget_chars=40_000)
+    transcript = _transcript(_run("r1", Message(role="tool", content=output, tool_name="shell")), budget_chars=40_000)
     assert "collected 900 items" in transcript
     assert transcript.endswith("FAILED test_deploy.py::test_rollback - KeyError")
     assert "characters omitted ..." in transcript
@@ -1336,8 +1388,8 @@ def test_transcript_keeps_the_compaction_summary_when_trimming() -> None:
     """The summary is the only record of compacted turns, so trimming drops digest lines before it."""
     older = [Message(role="user", content=f"old request {index} " + "x" * 400) for index in range(40)]
     recent = [Message(role="assistant", content="latest answer")]
-    transcript = render_transcript(
-        [*older, *[Message(role="user", content="recent")] * 24, *recent],
+    transcript = _transcript(
+        _run("r1", *older, *[Message(role="user", content="recent") for _ in range(24)], *recent),
         summary="Deploys go through canary. password: hunter2hunter2",
         budget_chars=3_000,
     )

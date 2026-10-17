@@ -1017,8 +1017,6 @@ def append_agent_daily_file_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
     """Append one memory entry to the agent's daily file."""
     resolution = resolve_file_memory_resolution(
@@ -1026,7 +1024,6 @@ def append_agent_daily_file_memory(
         config,
         runtime_paths,
         agent_name=agent_name,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
         execution_identity=execution_identity,
     )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
@@ -1265,7 +1262,6 @@ class FileMemoryBackend:
         config: Config,
         *,
         limit: int,
-        preserve_resolved_storage_path: bool = False,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> list[MemoryResult]:
         """List file-backed memories stored for an agent."""
@@ -1275,7 +1271,6 @@ class FileMemoryBackend:
             config,
             self.runtime_paths,
             agent_name=agent_name,
-            preserve_resolved_storage_path=preserve_resolved_storage_path,
             execution_identity=execution_identity,
         )
         results, _ = await asyncio.to_thread(

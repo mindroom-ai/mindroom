@@ -22,11 +22,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.knowledge_graph import ingestion
-from mindroom.knowledge_graph.ingestion import (
-    KnowledgeGraphIngestionWorker,
-    RedactedEventIds,
-    wake_knowledge_graph_ingestion,
-)
+from mindroom.knowledge_graph.ingestion import KnowledgeGraphIngestionWorker, wake_knowledge_graph_ingestion
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import (
     UnusableExtractionError,
@@ -41,6 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.history.session_runs import RedactedEventIds
     from mindroom.knowledge_graph.episodes import RenderedEpisode
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import EpisodeInput, GraphFact, _GraphEntity

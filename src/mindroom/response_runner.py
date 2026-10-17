@@ -46,6 +46,7 @@ from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -74,12 +75,7 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
-from mindroom.memory import (
-    mark_auto_flush_dirty_session,
-    reprioritize_auto_flush_sessions,
-    store_conversation_memory,
-    strip_user_turn_time_prefix,
-)
+from mindroom.memory import store_conversation_memory, strip_user_turn_time_prefix
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
@@ -459,20 +455,16 @@ def _split_delivery_tool_trace(
     return completed, interrupted
 
 
-def _run_metadata_with_hook_source(metadata: dict[str, Any] | None, hook_source: str | None) -> dict[str, Any] | None:
-    """Record the trusted hook source that started this turn, so stored runs show which automation asked."""
-    if hook_source is None:
-        return metadata
-    return {**(metadata or {}), HOOK_SOURCE_RUN_METADATA_KEY: hook_source}
+def _agent_run_metadata(request: ResponseRequest) -> dict[str, Any]:
+    """Record what started this turn, so stored runs show which automation asked or that MindRoom wrote the prompt.
 
-
-def _materialize_matrix_run_metadata(
-    matrix_run_metadata: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Return a concrete metadata dict for downstream APIs that require one."""
-    if matrix_run_metadata is None:
-        return None
-    return dict(matrix_run_metadata)
+    The turn recorder gets it too, so a turn stopped before its run starts keeps it.
+    """
+    envelope = request.response_envelope
+    recorded = {**(request.matrix_run_metadata or {}), TURN_INTENT_RUN_METADATA_KEY: envelope.origin.intent.value}
+    if envelope.hook_source is not None:
+        recorded[HOOK_SOURCE_RUN_METADATA_KEY] = envelope.hook_source
+    return recorded
 
 
 def _reply_authorization_entity_names(
@@ -2577,28 +2569,17 @@ class ResponseRunner:
         hook_source: str | None,
         origin: TurnOrigin,
     ) -> Callable[[], None] | None:
-        """Build the completed-turn memory handoff for an agent or a team's members, or None for a non-memory turn."""
-        if is_automation_hook_source(hook_source):
-            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
+        """Build the completed-turn Mem0 or team memory handoff, or None for a turn whose prompt is not memory."""
+        # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory, and a job follow-up's
+        # prompt is MindRoom's instruction to collect the results, not conversation to extract.
+        if is_automation_hook_source(hook_source) or origin.intent is TurnIntent.JOB_FOLLOW_UP:
             return None
-        # A job follow-up's prompt is MindRoom's instruction to collect the results, not conversation to extract;
-        # auto-flush, which reads the reply that reports them, still saves it.
-        extracts_prompt = origin.intent is not TurnIntent.JOB_FOLLOW_UP
-        if not extracts_prompt and not isinstance(agent_name, str):
+        # A file-memory agent's conversation is saved by auto-flush from stored sessions; a team's goes to its shared
+        # memory.
+        if isinstance(agent_name, str) and self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
             return None
 
         def queue() -> None:
-            if isinstance(agent_name, str):
-                mark_auto_flush_dirty_session(
-                    self.deps.storage_path,
-                    self.deps.runtime.config,
-                    agent_name=agent_name,
-                    session_id=session_id,
-                    execution_identity=execution_identity,
-                )
-                # A file-memory agent's conversation is saved by auto-flush; a team's goes to its shared memory.
-                if not extracts_prompt or self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
-                    return
             create_background_task(
                 store_conversation_memory(
                     prompt,
@@ -3942,10 +3923,7 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_run_metadata_with_hook_source(
-                _materialize_matrix_run_metadata(request.matrix_run_metadata),
-                request.response_envelope.hook_source,
-            ),
+            matrix_run_metadata=_agent_run_metadata(request),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
@@ -4772,7 +4750,7 @@ class ResponseRunner:
         response_run_id = str(uuid4())
         team_run_metadata_content: dict[str, Any] = {}
         progress = _DeliveryProgress()
-        matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
+        matrix_run_metadata = None if request.matrix_run_metadata is None else dict(request.matrix_run_metadata)
         active_event_ids = await self._active_response_event_ids(request.room_id)
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
@@ -5527,7 +5505,7 @@ class ResponseRunner:
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_agent_run_metadata(request),
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
@@ -5670,7 +5648,7 @@ class ResponseRunner:
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_agent_run_metadata(request),
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
@@ -5996,14 +5974,6 @@ class ResponseRunner:
         )
 
         session_id = resolved_target.session_id
-        reprioritize_auto_flush_sessions(
-            self.deps.storage_path,
-            self.deps.runtime.config,
-            agent_name=self.deps.agent_name,
-            active_session_id=session_id,
-            execution_identity=execution_identity,
-        )
-
         active_model_name = await self._cold_cache_model(
             request,
             runtime_model=runtime_model,

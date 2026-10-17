@@ -604,7 +604,6 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
         session_id="session-1",
     )
     store = AsyncMock()
-    mark_dirty = MagicMock()
     queue = bot._response_runner._memory_persistence(
         agent_name="a1",
         session_id="session-1",
@@ -615,21 +614,22 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
         hook_source=None,
         origin=message_origin(),
     )
-    assert queue is not None
-    with patch_response_runner_module(store_conversation_memory=store, mark_auto_flush_dirty_session=mark_dirty):
-        queue()
-        await asyncio.sleep(0)
+    # A file-memory agent's conversation is read from storage by auto-flush, so the reply hands nothing off.
+    assert (queue is not None) == bool(saves)
+    if queue is not None:
+        with patch_response_runner_module(store_conversation_memory=store):
+            queue()
+            await asyncio.sleep(0)
 
     assert store.await_count == saves
-    mark_dirty.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_job_follow_up_extracts_nothing_but_still_marks_auto_flush(
+async def test_job_follow_up_hands_no_prompt_to_memory(
     config_with_team: Config,
     tmp_path: Path,
 ) -> None:
-    """A job follow-up's prompt is MindRoom's instruction, but auto-flush still saves the reply reporting the results."""
+    """A job follow-up's prompt is MindRoom's instruction, so neither an agent nor a team saves it from the reply path."""
     config = _bind_runtime_paths(config_with_team, tmp_path)
     config.agents["a1"].memory_backend = "mem0"
     runtime_paths = runtime_paths_for(config)
@@ -664,16 +664,7 @@ async def test_job_follow_up_extracts_nothing_but_still_marks_auto_flush(
             origin=follow_up,
         )
 
-    queue = memory_persistence("a1")
-    assert queue is not None
-    store = AsyncMock()
-    mark_dirty = MagicMock()
-    with patch_response_runner_module(store_conversation_memory=store, mark_auto_flush_dirty_session=mark_dirty):
-        queue()
-        await asyncio.sleep(0)
-    store.assert_not_awaited()
-    mark_dirty.assert_called_once()
-
+    assert memory_persistence("a1") is None
     assert memory_persistence(["a1", "a2"]) is None
     continuation = approval_continuation(
         entity_kind="team",

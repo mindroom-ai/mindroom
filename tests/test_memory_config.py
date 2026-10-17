@@ -919,10 +919,21 @@ class TestMemoryConfig:
         assert memory.auto_flush.extractor.max_messages_per_flush == 12
         assert memory.auto_flush.extractor.max_chars_per_flush == 9000
 
-    def test_memory_auto_flush_default_interval_is_30_minutes(self) -> None:
-        """Auto-flush should default to a half-hour worker interval."""
+    def test_memory_auto_flush_default_interval_is_5_minutes(self) -> None:
+        """Without the reply path waking it, auto-flush passes every five minutes by default."""
         memory = MemoryConfig()
-        assert memory.auto_flush.flush_interval_seconds == 1800
+        assert memory.auto_flush.flush_interval_seconds == 300
+
+    def test_retired_auto_flush_fields_still_load(self) -> None:
+        """A config the dashboard saved with the retired dirty-queue fields loads, and a save drops them."""
+        memory = MemoryConfig.model_validate(
+            {
+                "backend": "file",
+                "auto_flush": {"enabled": True, "max_dirty_age_seconds": 600, "max_cross_session_reprioritize": 5},
+            },
+        )
+        assert memory.auto_flush.enabled is True
+        assert memory.model_dump(exclude_unset=True) == {"backend": "file", "auto_flush": {"enabled": True}}
 
     def test_memory_config_accepts_disabled_backend(self) -> None:
         """The memory config should accept disabled memory in object and shorthand form."""

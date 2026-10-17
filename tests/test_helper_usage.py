@@ -451,7 +451,6 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     session.session_data = {"session_metrics": run.metrics.to_dict()}
     config, paths, storage, _scope, context = _forced_compaction_context(tmp_path, session=session)
     assert isinstance(storage, SqliteDb)
-    config.memory.auto_flush.extractor.include_memory_context.memory_snippets = 0
     identity = build_execution_identity_from_runtime_context(context)
     model = _HelperModel(
         id="helper-model",
@@ -473,10 +472,10 @@ async def test_memory_usage_survives_rejected_output_and_retry(
             await _extract_memory_summary(
                 config=config,
                 runtime_paths=paths,
-                storage_path=paths.storage_root,
                 agent_name="test_agent",
                 session_id="session",
                 lines=["Synthetic conversation excerpt."],
+                existing_context="",
                 execution_identity=identity if has_requester else None,
             )
         report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
