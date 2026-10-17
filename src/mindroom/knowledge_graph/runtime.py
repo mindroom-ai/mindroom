@@ -36,7 +36,7 @@ class KnowledgeGraphRuntime:
         if self._task is not None and not self._task.done():
             return
         await self.stop()
-        store = GraphitiStore(lambda: self.config_provider() or config, self.runtime_paths)
+        store = GraphitiStore(lambda: self.config_provider() or config, self.runtime_paths, asyncio.get_running_loop())
         worker = KnowledgeGraphIngestionWorker(
             runtime_paths=self.runtime_paths,
             config_provider=self.config_provider,

@@ -59,7 +59,7 @@ async def store(tmp_path: Path) -> AsyncIterator[GraphitiStore]:
     )
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     with patch.object(store_module, "create_configured_embedder", return_value=_HashEmbedder()):
-        graph_store = GraphitiStore(lambda: config, paths)
+        graph_store = GraphitiStore(lambda: config, paths, asyncio.get_running_loop())
         try:
             yield graph_store
         finally:
@@ -273,12 +273,19 @@ async def test_a_cancelled_lookup_still_lets_the_store_close(store: GraphitiStor
     """Cancelling a caller cancels its graph work, and closing afterwards stops the graph thread."""
     await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
     started = threading.Event()
+    cancelled = threading.Event()
     query = AsyncGraph.query
 
-    async def slow_query(graph: AsyncGraph, *args: object, **kwargs: object) -> QueryResult:
-        started.set()
-        await asyncio.sleep(30)
-        return await query(graph, *args, **kwargs)
+    async def slow_query(graph: AsyncGraph, cypher: str, *args: object, **kwargs: object) -> QueryResult:
+        # The driver also builds its indexes in background tasks; only the lookup's own queries hang.
+        if not cypher.lstrip().startswith("CREATE"):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+        return await query(graph, cypher, *args, **kwargs)
 
     with patch.object(AsyncGraph, "query", slow_query):
         lookup = asyncio.create_task(store.search_facts(ALPHA, "Alice", limit=5))
@@ -286,9 +293,43 @@ async def test_a_cancelled_lookup_still_lets_the_store_close(store: GraphitiStor
         lookup.cancel()
         with pytest.raises(asyncio.CancelledError):
             await lookup
+        # Checked before closing, which would cancel the graph work anyway.
+        assert await asyncio.to_thread(cancelled.wait, 10)
     await store.close()
 
     assert not any(thread.name == "mindroom-knowledge-graph" for thread in threading.enumerate())
+
+
+@pytest.mark.asyncio
+async def test_closing_the_store_fails_a_lookup_it_interrupts(store: GraphitiStore) -> None:
+    """A lookup cut short by closing the store fails like an outage, which the tool reports as unavailable."""
+    await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
+    started = threading.Event()
+    query = AsyncGraph.query
+
+    async def slow_query(graph: AsyncGraph, cypher: str, *args: object, **kwargs: object) -> QueryResult:
+        # The driver also builds its indexes in background tasks; only the lookup's own queries hang.
+        if not cypher.lstrip().startswith("CREATE"):
+            started.set()
+            await asyncio.sleep(30)
+        return await query(graph, cypher, *args, **kwargs)
+
+    with patch.object(AsyncGraph, "query", slow_query):
+        lookup = asyncio.create_task(store.search_facts(ALPHA, "Alice", limit=5))
+        assert await asyncio.to_thread(started.wait, 10)
+        await store.close()
+        with pytest.raises(RuntimeError, match="cancelled on the other event loop"):
+            await lookup
+
+
+@pytest.mark.asyncio
+async def test_extraction_goes_to_the_owners_loop_whoever_calls_first(store: GraphitiStore) -> None:
+    """Extraction runs on the loop that created the store, even when a short-lived loop makes the first call."""
+    await asyncio.to_thread(asyncio.run, store.search_facts(ALPHA, "anything", limit=1))
+
+    graphiti = await store._run(store._graphiti_client())
+
+    assert graphiti.llm_client._runtime_loop is asyncio.get_running_loop()
 
 
 @pytest.mark.asyncio
@@ -300,7 +341,7 @@ async def test_closing_an_unused_store_starts_no_thread(tmp_path: Path) -> None:
         knowledge_graph={"model": "luna"},
     )
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    graph_store = GraphitiStore(lambda: config, paths)
+    graph_store = GraphitiStore(lambda: config, paths, asyncio.get_running_loop())
 
     await graph_store.close()
 
@@ -340,7 +381,7 @@ async def client(self):
     raise ClientReached
 
 GraphitiStore._graphiti_client = client
-store = GraphitiStore(None, None)
+store = GraphitiStore(None, None, None)
 for call in (store.search_facts(None, "q", 1), store.entity(None, "n"), store.add_episode(None, None, None)):
     try:
         asyncio.run(call)

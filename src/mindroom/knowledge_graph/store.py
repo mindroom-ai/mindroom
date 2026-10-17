@@ -199,7 +199,16 @@ async def run_on_loop[T](loop: asyncio.AbstractEventLoop, coroutine: Coroutine[A
     if loop is asyncio.get_running_loop():
         return await coroutine
     future = cast("ConcurrentFuture[T]", copy_context().run(asyncio.run_coroutine_threadsafe, coroutine, loop))
-    return await asyncio.wrap_future(future)
+    try:
+        return await asyncio.wrap_future(future)
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        # The work was cancelled on its own loop, for example by closing the store, not by this caller; a caller
+        # such as an agent's tool call must see an ordinary failure rather than its own turn being cancelled.
+        msg = "The work was cancelled on the other event loop"
+        raise RuntimeError(msg) from None
 
 
 class _GraphLoop:
@@ -242,12 +251,17 @@ class GraphitiStore:
     run their work there and return the result to the caller's loop.
     """
 
-    def __init__(self, config_provider: Callable[[], Config], runtime_paths: RuntimePaths) -> None:
+    def __init__(
+        self,
+        config_provider: Callable[[], Config],
+        runtime_paths: RuntimePaths,
+        runtime_loop: asyncio.AbstractEventLoop,
+    ) -> None:
         self._config_provider = config_provider
         self._runtime_paths = runtime_paths
+        # The runtime's loop, which extraction calls go back to; taken from the owner, not from whoever calls first.
+        self._runtime_loop = runtime_loop
         self._graph_loop: _GraphLoop | None = None
-        # The loop the store's callers run on, which extraction calls go back to.
-        self._runtime_loop: asyncio.AbstractEventLoop | None = None
         self._lock: asyncio.Lock | None = None
         self._graphiti: Graphiti | None = None
         self._signature: str | None = None
@@ -256,7 +270,6 @@ class GraphitiStore:
     async def _run[T](self, coroutine: Coroutine[Any, Any, T]) -> T:
         """Run ``coroutine`` on the graph loop, starting it on first use."""
         if self._graph_loop is None:
-            self._runtime_loop = asyncio.get_running_loop()
             self._graph_loop = _GraphLoop()
             self._lock = asyncio.Lock()
         return await run_on_loop(self._graph_loop.loop, coroutine)
@@ -295,7 +308,6 @@ class GraphitiStore:
         server = await start_embedded_server(self._runtime_paths.storage_root / "knowledge_graph")
         self._embedded_server = server
         driver = MindRoomFalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
-        assert self._runtime_loop is not None, "`_run` records the runtime loop before work reaches the graph loop"
         return Graphiti(
             graph_driver=driver,
             llm_client=MindRoomLLMClient(self._config_provider, self._runtime_paths, self._runtime_loop),
