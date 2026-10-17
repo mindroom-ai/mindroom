@@ -60,7 +60,7 @@ _MALFORMED = "The request is malformed and was refused."
 # with the same sentences, and the key and reconnect texts stay short enough for the 200-character reason phrase.
 CONNECTIONS_PAGE_NOT_SERVED = (
     "on the Connections page, which this deployment does not serve. "
-    "An administrator can enable trusted upstream auth or make the agent shared."
+    "An administrator can enable Connections sign-in or make the agent shared."
 )
 _WITHOUT_PAGE = {
     **_MESSAGES,

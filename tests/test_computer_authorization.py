@@ -13,8 +13,8 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
 from mindroom.orchestration.computer_runtime import _authorize_computer, computer_browser_provider
-from mindroom.worker_computer.auth import MatrixOpenIDToken, verify_openid
 from mindroom.worker_computer.sessions import ComputerError
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
@@ -32,8 +32,8 @@ async def test_openid_rejects_untrusted_server_before_network(tmp_path: Path) ->
         matrix_server_name="attacker.invalid",
         expires_in=30,
     )
-    with pytest.raises(ComputerError) as error:
-        await verify_openid(token, paths)
+    with pytest.raises(MatrixOpenIDError) as error:
+        await verify_matrix_openid(token, paths)
     assert error.value.status_code == 401
 
 

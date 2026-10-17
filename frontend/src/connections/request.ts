@@ -1,3 +1,10 @@
+let signedInUser: string | null = null;
+
+/** Remember the Matrix ID the portal rendered so every request can prove which account the page shows. */
+export function setSignedInUser(user: string | null) {
+  signedInUser = user;
+}
+
 /** Replacement messages for callers outside the Connections portal. */
 export interface RequestErrorMessages {
   forbidden?: string;
@@ -65,18 +72,20 @@ export async function requestConnection<T>(
   body: object = {},
   messages: RequestErrorMessages = {},
 ): Promise<T> {
+  const hasBody = method === "POST" || method === "PUT";
   let response: Response;
   try {
     response = await fetch(path, {
       method,
       signal,
       credentials: "same-origin",
-      ...(method === "POST" || method === "PUT"
-        ? {
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          }
-        : {}),
+      headers: {
+        ...(signedInUser
+          ? { "X-MindRoom-Connections-User": signedInUser }
+          : {}),
+        ...(hasBody ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(hasBody ? { body: JSON.stringify(body) } : {}),
     });
   } catch {
     throw new Error("Could not reach the server. Try again.");
