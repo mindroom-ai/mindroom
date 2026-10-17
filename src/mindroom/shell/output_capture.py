@@ -41,12 +41,18 @@ class ShellOutputDestination:
 
 
 def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
-    """Format completed output without discarding either failure stream."""
+    """Format completed output, leading a failure with its exit code and keeping both of its streams.
+
+    The exit code comes first so a bounded job summary still shows that the command failed.
+    """
     if return_code == 0:
         return stdout
-    if stdout and stderr:
-        return f"Error: {stdout}\nStderr:\n{stderr}"
-    return f"Error: {stdout or stderr}"
+    lines = [f"Exit code {return_code}"]
+    if stdout:
+        lines += ["Output:", stdout]
+    if stderr:
+        lines += ["Stderr:", stderr]
+    return "\n".join(lines)
 
 
 class CapturedShellStream:
@@ -141,7 +147,11 @@ class ShellOutputCapture:
             )
             if self.cwd is not None:
                 output = f"[cwd: {self.cwd}]\n{output}"
-            return json.dumps(finalize_tool_output_file(request, output))
+            receipt = cast("dict[str, dict[str, object]]", finalize_tool_output_file(request, output))
+            if return_code:
+                # The receipt is all the caller sees, so it must not read as a successful command.
+                receipt["mindroom_tool_output"]["exit_code"] = return_code
+            return json.dumps(receipt)
         except OSError:
             return json.dumps(
                 {

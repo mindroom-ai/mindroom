@@ -133,6 +133,25 @@ async def test_plain_shell_output_still_honors_tail(shell_toolkit: Toolkit) -> N
 
 
 @pytest.mark.asyncio
+async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+    """A failed command states its exit code before both output streams, locally and on a worker."""
+    result = await FunctionCall(
+        function=shell_toolkit.async_functions["run_shell_command"],
+        arguments={"args": "echo partial; echo broken >&2; exit 7"},
+    ).aexecute()
+
+    assert result.status == "success"
+    assert str(result.result).splitlines() == [
+        f"[cwd: {tmp_path}]",
+        "Exit code 7",
+        "Output:",
+        "partial",
+        "Stderr:",
+        "broken",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """Redirected nonterminal CLI output must use the same complete failure formatting."""
     result = await FunctionCall(
@@ -144,8 +163,9 @@ async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: 
     ).aexecute()
 
     assert result.status == "success"
+    assert json.loads(str(result.result))["mindroom_tool_output"]["exit_code"] == 3
     assert (tmp_path / "receipt.txt").read_text().split("\n", 1)[-1] == (
-        'Error: {"status":"queued","call_id":"call-1"}'
+        'Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}'
     )
 
 

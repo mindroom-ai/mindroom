@@ -129,12 +129,13 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
-With `mindroom_output_path`, the complete output is saved to that file instead.
+The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, the result leads with an `Exit code <code>` line, followed by stdout under `Output:` and stderr under `Stderr:`.
+With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` after a non-zero exit.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
 Without `timeout`, a call that runs as a [background job](agent-orchestration.md#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
+A command that exits non-zero still returned its result, so its job ends `completed`, and its summary in `job(action="list")` leads with the `Exit code <code>` line.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
 For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](../deployment/sandbox-proxy.md#stopping-and-background-commands).
 

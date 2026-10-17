@@ -297,14 +297,13 @@ async def test_run_shell_command_entrypoint_returns_error_for_empty_string_args(
 
 @pytest.mark.asyncio
 async def test_run_shell_command_returns_error_on_nonzero_exit(tmp_path: Path) -> None:
-    """Non-zero exit should return stderr."""
+    """Non-zero exit should return its exit code and stderr."""
     tool = _get_toolkit(tmp_path)
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
     result = await entrypoint(["bash", "-c", "echo oops >&2; exit 1"])
-    assert result.startswith("Error:")
-    assert "oops" in result
+    assert result == "Exit code 1\nStderr:\noops"
 
 
 @pytest.mark.asyncio
@@ -316,7 +315,7 @@ async def test_run_shell_command_preserves_stdout_receipt_on_nonzero_exit(tmp_pa
 
     result = await entrypoint(["bash", "-c", 'printf \'{"status":"queued","call_id":"call-1"}\'; exit 3'])
 
-    assert result == 'Error: {"status":"queued","call_id":"call-1"}'
+    assert result == 'Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}'
 
 
 @pytest.mark.asyncio
@@ -328,7 +327,7 @@ async def test_run_shell_command_preserves_both_failure_streams(tmp_path: Path) 
 
     result = await entrypoint(["bash", "-c", "printf receipt; printf warning >&2; exit 3"])
 
-    assert result == "Error: receipt\nStderr:\nwarning"
+    assert result == "Exit code 3\nOutput:\nreceipt\nStderr:\nwarning"
 
 
 @pytest.mark.asyncio
@@ -396,7 +395,7 @@ async def test_run_shell_command_nonzero_foreground_exit_with_inherited_pipe_chi
 
     elapsed = time.perf_counter() - started
     assert elapsed < 2
-    assert result == "Error: foreground failed"
+    assert result == "Exit code 7\nStderr:\nforeground failed"
 
 
 @pytest.mark.asyncio
@@ -437,7 +436,7 @@ async def test_run_shell_command_truncates_large_stderr_by_bytes(tmp_path: Path)
     script = "import sys\nfor i in range(120): print(f'{i:03d}:' + 'x' * 1000, file=sys.stderr)\nsys.exit(1)\n"
     result = await entrypoint([sys.executable, "-c", script])
 
-    assert result.startswith("Error: [Output truncated to the last")
+    assert result.startswith("Exit code 1\nStderr:\n[Output truncated to the last")
     assert "119:" in result
     assert "000:" not in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
@@ -482,7 +481,7 @@ async def test_run_shell_command_truncates_oversized_single_stderr_line(tmp_path
         [sys.executable, "-c", "import sys; sys.stderr.write('B' * 100000); sys.exit(1)"],
     )
 
-    assert result.startswith("Error: [Output truncated to the last")
+    assert result.startswith("Exit code 1\nStderr:\n[Output truncated to the last")
     assert "B" * 100 in result
     assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
 
