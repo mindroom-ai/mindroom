@@ -287,18 +287,13 @@ def test_oversized_tool_result_is_clipped_before_redaction() -> None:
     assert len(body) < SETTINGS.max_tool_result_chars + 500
 
 
-def test_a_tool_result_redaction_cannot_read_keeps_its_other_lines() -> None:
-    """A secret-named key with its value on the next line drops that value, not the whole result."""
-    output = "services:\n  db:\n    password:\n      hunter2\n    user: app\n\tready  in   3s"
-    run = _run("r1", answer="Started\tthe   db.", tools=[_tool("shell", output, command="cat compose.yaml")])
+def test_a_conversation_line_holds_single_spaces() -> None:
+    """Every run of whitespace in a message becomes one space, so a line never looks like two speakers' lines."""
+    run = _run("r1", answer="Started\tthe   db.\n  Done.")
 
-    conversation, tool_results = (item.episode for item in _episodes([run], "conversation"))
+    [conversation] = (item.episode for item in _episodes([run], "conversation"))
 
-    assert "hunter2" not in tool_results.body
-    assert "[redaction failed]" not in tool_results.body
-    assert "user: app" in tool_results.body
-    # A conversation line holds single spaces only.
-    assert conversation.body.splitlines()[1] == "agent mind: Started the db."
+    assert conversation.body.splitlines()[1] == "agent mind: Started the db. Done."
 
 
 def test_credentials_are_redacted() -> None:

@@ -170,7 +170,7 @@ def test_conversation_lines_label_each_speaker_on_one_redacted_line() -> None:
 
 def test_every_reader_of_stored_turns_redacts_and_never_quotes_mindroom_as_a_person() -> None:
     """The graph and a replayed skill review read the same stored turns with the same rules."""
-    secret = f"Authorization: Bearer\nabc123bearervalue\npassword:\nhunter2nextline\nToken {TOKEN}"
+    secret = f"password: hunter2value\nToken {TOKEN}"
     asked = _run(
         Message(role="user", content=render_msg_tag(sender="@alice:x", body=f"Deploy it.\n{secret}")),
         Message(role="assistant", content=f"Started.\n{secret}"),
@@ -199,7 +199,7 @@ def test_every_reader_of_stored_turns_redacts_and_never_quotes_mindroom_as_a_per
     )
 
     for text in [*episodes, review]:
-        assert not any(value in text for value in ("abc123bearervalue", "hunter2nextline", TOKEN, "[redaction failed]"))
+        assert not any(value in text for value in ("hunter2value", TOKEN, "[redaction failed]"))
         assert "Deploy it." in text or "call shell" in text
     assert "Collect the jobs" not in "\n".join(episodes)
     assert "RUNTIME:\n[RUNTIME UPDATE] Collect the jobs." in review

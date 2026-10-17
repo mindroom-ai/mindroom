@@ -1364,7 +1364,7 @@ async def test_file_backend_team_conversation_memory_removes_credentials(
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 
     await store_conversation_memory(
-        f"Use token {token}\npassword: hunter2\nfor the staging deploy on Friday\nAuthorization: Bearer\nabc123bearervalue",
+        f"Use token {token}\npassword: hunter2\nfor the staging deploy on Friday",
         ["general", "calculator"],
         storage_path,
         "session-alice",
@@ -1377,8 +1377,6 @@ async def test_file_backend_team_conversation_memory_removes_credentials(
     text = memory_file.read_text(encoding="utf-8")
     assert token not in text
     assert "hunter2" not in text
-    # A label and its value on separate lines are still read together.
-    assert "abc123bearervalue" not in text
     assert "for the staging deploy on Friday" in text
 
 

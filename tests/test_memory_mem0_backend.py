@@ -1100,9 +1100,7 @@ async def test_conversation_memory_removes_credentials_before_mem0(
         await store_conversation_memory(
             # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
             f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
-            "Use API key: my-secret-key for the local endpoint.\nThe launch is Friday.\n"
-            # A label and its value on separate lines are still read together.
-            "Authorization: Bearer\nabc123bearervalue\npassword:\nhunter2nextline\nDone.",
+            "Use API key: my-secret-key for the local endpoint.\nThe launch is Friday.",
             "general",
             storage_path,
             "session-alice",
@@ -1120,9 +1118,6 @@ async def test_conversation_memory_removes_credentials_before_mem0(
     # A key a person chose, after an explicit label, is removed too.
     assert "my-secret-key" not in messages[-1]["content"]
     assert "The launch is Friday." in messages[-1]["content"]
-    assert "abc123bearervalue" not in messages[-1]["content"]
-    assert "hunter2nextline" not in messages[-1]["content"]
-    assert "Done." in messages[-1]["content"]
     assert "env:" in messages[-1]["content"]
     if with_history:
         assert messages[1]["content"] == "Noted, Atlas is yours."

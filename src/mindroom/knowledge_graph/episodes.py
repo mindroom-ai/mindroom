@@ -17,7 +17,7 @@ from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hoo
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.history.conversation_text import conversation_lines, run_requester
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
-from mindroom.redaction import redact_sensitive_data, redact_sensitive_lines
+from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -212,7 +212,7 @@ def _episode(
 
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
     outcome = "error" if execution.tool_call_error else "result"
-    output = redact_sensitive_lines(str(execution.result or "").strip(), max_length=settings.max_tool_result_chars)
+    output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
     # Clipped to half a result, so arguments and result together stay within an episode.
     arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]
     return f"call {execution.tool_name}({arguments}) {outcome}: {output}"
@@ -226,6 +226,12 @@ def tool_arguments(execution: ToolExecution) -> str:
 
 def _digest(execution: ToolExecution) -> str:
     return hashlib.sha256(tool_arguments(execution).encode()).hexdigest()[:12]
+
+
+def _clean(text: str, limit: int) -> str:
+    # Redaction scans a little past the limit, so a credential cut at the edge is still caught, and keeps its input
+    # under the redaction size limit.
+    return redact_sensitive_text(text.strip(), max_length=limit)
 
 
 def _size(lines: Sequence[str]) -> int:
