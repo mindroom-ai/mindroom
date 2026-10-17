@@ -208,7 +208,9 @@ def _general_notes(tmp_path: Path) -> list[str]:
 
 def _entry(tmp_path: Path, session_id: str) -> dict[str, object]:
     state = json.loads((tmp_path / "tracking" / "memory_auto_flush.json").read_text(encoding="utf-8"))
-    return next(conversations[session_id] for conversations in state["scopes"].values() if session_id in conversations)
+    return next(
+        scope["conversations"][session_id] for scope in state["scopes"].values() if session_id in scope["conversations"]
+    )
 
 
 @pytest.fixture
@@ -292,8 +294,10 @@ async def test_each_private_instance_flushes_into_its_own_memory(
     worker = _worker(config, clock)
     await _started(worker, config, clock)
     alice, bob = _requester(config, ALICE), _requester(config, BOB)
-    _seed(config, _thread("a"), [_run("a1", _thread("a"), T0 + 10)], agent="mind", identity=alice)
-    _seed(config, _thread("b"), [_run("b1", _thread("b"), T0 + 10)], agent="mind", identity=bob)
+    # Instances created since the previous pass keep those first turns.
+    created = int(clock.now) - config.memory.auto_flush.flush_interval_seconds + 10
+    _seed(config, _thread("a"), [_run("a1", _thread("a"), created)], agent="mind", identity=alice)
+    _seed(config, _thread("b"), [_run("b1", _thread("b"), created)], agent="mind", identity=bob)
 
     await worker._run_cycle(config)
 
@@ -309,6 +313,53 @@ async def test_each_private_instance_flushes_into_its_own_memory(
         assert worker_key is not None
         [note] = _notes(private_instance_scope_root_path(tmp_path, worker_key) / "mind" / "mind_data")
         assert f":{run_id}] important decision" in note
+
+
+@pytest.mark.asyncio
+async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_previous_pass(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A scope first seen after the start begins one pass before it was seen, so its older history is never flushed."""
+    agents = {
+        "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
+        "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
+    }
+    config, clock = _config(tmp_path, agents=agents), _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    clock.now = T0 + 90 * 86_400
+    interval = config.memory.auto_flush.flush_interval_seconds
+    session = _thread("t1")
+    older = [_run(f"m{index}", session, T0 + 100 + index) for index in range(3)]
+    recent = _run("recent", session, int(clock.now) - interval // 2)
+    _seed(config, session, [*older, recent], agent="other", updated_at=int(clock.now) - 10)
+    config.agents["other"].memory_backend = "file"
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("recent")]
+
+
+@pytest.mark.asyncio
+async def test_a_scope_keeps_the_start_it_was_first_seen_with(tmp_path: Path, extractor: _Extractor) -> None:
+    """The start of a newly seen scope is saved, so a late next pass still flushes the turns made since it appeared."""
+    agents = {
+        "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
+        "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
+    }
+    config, clock = _config(tmp_path, agents=agents), _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    config.agents["other"].memory_backend = "file"
+    await worker._run_cycle(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, int(clock.now) + 10)], agent="other")
+
+    clock.now += 3 * config.memory.auto_flush.flush_interval_seconds
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r1")]
 
 
 @pytest.mark.asyncio
@@ -447,6 +498,45 @@ async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unb
     assert _entry(tmp_path, session)["marker"] == [T0 + 20, "kept"]
     with pytest.raises(StopIteration):
         _entry(tmp_path, waiting)
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_whose_redactions_cannot_be_checked_backs_off_without_blocking_the_agent(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A failing redaction lookup backs off one conversation like a failed read, and the agent's others still flush."""
+    config, clock = _config(tmp_path, stale_ttl_seconds=3600), _Clock()
+    broken_room = "!broken:example.org"
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, event_ids
+        if room_id == broken_room:
+            msg = "journal read failed"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    worker = _worker(config, clock, redacted)
+    await _started(worker, config, clock)
+    broken = _thread("broken", broken_room)
+    _seed(config, broken, [_run("b1", broken, T0 + 5)])
+    cooldown = config.memory.auto_flush.retry_cooldown_seconds
+
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, broken)
+    assert (entry["failures"], entry["retry_at"]) == (1, clock.now + cooldown)
+
+    fine = _thread("fine")
+    _seed(config, fine, [_run("f1", fine, T0 + 10)])
+    clock.now += cooldown
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("f1")]
+    assert _entry(tmp_path, broken)["failures"] == 2
+
+    clock.now += 3600
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, broken)
+    assert (entry["failures"], entry["updated_at"]) == (0, T0 + 6)
 
 
 @pytest.mark.asyncio
@@ -666,6 +756,38 @@ async def test_failures_back_off_from_when_they_happen_and_are_given_up_after_th
     clock.now += 10_000
     await worker._run_cycle(config)
     assert len(extractor.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A give-up skips the batch that kept failing, not the turns an unrecorded note already covers."""
+    config = _config(tmp_path, stale_ttl_seconds=3600, extractor={"max_messages_per_flush": 2})
+    clock = _Clock()
+    worker = _worker(config, clock)
+    await _started(worker, config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run(f"r{index}", session, T0 + 10 + index) for index in range(1, 4)])
+    append_agent_daily_memory(
+        f"[auto_flush:{session}:r1] written before its progress was saved",
+        "general",
+        tmp_path,
+        config,
+        runtime_paths_for(config),
+    )
+    extractor.error = OSError("model unavailable")
+
+    await worker._run_cycle(config)
+    clock.now += 3600
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r2"), _lines("r2")]
+    assert _entry(tmp_path, session)["marker"] == [T0 + 12, "r2"]
+    extractor.error = None
+    await worker._run_cycle(config)
+    assert extractor.lines()[-1] == _lines("r3")
 
 
 @pytest.mark.asyncio

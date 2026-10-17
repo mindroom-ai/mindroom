@@ -250,6 +250,7 @@ Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling
 A message redacted before its turn is flushed stays out of memory, and so does the turn that read it.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
+An agent switched to `file` memory later, or a new private instance, starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it.
 
 ```yaml
 memory:

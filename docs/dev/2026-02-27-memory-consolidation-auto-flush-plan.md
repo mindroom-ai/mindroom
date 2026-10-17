@@ -15,7 +15,7 @@ This record explains why file memory is the primary backend and why auto-flush e
 - Files are canonical because they keep memory portable and auditable; any semantic index over them is a secondary cache that can be discarded and rebuilt.
 - Auto-flush reads stored conversations, the same source and reader knowledge-graph ingestion uses, and keeps a per-conversation marker of the last turn it flushed, so stored history decides what is pending and no reply-path state can drift from it.
 - Each daily note names the last turn it covers, so a retry after the note was written but its progress was not saved finds the note and skips those turns instead of writing it again.
-- A new conversation starts at the time auto-flush first ran, so an upgrade or first enablement never re-extracts history.
+- A new conversation starts at the time auto-flush first ran, so an upgrade or first enablement never re-extracts history; an agent or private instance first seen later starts one pass interval before it was seen, so switching an agent to file memory does not extract its history either, while a new private instance keeps the turns since the previous pass.
 - Freshness across threads comes from a short pass interval (five minutes by default) rather than from replies waking the worker.
 
 ## Rejected alternatives

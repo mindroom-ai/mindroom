@@ -86,10 +86,15 @@ class _ConversationState(TypedDict):
     recheck_at: float
 
 
+class _ScopeState(TypedDict):
+    # Turns created before this are never flushed.
+    started_at: float
+    conversations: dict[str, _ConversationState]
+
+
 class _FlushState(TypedDict):
     started_at: float
-    # Conversations by scope key, then by session id.
-    scopes: dict[str, dict[str, _ConversationState]]
+    scopes: dict[str, _ScopeState]
 
 
 @dataclass(frozen=True)
@@ -213,6 +218,17 @@ def _record_failure(entry: _ConversationState, settings: MemoryAutoFlushConfig, 
     entry["failures"] += 1
     entry["retry_at"] = failed_at + _retry_cooldown_seconds(settings, entry["failures"])
     return failed_at - entry["failing_since"] >= settings.stale_ttl_seconds
+
+
+def _record_unreadable(
+    entry: _ConversationState,
+    settings: MemoryAutoFlushConfig,
+    updated_at: int,
+    failed_at: float,
+) -> None:
+    """Back off a conversation that could not be read, and once that has failed for long enough, wait until it changes."""
+    if _record_failure(entry, settings, failed_at):
+        entry.update(updated_at=updated_at, failures=0, failing_since=0, retry_at=0)
 
 
 def _record_progress(
@@ -395,6 +411,16 @@ class MemoryAutoFlushWorker:
         now = self.clock()
         state = await asyncio.to_thread(self._load_state, now)
         scopes = await asyncio.to_thread(_flush_scopes, config, self.runtime_paths)
+        # A scope first seen after the start, such as an agent switched to file memory, starts one pass before it was
+        # seen, so a new private instance keeps the turns since the previous pass but no older history is flushed.
+        new_scopes = [scope for scope in scopes if scope.key not in state["scopes"]]
+        for scope in new_scopes:
+            state["scopes"][scope.key] = {
+                "started_at": max(state["started_at"], now - settings.flush_interval_seconds),
+                "conversations": {},
+            }
+        if new_scopes:
+            await self._persist(state)
         budget = settings.batch.max_sessions_per_cycle
         # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
         start = self._passes % len(scopes) if scopes else 0
@@ -404,21 +430,13 @@ class MemoryAutoFlushWorker:
                 break
             # One agent or private instance whose conversations cannot be listed must not stop the others.
             try:
-                conversations = state["scopes"].setdefault(scope.key, {})
+                scope_state = state["scopes"][scope.key]
                 limit = min(budget, settings.batch.max_sessions_per_agent_per_cycle)
-                due, failed_reads = await asyncio.to_thread(
-                    self._due,
-                    config,
-                    scope,
-                    conversations,
-                    state["started_at"],
-                    now,
-                    limit,
-                )
+                due, failed_reads = await asyncio.to_thread(self._due, config, scope, scope_state, now, limit)
                 if failed_reads:
                     await self._persist(state)
                 for conversation in due:
-                    budget -= await self._flush(config, scope, state, conversations, conversation, now)
+                    budget -= await self._flush(config, scope, state, scope_state, conversation, now)
             except Exception:
                 logger.exception("Memory auto-flush failed for an agent", agent=scope.agent_name)
 
@@ -426,8 +444,7 @@ class MemoryAutoFlushWorker:
         self,
         config: Config,
         scope: _FlushScope,
-        conversations: dict[str, _ConversationState],
-        started_at: float,
+        scope_state: _ScopeState,
         now: float,
         limit: int,
     ) -> tuple[list[_DueConversation], bool]:
@@ -441,10 +458,15 @@ class MemoryAutoFlushWorker:
             self.runtime_paths,
             execution_identity=scope.execution_identity,
         )
+        conversations = scope_state["conversations"]
         try:
             due: list[_DueConversation] = []
             failed_reads = False
-            for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=int(started_at)):
+            for session_id, updated_at in updated_sessions(
+                storage,
+                scope.agent_name,
+                since=int(scope_state["started_at"]),
+            ):
                 if len(due) >= limit:
                     break
                 # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
@@ -466,9 +488,7 @@ class MemoryAutoFlushWorker:
                         session_id=session_id,
                     )
                     entry = conversations.setdefault(session_id, _new_conversation())
-                    if _record_failure(entry, settings, self.clock()):
-                        # Read again once the conversation changes.
-                        entry.update(updated_at=updated_at, failures=0, failing_since=0, retry_at=0)
+                    _record_unreadable(entry, settings, updated_at, self.clock())
                     failed_reads = True
                     continue
                 due.append(_DueConversation(session_id, updated_at, runs))
@@ -481,85 +501,110 @@ class MemoryAutoFlushWorker:
         config: Config,
         scope: _FlushScope,
         state: _FlushState,
-        conversations: dict[str, _ConversationState],
+        scope_state: _ScopeState,
         conversation: _DueConversation,
         now: float,
     ) -> int:
         """Flush the oldest new turns of one conversation and return how much of the pass budget that spent."""
         settings = config.memory.auto_flush
+        session_id = conversation.session_id
+        conversations = scope_state["conversations"]
         finished, blocked_until = finished_runs(conversation.runs, config, now=now)
-        runs = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+        try:
+            runs = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+        except Exception:
+            # A conversation whose redactions cannot be checked backs off like one that cannot be read.
+            logger.exception(
+                "Memory auto-flush could not check a conversation for redactions",
+                agent=scope.agent_name,
+                session_id=session_id,
+            )
+            _record_unreadable(
+                conversations.setdefault(session_id, _new_conversation()),
+                settings,
+                conversation.updated_at,
+                self.clock(),
+            )
+            await self._persist(state)
+            return 0
         if runs is None:
             # Its agent cannot say yet what was redacted, so the conversation waits for a later pass.
             return 0
-        entry = conversations.setdefault(conversation.session_id, _new_conversation())
-        start = _start(entry, runs, state["started_at"])
+        entry = conversations.setdefault(session_id, _new_conversation())
+        start = _start(entry, runs, scope_state["started_at"])
         pending = [run for run in runs if start is None or run_key(run) > start]
         flushable = [run for run in pending if not _is_automation_turn(run)]
+        skipped = 0
+        batch: list[RunOutput] = []
         try:
-            covered = await self._write_note(config, scope, conversation.session_id, flushable)
+            if flushable:
+                memories = await list_all_agent_memories(
+                    scope.agent_name,
+                    self.runtime_paths.storage_root,
+                    config,
+                    self.runtime_paths,
+                    limit=sys.maxsize,
+                    execution_identity=scope.execution_identity,
+                )
+                # A note written by an attempt whose progress was not saved already covers its turns.
+                skipped = _already_flushed(flushable, session_id, memories)
+                batch, lines = _next_batch(flushable[skipped:], settings)
+                if lines:
+                    await self._write_note(config, scope, session_id, batch[-1], lines, memories)
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 logger.warning(
                     "Memory auto-flush timed out",
                     agent=scope.agent_name,
-                    session_id=conversation.session_id,
+                    session_id=session_id,
                     timeout_seconds=settings.extractor.max_extraction_seconds,
                 )
             else:
-                logger.exception("Memory auto-flush failed", agent=scope.agent_name, session_id=conversation.session_id)
+                logger.exception("Memory auto-flush failed", agent=scope.agent_name, session_id=session_id)
             if not _record_failure(entry, settings, self.clock()):
                 await self._persist(state)
                 return 1
             logger.warning(
                 "Memory auto-flush gave up on turns it kept failing to flush",
                 agent=scope.agent_name,
-                session_id=conversation.session_id,
+                session_id=session_id,
             )
-            covered = len(_next_batch(flushable, settings)[0])
-        _record_progress(entry, pending, flushable, covered, conversation.updated_at, blocked_until)
+            batch = _next_batch(flushable[skipped:], settings)[0]
+        _record_progress(entry, pending, flushable, skipped + len(batch), conversation.updated_at, blocked_until)
         await self._persist(state)
         return 1
 
-    async def _write_note(self, config: Config, scope: _FlushScope, session_id: str, runs: list[RunOutput]) -> int:
-        """Write one daily note for the oldest turns that fit an extraction, and return how many turns are covered."""
-        if not runs:
-            return 0
-        settings = config.memory.auto_flush
-        memories = await list_all_agent_memories(
-            scope.agent_name,
-            self.runtime_paths.storage_root,
-            config,
-            self.runtime_paths,
-            limit=sys.maxsize,
-            execution_identity=scope.execution_identity,
+    async def _write_note(
+        self,
+        config: Config,
+        scope: _FlushScope,
+        session_id: str,
+        last_run: RunOutput,
+        lines: list[str],
+        memories: list[MemoryResult],
+    ) -> None:
+        """Extract durable memories from the lines and append them to today's daily note, tagged with the last turn."""
+        summary = await asyncio.wait_for(
+            _extract_memory_summary(
+                config=config,
+                runtime_paths=self.runtime_paths,
+                agent_name=scope.agent_name,
+                session_id=session_id,
+                lines=lines,
+                existing_context=_existing_memory_context(memories, config),
+                execution_identity=scope.execution_identity,
+            ),
+            timeout=config.memory.auto_flush.extractor.max_extraction_seconds,
         )
-        # A note written by an attempt whose progress was not saved already covers its turns.
-        skipped = _already_flushed(runs, session_id, memories)
-        batch, lines = _next_batch(runs[skipped:], settings)
-        if lines:
-            summary = await asyncio.wait_for(
-                _extract_memory_summary(
-                    config=config,
-                    runtime_paths=self.runtime_paths,
-                    agent_name=scope.agent_name,
-                    session_id=session_id,
-                    lines=lines,
-                    existing_context=_existing_memory_context(memories, config),
-                    execution_identity=scope.execution_identity,
-                ),
-                timeout=settings.extractor.max_extraction_seconds,
+        if summary is not None:
+            append_agent_daily_memory(
+                f"{_flush_tag(session_id, last_run)} {summary}",
+                agent_name=scope.agent_name,
+                storage_path=self.runtime_paths.storage_root,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=scope.execution_identity,
             )
-            if summary is not None:
-                append_agent_daily_memory(
-                    f"{_flush_tag(session_id, batch[-1])} {summary}",
-                    agent_name=scope.agent_name,
-                    storage_path=self.runtime_paths.storage_root,
-                    config=config,
-                    runtime_paths=self.runtime_paths,
-                    execution_identity=scope.execution_identity,
-                )
-        return skipped + len(batch)
 
     def _state_path(self) -> Path:
         return tracking_dir(self.runtime_paths) / _STATE_FILENAME
