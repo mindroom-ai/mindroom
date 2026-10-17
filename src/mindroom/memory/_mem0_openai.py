@@ -11,9 +11,10 @@ if TYPE_CHECKING:
 
     from mem0.llms.openai import OpenAILLM
 
-# Mem0 sends temperature, top_p, and max_tokens to every model it does not list as a reasoning model, so GPT-5 and
-# GPT-6 models get what Mem0 sends its known reasoning models: no sampling controls and no max_tokens, which as
-# max_completion_tokens would also cap their reasoning.
+# Mem0 sends temperature, top_p, and max_tokens to every model it does not list as a reasoning model. GPT-5 and GPT-6
+# models reject max_tokens on Chat Completions and most of them reject those sampling values, so they get what Mem0
+# sends its known reasoning models: no sampling controls and no max_tokens, which as max_completion_tokens would also
+# cap their reasoning.
 _REASONING_MODEL_UNSUPPORTED = frozenset({"temperature", "top_p", "max_tokens"})
 
 

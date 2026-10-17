@@ -139,8 +139,8 @@ OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
 # The Decisions API serves only this model, so it does not follow the Luna default.
 OPENAI_DECISIONS_MODEL = "gpt-6-luna"
-# OpenAI model families whose models mostly reject sampling values other than their defaults, such as gpt-5-mini,
-# gpt-5.5, and gpt-6-luna for temperature 0.1; each user decides how it matches IDs and which parameters it drops.
+# OpenAI model families whose models mostly reject sampling values other than their defaults, as gpt-5-mini, gpt-5.5,
+# and gpt-6-luna reject temperature 0.1; each user decides how it matches IDs and which parameters it drops.
 OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
 # Original detail preserves patch coverage on these models; the provider's
 # separate rejection limit and maximum pixel dimension still apply.
