@@ -25,9 +25,7 @@ When the active model has a known `context_window`, MindRoom fits replayed histo
 Your configured `num_history_runs` stays unchanged; the reduction applies only to the run that needs it.
 Without a known `context_window` (and without `compaction.replay_window_tokens`), history is not fitted and automatic text compaction is unavailable.
 
-On `vertexai_claude` models, a known `context_window` also checks every provider request, including follow-ups after tool results.
-A request that would exceed the window drops its oldest replayed history turns for that request only and logs a warning.
-When the current turn alone cannot fit, the request fails with a provider error instead of being sent oversized.
+With compaction enabled, MindRoom also checks every model request of a reply against a known `context_window`, including the requests after tool results, and compacts when one would not fit; see [Compaction during a reply](#compaction-during-a-reply).
 
 ```yaml
 models:
@@ -46,20 +44,20 @@ defaults:
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply when history exceeds the hard replay budget, or when [requested manually](#manual-compaction).
+Text compaction runs before a reply when history exceeds the hard replay budget or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
 A [scheduled task](https://docs.mindroom.chat/scheduling/) run with a `history_limit` cannot use native compaction, so it also runs text compaction once history exceeds the compaction threshold.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
-If compaction fails, the notice reads `Compaction failed; continuing with trimmed history.` with the reason, and the reply continues with fitted history.
+If compaction fails, the notice reads `Compaction failed; continuing without compaction.` with the reason; before a reply, the reply continues with fitted history.
 
 Set these fields under `defaults.compaction`, an agent's `compaction`, or a team's `compaction`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` | `false` disables automatic native and pre-reply text compaction for the scope |
+| `enabled` | bool | `true` | `false` disables automatic compaction for the scope, both before and during a reply |
 | `threshold_tokens` | int, >= 1 | `null` | Native provider trigger in tokens; on text-only routes a soft planning threshold that does not compact by itself while history still fits. Mutually exclusive with `threshold_percent` |
 | `threshold_percent` | float, > 0 and < 1 | `null` | The same trigger as a fraction of the effective replay window. When neither threshold is set, the trigger is 80% of that window |
 | `replay_window_tokens` | int, >= 1 | `null` | Cap replayed history and compaction planning below the model's real `context_window` without lowering the provider request limit. The smaller of the two applies; when the model window is unknown, this value alone sets the replay window |
-| `reserve_tokens` | int, >= 0 | `16384` | Headroom kept free for the current prompt, tool definitions, and output |
+| `reserve_tokens` | int, >= 0 | `16384` | Headroom kept free for the current prompt, tool definitions, and output; set it at least to the model's maximum output tokens, including any thinking budget |
 | `model` | string | `null` | Model config name used to write summaries; `null` uses the active model. Must define its own `context_window` |
 | `fallback_model` | string | `null` | Different model config retried once when the summary model refuses for safeguards; after success it writes the remaining summaries for that compaction. Must define its own `context_window` |
 | `timeout_seconds` | float, > 0 | `600` | Maximum seconds for each summary request; a shorter provider timeout still applies |
@@ -76,6 +74,22 @@ A `fallback_model` that resolves to the same provider and model ID as the summar
 Text compaction needs more than 2,000 tokens of summary input after `reserve_tokens` and prompt overhead are subtracted from the summary model's `context_window`.
 With the default `reserve_tokens`, a summary model with a context window of roughly 10,000 tokens or less cannot compact; lower `reserve_tokens` to make it work.
 
+### Compaction during a reply
+
+A long reply, for example a tool loop that keeps reading files, can outgrow the context window before it finishes.
+Before each model request, MindRoom checks whether the request would exceed the replay window minus `reserve_tokens`; if it would, it compacts first and the reply continues.
+After that compaction the model sees its system prompt, the summary, the user's current message, and any per-turn context; earlier conversation and the reply's own earlier tool calls and results are replaced by the summary, which records the progress made so far.
+The tool calls still appear in the reply.
+If the summary and the current message together exceed the model's `context_window` minus `reserve_tokens`, the reply fails with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
+If the summary model fails, the reply continues without compacting and may then fail with a provider error.
+A reply that restarts after such a compaction, for example after a crash, continues from the summary, so it knows which tool calls already ran.
+With compaction disabled, or with a summary model too small to compact, nothing bounds the requests of a reply, and one that outgrows the model's window fails with a provider error.
+
+A compaction leaves the system prompt and tools unchanged, so provider prompt caching keeps working after it.
+Agents, teams, subagents, workflow participants, and minimal-mode agents all compact the same way.
+Team members, workflow participants, and scheduled tasks with a `history_limit` of `0` compact only their own work, using their own compaction settings, and post no notice.
+Subagents and replies resuming after a tool approval compact the conversation like any other reply but post no notice.
+
 ### Compacted history and redaction
 
 Text compaction keeps every run in the conversation database and replays a merged summary in place of the older ones.
@@ -83,6 +97,7 @@ Compaction deletes no stored history; only Matrix redaction, regenerating an edi
 Redacting a message, including one the agent never answered, removes the first stored run that read, answered, or wrote it, and every later run, from an agent's or team's history before that agent or team next replies in the conversation (for a private agent, its next reply to that requester).
 Until then the text stays in local storage; a reply that continues after a tool approval, and a voice-call reply, do not remove it first.
 Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run, removing that run and everything after it, instead of clearing the whole conversation.
+Editing a message whose reply compacted history during the reply rolls that compaction back too, so the regenerated reply never sees a summary of the reply it replaces.
 
 If a reply fails with `Saved conversation summary exceeds the available history budget`, the saved summary no longer fits beside the current prompt.
 This can happen after switching to a model with a smaller context window or when system instructions and the current message leave too little room.
@@ -102,6 +117,7 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
 Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the hard request limit.
 An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the hard budget uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
+If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
 
 ### Manual compaction
 
@@ -115,3 +131,4 @@ Named teams accept `num_history_runs`, `num_history_messages`, `max_tool_calls_f
 The team's shared history uses the team's own settings, never a member agent's, and the team model's `context_window` sets its replay budget.
 
 [Ad hoc teams](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) have no `teams:` entry, so their history and compaction settings come from `defaults`, not from any participating agent.
+Team members keep no history of their own.
