@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from agno.run.agent import RunCancelledEvent, RunErrorEvent, RunOutput
+from agno.run.agent import RunCancelledEvent, RunContentEvent, RunErrorEvent, RunOutput, ToolCallStartedEvent
 from agno.run.base import RunStatus
 
 from mindroom.authorization import is_sender_allowed_for_responder
@@ -28,6 +28,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.error_handling import run_error_event_text
+from mindroom.tool_system.progress import cap_progress, report_tool_progress
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
@@ -58,6 +59,8 @@ class _ChildRunObservation:
     parent: _ChildRunObservation | None = None
     response: RunOutput | None = None
     terminal: tuple[str, _ChildTerminalStatus, str] | None = None
+    # The tail of what the child said and which tools it called, reported as its caller's progress.
+    activity: str = ""
 
 
 _CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
@@ -255,13 +258,28 @@ async def child_run_context(
             _CHILD_RUN.reset(token)
 
 
+def _report_child_activity(observation: _ChildRunObservation, event: RunContentEvent | ToolCallStartedEvent) -> None:
+    if isinstance(event, RunContentEvent):
+        text = event.content if isinstance(event.content, str) else ""
+    else:
+        text = f"\nCalling {event.tool.tool_name}\n" if event.tool is not None else ""
+    if text:
+        observation.activity = cap_progress(observation.activity + text)
+        report_tool_progress(observation.activity)
+
+
 async def observe_child_event(event: object) -> None:
-    """Retain execution evidence before forwarding the event to the audit adapter."""
+    """Retain execution evidence and report the child's activity before forwarding the event to the audit adapter."""
     observation = _CHILD_RUN.get()
-    if observation is not None and isinstance(event, (RunOutput, RunCancelledEvent, RunErrorEvent)):
+    if observation is not None and isinstance(
+        event,
+        (RunOutput, RunCancelledEvent, RunErrorEvent, RunContentEvent, ToolCallStartedEvent),
+    ):
         child = observation.child
         if event.run_id == child.run_id and event.session_id == child.session_id:
-            if isinstance(event, RunOutput):
+            if isinstance(event, (RunContentEvent, ToolCallStartedEvent)):
+                _report_child_activity(observation, event)
+            elif isinstance(event, RunOutput):
                 # Failed outputs can retain stale text; keep the matching error event's details.
                 observation.response = event
                 if event.status != RunStatus.error:

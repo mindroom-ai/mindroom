@@ -49,6 +49,7 @@ from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.backend import WorkerBackend
+from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -940,6 +941,33 @@ def test_worker_cleanup_touches_live_script_workers_before_maintenance(
     )
 
     assert actions == ["touch", "maintain"]
+
+
+def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker running a long tool call has its lease refreshed before idle cleanup, however idle it looks."""
+    actions: list[str] = []
+    worker_manager = MagicMock()
+    worker_manager.backend_name = "test"
+    worker_manager.cleanup_locator = "local:test"
+    worker_manager.touch_worker.side_effect = lambda key: actions.append(f"touch {key}")
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
+    monkeypatch.setattr(
+        main,
+        "maintain_workers",
+        lambda _backend: actions.append("maintain") or WorkerMaintenanceResult(cleaned=(), reconciled=()),
+    )
+
+    with worker_call_in_flight(worker_manager, "agent:busy"):
+        main._cleanup_workers_once(main._app_runtime_paths(main.app))
+    main._cleanup_workers_once(main._app_runtime_paths(main.app))
+
+    assert actions == ["touch agent:busy", "maintain", "maintain"]
 
 
 def test_health_check(test_client: TestClient) -> None:

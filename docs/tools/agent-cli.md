@@ -65,7 +65,7 @@ Use it for self-contained tasks where the child does not need its role, instruct
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
-A minimal [authored subagent](agent-orchestration.md#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
+A minimal [authored subagent](agent-orchestration.md#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or `shell.run_shell_command`.
 Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
 ## Standard mode
@@ -75,7 +75,8 @@ It is available automatically when the agent answers a Matrix conversation itsel
 Team members, call agents, `room_agent` workflow participants, and OpenAI-compatible requests do not get it.
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
-The CLI is not offered when the agent's shell commands themselves require approval, or when [background jobs](agent-orchestration.md#background-jobs) manage the shell because `shell` was removed from `exclude_toolkits`, and after a response pauses for any approval, the rest of that response continues without it.
+The CLI is not offered when the agent's shell commands themselves pause the response for approval, and after a response pauses for any approval, the rest of that response continues without it.
+With [background jobs](agent-orchestration.md#background-jobs) enabled, a shell command that continues in the background keeps the CLI until its job ends, including after the response finished.
 Media returned by CLI calls reaches the model with the shell command's result, and streamed responses show CLI calls as their own tool-trace entries.
 
 ## Discover and call tools
@@ -138,9 +139,12 @@ After exit code `4`, check the original call ID before retrying, because submitt
 
 CLI calls follow the agent's existing approval rules and interactive questions, and an approval applies to the exact tool and arguments shown.
 Each Bash command starts a fresh shell: workspace files persist, but shell variables and directory changes do not carry over.
+A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far, while one inside a background job, such as a minimal subagent that a standard agent's own `delegate` call started with background jobs enabled, has no default limit.
+In a reply, start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
 A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.
-`calls wait` on earlier receipts works until the response ends.
+A command's `timeout` stops the command, not the calls it started: its Bash call returns once they finish, including a call that waits for an approval.
+`calls wait` on earlier receipts works until the response and its background jobs end.
 
 CLI calls are limited by the agent's `max_tool_calls_per_turn`, counted separately from its direct tool calls; calls past the limit return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an error.
@@ -153,7 +157,7 @@ Minimal Bash runs where the agent's ordinary shell runs.
 Every mode that uses `mindroom-agent` needs the `shell` tool on the agent and MindRoom running with its API server, not `--no-api`.
 Minimal mode and minimal subagents also need:
 
-- the shell's run, check, and kill commands allowed;
+- the shell's `run_shell_command` allowed;
 - an agent workspace, which `memory_backend: file` or a `private` agent provides.
 
 `!mode <agent> minimal` lists every missing requirement at once.
@@ -182,7 +186,7 @@ An API that listens only on loopback cannot be reached from workers, and a host 
 Without the gateway-only listener and with the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
 
 The shell receives a grant scoped to its own active response, not provider or administrator credentials, and provider credentials stay where the tools already run.
-The grant cannot select another agent, requester, or conversation, and it stops working when the response ends.
+The grant cannot select another agent, requester, or conversation, and it stops working when the response and its background jobs end, or 24 hours after the response started, whichever comes first.
 Other code in the same worker can read the grant while the response runs, and anything that copies it can use the same permissions from any host that reaches MindRoom's API until then; agents and requesters that share a worker already share its trust.
 The external MCP gateway keeps its own authentication and tool restrictions; minimal mode does not widen them.
 

@@ -92,7 +92,7 @@ class BackgroundToolJobsConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Enable managed tool waits and durable jobs; requires restart.")
     exclude_toolkits: list[str] = Field(
-        default_factory=lambda: ["shell"],
+        default_factory=list,
         description="Registered toolkit names that keep their own waiting behavior; requires restart.",
     )
     approval_wait_timeout: float | None = Field(

@@ -271,9 +271,13 @@ Matrix sync callback
 | `matrix_rtc/audio_protocol.py` | Length-prefixed JSON frames between MindRoom and a call's audio process |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
+| `api/sandbox_execute_stream.py` | Streams one runner call's progress and keep-alives before its result, and stops the call when the primary hangs up |
+| `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
+| `tool_system/dedicated_threads.py` | One thread per blocking call of a background job, outside the bounded shared pools |
+| `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
 | `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
-| `shell/execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
-| `shell/supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
+| `shell/execution.py` | Shell command execution core: spawning, output buffering, stopping at a timeout, and the handle registry of Desktop shell and script runs |
+| `shell/supervisor.py` | Worker-local shell supervisor process that runs shell commands and script handles for sandbox request subprocesses, stopping a command whose relay dies |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |

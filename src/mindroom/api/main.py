@@ -74,6 +74,7 @@ from mindroom.runtime_state import get_runtime_state
 from mindroom.usage.legacy_usage_storage import migrate_usage_storage
 from mindroom.worker_computer.auth import computer_origins
 from mindroom.workers.backend import maintain_workers
+from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -245,6 +246,7 @@ def _cleanup_workers_once(
             touch_live_workers(worker_manager)
         for worker_key in computer_worker_keys:
             worker_manager.touch_worker(worker_key)
+        touch_workers_in_flight(worker_manager)
         maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(

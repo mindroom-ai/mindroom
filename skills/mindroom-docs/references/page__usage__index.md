@@ -43,6 +43,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `run` | Ordinary agent or team reply |
 | `compaction_summary` | Conversation compaction summaries |
 | `memory_auto_flush` | Background memory auto-flush extraction |
+| `memory_extraction` | Mem0 memory extraction from conversations, the `memory` tool, and voice-call transcripts, when its LLM provider reports tokens; a team's conversation memory is reported under `system:internal` |
 | `dynamic_workflow` | Dynamic Workflow `room_agent` participants; a `subagent` participant's tokens appear under its calling agent |
 | `claude_agent` | Each Claude Code turn run by the `claude_agent` tool, for its main conversation's responses but not the subagents it starts or requests Claude Code makes for itself, such as compaction summaries and session titles; it appears in totals but not in request rows |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |

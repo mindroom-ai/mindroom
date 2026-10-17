@@ -642,13 +642,14 @@ if mode == 'reader':
     print('imported complete metadata', flush=True)
 elif mode == 'mem0_reader':
     import asyncio
-    from types import ModuleType
+    from types import ModuleType, SimpleNamespace
     from mindroom.config.main import Config
     from mindroom.constants import resolve_primary_runtime_paths
     from mindroom.memory import config as memory_config
 
     class Memory:
         vector_store = object()
+        llm = SimpleNamespace(config=SimpleNamespace(model='gemma4'), client=SimpleNamespace(chat=lambda **_: None))
 
         @classmethod
         def from_config(cls, config):

@@ -3843,6 +3843,9 @@ Semantic knowledge and file-memory indexes support the `openai`, `ollama`, and `
 | `ollama` | `nomic-embed-text` | Self-hosted; set `host` or `OLLAMA_HOST` |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Runs locally in MindRoom; the optional extra installs on first use |
 
+For multilingual text and code, use `google/embeddinggemma-2` with `sentence_transformers`; its first use downloads about 1.4 GB.
+MindRoom applies the query and document prompts that a `sentence_transformers` model defines, so knowledge and file-memory searches need no manual task prefixes.
+
 See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder fields, API key resolution, and how embedder failures are reported.
 
 ## Storage
@@ -5998,6 +6001,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `run` | Ordinary agent or team reply |
 | `compaction_summary` | Conversation compaction summaries |
 | `memory_auto_flush` | Background memory auto-flush extraction |
+| `memory_extraction` | Mem0 memory extraction from conversations, the `memory` tool, and voice-call transcripts, when its LLM provider reports tokens; a team's conversation memory is reported under `system:internal` |
 | `dynamic_workflow` | Dynamic Workflow `room_agent` participants; a `subagent` participant's tokens appear under its calling agent |
 | `claude_agent` | Each Claude Code turn run by the `claude_agent` tool, for its main conversation's responses but not the subagents it starts or requests Claude Code makes for itself, such as compaction summaries and session titles; it appears in totals but not in request rows |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |
@@ -7520,7 +7524,7 @@ Use it for self-contained tasks where the child does not need its role, instruct
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
-A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or all of `shell.run_shell_command`, `shell.check_shell_command`, and `shell.kill_shell_command`.
+A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or `shell.run_shell_command`.
 Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
 ## Standard mode
@@ -7530,7 +7534,8 @@ It is available automatically when the agent answers a Matrix conversation itsel
 Team members, call agents, `room_agent` workflow participants, and OpenAI-compatible requests do not get it.
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
-The CLI is not offered when the agent's shell commands themselves require approval, or when [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) manage the shell because `shell` was removed from `exclude_toolkits`, and after a response pauses for any approval, the rest of that response continues without it.
+The CLI is not offered when the agent's shell commands themselves pause the response for approval, and after a response pauses for any approval, the rest of that response continues without it.
+With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a shell command that continues in the background keeps the CLI until its job ends, including after the response finished.
 Media returned by CLI calls reaches the model with the shell command's result, and streamed responses show CLI calls as their own tool-trace entries.
 
 ## Discover and call tools
@@ -7593,9 +7598,12 @@ After exit code `4`, check the original call ID before retrying, because submitt
 
 CLI calls follow the agent's existing approval rules and interactive questions, and an approval applies to the exact tool and arguments shown.
 Each Bash command starts a fresh shell: workspace files persist, but shell variables and directory changes do not carry over.
+A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far, while one inside a background job, such as a minimal subagent that a standard agent's own `delegate` call started with background jobs enabled, has no default limit.
+In a reply, start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
 A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.
-`calls wait` on earlier receipts works until the response ends.
+A command's `timeout` stops the command, not the calls it started: its Bash call returns once they finish, including a call that waits for an approval.
+`calls wait` on earlier receipts works until the response and its background jobs end.
 
 CLI calls are limited by the agent's `max_tool_calls_per_turn`, counted separately from its direct tool calls; calls past the limit return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an error.
@@ -7608,7 +7616,7 @@ Minimal Bash runs where the agent's ordinary shell runs.
 Every mode that uses `mindroom-agent` needs the `shell` tool on the agent and MindRoom running with its API server, not `--no-api`.
 Minimal mode and minimal subagents also need:
 
-- the shell's run, check, and kill commands allowed;
+- the shell's `run_shell_command` allowed;
 - an agent workspace, which `memory_backend: file` or a `private` agent provides.
 
 `!mode <agent> minimal` lists every missing requirement at once.
@@ -7637,7 +7645,7 @@ An API that listens only on loopback cannot be reached from workers, and a host 
 Without the gateway-only listener and with the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
 
 The shell receives a grant scoped to its own active response, not provider or administrator credentials, and provider credentials stay where the tools already run.
-The grant cannot select another agent, requester, or conversation, and it stops working when the response ends.
+The grant cannot select another agent, requester, or conversation, and it stops working when the response and its background jobs end, or 24 hours after the response started, whichever comes first.
 Other code in the same worker can read the grant while the response runs, and anything that copies it can use the same permissions from any host that reaches MindRoom's API until then; agents and requesters that share a worker already share its trust.
 The external MCP gateway keeps its own authentication and tool restrictions; minimal mode does not widen them.
 
@@ -8676,7 +8684,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 ## Tools On This Page
 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
-- [`shell`] - Shell commands with background handles, environment passthrough, and PATH prepends.
+- [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -8789,18 +8797,16 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ## [`shell`]
 
-`shell` provides `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` accepts a shell command string or a list of argv strings.
+`shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
+The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
-A command that exceeds `timeout` keeps running in the background, and the tool returns a `shell:...` handle.
-Poll it with `check_shell_command(handle)` and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
-A backgrounded command with `mindroom_output_path` saves its output when it finishes, and `check_shell_command()` then returns the file receipt.
-Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
-Records of finished commands are cleared about 10 minutes after they finish.
-For how stopping a response and worker restarts affect background commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
+A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
+Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
+While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
+A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
+For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
 
 Worker-routed `shell` sees only a small default environment; which variables pass by default and which `extra_env_passthrough` never passes are listed in [Shell environment and PATH](https://docs.mindroom.chat/deployment/sandbox-proxy/#shell-environment-and-path).
 
@@ -8808,7 +8814,7 @@ Worker-routed `shell` sees only a small default environment; which variables pas
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`. |
+| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()`. |
 | `all` | `boolean` | `no` | `false` | Enable all shell functions. |
 | `extra_env_passthrough` | `text` or `string[]` | `no` | `null` | Additional exported process environment variable names or glob patterns passed to shell commands; comma- or newline-separated in text form. It matches the exported process environment, not entries in the config's `.env` file. |
 | `shell_path_prepend` | `text` or `string[]` | `no` | `null` | Directories prepended to `PATH` for shell commands only, with duplicates removed; comma- or newline-separated in text form. |
@@ -8831,9 +8837,8 @@ agents:
 ```python
 run_shell_command("git status --short", tail=50)
 run_shell_command(["git", "status", "--short"], tail=50)
-run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
-check_shell_command("shell:abcd1234")
-kill_shell_command("shell:abcd1234")
+run_shell_command(["bash", "-lc", "make test"], timeout=900)
+run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
 
 ### Per-workspace environment
@@ -12834,7 +12839,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; configs from `mindroom config init` turn it on.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and shell tools keep their own background commands.
+With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
 An approval that needed a job fails when it resumes while the option is off.
 
@@ -12851,19 +12856,21 @@ Exclude complete toolkits in YAML when they should retain native execution:
 ```yaml
 background_tool_jobs:
   enabled: true
-  exclude_toolkits: [shell, my_plugin_toolkit]
+  exclude_toolkits: [my_plugin_toolkit]
   approval_wait_timeout: 120
 ```
 
-The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
+The default list is `[]`, which excludes nothing.
 Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
 Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
 The generic runtime adds no `background_after`, creates no job, and does not release these calls when a newer message arrives.
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
-Shell handles do not appear in `job(action="list")` or the jobs bar, and cannot be controlled with `job`.
+A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
+A shell call that runs outside any job, such as during a voice call, in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
+A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
+Tools that run long in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/) are not limited by the worker's request timeouts while they run as a job.
 
 ### When a call becomes a job
 
@@ -12912,12 +12919,13 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 
 | Action | Behavior |
 | --- | --- |
-| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes, including collected ones. A call that returned its result before its wait ended never became a job and is not listed, unless its reply could not be saved. |
-| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget. |
+| `list` | Discover accessible jobs, active first, with their status, saved summaries, the latest progress of running jobs, bounded pagination, and retained terminal outcomes, including collected ones. A call that returned its result before its wait ended never became a job and is not listed, unless its reply could not be saved. |
+| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget; a wait that times out returns the job's latest progress. |
 | `cancel` | Ask one job to stop and return at once; the next notice reports how it ended. |
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+A running job's `progress` is the last 2,000 characters a tool reported, such as the last lines of a shell command's output or what a subagent is saying and which tools it calls.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, conversation, and current local tool or delegation permission, and either the original caller or the agent or team that answers in that conversation.
@@ -12939,7 +12947,7 @@ The reply waits for the decision for `background_tool_jobs.approval_wait_timeout
 The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
 A call's own `background_after`, or a newer human message, releases the reply the same way.
 Cancelling the job before the decision denies its card.
-Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits such as shell, subagent calls, and minimal mode.
+Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 Cancelling the job denies its open cards.
@@ -14695,7 +14703,7 @@ Do not report or "fix" these; they are deliberate.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
-- A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
+- A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
 - Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so deleting the `knowledge_graph/` storage directory rebuilds the graph without them; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
@@ -18158,8 +18166,10 @@ This mapping controls only who may manage a vault in the UI, never which worker 
 ## Stopping and background commands
 
 Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
+With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
-Shell commands that exceed their timeout keep running in the background and survive across requests to the same runner, but a runner or worker restart stops them; see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell) for handles.
+A shell command stops at its `timeout`; without one, a background job's command runs until it ends or the job is cancelled, and any other command stops after 120 seconds.
+A runner or worker restart stops running commands; see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
 ## Browsers in workers
 
@@ -18206,7 +18216,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, or `off`; see [Execution modes](#execution-modes) | _(unset)_ |
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not a background job; a `run_shell_command` call waits at least its `timeout` plus 30 seconds | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
@@ -18244,7 +18254,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to run as a sandbox runner | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token; dedicated workers receive their derived token automatically | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess` (a fresh process per call), or `forkserver` (a fresh forked process per call from a warm template) | `inprocess`; dedicated workers use `forkserver` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution | `120` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for a background job's call | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for the tool registry and worker-local caches, such as `/app/workspace/.mindroom`; startup fails if it is not writable | `mindroom_data` next to the config |
 | `MINDROOM_CONFIG_PATH` | Config used for requests that carry no [live config snapshot](#live-config-snapshots) | _(optional)_ |
 

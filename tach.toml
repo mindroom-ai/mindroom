@@ -276,6 +276,7 @@ expose = [
 path = "mindroom.agent_cli.lifetime"
 depends_on = [
     "mindroom.agent_cli.agno_compat_cli_checkpoint",
+    "mindroom.tool_jobs.resources",
 ]
 visibility = [
     "mindroom.ai",
@@ -384,6 +385,7 @@ depends_on = [
     "mindroom.agno_compat_prepared_tools",
     "mindroom.cancellation",
     "mindroom.response_turn",
+    "mindroom.tool_jobs.resources",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
@@ -983,6 +985,7 @@ visibility = [
     "mindroom.knowledge_graph.session_runs",
     "mindroom.knowledge_graph.ingestion",
     "mindroom.automations.exploration",
+    "mindroom.memory._mem0_backend",
 ]
 
 [[modules]]
@@ -992,6 +995,7 @@ visibility = [
     "mindroom.response_turn",
     "mindroom.api.openai_compat",
     "mindroom.memory.auto_flush",
+    "mindroom.memory._mem0_backend",
     "mindroom.custom_tools.claude_agent",
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.approval.execution",
@@ -2000,9 +2004,29 @@ path = "mindroom.api.sandbox_protocol"
 depends_on = []
 
 [[modules]]
+path = "mindroom.api.sandbox_execute_stream"
+depends_on = [
+    "mindroom.api.sandbox_request_cancellation",
+    "mindroom.tool_system.progress",
+]
+visibility = ["mindroom.api.sandbox_runner"]
+
+[[modules]]
+path = "mindroom.tool_system.dedicated_threads"
+depends_on = []
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_system.agent_tool_calls",
+]
+
+[[modules]]
 path = "mindroom.api.sandbox_request_cancellation"
 depends_on = []
-visibility = ["mindroom.api.sandbox_runner"]
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.sandbox_execute_stream",
+]
 
 [[modules]]
 path = "mindroom.api.worker_responses"
@@ -2026,6 +2050,7 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.file_access",
     "mindroom.path_confinement",
     "mindroom.media_delivery",
@@ -2056,6 +2081,11 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backends.local",
+    "mindroom.api.sandbox_execute_stream",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_system.dedicated_threads",
+    "mindroom.tool_system.progress",
+    "mindroom.tool_system.worker_proxy_client",
 ]
 
 [[modules]]
@@ -3343,6 +3373,7 @@ depends_on = [
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
     "mindroom.memory._mem0_openai",
+    "mindroom.memory._mem0_usage",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
@@ -3352,6 +3383,11 @@ visibility = ["mindroom.memory._backend"]
 path = "mindroom.memory._mem0_openai"
 depends_on = ["mindroom.model_defaults"]
 visibility = ["mindroom.memory.config"]
+
+[[modules]]
+path = "mindroom.memory._mem0_usage"
+depends_on = []
+visibility = ["mindroom.memory._mem0_backend", "mindroom.memory.config"]
 
 [[modules]]
 path = "mindroom.memory._file_backend"
@@ -3391,11 +3427,14 @@ path = "mindroom.memory._mem0_backend"
 depends_on = [
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
+    "mindroom.helper_usage",
     "mindroom.logging_config",
+    "mindroom.memory._mem0_usage",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
     "mindroom.memory_scope_ids",
+    "mindroom.session_storage.agent_storage",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend"]
@@ -5155,6 +5194,17 @@ path = "mindroom.tool_system.tool_calls"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
+path = "mindroom.tool_system.progress"
+depends_on = []
+visibility = [
+    "mindroom.delegation.lifecycle",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.api.sandbox_execute_stream",
+    "mindroom.api.sandbox_runner",
+    "mindroom.tool_system.worker_proxy_client",
+]
+
+[[modules]]
 path = "mindroom.tool_system.call_record"
 depends_on = []
 visibility = [
@@ -5204,11 +5254,14 @@ depends_on = [
     "mindroom.credentials.policy",
     "mindroom.runtime_env_policy",
     "mindroom.workers.models",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_system.progress",
 ]
 visibility = [
     "mindroom.mcp_gateway.tools",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_media",
+    "mindroom.api.sandbox_runner",
 ]
 
 [[modules]]
@@ -7543,6 +7596,7 @@ depends_on = [
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.delegation.storage",
+    "mindroom.tool_system.progress",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
@@ -8129,6 +8183,7 @@ depends_on = [
     "mindroom.tool_jobs.instances",
     "mindroom.tool_jobs.resources",
     "mindroom.tool_system.call_record",
+    "mindroom.tool_system.progress",
 ]
 visibility = [
     "mindroom.tool_jobs.publication",
@@ -8175,6 +8230,9 @@ visibility = [
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.approvals",
+    "mindroom.api.sandbox_runner",
+    "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.agent_tool_calls",
 ]
 
 [[modules]]
@@ -8225,6 +8283,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.dedicated_threads",
 ]
 visibility = [
     # Agent assembly asks which gated functions can ask for their approval as their job.
@@ -8281,6 +8340,8 @@ visibility = [
 path = "mindroom.tool_jobs.resources"
 depends_on = []
 visibility = [
+    "mindroom.agent_cli.lifetime",
+    "mindroom.agent_cli.turn",
     "mindroom.ai",
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.history.session_context",
@@ -8325,7 +8386,9 @@ depends_on = [
     "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.agno_compat_prepared_tools",
     "mindroom.background_tasks",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
     "mindroom.tool_system.tool_hooks",

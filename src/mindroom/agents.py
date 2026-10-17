@@ -2256,9 +2256,11 @@ def create_agent(  # noqa: PLR0915
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
+    # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
     cli_shell = (
         agent_cli_in_shell
         and agent_mode == "standard"
+        and delegation_depth == 0
         and not disable_runtime_capabilities
         and standard_cli_eligible(config, runtime_paths, agent_name, execution_identity)
         and wrap_native_shell_window(tool_assembly.tools)

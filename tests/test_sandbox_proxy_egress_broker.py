@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pkgutil
 import socket
 import sys
@@ -74,6 +75,35 @@ class _RecordingClient:
             return _Response({"lease_id": "lease-1", "expires_at": 123.0, "max_uses": 1})
         self.payloads.append(json)
         return _Response({"ok": True, "result": "done"})
+
+    @contextmanager
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: object,
+    ) -> Iterator[_StreamedResponse]:
+        """Serve the streamed execute request as the single result line a quick call sends."""
+        _ = method, timeout
+        response = self.post(url, json=json, headers=headers)
+        yield _StreamedResponse(response._data)
+
+
+class _StreamedResponse:
+    def __init__(self, data: dict[str, object]) -> None:
+        self._data = data
+
+    def raise_for_status(self) -> None:
+        return
+
+    def read(self) -> bytes:
+        return b""
+
+    def iter_bytes(self) -> Iterator[bytes]:
+        yield json.dumps(self._data).encode() + b"\n"
 
 
 class _Response:

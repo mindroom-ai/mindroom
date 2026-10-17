@@ -2009,7 +2009,10 @@ def test_subprocess_worker_encodes_browser_media_results(
         config_yaml="{}\n",
     )
 
-    exit_code, _tool_output, marked_response = sandbox_runner_module._run_subprocess_worker_payload(envelope)
+    exit_code, _tool_output, marked_response = sandbox_runner_module._run_subprocess_worker_payload(
+        envelope,
+        lambda _text: None,
+    )
 
     assert exit_code == 0
     response_json = sandbox_protocol_module.extract_response_json(marked_response)
@@ -3131,8 +3134,9 @@ def test_sandbox_runner_runs_agent_known_only_to_primary_config_snapshot(
         "tool_init_overrides": {"base_dir": str(workspace)},
     }
 
-    with pytest.raises(ValueError, match="Unknown agent: mind"):
-        runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+    unknown = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request).json()
+    assert unknown["ok"] is False
+    assert "Unknown agent: mind" in unknown["error"]
     response = runner_client.post(
         "/api/sandbox-runner/execute",
         headers=SANDBOX_HEADERS,
@@ -3333,7 +3337,7 @@ def test_sandbox_runner_reloads_edited_snapshot_plugins_and_logs_only_changes(
         disabled = greet({"plugins": [{"path": "./plugins/snapshot-only", "enabled": False}]})
 
     assert results == ["hello", "hello", "hello", "edited"]
-    assert disabled.status_code == 404
+    assert disabled.json()["failure_kind"] == "tool"
     assert [entry for entry in logs if entry["event"] == "Loaded plugins"] == [
         {"event": "Loaded plugins", "log_level": "info", "plugins": ["snapshot_only_plugin"]},
     ] * 2
@@ -3809,12 +3813,12 @@ def test_sandbox_runner_executes_tool_call_in_subprocess_mode(
     assert '"result": 3' in data["result"]
 
 
-def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
+def test_sandbox_runner_stops_a_shell_command_past_its_timeout_in_subprocess_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Shell background handles should keep working across requests in subprocess runner mode."""
+    """A worker shell call past its timeout returns its output so far, through the runner's subprocess relay."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
@@ -3826,51 +3830,24 @@ def test_sandbox_runner_shell_handles_survive_requests_in_subprocess_mode(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
 
-    run_response = runner_client.post(
+    response = runner_client.post(
         "/api/sandbox-runner/execute",
         headers=SANDBOX_HEADERS,
         json={
             "tool_name": "shell",
             "function_name": "run_shell_command",
-            "args": [["sleep", "3"]],
-            "kwargs": {"timeout": 0},
+            "args": [["bash", "-c", "echo started; sleep 300"]],
+            "kwargs": {"timeout": 1},
         },
     )
-    assert run_response.status_code == 200
-    run_data = run_response.json()
-    assert run_data["ok"] is True
-    assert "Handle: " in run_data["result"]
-    handle = run_data["result"].split("Handle: ")[1].split("\n")[0]
 
-    check_response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "shell",
-            "function_name": "check_shell_command",
-            "args": [handle],
-            "kwargs": {},
-        },
-    )
-    assert check_response.status_code == 200
-    check_data = check_response.json()
-    assert check_data["ok"] is True
-    assert "Unknown handle" not in check_data["result"]
-
-    kill_response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "shell",
-            "function_name": "kill_shell_command",
-            "args": [handle],
-            "kwargs": {"force": True},
-        },
-    )
-    assert kill_response.status_code == 200
-    kill_data = kill_response.json()
-    assert kill_data["ok"] is True
-    assert "Unknown handle" not in kill_data["result"]
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "result": "Stopped after 1s.\nOutput:\nstarted",
+        "error": None,
+        "failure_kind": None,
+    }
 
 
 def test_sandbox_runner_rejects_missing_token(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4184,8 +4161,13 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         },
     )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Tool 'demo_plugin' does not expose 'missing'."
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "result": None,
+        "error": "Tool 'demo_plugin' does not expose 'missing'.",
+        "failure_kind": "tool",
+    }
 
 
 def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_override_validation(
@@ -4249,8 +4231,13 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         },
     )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Tool 'demo_plugin_init' does not expose 'missing'."
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "result": None,
+        "error": "Tool 'demo_plugin_init' does not expose 'missing'.",
+        "failure_kind": "tool",
+    }
 
 
 def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
@@ -4674,8 +4661,11 @@ def test_sandbox_runner_subprocess_consumes_lease(runner_client: TestClient, mon
     assert execute_response.json()["ok"] is True
 
 
-def test_sandbox_runner_unknown_tool_returns_404(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unknown tools should return 404 instead of an unhandled server error."""
+def test_sandbox_runner_unknown_tool_is_a_tool_failure(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown tool fails the call as the tool's failure, not as an unhandled server error."""
     _set_sandbox_token(monkeypatch)
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -4687,8 +4677,10 @@ def test_sandbox_runner_unknown_tool_returns_404(runner_client: TestClient, monk
             "kwargs": {},
         },
     )
-    assert response.status_code == 404
-    assert "Unknown tool" in response.json()["detail"]
+    # The tool resolves in the call's own process, after the response started, so its result reports it.
+    assert response.status_code == 200
+    assert response.json()["failure_kind"] == "tool"
+    assert "Unknown tool" in response.json()["error"]
 
 
 def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
@@ -7777,6 +7769,18 @@ def _forwarding_client_factory(runner_client: TestClient) -> type[Any]:
 
         def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> object:
             return runner_client.post(url, json=json, headers=headers)
+
+        def stream(
+            self,
+            method: str,
+            url: str,
+            *,
+            json: dict[str, Any],
+            headers: dict[str, str],
+            timeout: object,
+        ) -> object:
+            del timeout
+            return runner_client.stream(method, url, json=json, headers=headers)
 
     return _RunnerClient
 

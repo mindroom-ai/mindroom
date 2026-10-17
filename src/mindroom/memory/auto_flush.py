@@ -515,12 +515,17 @@ class MemoryAutoFlushWorker:
         _WAKE_EVENTS.add(self._wake_event)
         try:
             while not self._stop_event.is_set():
+                # Cleared before the cycle, so a stop or new activity during it ends the next wait at once.
+                self._wake_event.clear()
                 config = self.config_provider()
                 interval = 30
                 if config is not None and auto_flush_enabled(config):
-                    await self._run_cycle(config)
+                    try:
+                        await self._run_cycle(config)
+                    except Exception:
+                        # A failed cycle, such as an unwritable state file, must not end flushing until a restart.
+                        logger.exception("Memory auto-flush cycle failed")
                     interval = config.memory.auto_flush.flush_interval_seconds
-                self._wake_event.clear()
                 try:
                     await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
                 except TimeoutError:
@@ -595,14 +600,24 @@ class MemoryAutoFlushWorker:
                 strict=False,
             )
 
-            session = await asyncio.to_thread(
-                load_agent_session,
-                agent_name,
-                config,
-                self.runtime_paths,
-                session_id,
-                execution_identity=entry_execution_identity,
-            )
+            try:
+                session = await asyncio.to_thread(
+                    load_agent_session,
+                    agent_name,
+                    config,
+                    self.runtime_paths,
+                    session_id,
+                    execution_identity=entry_execution_identity,
+                )
+            except Exception:
+                # One conversation that cannot be read backs off instead of blocking every later one.
+                self._record_failure(key, entry, settings)
+                logger.exception(
+                    "Memory auto-flush could not read a conversation",
+                    agent=agent_name,
+                    session_id=session_id,
+                )
+                continue
             if session is None:
                 continue
             session_updated_at = session.updated_at
@@ -634,10 +649,25 @@ class MemoryAutoFlushWorker:
                 _write_state_unlocked(self.storage_path, latest_state)
 
         for key in selected_keys:
+            if self._stop_event.is_set():
+                return
             await self._process_session_key(config, key)
 
-    async def _process_session_key(self, config: Config, key: str) -> None:  # noqa: PLR0915
+    def _record_failure(self, key: str, entry: _FlushSessionEntry, settings: MemoryAutoFlushConfig) -> None:
+        """Count one failed attempt and back the conversation off before its next one."""
+        # The cooldown starts at the failure, which can come after a read or flush as long as the cooldown itself.
         now = _now_ts()
+        with _STATE_LOCK:
+            latest_state = _read_state_unlocked(self.storage_path)
+            latest_entry = latest_state["sessions"].get(key, entry)
+            failures = latest_entry.get("consecutive_failures", 0) + 1
+            latest_entry["consecutive_failures"] = failures
+            latest_entry["next_attempt_at"] = now + _retry_cooldown_seconds(settings, failures)
+            latest_entry.pop("flush_started_dirty_revision", None)
+            latest_state["sessions"][key] = latest_entry
+            _write_state_unlocked(self.storage_path, latest_state)
+
+    async def _process_session_key(self, config: Config, key: str) -> None:
         settings = config.memory.auto_flush
         with _STATE_LOCK:
             state = _read_state_unlocked(self.storage_path)
@@ -664,16 +694,7 @@ class MemoryAutoFlushWorker:
                 timeout=settings.extractor.max_extraction_seconds,
             )
         except TimeoutError:
-            with _STATE_LOCK:
-                latest_state = _read_state_unlocked(self.storage_path)
-                latest_entry = latest_state["sessions"].get(key, entry)
-                failures = latest_entry.get("consecutive_failures", 0) + 1
-                cooldown = _retry_cooldown_seconds(settings, failures)
-                latest_entry["consecutive_failures"] = failures
-                latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry.pop("flush_started_dirty_revision", None)
-                latest_state["sessions"][key] = latest_entry
-                _write_state_unlocked(self.storage_path, latest_state)
+            self._record_failure(key, entry, settings)
             logger.warning(
                 "Memory auto-flush timed out",
                 agent=agent_name,
@@ -682,51 +703,20 @@ class MemoryAutoFlushWorker:
             )
             return
         except Exception:
-            with _STATE_LOCK:
-                latest_state = _read_state_unlocked(self.storage_path)
-                latest_entry = latest_state["sessions"].get(key, entry)
-                failures = latest_entry.get("consecutive_failures", 0) + 1
-                cooldown = _retry_cooldown_seconds(settings, failures)
-                latest_entry["consecutive_failures"] = failures
-                latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry.pop("flush_started_dirty_revision", None)
-                latest_state["sessions"][key] = latest_entry
-                _write_state_unlocked(self.storage_path, latest_state)
+            self._record_failure(key, entry, settings)
             logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
             return
-
-        latest_session_updated_at: int | None = None
-        latest_session = await asyncio.to_thread(
-            load_agent_session,
-            agent_name,
-            config,
-            self.runtime_paths,
-            session_id,
-            execution_identity=entry_execution_identity,
-        )
-        if latest_session is not None and isinstance(latest_session.updated_at, int):
-            latest_session_updated_at = latest_session.updated_at
 
         with _STATE_LOCK:
             latest_state = _read_state_unlocked(self.storage_path)
             latest_entry = latest_state["sessions"].get(key, entry)
             flush_started_dirty_revision = entry.get("flush_started_dirty_revision")
-            has_newer_dirty_marks = (
+            # Only requeue if the session was explicitly marked dirty again during this flush.
+            latest_entry["dirty"] = (
                 isinstance(flush_started_dirty_revision, int)
                 and isinstance(latest_entry.get("dirty_revision"), int)
                 and latest_entry["dirty_revision"] > flush_started_dirty_revision
             )
-            has_newer_updates = (
-                isinstance(latest_session_updated_at, int)
-                and isinstance(session_updated_at, int)
-                and latest_session_updated_at > session_updated_at
-            )
-            # Only requeue if the session was explicitly marked dirty again during this flush.
-            latest_entry["dirty"] = (
-                has_newer_dirty_marks if isinstance(flush_started_dirty_revision, int) else has_newer_updates
-            )
-            if isinstance(latest_session_updated_at, int):
-                latest_entry["last_session_updated_at"] = latest_session_updated_at
             if isinstance(session_updated_at, int):
                 latest_entry["last_flushed_session_updated_at"] = session_updated_at
             latest_entry["next_attempt_at"] = None

@@ -490,11 +490,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
 @pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize(
     ("shell", "missing_shell_function", "nested"),
-    [
-        (shell, missing, None)
-        for shell in (False, True)
-        for missing in (None, "check_shell_command", "kill_shell_command")
-    ]
+    [(shell, missing, None) for shell in (False, True) for missing in (None, "run_shell_command")]
     + [(True, None, "media"), (True, None, "approval"), (True, None, "suspend")],
 )
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
@@ -841,7 +837,8 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     with tool_runtime_context(runtime):
         if missing_shell_function:
             saved_before = agent.db.get_session(runtime.session_id).to_dict()
-            with pytest.raises(RuntimeError, match="run, check, and kill shell permissions"):
+            # A saved shell call loses its own toolkit first; any other call loses minimal mode's shell.
+            with pytest.raises(RuntimeError, match=r"no longer has its original toolkit|`run_shell_command` shell"):
                 await recover()
             assert shell_tokens == []
             assert requests == []

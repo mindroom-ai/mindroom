@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.agent import RunErrorEvent, RunOutput
+from agno.models.response import ModelResponse, ToolExecution
+from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
@@ -19,6 +19,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import child_execution_identity, observe_child_event, prepare_child_turn
+from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.worker_routing import (
@@ -308,6 +309,37 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
     run = _only_run(tmp_path)
     assert run["parent_run_id"] is None
     assert run["parent_tool_call_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: Path) -> None:
+    """A subagent's latest words and tool calls are its caller's progress; other runs' events are not."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    reports: list[str] = []
+
+    async def talking_child(ctx: object, **kwargs: object) -> str:
+        cast("Callable[[str], None]", kwargs["run_id_callback"])("child-run")
+        await observe_child_event(RunContentEvent(run_id="child-run", session_id=ctx.session_id, content="Reading "))
+        await observe_child_event(RunContentEvent(run_id="other-run", session_id=ctx.session_id, content="noise"))
+        await observe_child_event(RunContentEvent(run_id="child-run", session_id=ctx.session_id, content="the logs."))
+        await observe_child_event(
+            ToolCallStartedEvent(
+                run_id="child-run",
+                session_id=ctx.session_id,
+                tool=ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}),
+            ),
+        )
+        return "done"
+
+    with (
+        tool_runtime_context(context),
+        tool_progress_reporter(reports.append),
+        patch("mindroom.ai.ai_response", side_effect=talking_child),
+    ):
+        await tools.run_subagent(agent_name="child", task="Inspect the logs")
+
+    assert reports == ["Reading ", "Reading the logs.", "Reading the logs.\nCalling lookup\n"]
 
 
 @pytest.mark.asyncio

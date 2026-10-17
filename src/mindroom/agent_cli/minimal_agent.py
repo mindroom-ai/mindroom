@@ -201,7 +201,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
                 for name in SHELL_OPERATION_NAMES:
                     await catalog.bind(ToolKey("shell", name))
             except ValueError as exc:
-                msg = "Minimal mode requires the agent's run, check, and kill shell permissions."
+                msg = "Minimal mode requires the agent's `run_shell_command` shell permission."
                 raise RuntimeError(msg) from exc
             # The SDK calls this preparation before its module-level message builder;
             # overriding Agent.aget_system_message does not intercept live runs.

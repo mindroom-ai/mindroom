@@ -7,6 +7,7 @@ import base64
 import json
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
@@ -61,7 +62,11 @@ from mindroom.tool_jobs.runtime import JobAccessError, register_background_runti
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import (
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+    run_async_entrypoint_blocking_call,
+)
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -767,6 +772,54 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
             assert finished.is_set()
     finally:
         release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_a_jobs_blocking_call_runs_on_its_own_thread_not_the_shared_pool(tmp_path: Path, managed: bool) -> None:
+    """A job's call may block for hours, so what its entrypoint offloads, like a worker request, gets its own thread."""
+    shared = ThreadPoolExecutor(thread_name_prefix="shared-pool")
+    threads: list[str] = []
+
+    def blocking() -> str:
+        threads.append(threading.current_thread().name)
+        return "done"
+
+    async def offloading() -> str:
+        return await run_async_entrypoint_blocking_call(blocking, executor=shared)
+
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader")},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
+    )
+    context = _delegate_runtime_context(config, paths)
+    runtime = await tool_job_runtime(tmp_path)
+    if managed:
+        pin_background_tool_jobs(context.config, paths)
+        register_background_runtime(paths, runtime)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("offloading", "offloading-call")]), ModelResponse(content="done")],
+    )
+    if managed:
+        install_tool_job_execution(model)
+    toolkit = Toolkit(name="threads", tools=[offloading])
+    bind_toolkit_authority(toolkit, authored_name="threads")
+    agent = Agent(id="leader", model=model, tools=[toolkit])
+
+    @owned_tool_execution()
+    async def parent_run() -> RunOutput | TeamRunOutput:
+        return await agent.arun("start", session_id=context.session_id)
+
+    try:
+        with tool_runtime_context(context):
+            await asyncio.wait_for(parent_run(), JOB_TEST_TIMEOUT)
+        [thread] = threads
+        assert thread.startswith("mindroom-job-call" if managed else "shared-pool")
+    finally:
+        shared.shutdown(wait=False)
         await runtime.shutdown()
 
 

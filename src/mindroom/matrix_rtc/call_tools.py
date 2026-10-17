@@ -21,6 +21,7 @@ import asyncio
 import functools
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any, Literal
@@ -77,7 +78,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
     from contextlib import AbstractAsyncContextManager
 
     from agno.agent import Agent as AgnoAgent
@@ -170,6 +171,32 @@ def _call_usage_owner(
             updated_at=int(created_at),
         ),
     )
+
+
+@contextmanager
+def call_helper_usage(
+    execution_identity: ToolExecutionIdentity,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Iterator[None]:
+    """Charge helper work done for a call outside its tools, such as extracting memory from its transcript, to the caller."""
+    agent_name = execution_identity.agent_name
+    session_id = execution_identity.session_id
+    owner = (
+        None
+        if agent_name is None or session_id is None
+        else _call_usage_owner(
+            agent_name,
+            session_id,
+            created_at=time.time(),
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+    )
+    with helper_usage_owner_context(owner):
+        yield
 
 
 async def record_call_voice_usage(
