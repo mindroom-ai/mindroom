@@ -877,8 +877,8 @@ class TurnStore:
     ) -> bool:
         """Remove persisted runs using the exact recorded target and history scope.
 
-        History derived from redacted events goes first, so a compaction rollback
-        cannot restore the turn's old runs after they were pruned.
+        History derived from redacted events goes first, so a loaded run holding a
+        redacted event still retires a legacy summary before the edit removes that run.
         """
         target = turn_record.conversation_target
         scope = turn_record.history_scope
