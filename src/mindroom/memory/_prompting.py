@@ -6,7 +6,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.prompt_templates import render_prompt_template
-from mindroom.redaction import REDACTION_FAILED, redact_authored_text
+from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
@@ -25,7 +25,7 @@ def redact_memory_text(text: str) -> str:
     Each line is redacted on its own and a line redaction cannot read safely, such as one with an unclosed quote, is
     dropped, so it does not cost the rest of the message; a value on the line after its key is not recognized.
     """
-    lines = (redact_authored_text(line) for line in text.splitlines())
+    lines = (redact_sensitive_text(line) for line in text.splitlines())
     return "\n".join(line for line in lines if line != REDACTION_FAILED)
 
 

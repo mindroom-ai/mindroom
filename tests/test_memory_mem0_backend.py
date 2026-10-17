@@ -727,7 +727,7 @@ async def test_conversation_memory_removes_credentials_before_mem0(
         await store_conversation_memory(
             # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
             f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
-            "API key rotation happens every Friday.\nThe launch is Friday.",
+            "Use API key: my-secret-key for the local endpoint.\nThe launch is Friday.",
             "general",
             storage_path,
             "session-alice",
@@ -742,8 +742,8 @@ async def test_conversation_memory_removes_credentials_before_mem0(
     assert all(token not in message["content"] and "correct horse" not in message["content"] for message in messages)
     assert REDACTION_FAILED not in messages[-1]["content"]
     assert oversized not in messages[-1]["content"]
-    # Ordinary words after a credential keyword stay.
-    assert "API key rotation happens every Friday." in messages[-1]["content"]
+    # A key a person chose, after an explicit label, is removed too.
+    assert "my-secret-key" not in messages[-1]["content"]
     assert "The launch is Friday." in messages[-1]["content"]
     assert "env:" in messages[-1]["content"]
     if with_history:
