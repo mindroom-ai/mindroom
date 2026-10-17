@@ -756,8 +756,14 @@ async def test_a_session_that_cannot_be_read_does_not_block_the_others(
     mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="broken")
     mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="fine")
 
+    now = auto_flush._now_ts()
+    clock = now
+
     def load(_agent: str, _config: Config, _runtime_paths: RuntimePaths, session_id: str, **_: object) -> _FakeSession:
+        nonlocal clock
         if session_id == "broken":
+            # The read waits on a locked database before it fails, so the cooldown starts after the wait.
+            clock += 60
             msg = "session database is locked"
             raise OSError(msg)
         return _FakeSession(updated_at=100, messages=[_FakeMessage(role="user", content="remember this decision")])
@@ -774,21 +780,24 @@ async def test_a_session_that_cannot_be_read_does_not_block_the_others(
         runtime_paths=runtime_paths_for(config),
         config_provider=lambda: config,
     )
-    now = auto_flush._now_ts()
-    monkeypatch.setattr(auto_flush, "_now_ts", lambda: now)
+    monkeypatch.setattr(auto_flush, "_now_ts", lambda: clock)
 
     await worker._run_cycle(config)
 
     assert writes == ["general:[auto_flush:fine:100] important decision"]
     cooldown = config.memory.auto_flush.retry_cooldown_seconds
     broken = _entry(tmp_path, "broken")
-    assert (broken["dirty"], broken["consecutive_failures"], broken["next_attempt_at"]) == (True, 1, now + cooldown)
+    assert (broken["dirty"], broken["consecutive_failures"], broken["next_attempt_at"]) == (
+        True,
+        1,
+        now + 60 + cooldown,
+    )
 
     # The next failure waits twice as long.
-    monkeypatch.setattr(auto_flush, "_now_ts", lambda: now + cooldown)
+    clock = broken["next_attempt_at"]
     await worker._run_cycle(config)
     broken = _entry(tmp_path, "broken")
-    assert (broken["consecutive_failures"], broken["next_attempt_at"]) == (2, now + 3 * cooldown)
+    assert (broken["consecutive_failures"], broken["next_attempt_at"]) == (2, clock + 2 * cooldown)
 
 
 @pytest.mark.asyncio

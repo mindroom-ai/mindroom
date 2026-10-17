@@ -514,7 +514,7 @@ class MemoryAutoFlushWorker:
         _WAKE_EVENTS.add(self._wake_event)
         try:
             while not self._stop_event.is_set():
-                # Cleared before the cycle, so a stop or new activity during it starts the next wait at once.
+                # Cleared before the cycle, so a stop or new activity during it ends the next wait at once.
                 self._wake_event.clear()
                 config = self.config_provider()
                 interval = 30
@@ -610,7 +610,7 @@ class MemoryAutoFlushWorker:
                 )
             except Exception:
                 # One conversation that cannot be read backs off instead of blocking every later one.
-                self._record_failure(key, entry, now, settings)
+                self._record_failure(key, entry, settings)
                 logger.exception(
                     "Memory auto-flush could not read a conversation",
                     agent=agent_name,
@@ -652,8 +652,10 @@ class MemoryAutoFlushWorker:
                 return
             await self._process_session_key(config, key)
 
-    def _record_failure(self, key: str, entry: _FlushSessionEntry, now: int, settings: MemoryAutoFlushConfig) -> None:
+    def _record_failure(self, key: str, entry: _FlushSessionEntry, settings: MemoryAutoFlushConfig) -> None:
         """Count one failed attempt and back the conversation off before its next one."""
+        # The cooldown starts at the failure, which can come after a read or flush as long as the cooldown itself.
+        now = _now_ts()
         with _STATE_LOCK:
             latest_state = _read_state_unlocked(self.storage_path)
             latest_entry = latest_state["sessions"].get(key, entry)
@@ -665,7 +667,6 @@ class MemoryAutoFlushWorker:
             _write_state_unlocked(self.storage_path, latest_state)
 
     async def _process_session_key(self, config: Config, key: str) -> None:
-        now = _now_ts()
         settings = config.memory.auto_flush
         with _STATE_LOCK:
             state = _read_state_unlocked(self.storage_path)
@@ -692,7 +693,7 @@ class MemoryAutoFlushWorker:
                 timeout=settings.extractor.max_extraction_seconds,
             )
         except TimeoutError:
-            self._record_failure(key, entry, now, settings)
+            self._record_failure(key, entry, settings)
             logger.warning(
                 "Memory auto-flush timed out",
                 agent=agent_name,
@@ -701,7 +702,7 @@ class MemoryAutoFlushWorker:
             )
             return
         except Exception:
-            self._record_failure(key, entry, now, settings)
+            self._record_failure(key, entry, settings)
             logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
             return
 
