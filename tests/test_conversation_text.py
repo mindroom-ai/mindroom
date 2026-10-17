@@ -6,12 +6,17 @@ import random
 
 import pytest
 from agno.models.message import Message
+from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
 
+from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import conversation_lines, redact_conversation_text, utterances
+from mindroom.knowledge_graph.episodes import render_episodes
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 
 TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 AGENTS = {"@mindroom_research:x": "research", "@mindroom_mind:x": "mind"}
@@ -215,3 +220,40 @@ def test_conversation_lines_label_each_speaker_on_one_redacted_line() -> None:
     assert lines[2].endswith("... [truncated]")
     assert len(lines[2]) == len("agent research: ") + 500
     assert lines[3] == "agent mind: Thanks."
+
+
+def test_every_reader_of_stored_turns_redacts_and_never_quotes_mindroom_as_a_person() -> None:
+    """The graph and a replayed skill review read the same stored turns with the same rules."""
+    secret = f"Authorization: Bearer\nabc123bearervalue\npassword:\nhunter2nextline\nToken {TOKEN}"
+    asked = _run(
+        Message(role="user", content=render_msg_tag(sender="@alice:x", body=f"Deploy it.\n{secret}")),
+        Message(role="assistant", content=f"Started.\n{secret}"),
+    )
+    asked.tools = [ToolExecution(tool_call_id="c1", tool_name="shell", tool_args={"command": "env"}, result=secret)]
+    follow_up = _run(
+        Message(role="user", content=render_msg_tag(sender="@alice:x", body="[RUNTIME UPDATE] Collect the jobs.")),
+        Message(role="assistant", content="The deploy finished."),
+        **{TURN_INTENT_RUN_METADATA_KEY: "job_follow_up"},
+    )
+    episodes = [
+        rendered.episode.body
+        for kind in ("conversation", "tool_results")
+        for rendered in render_episodes(
+            [asked, follow_up],
+            thread_kind="conversation",
+            episode_kind=kind,
+            agent_name="mind",
+            settings=KnowledgeGraphIngestConfig(),
+            agent_for_sender=AGENTS.get,
+        )
+    ]
+    review = render_transcript(
+        conversation_messages(AgentSession(session_id="s1", runs=[asked, follow_up])),
+        budget_chars=50_000,
+    )
+
+    for text in [*episodes, review]:
+        assert not any(value in text for value in ("abc123bearervalue", "hunter2nextline", TOKEN, "[redaction failed]"))
+        assert "Deploy it." in text or "call shell" in text
+    assert "Collect the jobs" not in "\n".join(episodes)
+    assert "RUNTIME:\n[RUNTIME UPDATE] Collect the jobs." in review

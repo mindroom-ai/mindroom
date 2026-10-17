@@ -124,12 +124,11 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
         content = message.content if isinstance(message.content, str) else ""
         if message.from_history:
             continue
-        if message.role == "user" and runtime_prompt:
-            if agent_work and content.strip():
-                said.append(Utterance("runtime", None, content, message))
-        elif message.role == "user":
+        if message.role == "user" and (agent_work or not runtime_prompt):
             said.extend(
-                Utterance("said", sender, body, message)
+                Utterance("runtime", None, body, message)
+                if runtime_prompt
+                else Utterance("said", sender, body, message)
                 for sender, body in parse_msg_tags(content, default_sender=requester)
                 if body.strip()
             )
