@@ -1350,7 +1350,9 @@ class KubernetesResourceManager:
                     "name": _CONTAINER_NAME,
                     "image": self.config.image,
                     "imagePullPolicy": self.config.image_pull_policy,
-                    "command": ["/app/run-sandbox-runner.sh"],
+                    # A container command replaces the image's tini entrypoint, so name tini here:
+                    # PID 1 must reap the children a killed command's process group leaves behind.
+                    "command": ["tini", "--", "/app/run-sandbox-runner.sh"],
                     "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
                     "env": self._worker_env(
                         worker_key=worker_key,
