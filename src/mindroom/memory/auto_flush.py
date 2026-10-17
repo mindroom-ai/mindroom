@@ -182,7 +182,7 @@ def _next_batch(runs: list[RunOutput], settings: MemoryAutoFlushConfig) -> tuple
     lines: list[str] = []
     for run in runs:
         candidate = [*lines, *_run_lines(run)]
-        # Turns with no lines, such as an automation's, ride along with the next turn instead of making a batch alone.
+        # Turns with no lines at the start of a batch, such as an automation's, ride along with the turn after them.
         if lines and len(_newest_lines(candidate, **limits)) < len(candidate):
             break
         batch.append(run)
