@@ -17,15 +17,14 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 from sqlalchemy.exc import IntegrityError
 
-from mindroom.history.storage import archive_compaction_chunk
 from mindroom.history.types import HistoryScope
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
+from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -185,6 +184,21 @@ def test_repeated_saves_replace_the_usage_snapshot(usage_db: SqliteDb) -> None:
     assert rows[0][1]["metrics"]["total_tokens"] == 30
 
 
+def test_a_refused_save_of_a_removed_run_still_records_usage(usage_db: SqliteDb) -> None:
+    """The provider calls behind a late save of a cut run were made, so their usage stays recorded."""
+    with sqlite3.connect(usage_db.db_file) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS code_sessions_removed_runs (run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL)",
+        )
+        connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('run-1', 'session')")
+
+    usage_db.upsert_run(_run(), session_id="session")
+
+    assert [(run_id, payload["metrics"]["total_tokens"]) for run_id, payload in _rows(usage_db)] == [("run-1", 10)]
+    with sqlite3.connect(usage_db.db_file) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM code_sessions_runs").fetchone() == (0,)
+
+
 def test_run_cleanup_preserves_usage_before_regeneration(usage_db: SqliteDb) -> None:
     """Replay cleanup cannot erase incurred usage, and the replacement run adds its own work."""
     usage_db.upsert_run(_run(), session_id="session")
@@ -257,14 +271,7 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Sqlite
     assert before[0].runs[0].metrics["total_tokens"] == 10
     session = usage_db.get_session("session", session_type=SessionType.AGENT)
     assert isinstance(session, AgentSession)
-    archive_compaction_chunk(
-        storage=usage_db,
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id="code"),
-        summary=SessionSummary(summary="summary"),
-        summary_model="summary-model",
-        archived_runs=[run for run in session.runs or [] if run.run_id == "run-1"],
-    )
+    compact_runs(usage_db, session, HistoryScope(kind="agent", scope_id="code"), ["run-1"], "summary")
     assert session.runs == []
     usage_db.close()
     assert list(iter_usage_storage_rows(source)) == before

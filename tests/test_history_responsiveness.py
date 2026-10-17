@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
-from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
@@ -22,11 +21,11 @@ from mindroom.history.runtime import (
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import archive_compaction_chunk, reconcile_compaction_state, set_force_compaction_state
+from mindroom.history.storage import append_compaction_chunk, read_chunk_basis, set_force_compaction_state
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
-from mindroom.session_storage.agent_storage import get_agent_session
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import _ALL_HISTORY_SETTINGS, _agent, _completed_run, _make_config, _session
@@ -47,7 +46,7 @@ async def test_history_sizing_allows_loop_progress(
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     original = session.to_dict()
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     agent = _agent(model=model, db=storage)
@@ -145,17 +144,16 @@ async def test_history_sizing_allows_loop_progress(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["reconcile", "archive"])
+@pytest.mark.parametrize("stage", ["basis", "append"])
 async def test_history_storage_work_allows_loop_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
 ) -> None:
-    """A pending loop callback can run while history preparation reconciles or archives saved runs."""
-    config, paths = _make_config(tmp_path)
+    """A pending loop callback can run while compaction reads its basis or appends its summary row."""
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     loop = asyncio.get_running_loop()
@@ -163,15 +161,15 @@ async def test_history_storage_work_allows_loop_progress(
     released = threading.Event()
     loop_progress: list[bool] = []
     target, operation = (
-        ("mindroom.history.runtime.reconcile_compaction_state", reconcile_compaction_state)
-        if stage == "reconcile"
-        else ("mindroom.history.compaction.archive_compaction_chunk", archive_compaction_chunk)
+        ("mindroom.history.compaction.read_chunk_basis", read_chunk_basis)
+        if stage == "basis"
+        else ("mindroom.history.compaction.append_compaction_chunk", append_compaction_chunk)
     )
 
-    def controlled(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+    def controlled(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         loop.call_soon_threadsafe(entered.set)
         loop_progress.append(released.wait(timeout=1))
-        operation(*args, **kwargs)
+        return operation(*args, **kwargs)
 
     async def release_from_loop() -> None:
         await entered.wait()
@@ -180,42 +178,25 @@ async def test_history_storage_work_allows_loop_progress(
     monkeypatch.setattr(target, controlled)
     heartbeat = asyncio.create_task(release_from_loop())
     try:
-        if stage == "reconcile":
-            agent = _agent(model=model, db=storage)
-            await prepare_scope_history(
-                agent=agent,
-                agent_name="test_agent",
-                resolved_inputs=resolve_agent_preparation_inputs(
-                    agent=agent,
-                    agent_name="test_agent",
-                    full_prompt="Continue",
-                    config=config,
-                    static_prompt_tokens=100,
-                ),
-                runtime_paths=paths,
-                config=config,
-                scope_context=ScopeSessionContext(scope, storage, session),
-            )
-        else:
-            monkeypatch.setattr(
-                "mindroom.history.compaction.generate_compaction_summary",
-                AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
-            )
-            outcome = await compact_scope_history(
-                storage=storage,
-                session=session,
-                scope=scope,
-                state=HistoryScopeState(force_compact_before_next_run=True),
-                history_settings=_ALL_HISTORY_SETTINGS,
-                available_history_budget=1000,
-                summary_model=SummaryModel(FakeModel(id="summary", provider="fake"), "summary", 1000),
-                replay_window_tokens=2000,
-                threshold_tokens=1000,
-                summary_prompt="Summarize",
-                summary_timeout_seconds=30,
-                replay_model=model,
-            )
-            assert outcome is not None
+        monkeypatch.setattr(
+            "mindroom.history.compaction.generate_compaction_summary",
+            AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
+        )
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=_ALL_HISTORY_SETTINGS,
+            available_history_budget=1000,
+            summary_model=SummaryModel(FakeModel(id="summary", provider="fake"), "summary", 1000),
+            replay_window_tokens=2000,
+            threshold_tokens=1000,
+            summary_prompt="Summarize",
+            summary_timeout_seconds=30,
+            replay_model=model,
+        )
+        assert outcome is not None
         await heartbeat
         assert loop_progress == [True]
     finally:
@@ -235,7 +216,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(storage, session)
     agent = _agent(model=model, db=storage)
     resolved = resolve_agent_preparation_inputs(
@@ -292,7 +273,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     config, paths = _make_config(tmp_path)
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(storage, session)
     original = session.to_dict()
     resolved = resolve_agent_preparation_inputs(
@@ -386,7 +367,7 @@ async def test_cancelled_finalization_finishes_before_agent_reuse(  # noqa: PLR0
     config, paths = _make_config(tmp_path)
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(storage, session)
     agent = _agent(model=model, db=storage)
     resolved = resolve_agent_preparation_inputs(
@@ -517,7 +498,7 @@ async def test_cancelling_preparation_sizing_preserves_input(
     config, paths = _make_config(tmp_path)
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(storage, session)
     original = session.to_dict()
     agent = _agent(model=model, db=storage)

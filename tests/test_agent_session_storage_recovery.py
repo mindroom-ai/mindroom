@@ -432,13 +432,12 @@ def test_session_recovery_refuses_symlinked_storage(
 
 @pytest.mark.parametrize("null_blob", [False, True])
 def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Path, *, null_blob: bool) -> None:
-    """Old versions and optional legacy blobs do not justify discarding compatible history."""
+    """Old versions and optional legacy blobs do not justify discarding compatible history; blob runs become rows."""
     database = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
     with closing(sqlite3.connect(database)) as connection:
         if null_blob:
             connection.execute("UPDATE code_sessions SET runs = NULL")
             connection.commit()
-        original_blob = connection.execute("SELECT runs FROM code_sessions").fetchone()
 
     def open_storage() -> BaseDb:
         return create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
@@ -464,16 +463,14 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
         assert isinstance(current, AgentSession)
         assert [(run.run_id, run.content) for run in current.runs or []] == [("current-run", "current answer")]
     with closing(sqlite3.connect(database)) as connection:
-        assert (
-            connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
-            == original_blob
-        )
+        assert connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone() == (None,)
         assert connection.execute(
             "SELECT version FROM agno_schema_versions WHERE table_name = 'code_sessions'",
         ).fetchone() == ("2.5.6",)
         assert connection.execute("SELECT run_id FROM code_sessions_runs ORDER BY run_id").fetchall() == [
             ("current-run",),
             ("row-only",),
+            *(() if null_blob else (("run-1",), ("run-2",), ("run-3",))),
         ]
     assert not list(tmp_path.glob("sessions.incompatible-*"))
 

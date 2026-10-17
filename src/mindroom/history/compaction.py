@@ -17,7 +17,8 @@ from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
-    archive_compaction_chunk,
+    append_compaction_chunk,
+    read_chunk_basis,
     record_summary_usage,
     save_working_run_changes,
     update_scope_state_on_latest,
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
+    from mindroom.history.storage import ChunkBasis
     from mindroom.history.summary_call import SummaryRetryDecision
     from mindroom.native_compaction import NativeCompactionModel
 
@@ -185,7 +187,7 @@ async def compact_scope_history(
     replay_model: NativeCompactionModel | None = None,
     before_tokens: int | None = None,
 ) -> CompactionOutcome | None:
-    """Compact one scope by moving its oldest runs into the archive behind a new session.summary."""
+    """Compact one scope by appending summary rows that fold its oldest runs, chunk by chunk."""
     visible_runs = scope_visible_runs(session, scope)
     if not visible_runs or (available_history_budget is None and not state.force_compact_before_next_run):
         await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
@@ -220,6 +222,7 @@ async def compact_scope_history(
         return None
 
     before_run_count = len(visible_runs)
+    loaded_runs = list(session.runs or [])
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
 
@@ -267,7 +270,7 @@ async def compact_scope_history(
         return None
 
     compacted_at = _iso_utc_now()
-    await run_blocking_until_complete(save_working_run_changes, storage, session, working_session)
+    await run_blocking_until_complete(save_working_run_changes, storage, session, loaded_runs, working_session)
     await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",
@@ -359,15 +362,17 @@ async def _rewrite_working_session_for_compaction(
     )
 
     while pending_selected_run_ids:
-        working_visible_runs = scope_visible_runs(working_session, scope)
-        compactable_runs = [
-            run
-            for run in working_visible_runs
-            if isinstance(run.run_id, str) and run.run_id in pending_selected_run_ids
-        ]
-        if not compactable_runs:
+        chunk = await _next_chunk(
+            storage=storage,
+            persisted_session=persisted_session,
+            working_session=working_session,
+            scope=scope,
+            pending_run_ids=pending_selected_run_ids,
+            compacted_run_count=total_compacted_run_count,
+        )
+        if chunk is None:
             break
-
+        compactable_runs, basis = chunk
         summary_input, included_runs = await asyncio.to_thread(
             build_summary_input,
             previous_summary=current_summary_text(working_session),
@@ -411,29 +416,30 @@ async def _rewrite_working_session_for_compaction(
         generated_summary = new_summary.summary
         if before_persist_callback is not None:
             await before_persist_callback(included_runs)
-        final_summary_text = generated_summary.summary
         compacted_run_ids = tuple(run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id)
-        working_session.summary = SessionSummary(summary=generated_summary.summary, updated_at=datetime.now(UTC))
-        runs_before_chunk = working_session.runs or []
-        working_session.runs = runs_without(runs_before_chunk, compacted_run_ids)
-        kept_runs = {id(run) for run in working_session.runs}
-        archived_runs = [run for run in runs_before_chunk if id(run) not in kept_runs]
+        chunk_summary = SessionSummary(summary=generated_summary.summary, updated_at=datetime.now(UTC))
+        appended = await run_blocking_until_complete(
+            partial(
+                append_compaction_chunk,
+                storage=storage,
+                session=persisted_session,
+                scope=scope,
+                basis=basis,
+                included_run_ids=compacted_run_ids,
+                summary=chunk_summary,
+                summary_model=_model_identifier(summary_model.model),
+            ),
+        )
+        if not appended:
+            _log_conversation_changed(session_id, scope, total_compacted_run_count)
+            break
+        final_summary_text = generated_summary.summary
+        working_session.summary = chunk_summary
+        working_session.runs = runs_without(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
         if collect_compaction_hook_messages:
             compacted_messages.extend(messages_for_runs(included_runs, history_settings))
         pending_selected_run_ids.difference_update(compacted_run_ids)
-
-        await run_blocking_until_complete(
-            partial(
-                archive_compaction_chunk,
-                storage=storage,
-                session=persisted_session,
-                scope=scope,
-                summary=working_session.summary,
-                summary_model=_model_identifier(summary_model.model),
-                archived_runs=archived_runs,
-            ),
-        )
 
         await _emit_lifecycle_progress_after_persist(
             working_session=working_session,
@@ -463,6 +469,49 @@ async def _rewrite_working_session_for_compaction(
         compacted_run_count=total_compacted_run_count,
         compacted_messages=tuple(compacted_messages),
         served_by=summary_model,
+    )
+
+
+async def _next_chunk(
+    *,
+    storage: BaseDb,
+    persisted_session: AgentSession | TeamSession,
+    working_session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    pending_run_ids: set[str],
+    compacted_run_count: int,
+) -> tuple[list[RunOutput | TeamRunOutput], ChunkBasis] | None:
+    """Return the runs the next chunk may fold and what it builds on, or ``None`` to stop compacting."""
+    compactable_runs = [
+        run
+        for run in scope_visible_runs(working_session, scope)
+        if isinstance(run.run_id, str) and run.run_id in pending_run_ids
+    ]
+    if not compactable_runs:
+        return None
+    basis = await run_blocking_until_complete(
+        partial(
+            read_chunk_basis,
+            storage,
+            persisted_session,
+            scope,
+            [run.run_id for run in compactable_runs if run.run_id],
+            previous_summary=current_summary_text(working_session),
+        ),
+    )
+    if basis is None:
+        _log_conversation_changed(persisted_session.session_id, scope, compacted_run_count)
+        return None
+    return compactable_runs, basis
+
+
+def _log_conversation_changed(session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
+    # Another writer changed this scope's history since the session loaded; earlier chunks stand.
+    logger.warning(
+        "Compaction stopped because the conversation changed",
+        session_id=session_id,
+        scope=scope.key,
+        compacted_runs=compacted_run_count,
     )
 
 

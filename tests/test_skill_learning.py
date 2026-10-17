@@ -23,7 +23,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 from anthropic import AsyncAnthropic
 from google import genai
@@ -38,6 +37,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
+from mindroom.history import summary_rows
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
@@ -1308,8 +1308,17 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
         storage.delete_runs(["r1"])
         later = _tool_turn("r2", result="deployed to canary")
         later.session_id = "session"
-        summary = SessionSummary(summary="The user wants release notes in the #deploys channel.")
-        seed_session(storage, AgentSession(session_id="session", agent_id="mind", summary=summary, runs=[later]))
+        seed_session(storage, AgentSession(session_id="session", agent_id="mind", runs=[later]))
+        # The summary of the deleted reply sorts before every remaining run, as a compaction of it would.
+        assert summary_rows.append_summary(
+            storage,
+            session_id="session",
+            scope_key="agent:mind",
+            based_on=None,
+            covered=[],
+            summary="The user wants release notes in the #deploys channel.",
+            summary_model="summary-model",
+        )
     finally:
         storage.close()
     model = _model()

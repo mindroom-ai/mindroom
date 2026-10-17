@@ -62,7 +62,7 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _session,
     _team_session,
-    archived_run_ids,
+    folded_run_ids,
     latest_summary_model,
 )
 
@@ -170,7 +170,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
 
     state = read_scope_state(persisted, scope)
     assert latest_summary_model(storage, scope) == "summary-model"
-    assert len(archived_run_ids(storage)) == 4
+    assert len(folded_run_ids(storage)) == 4
     assert state.force_compact_before_next_run is False
 
     assert prepared.replays_persisted_history is True
@@ -672,7 +672,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     assert persisted.summary is not None
     assert persisted.summary.summary == second_summary_text
     assert persisted.runs == []
-    assert len(archived_run_ids(storage)) == 3
+    assert len(folded_run_ids(storage)) == 3
     assert summary_mock.await_count == 2
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].compacted_run_count == 3
@@ -798,7 +798,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     assert persisted.runs == []
     assert summary_mock.await_count == 2
     assert len(prepared.compaction_outcomes) == 1
-    assert len(archived_run_ids(storage)) == 3
+    assert len(folded_run_ids(storage)) == 3
 
 
 @pytest.mark.asyncio
@@ -1034,7 +1034,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     summary_only_tokens = _estimate_session_summary_tokens(persisted.summary.summary)
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
-    assert archived_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]
+    assert folded_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]
     progress_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleProgress)]
     assert progress_events
     assert progress_events[-1].runs_remaining > 0
@@ -1053,7 +1053,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     current_run_session = get_agent_session(storage, "session-1")
     assert current_run_session is not None
     assert [run.run_id for run in current_run_session.runs or []] == ["run-24"]
-    assert "run-24" not in archived_run_ids(storage)
+    assert "run-24" not in folded_run_ids(storage)
     assert (
         estimate_prompt_visible_history_tokens(
             session=current_run_session,

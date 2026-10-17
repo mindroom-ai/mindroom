@@ -23,7 +23,6 @@ from PIL import Image as PillowImage
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
-from mindroom.history import archive
 from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
@@ -39,10 +38,18 @@ from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
-from mindroom.session_storage.agent_storage import get_agent_session
+from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import FakeModel, seed_session
-from tests.history_helpers import _agent, _completed_run, _completed_team_run, _make_config, _session, _team_session
+from tests.history_helpers import (
+    _agent,
+    _completed_run,
+    _completed_team_run,
+    _make_config,
+    _session,
+    _team_session,
+    compact_runs,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -460,8 +467,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         ),
         Message(role="tool", tool_call_id="fc_status", content="ready"),
     ]
-    db_path = str(tmp_path / "history.db")
-    db = SqliteDb(db_file=db_path)
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(
         db,
         _session(
@@ -473,7 +479,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         ),
     )
     db.close()
-    db = SqliteDb(db_file=db_path)
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     session = get_agent_session(db, "session")
     assert session is not None
     original = [run.to_dict() for run in session.runs or []]
@@ -628,7 +634,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
             ),
         ],
     )
-    db = SqliteDb(db_file=str(tmp_path / "history.db"))
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(db, session)
     agent = _agent(model=model, db=db)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -700,7 +706,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
             _completed_run("recent", messages=latest),
         ],
     )
-    db = SqliteDb(db_file=str(tmp_path / "history.db"))
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(db, session)
     agent = _agent(model=model, db=db)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -771,7 +777,7 @@ async def test_native_activation_respects_history_policy(
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if case == "manual":
         set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-    db = SqliteDb(db_file=str(tmp_path / "history.db"))
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(db, session)
     agent = _agent(model=model, db=db)
     if case == "manual":
@@ -819,7 +825,7 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     model.configure_native_compaction(threshold=120000)
     old_route = model.native_compaction.route
     session = _session("session", summary=SessionSummary(summary="New portable summary."))
-    db = SqliteDb(db_file=str(tmp_path / "history.db"))
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     seed_session(db, session)
     agent = _agent(model=model, db=db)
     resolved = resolve_agent_preparation_inputs(
@@ -843,8 +849,8 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_native_route_names_the_summary_reconciliation_repaired(tmp_path: Path) -> None:
-    """A stale replayed summary cannot name the route checkpoints are recorded under."""
+async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) -> None:
+    """A summary left in the session row cannot name the route checkpoints are recorded under."""
     config, paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
@@ -852,19 +858,17 @@ async def test_native_route_names_the_summary_reconciliation_repaired(tmp_path: 
     )
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session = _session("session", summary=SessionSummary(summary="Stale summary."))
-    db = SqliteDb(db_file=str(tmp_path / "history.db"))
-    seed_session(db, session)
-    archive.archive_runs(
-        db,
-        session_id="session",
-        scope_key=scope.key,
-        summary="Archived summary.",
-        summary_model="summary-model",
-        runs=[],
-        event_ids={},
-        seen_event_ids={},
+    seeded = _session(
+        "session",
+        runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")])],
+        summary=SessionSummary(summary="Stale summary."),
     )
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    assert isinstance(db, SqliteDb)
+    seed_session(db, seeded)
+    compact_runs(db, seeded, scope, ["folded"], "Archived summary.")
+    session = get_agent_session(db, "session")
+    assert session is not None
     agent = _agent(model=model, db=db)
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
@@ -910,7 +914,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     member = _agent()
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
     team = Team(id="team", model=model, members=[member])
-    db = SqliteDb(db_file=str(tmp_path / "history.db"))
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
     session = _team_session("session", team_id="team", runs=[_completed_team_run("run", team_id="team")])
     seed_session(db, session)
     await prepare_bound_scope_history(

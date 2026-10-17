@@ -1,47 +1,113 @@
-"""Compatibility for older session payloads: Agno 2 run blobs and retired run metadata."""
+"""Compatibility for older session payloads: Agno 2 run blobs, run rows without a position, and retired run metadata."""
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
+from agno.db.utils import build_single_run_row
 from agno.run.team import TeamRunOutput
+from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert
+
+from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable
+    from collections.abc import Iterable
 
     from agno.run.agent import RunOutput
-    from sqlalchemy import Table
-    from sqlalchemy.orm import Session
+    from sqlalchemy import Connection, Table
+
 
 # LEGACY_COMPAT: Agno 2 session history stored in JSON run blobs.
-# Legacy format: Agno 2 sessions stored run history in single- or double-encoded JSON `runs` blobs.
+# Legacy format: Agno 2 sessions stored run history in single- or double-encoded JSON `runs` blobs,
+# which Agno 3 merges into every read ahead of run rows.
 # Last legacy release: v2026.9.11; replacement: v2026.9.12 wrote first-class Agno 3 run rows.
-# Handling: Decode retained payloads and scrub deletions and descendants transactionally.
-# Coverage: tests/test_agent_storage_runs.py::test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick.
-
-
-def scrub_legacy_run_blobs(
-    session: Session,
-    sessions_table: Table,
-    run_ids: Collection[str],
-) -> None:
-    """Remove deleted ids and descendants from retained 2.x ``runs`` payloads."""
-    if "runs" not in sessions_table.c:
+# Handling: The open-time summary-row migration turns every blob entry with a string run id that has
+# no row yet into a run row, renumbers the session's rows in the order Agno's merge read them, and
+# clears the blob, so every run has a position in the conversation log and no read merges a blob.
+# Coverage: tests/test_agent_storage_runs.py::test_agno_2_blob_runs_become_rows_once,
+# tests/test_agent_storage_runs.py::test_blob_runs_keep_the_order_agno_read_them_in, and
+# tests/test_agent_storage_runs.py::test_blob_entries_without_a_string_run_id_are_dropped.
+def materialize_legacy_run_blobs(connection: Connection, runs: Table, session_table: str) -> None:
+    """Turn the runs Agno 2 blobs still hold into run rows, in the caller's write transaction."""
+    sessions = quote_identifier(session_table)
+    columns = {row[1] for row in connection.exec_driver_sql(f"PRAGMA table_info({sessions})")}
+    if "runs" not in columns:
         return
-    rows = session.execute(
-        sessions_table.select()
-        .with_only_columns(sessions_table.c.session_id, sessions_table.c.runs)
-        .where(sessions_table.c.runs.isnot(None)),
+    blobs = connection.exec_driver_sql(
+        f"SELECT session_id, runs FROM {sessions} WHERE runs IS NOT NULL",  # noqa: S608
     ).fetchall()
-    for session_id, blob in rows:
-        legacy_runs = _decode_legacy_run_blob(blob)
-        kept = _legacy_runs_without(legacy_runs, run_ids)
-        if len(kept) == len(legacy_runs):
-            continue
-        session.execute(
-            sessions_table.update().where(sessions_table.c.session_id == session_id).values(runs=kept),
+    for session_id, blob in blobs:
+        stored = ordered_run_ids(connection, runs, session_id)
+        legacy = _legacy_entries(blob)
+        for run_id, entry in legacy.items():
+            if run_id not in stored:
+                insert_run_entry(connection, runs, entry, session_id=session_id)
+        # Agno's merge read blob entries first, table copies substituted, then table-only rows.
+        renumber_runs(connection, runs, session_id, [*legacy, *(run_id for run_id in stored if run_id not in legacy)])
+        connection.exec_driver_sql(
+            f"UPDATE {sessions} SET runs = NULL WHERE session_id = ?",  # noqa: S608
+            (session_id,),
         )
+
+
+# LEGACY_COMPAT: Run rows without a position.
+# Legacy format: Run rows whose ``run_index`` is ``NULL``, which Agno 3 writers before its ``upsert_run``
+# index backfill stored when a run arrived without one; Agno reads them first in a session.
+# Last legacy release: unversioned external input; no MindRoom release is known to write them, and the
+# current insertion rules give every new row an index.
+# Handling: The open-time summary-row migration renumbers each session holding such a row in the order a
+# read returned its rows, so every run has a place in the conversation log before any response loads it.
+# Coverage: tests/test_legacy_compaction_state.py::test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index
+# and tests/test_archive_migration.py::test_rows_without_an_index_keep_their_place.
+def number_unindexed_runs(connection: Connection, runs: Table) -> None:
+    """Give every session that holds a row without an index consecutive indexes in its read order."""
+    sessions = connection.execute(select(runs.c.session_id).where(runs.c.run_index.is_(None)).distinct()).scalars()
+    for session_id in list(sessions):
+        renumber_runs(connection, runs, session_id, ordered_run_ids(connection, runs, session_id))
+
+
+def ordered_run_ids(connection: Connection, runs: Table, session_id: str) -> list[str]:
+    """Return one session's run rows in the order Agno reads them, rows without an index first."""
+    return list(
+        connection.execute(
+            select(runs.c.run_id)
+            .where(runs.c.session_id == session_id)
+            .order_by(runs.c.run_index, runs.c.created_at, runs.c.run_id),
+        ).scalars(),
+    )
+
+
+def insert_run_entry(connection: Connection, runs: Table, entry: dict[str, Any], *, session_id: str) -> None:
+    """Write one serialized run as a run row without an index, unless a row already has its id."""
+    row = build_single_run_row(entry, session_id=session_id, user_id=entry.get("user_id"), run_index=None)
+    connection.execute(insert(runs).values(**row).on_conflict_do_nothing(index_elements=["run_id"]))
+
+
+def renumber_runs(connection: Connection, runs: Table, session_id: str, run_ids: list[str]) -> None:
+    """Give one session's run rows consecutive indexes in the order of ``run_ids``."""
+    for run_index, run_id in enumerate(run_ids):
+        connection.execute(
+            runs.update().where(runs.c.session_id == session_id, runs.c.run_id == run_id).values(run_index=run_index),
+        )
+
+
+def _legacy_entries(blob: object) -> dict[str, dict[str, Any]]:
+    """Return the blob's run entries a read could address by id, keyed by run id in stored order."""
+    try:
+        decoded = decode_persisted_session_json(blob)
+    except (TypeError, ValueError):
+        return {}
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in decoded if isinstance(decoded, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        run = cast("dict[str, Any]", entry)
+        run_id = run.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            entries.setdefault(run_id, run)
+    return entries
 
 
 def decode_persisted_session_json(raw_value: object) -> object:
@@ -52,42 +118,6 @@ def decode_persisted_session_json(raw_value: object) -> object:
         raise TypeError
     decoded = json.loads(raw_value)
     return json.loads(decoded) if isinstance(decoded, str) else decoded
-
-
-def _decode_legacy_run_blob(blob: object) -> list[object]:
-    """Forgiving decode for deletion-time scrubbing of malformed historical blobs."""
-    if isinstance(blob, str):
-        try:
-            blob = json.loads(blob)
-        except json.JSONDecodeError:
-            return []
-    return cast("list[object]", blob) if isinstance(blob, list) else []
-
-
-def _legacy_runs_without(runs: list[object], run_ids: Collection[str]) -> list[object]:
-    """Remove requested historical runs and all entries descending from them."""
-    removed = set(run_ids)
-    while True:
-        children = {
-            run_id
-            for run in runs
-            if _string_field(run, "parent_run_id") in removed
-            and (run_id := _string_field(run, "run_id")) is not None
-            and run_id not in removed
-        }
-        if not children:
-            break
-        removed |= children
-    return [
-        run
-        for run in runs
-        if _string_field(run, "run_id") not in removed and _string_field(run, "parent_run_id") not in removed
-    ]
-
-
-def _string_field(entry: object, key: str) -> str | None:
-    value = cast("dict[str, object]", entry).get(key) if isinstance(entry, dict) else None
-    return value if isinstance(value, str) and value else None
 
 
 # LEGACY_COMPAT: Run metadata carrying a copy of every model-visible tool schema.
