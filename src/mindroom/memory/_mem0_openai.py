@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.model_defaults import OPENAI_MAX_TOKENS_UNSUPPORTED_PREFIXES, OPENAI_UNSUPPORTED_SAMPLING_CONTROLS
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mem0.llms.openai import OpenAILLM
+
+# Mem0 sends temperature, top_p, and max_tokens to every model it does not list as a reasoning model.
+# GPT-5 and later models reject max_tokens on Chat Completions, and most of them reject those sampling values,
+# so they get what Mem0 sends its known reasoning models: no sampling controls and no max_tokens, which as
+# max_completion_tokens would also cap their reasoning.
+_REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
+_REASONING_MODEL_UNSUPPORTED = frozenset({"temperature", "top_p", "max_tokens"})
 
 
 def _without_parameters(create: Callable[..., object], unsupported: frozenset[str]) -> Callable[..., object]:
@@ -26,17 +31,10 @@ def _without_parameters(create: Callable[..., object], unsupported: frozenset[st
 def install_mem0_openai_compatibility(llm: OpenAILLM) -> None:
     """Install model-specific request filtering on an existing Mem0 OpenAI LLM."""
     model = llm.config.model
-    if not isinstance(model, str):
-        return
-    unsupported = OPENAI_UNSUPPORTED_SAMPLING_CONTROLS.get(model, frozenset())
-    if model.startswith(OPENAI_MAX_TOKENS_UNSUPPORTED_PREFIXES):
-        # Mem0 sends max_tokens to every model it does not list as a reasoning model and omits it for those it does;
-        # renaming it to max_completion_tokens would also cap these models' reasoning and could cut the answer off.
-        unsupported |= {"max_tokens"}
-    if not unsupported:
+    if not isinstance(model, str) or not model.startswith(_REASONING_MODEL_PREFIXES):
         return
     completions = llm.client.chat.completions
     completions.create = _without_parameters(  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
         completions.create,
-        unsupported,
+        _REASONING_MODEL_UNSUPPORTED,
     )

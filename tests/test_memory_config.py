@@ -169,14 +169,27 @@ class TestMemoryConfig:
             ("gpt-6-astra", None, None, False, False),
             (OPENAI_GPT_LUNA, None, None, False, False),
             (OPENAI_GPT_SOL, None, None, False, False),
-            ("gpt-5.6-luna", 0.1, None, False, False),
-            ("gpt-5.6-terra", 0.1, None, False, False),
-            ("gpt-5.4-mini", 0.1, 0.8, False, False),
+            ("gpt-5.6-luna", None, None, False, False),
+            ("gpt-5.6-terra", None, None, False, False),
+            ("gpt-5.4-mini", None, None, False, False),
+            ("gpt-5-mini", None, None, False, False),
+            ("gpt-5-2025-08-07", None, None, False, False),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
             ("gpt-4", 0.1, 0.8, True, False),
             (OPENAI_GPT_SOL, None, None, False, True),
         ],
-        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.4-mini", "gpt-4", "sol-legacy-mem0"],
+        ids=[
+            "astra",
+            "luna",
+            "sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.4-mini",
+            "gpt-5-mini",
+            "gpt-5-snapshot",
+            "gpt-4",
+            "sol-legacy-mem0",
+        ],
     )
     async def test_mem0_openai_request_parameters_are_model_specific(
         self,
@@ -241,7 +254,6 @@ class TestMemoryConfig:
         assert {name: request_params[name] for name in expected_sampling if name in request_params} == {
             name: value for name, value in expected_sampling.items() if value is not None
         }
-        # GPT-5 and later models reject max_tokens on Chat Completions, which Mem0 sends to models it does not know.
         assert ("max_tokens" in request_params) is sends_max_tokens
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
