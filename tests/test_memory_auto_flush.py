@@ -334,11 +334,16 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
     older = [_run(f"m{index}", session, T0 + 100 + index) for index in range(3)]
     recent = _run("recent", session, int(clock.now) - interval // 2)
     _seed(config, session, [*older, recent], agent="other", updated_at=int(clock.now) - 10)
+    stale = _thread("stale")
+    _seed(config, stale, [_run("s1", stale, T0 + 200)], agent="other")
     config.agents["other"].memory_backend = "file"
 
     await worker._run_cycle(config)
 
     assert extractor.lines() == [_lines("recent")]
+    # A conversation last updated before the scope's start is not even read.
+    with pytest.raises(StopIteration):
+        _entry(tmp_path, stale)
 
 
 @pytest.mark.asyncio
