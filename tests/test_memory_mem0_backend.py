@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,
@@ -26,6 +27,7 @@ from mindroom.memory import (
     update_agent_memory,
 )
 from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
+from mindroom.redaction import REDACTION_FAILED
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -697,10 +699,19 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
 
 
 @pytest.mark.asyncio
-async def test_conversation_memory_never_sends_credentials_to_mem0(storage_path: Path, config: Config) -> None:
+@pytest.mark.parametrize("with_history", [False, True])
+async def test_conversation_memory_removes_credentials_before_mem0(
+    storage_path: Path,
+    config: Config,
+    with_history: bool,
+) -> None:
     """Mem0 extracts and stores memories from what it is given, so credential-like values are removed first."""
     config.memory.backend = "mem0"
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    history = [
+        ResolvedVisibleMessage.synthetic(sender="@alice:example.org", body=f"My token is {token}", event_id="$1"),
+        ResolvedVisibleMessage.synthetic(sender="@general:example.org", body="Noted, Atlas is yours.", event_id="$2"),
+    ]
     sent: list[list[dict]] = []
 
     class FakeScopedMemory:
@@ -712,14 +723,22 @@ async def test_conversation_memory_never_sends_credentials_to_mem0(storage_path:
 
     with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         await store_conversation_memory(
-            f"The staging token is {token}; the launch is Friday.",
+            # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
+            f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\nThe launch is Friday.',
             "general",
             storage_path,
             "session-alice",
             config,
             runtime_paths_for(config),
+            history if with_history else None,
+            "@alice:example.org",
         )
 
     [messages] = sent
-    assert all(token not in message["content"] for message in messages)
-    assert "the launch is Friday" in messages[-1]["content"]
+    assert len(messages) == (3 if with_history else 1)
+    assert all(token not in message["content"] and "correct horse" not in message["content"] for message in messages)
+    assert REDACTION_FAILED not in messages[-1]["content"]
+    assert "The launch is Friday." in messages[-1]["content"]
+    assert "env:" in messages[-1]["content"]
+    if with_history:
+        assert messages[1]["content"] == "Noted, Atlas is yours."

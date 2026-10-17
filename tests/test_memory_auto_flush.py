@@ -469,7 +469,7 @@ async def test_worker_does_not_load_a_dirty_session_before_it_is_ready_to_flush(
 
 
 @pytest.mark.asyncio
-async def test_worker_flush_never_sends_credentials_to_the_extractor(
+async def test_worker_flush_removes_credentials_before_the_extractor(
     tmp_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -479,7 +479,12 @@ async def test_worker_flush_never_sends_credentials_to_the_extractor(
     mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="s1")
     session = _FakeSession(
         updated_at=100,
-        messages=[_FakeMessage(role="user", content=f"the deploy token is {token}, remember the deploy is Friday")],
+        messages=[
+            _FakeMessage(
+                role="user",
+                content=f"the deploy token is {token}\npassword: hunter2\nremember the deploy is Friday",
+            ),
+        ],
     )
     monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", lambda *_args, **_kwargs: session)
     prompts: list[list[str]] = []
@@ -498,8 +503,11 @@ async def test_worker_flush_never_sends_credentials_to_the_extractor(
     await worker._run_cycle(config)
 
     [lines] = prompts
-    assert token not in "\n".join(lines)
-    assert "remember the deploy is Friday" in "\n".join(lines)
+    text = "\n".join(lines)
+    assert token not in text
+    assert "hunter2" not in text
+    # A secret on one line does not swallow the lines after it.
+    assert "remember the deploy is Friday" in text
 
 
 @pytest.mark.asyncio

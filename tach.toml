@@ -3300,6 +3300,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.session_storage.agent_storage",
     "mindroom.logging_config",
+    "mindroom.memory._prompting",
     "mindroom.memory.functions",
     "mindroom.providers.model_loading",
     "mindroom.runtime_resolution",
@@ -3360,6 +3361,7 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.logging_config",
     "mindroom.memory._policy",
+    "mindroom.memory._prompting",
     "mindroom.memory._shared",
     "mindroom.memory._semantic_file_search",
     "mindroom.memory_scope_ids",
@@ -3401,7 +3403,13 @@ visibility = ["mindroom.memory._backend"]
 [[modules]]
 path = "mindroom.memory._prompting"
 depends_on = ["mindroom.memory._shared", "mindroom.prompt_templates", "mindroom.tool_system.events"]
-visibility = ["mindroom.memory", "mindroom.memory._mem0_backend", "mindroom.memory.functions"]
+visibility = [
+    "mindroom.memory",
+    "mindroom.memory._file_backend",
+    "mindroom.memory._mem0_backend",
+    "mindroom.memory.auto_flush",
+    "mindroom.memory.functions",
+]
 
 [[modules]]
 path = "mindroom.prompt_templates"
@@ -6095,6 +6103,7 @@ expose = [
     "list_all_agent_memories",
     "mark_auto_flush_dirty_session",
     "read_scope_memory_files",
+    "redact_memory_text",
     "refresh_agent_memory_search",
     "reprioritize_auto_flush_sessions",
     "search_agent_memories",

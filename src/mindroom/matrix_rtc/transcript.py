@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.spoken_turns import spoken_continuation
-from mindroom.memory import add_agent_memory
+from mindroom.memory import add_agent_memory, redact_memory_text
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 
@@ -249,7 +249,7 @@ class CallTranscript:
                     self.path.relative_to(self.reference_root),
                     truncate=True,
                 )
-                memory_content = f"{summary}\n\n{transcript.decode('utf-8', errors='replace')}"
+                memory_content = f"{summary}\n\n{redact_memory_text(transcript.decode('utf-8', errors='replace'))}"
             await add_agent_memory(
                 memory_content,
                 self.agent_name,

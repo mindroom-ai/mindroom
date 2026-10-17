@@ -175,6 +175,25 @@ async def test_finalize_stores_relative_transcript_memory_reference(
 
 
 @pytest.mark.asyncio
+async def test_finalize_removes_credentials_from_the_transcript_sent_to_mem0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mem0 extracts memories from the whole transcript, so a credential spoken or typed in the call is removed first."""
+    add_memory = AsyncMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", add_memory)
+    transcript = _transcript(tmp_path)
+    transcript.record("user", "the password=hunter2 and the launch is Friday")
+
+    await transcript.finalize(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
+
+    memory_content = add_memory.await_args.args[0]
+    assert "hunter2" not in memory_content
+    assert "**user**: the password=" in memory_content
+    assert "hunter2" in transcript.path.read_text()
+
+
+@pytest.mark.asyncio
 async def test_file_memory_stores_workspace_relative_reference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

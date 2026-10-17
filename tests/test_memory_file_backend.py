@@ -1352,7 +1352,7 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_team_conversation_memory_never_stores_credentials(
+async def test_file_backend_team_conversation_memory_removes_credentials(
     storage_path: Path,
     config: Config,
 ) -> None:
@@ -1364,7 +1364,7 @@ async def test_file_backend_team_conversation_memory_never_stores_credentials(
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 
     await store_conversation_memory(
-        f"Use token {token} for the staging deploy on Friday",
+        f"Use token {token}\npassword: hunter2\nfor the staging deploy on Friday",
         ["general", "calculator"],
         storage_path,
         "session-alice",
@@ -1376,6 +1376,7 @@ async def test_file_backend_team_conversation_memory_never_stores_credentials(
     )
     text = memory_file.read_text(encoding="utf-8")
     assert token not in text
+    assert "hunter2" not in text
     assert "for the staging deploy on Friday" in text
 
 
