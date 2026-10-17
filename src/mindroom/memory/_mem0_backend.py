@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from agno.metrics import ModelMetrics
+    from agno.models.message import Message
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -361,31 +361,31 @@ class Mem0MemoryBackend:
 
     async def _record_extraction_usage(
         self,
-        calls: list[ModelMetrics],
+        calls: list[Message],
         owner: HelperUsageOwner | None,
         requester_id: str | None,
     ) -> None:
         """Count Mem0's extraction tokens toward the conversation, or as internal work when there is none."""
         if (run := mem0_usage_run(calls)) is None:
             return
-        if owner is None:
-            await record_system_usage(
-                run,
-                runtime_paths=self.runtime_paths,
-                kind="memory_extraction",
-                requester_id=requester_id,
-            )
-            return
         try:
-            await record_helper_usage(
-                run,
-                owner=owner,
-                invocation_id=run.run_id or "",
-                kind="memory_extraction",
-                requester_id=requester_id,
-            )
+            if owner is None:
+                await record_system_usage(
+                    run,
+                    runtime_paths=self.runtime_paths,
+                    kind="memory_extraction",
+                    requester_id=requester_id,
+                )
+            else:
+                await record_helper_usage(
+                    run,
+                    owner=owner,
+                    invocation_id=run.run_id or "",
+                    kind="memory_extraction",
+                    requester_id=requester_id,
+                )
         except Exception:
-            # The memory is already stored; failing the write here would make the memory tool report an error.
+            # Recording follows the memory write, which it must neither fail nor, after a failed write, replace.
             logger.exception("Memory extraction usage could not be recorded")
 
     async def add(
@@ -421,13 +421,16 @@ class Mem0MemoryBackend:
             )
 
         with counted_mem0_usage() as calls:
-            await _run_mem0_embedder_mutation(add_memory, health_recorder)
-        # The memory tool runs inside a reply, whose conversation is the bound owner.
-        await self._record_extraction_usage(
-            calls,
-            get_helper_usage_owner(),
-            execution_identity.requester_id if execution_identity is not None else None,
-        )
+            try:
+                await _run_mem0_embedder_mutation(add_memory, health_recorder)
+            finally:
+                # Extraction tokens are spent even when storing the extracted facts fails afterwards.
+                # The memory tool runs inside a reply, whose conversation is the bound owner.
+                await self._record_extraction_usage(
+                    calls,
+                    get_helper_usage_owner(),
+                    execution_identity.requester_id if execution_identity is not None else None,
+                )
         logger.info("Memory added", agent=agent_name)
 
     @timed("system_prompt_assembly.memory_search.mem0_backend")
@@ -677,27 +680,6 @@ class Mem0MemoryBackend:
             failure_log = "Failed to add memory"
             failure_context = {"agent": agent_name}
 
-        stored_targets = 0
-        with counted_mem0_usage() as calls:
-            for target_storage_path in target_storage_paths:
-                health_recorder = capture_embedder_health_recorder()
-                try:
-                    memory = await self.create_memory(target_storage_path, config)
-                except Exception as exc:
-                    if (detail := _record_classified_embedder_failure(exc, health_recorder)) is None:
-                        raise
-                    logger.warning(failure_log, error=detail, **failure_context)
-                    continue
-                if await _add_mem0_scope_messages(
-                    memory=memory,
-                    messages=messages,
-                    user_id=scope_user_id,
-                    metadata=metadata,
-                    failure_log=failure_log,
-                    failure_context=failure_context,
-                    health_recorder=health_recorder,
-                ):
-                    stored_targets += 1
         # A team's conversation has no single agent session, so its extraction counts as internal work.
         owner = (
             None
@@ -713,7 +695,31 @@ class Mem0MemoryBackend:
                 session_id=session_id,
             )
         )
-        await self._record_extraction_usage(calls, owner, user_id)
+        stored_targets = 0
+        with counted_mem0_usage() as calls:
+            try:
+                for target_storage_path in target_storage_paths:
+                    health_recorder = capture_embedder_health_recorder()
+                    try:
+                        memory = await self.create_memory(target_storage_path, config)
+                    except Exception as exc:
+                        if (detail := _record_classified_embedder_failure(exc, health_recorder)) is None:
+                            raise
+                        logger.warning(failure_log, error=detail, **failure_context)
+                        continue
+                    if await _add_mem0_scope_messages(
+                        memory=memory,
+                        messages=messages,
+                        user_id=scope_user_id,
+                        metadata=metadata,
+                        failure_log=failure_log,
+                        failure_context=failure_context,
+                        health_recorder=health_recorder,
+                    ):
+                        stored_targets += 1
+            finally:
+                # Extraction tokens are spent even when a later store fails.
+                await self._record_extraction_usage(calls, owner, user_id)
 
         if stored_targets == 0:
             logger.warning(

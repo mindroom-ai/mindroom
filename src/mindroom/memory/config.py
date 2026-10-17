@@ -11,6 +11,7 @@ from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
+from mindroom.memory._mem0_usage import install_mem0_usage_capture
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.timing import timed
 from mindroom.tool_system.dependencies import optional_dependency_environment
@@ -282,8 +283,6 @@ async def create_memory_instance(
         from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
 
         install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
-    from mindroom.memory._mem0_usage import install_mem0_usage_capture  # noqa: PLC0415
-
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
