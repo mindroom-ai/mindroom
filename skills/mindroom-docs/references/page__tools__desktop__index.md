@@ -56,6 +56,7 @@ To drive the user's signed-in browser, also configure the [`browser`](https://do
    The pairing code is a secret, so MindRoom refuses `!desktop` when any other member or pending invite is in the room or when it cannot confirm the room's membership.
 2. In the macOS app, paste the reply's JSON setup data into **Computer access** and follow the [Computer Access steps](https://docs.mindroom.chat/installation/macos-app/#computer-access).
    In a terminal, run the full `mindroom desktop setup` command from the reply once; it reuses a saved Desktop Matrix session or logs in first, then claims the pairing.
+   With a dedicated bridge account, change only the command's `--user-id` to that account; its `--allow-requester` keeps your chat account as the user allowed to drive the agent on this computer.
    Add `--allow-app com.apple.TextEdit` to save an app choice at the same time.
 3. Copy the printed `!desktop confirm <code> <verification>` command back into the same chat.
    The verification value ensures that only the device that claimed the code can confirm it.

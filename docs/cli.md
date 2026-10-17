@@ -778,10 +778,12 @@ Use `--allow-app` to save app choices at the same time.
 │ *  --controller-ed25519          TEXT  Pinned controller fingerprint. [required]       │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Access ───────────────────────────────────────────────────────────────────────────────╮
-│ --allow-agent        TEXT  Agent name from the setup message; prompts if omitted.      │
-│                            Repeat as needed.                                           │
-│ --allow-app          TEXT  Save allowed app IDs, or choose apps later in the macOS     │
-│                            app.                                                        │
+│ --allow-requester        TEXT  Chat user from the setup message; defaults to the       │
+│                                logged-in account. Repeat as needed.                    │
+│ --allow-agent            TEXT  Agent name from the setup message; prompts if omitted.  │
+│                                Repeat as needed.                                       │
+│ --allow-app              TEXT  Save allowed app IDs, or choose apps later in the macOS │
+│                                app.                                                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Matrix connection ────────────────────────────────────────────────────────────────────╮
 │ --user-id                         TEXT  Expected Matrix user ID; required for password │
