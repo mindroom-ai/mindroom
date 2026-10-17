@@ -176,16 +176,8 @@ def _file_memory_resolution_from_paths(
     original_storage_path: Path,
     resolved_storage_path: Path,
     runtime_paths: RuntimePaths,
-    preserve_resolved_storage_path: bool = False,
 ) -> FileMemoryResolution:
     """Build file-memory resolution settings from original and resolved roots."""
-    if preserve_resolved_storage_path:
-        return FileMemoryResolution(
-            storage_path=resolved_storage_path,
-            runtime_paths=runtime_paths,
-            use_configured_path=False,
-        )
-
     return FileMemoryResolution(
         storage_path=resolved_storage_path,
         runtime_paths=runtime_paths,
@@ -209,7 +201,6 @@ def resolve_file_memory_resolution(
     *,
     agent_name: str | None = None,
     original_storage_path: Path | None = None,
-    preserve_resolved_storage_path: bool = False,
 ) -> FileMemoryResolution:
     """Resolve file-memory storage settings for one caller context."""
     resolved_storage_path = storage_path
@@ -230,7 +221,6 @@ def resolve_file_memory_resolution(
         original_storage_path=base_storage_path,
         resolved_storage_path=resolved_storage_path,
         runtime_paths=runtime_paths,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     if agent_name is None or agent_memory_scope_path is not None:
         return FileMemoryResolution(

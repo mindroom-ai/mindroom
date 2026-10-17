@@ -628,11 +628,7 @@ class _MultiAgentOrchestrator:
     async def _sync_memory_auto_flush_worker(self) -> None:
         """Start or stop background memory auto-flush worker based on current config."""
         config = self.config
-        if config is None:
-            await self._stop_memory_auto_flush_worker()
-            return
-
-        if not auto_flush_enabled(config):
+        if config is None or not auto_flush_enabled(config):
             await self._stop_memory_auto_flush_worker()
             return
 

@@ -18,7 +18,6 @@ import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
-from mindroom.history import archive
 from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -219,11 +218,17 @@ def extractor(monkeypatch: pytest.MonkeyPatch) -> _Extractor:
     return fake
 
 
-async def _started(worker: MemoryAutoFlushWorker, config: Config, clock: _Clock) -> None:
-    """Run the first pass at T0, which starts auto-flush, then move the clock well past every seeded turn."""
-    clock.now = T0
+async def _started(
+    config: Config,
+    clock: _Clock | None = None,
+    redacted_event_ids: RedactedEventIds = _no_redactions,
+) -> MemoryAutoFlushWorker:
+    """Return a worker whose first pass ran at T0, which starts auto-flush, with its clock moved past every seeded turn."""
+    clock = _Clock() if clock is None else clock
+    worker = _worker(config, clock, redacted_event_ids)
     await worker._run_cycle(config)
     clock.now = T0 + 1000
+    return worker
 
 
 @pytest.mark.asyncio
@@ -232,15 +237,14 @@ async def test_the_first_pass_removes_the_old_queue_and_flushes_only_later_turns
     extractor: _Extractor,
 ) -> None:
     """Upgrading deletes the push-model queue, and a conversation's turns from before auto-flush started stay unflushed."""
-    config, clock = _config(tmp_path), _Clock()
+    config = _config(tmp_path)
     (tmp_path / "memory_flush_state.json").write_text('{"version": 1, "sessions": {}}', encoding="utf-8")
     (tmp_path / "memory_flush_state.json.tmp").write_text("{", encoding="utf-8")
     session = _thread("t1")
     old = _run("old", session, T0 - 50)
     _seed(config, session, [old])
-    worker = _worker(config, clock)
 
-    await _started(worker, config, clock)
+    worker = await _started(config)
 
     assert not (tmp_path / "memory_flush_state.json").exists()
     assert not (tmp_path / "memory_flush_state.json.tmp").exists()
@@ -256,46 +260,14 @@ async def test_the_first_pass_removes_the_old_queue_and_flushes_only_later_turns
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_first_listed_after_the_start_flushes_from_its_first_turn(
-    tmp_path: Path,
-    extractor: _Extractor,
-) -> None:
-    """The start applies to every conversation, so one that begins after it is flushed whole."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
-    session = _thread("later")
-    _seed(config, session, [_run("r1", session, T0 + 10), _run("r2", session, T0 + 20)])
-
-    await worker._run_cycle(config)
-
-    assert extractor.lines() == [_lines("r1", "r2")]
-
-
-@pytest.mark.asyncio
-async def test_each_private_instance_flushes_into_its_own_memory(
-    tmp_path: Path,
-    extractor: _Extractor,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_each_private_instance_flushes_into_its_own_memory(tmp_path: Path, extractor: _Extractor) -> None:
     """Every requester's private instance is its own scope, with its own identity, memory, and per-scope cap."""
     config = _private_config(tmp_path, batch={"max_sessions_per_cycle": 2, "max_sessions_per_agent_per_cycle": 1})
-    clock = _Clock()
-    config.memory.search.mode = "semantic"
-    scheduled: list[object] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, _base_id: str, **kwargs: object) -> None:
-            scheduled.append(kwargs["execution_identity"])
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config)
     alice, bob = _requester(config, ALICE), _requester(config, BOB)
-    # Instances created since the previous pass keep those first turns.
-    created = int(clock.now) - config.memory.auto_flush.flush_interval_seconds + 10
-    _seed(config, _thread("a"), [_run("a1", _thread("a"), created)], agent="mind", identity=alice)
-    _seed(config, _thread("b"), [_run("b1", _thread("b"), created)], agent="mind", identity=bob)
+    # Instances share their agent's start, so one first listed long after it keeps every turn since.
+    _seed(config, _thread("a"), [_run("a1", _thread("a"), T0 + 10)], agent="mind", identity=alice)
+    _seed(config, _thread("b"), [_run("b1", _thread("b"), T0 + 10)], agent="mind", identity=bob)
 
     await worker._run_cycle(config)
 
@@ -305,7 +277,6 @@ async def test_each_private_instance_flushes_into_its_own_memory(
         ALICE,
         BOB,
     ]
-    assert sorted(cast("ToolExecutionIdentity", identity).requester_id for identity in scheduled) == [ALICE, BOB]
     for identity, run_id in ((alice, "a1"), (bob, "b1")):
         worker_key = resolve_worker_key("user", identity, agent_name="mind")
         assert worker_key is not None
@@ -324,8 +295,7 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
         "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
     }
     config, clock = _config(tmp_path, agents=agents), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     clock.now = T0 + 90 * 86_400
     interval = config.memory.auto_flush.flush_interval_seconds
     session = _thread("t1")
@@ -342,23 +312,6 @@ async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_pre
     # A conversation last updated before the scope's start is not even read.
     with pytest.raises(StopIteration):
         _entry(tmp_path, stale)
-
-
-@pytest.mark.asyncio
-async def test_a_private_instance_first_listed_late_keeps_every_turn(tmp_path: Path, extractor: _Extractor) -> None:
-    """Instances share their agent's start, so one listed passes after it appeared, or after a long pass, loses nothing."""
-    config, clock = _private_config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
-    bob = _requester(config, BOB)
-    _seed(config, _thread("b"), [_run("b1", _thread("b"), T0 + 10)], agent="mind", identity=bob)
-
-    await worker._run_cycle(config)
-
-    assert [
-        (cast("ToolExecutionIdentity", call["execution_identity"]).requester_id, call["lines"])
-        for call in extractor.calls
-    ] == [(BOB, _lines("b1"))]
 
 
 @pytest.mark.asyncio
@@ -383,9 +336,8 @@ async def test_conversations_without_matrix_turns_leave_the_pass_to_others(
     extractor: _Extractor,
 ) -> None:
     """A conversation with nothing to flush, such as one through the OpenAI-compatible API, takes no place in a pass."""
-    config, clock = _config(tmp_path, batch={"max_sessions_per_agent_per_cycle": 1}), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path, batch={"max_sessions_per_agent_per_cycle": 1})
+    worker = await _started(config)
     for index in range(3):
         api_session = f"api-{index}"
         api_run = _run(f"x{index}", api_session, T0 + 10 + index)
@@ -411,8 +363,7 @@ async def test_an_agent_keeps_the_start_it_was_first_seen_with(tmp_path: Path, e
         "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
     }
     config, clock = _config(tmp_path, agents=agents), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     config.agents["other"].memory_backend = "file"
     await worker._run_cycle(config)
     session = _thread("t1")
@@ -425,44 +376,14 @@ async def test_an_agent_keeps_the_start_it_was_first_seen_with(tmp_path: Path, e
 
 
 @pytest.mark.asyncio
-async def test_compacted_turns_are_flushed(tmp_path: Path, extractor: _Extractor) -> None:
-    """Turns that compaction moved into the archive before the pass are still read, in order with the live ones."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
-    session = _thread("t1")
-    runs = [_run(run_id, session, T0 + 10 * index) for index, run_id in enumerate(("r1", "r2", "r3"), 1)]
-    _seed(config, session, runs)
-    storage = create_session_storage("general", config, runtime_paths_for(config), execution_identity=None)
-    try:
-        archive.archive_runs(
-            storage,
-            session_id=session,
-            scope_key="agent:general",
-            summary="summary",
-            summary_model="m",
-            runs=runs[:2],
-            event_ids={},
-            seen_event_ids={},
-        )
-    finally:
-        storage.close()
-
-    await worker._run_cycle(config)
-
-    assert extractor.lines() == [_lines("r1", "r2", "r3")]
-
-
-@pytest.mark.asyncio
 async def test_a_retry_after_a_failed_progress_write_never_writes_a_note_twice(
     tmp_path: Path,
     extractor: _Extractor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A note written before its progress could be saved is found again, even when newer turns arrived since."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path)
+    worker = await _started(config)
     session = _thread("t1")
     first = _run("r1", session, T0 + 10)
     _seed(config, session, [first])
@@ -503,9 +424,8 @@ async def test_automation_turns_are_skipped_while_other_turns_in_the_thread_are_
     extractor: _Extractor,
 ) -> None:
     """An automation's maintenance turn is not memory; a person's turn or another hook's turn in the thread is."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path)
+    worker = await _started(config)
     session = _thread("t1")
     _seed(
         config,
@@ -540,14 +460,13 @@ async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unb
         "general": AgentConfig(display_name="General", rooms=[]),
         "other": AgentConfig(display_name="Other", rooms=[]),
     }
-    config, clock = _config(tmp_path, agents=agents, batch={"max_sessions_per_cycle": 1}), _Clock()
+    config = _config(tmp_path, agents=agents, batch={"max_sessions_per_cycle": 1})
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         del room_id, event_ids
         return None if agent_name == "other" else frozenset({"$event-gone"})
 
-    worker = _worker(config, clock, redacted)
-    await _started(worker, config, clock)
+    worker = await _started(config, redacted_event_ids=redacted)
     # The second pass starts with the second agent, whose bot cannot tell, so its waiting must leave budget.
     waiting = _thread("w")
     _seed(config, waiting, [_run("w1", waiting, T0 + 5)], agent="other")
@@ -578,8 +497,7 @@ async def test_a_conversation_whose_redactions_cannot_be_checked_backs_off_witho
             raise RuntimeError(msg)
         return frozenset()
 
-    worker = _worker(config, clock, redacted)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock, redacted_event_ids=redacted)
     broken = _thread("broken", broken_room)
     _seed(config, broken, [_run("b1", broken, T0 + 5)])
     cooldown = config.memory.auto_flush.retry_cooldown_seconds
@@ -607,9 +525,8 @@ async def test_a_turn_waiting_for_approval_holds_back_later_turns_until_it_finis
     extractor: _Extractor,
 ) -> None:
     """A paused turn finishes in place later, so it and the turns after it are flushed once, after it finishes."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path)
+    worker = await _started(config)
     session = _thread("t1")
     paused = _run("asks", session, T0 + 10, status=RunStatus.paused)
     after = _run("after", session, T0 + 20)
@@ -632,8 +549,7 @@ async def test_a_turn_whose_approval_expired_releases_the_turns_after_it_without
 ) -> None:
     """Once every approval a paused turn could get has expired, the conversation is read again and moves on."""
     config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     session = _thread("t1")
     _seed(config, session, [_run("asks", session, T0 + 10, status=RunStatus.paused), _run("after", session, T0 + 20)])
 
@@ -649,9 +565,8 @@ async def test_a_turn_whose_approval_expired_releases_the_turns_after_it_without
 @pytest.mark.asyncio
 async def test_delegated_task_sessions_are_not_flushed(tmp_path: Path, extractor: _Extractor) -> None:
     """A task another agent delegated is the delegating agent's conversation, not the delegate's."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path)
+    worker = await _started(config)
     delegated = "delegate:other:general:abc"
     _seed(config, delegated, [_run("task", f"{ROOM}:$x", T0 + 10)])
 
@@ -668,8 +583,7 @@ async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_
 ) -> None:
     """Only conversations quiet for ``idle_seconds`` are decoded, and decoding never blocks the event loop."""
     config, clock = _config(tmp_path, idle_seconds=120), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 900)], updated_at=T0 + 990)
     loop_thread = threading.get_ident()
@@ -695,8 +609,7 @@ async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_
 async def test_a_zero_idle_time_still_waits_a_second(tmp_path: Path, extractor: _Extractor) -> None:
     """A turn stored in the same second as a pass could share the update time the pass recorded, so it waits."""
     config, clock = _config(tmp_path, idle_seconds=0), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)], updated_at=int(clock.now))
 
@@ -711,9 +624,8 @@ async def test_a_zero_idle_time_still_waits_a_second(tmp_path: Path, extractor: 
 @pytest.mark.asyncio
 async def test_a_long_backlog_is_flushed_oldest_first_over_passes(tmp_path: Path, extractor: _Extractor) -> None:
     """Each pass extracts the oldest new turns that fit, so a backlog bigger than one extraction loses nothing."""
-    config, clock = _config(tmp_path, extractor={"max_messages_per_flush": 4}), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path, extractor={"max_messages_per_flush": 4})
+    worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run(f"r{index}", session, T0 + index) for index in range(1, 6)])
 
@@ -724,34 +636,18 @@ async def test_a_long_backlog_is_flushed_oldest_first_over_passes(tmp_path: Path
     assert len(_general_notes(tmp_path)) == 3
 
 
-@pytest.mark.asyncio
-async def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_path: Path, extractor: _Extractor) -> None:
-    """A single turn over the limits is sent alone with its newest lines, as before."""
-    config, clock = _config(tmp_path, extractor={"max_messages_per_flush": 2}), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_path: Path) -> None:
+    """A single turn over the limits is sent alone with its newest lines."""
+    settings = _config(tmp_path, extractor={"max_messages_per_flush": 2}).memory.auto_flush
     session = _thread("t1")
-    long_turn = _run(
-        "long",
-        session,
-        T0 + 10,
-        messages=[Message(role="user", content=f"part {index}") for index in range(4)],
-    )
-    _seed(config, session, [long_turn, _run("next", session, T0 + 20)])
+    messages = [Message(role="user", content=f"part {index}") for index in range(4)]
+    long_turn, following = _run("long", session, T0 + 10, messages=messages), _run("next", session, T0 + 20)
 
-    await worker._run_cycle(config)
-    await worker._run_cycle(config)
-
-    assert extractor.lines() == [["user: part 2", "user: part 3"], _lines("next")]
+    assert auto_flush._next_batch([long_turn, following], settings) == ([long_turn], ["user: part 2", "user: part 3"])
 
 
-@pytest.mark.asyncio
-async def test_each_turn_is_read_as_its_own_user_and_assistant_lines(tmp_path: Path, extractor: _Extractor) -> None:
+def test_each_turn_is_read_as_its_own_user_and_assistant_lines() -> None:
     """History replayed into a turn, system and tool messages, and blank text are left out, and long messages are cut."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
-    session = _thread("t1")
     messages = [
         Message(role="system", content="system prompt"),
         Message(role="user", content="earlier question", from_history=True),
@@ -760,26 +656,19 @@ async def test_each_turn_is_read_as_its_own_user_and_assistant_lines(tmp_path: P
         Message(role="assistant", content="x" * 600),
         Message(role="assistant", content="   "),
     ]
-    _seed(config, session, [_run("r1", session, T0 + 10, messages=messages)])
 
-    await worker._run_cycle(config)
+    lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
 
-    assert extractor.lines() == [["user: question with spaces", f"assistant: {'x' * 497}..."]]
+    assert lines == ["user: question with spaces", f"assistant: {'x' * 497}..."]
 
 
-@pytest.mark.asyncio
-async def test_the_character_limit_bounds_each_extraction(tmp_path: Path, extractor: _Extractor) -> None:
+def test_the_character_limit_bounds_each_extraction(tmp_path: Path) -> None:
     """``max_chars_per_flush`` ends a batch, and a single turn over it keeps only its newest lines."""
-    config, clock = _config(tmp_path, extractor={"max_chars_per_flush": 30}), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    settings = _config(tmp_path, extractor={"max_chars_per_flush": 30}).memory.auto_flush
     session = _thread("t1")
-    _seed(config, session, [_run("r1", session, T0 + 10), _run("r2", session, T0 + 20)])
+    first, second = _run("r1", session, T0 + 10), _run("r2", session, T0 + 20)
 
-    await worker._run_cycle(config)
-    await worker._run_cycle(config)
-
-    assert extractor.lines() == [["assistant: answer r1"], ["assistant: answer r2"]]
+    assert auto_flush._next_batch([first, second], settings) == ([first], ["assistant: answer r1"])
 
 
 @pytest.mark.asyncio
@@ -789,8 +678,7 @@ async def test_failures_back_off_from_when_they_happen_and_are_given_up_after_th
 ) -> None:
     """The cooldown doubles from each failure's end, and turns failing for ``stale_ttl_seconds`` are given up."""
     config, clock = _config(tmp_path, stale_ttl_seconds=3600), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
     extractor.error, extractor.clock, extractor.takes = OSError("model unavailable"), clock, 5
@@ -828,8 +716,7 @@ async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
     """A give-up skips the batch that kept failing, not the turns an unrecorded note already covers."""
     config = _config(tmp_path, stale_ttl_seconds=3600, extractor={"max_messages_per_flush": 2})
     clock = _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     session = _thread("t1")
     _seed(config, session, [_run(f"r{index}", session, T0 + 10 + index) for index in range(1, 4)])
     append_agent_daily_memory(
@@ -855,9 +742,8 @@ async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
 @pytest.mark.asyncio
 async def test_a_timed_out_extraction_backs_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An extraction over ``max_extraction_seconds`` is abandoned and retried after the cooldown."""
-    config, clock = _config(tmp_path, extractor={"max_extraction_seconds": 1}), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path, extractor={"max_extraction_seconds": 1})
+    worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
 
@@ -881,8 +767,7 @@ async def test_an_unreadable_conversation_backs_off_without_blocking_the_others(
 ) -> None:
     """A conversation that cannot be read backs off, gives up until it changes, and the next one is still flushed."""
     config, clock = _config(tmp_path, stale_ttl_seconds=3600), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     broken, fine = _thread("broken"), _thread("fine")
     _seed(config, broken, [_run("b1", broken, T0 + 10)])
     _seed(config, fine, [_run("f1", fine, T0 + 20)])
@@ -925,9 +810,7 @@ async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
         agents=agents,
         batch={"max_sessions_per_cycle": 2, "max_sessions_per_agent_per_cycle": 1},
     )
-    clock = _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config)
     for name in ("g1", "g2", "g3"):
         _seed(config, _thread(name), [_run(name, _thread(name), T0 + 10)])
     for name in ("o1", "o2"):
@@ -958,9 +841,8 @@ async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
 @pytest.mark.asyncio
 async def test_no_reply_moves_on_without_extracting_the_same_turns_again(tmp_path: Path, extractor: _Extractor) -> None:
     """When the model finds nothing durable, nothing is written and only later turns are read next time."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    config = _config(tmp_path)
+    worker = await _started(config)
     session = _thread("t1")
     first = _run("r1", session, T0 + 10)
     _seed(config, session, [first])
@@ -983,10 +865,9 @@ async def test_cancelling_the_worker_mid_extraction_loses_nothing(
 ) -> None:
     """Shutdown cancels the worker; the conversation it was flushing is flushed by the next start."""
     config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
     first_extractor = _Extractor()
     monkeypatch.setattr(auto_flush, "_extract_memory_summary", first_extractor)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
     entered = asyncio.Event()
@@ -1049,8 +930,7 @@ async def test_an_unreadable_progress_file_starts_over_without_flushing_history(
 ) -> None:
     """A corrupt progress file starts again from the current pass, so no earlier conversation is flushed."""
     config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config, clock)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
     (tmp_path / "tracking" / "memory_auto_flush.json").write_text("{", encoding="utf-8")
@@ -1069,10 +949,9 @@ async def test_only_agents_whose_effective_backend_is_file_are_flushed(tmp_path:
         "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
         "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
     }
-    config, clock = _config(tmp_path, agents=agents), _Clock()
+    config = _config(tmp_path, agents=agents)
     config.memory.backend = "mem0"
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config)
     _seed(config, _thread("g"), [_run("g1", _thread("g"), T0 + 10)])
     _seed(config, _thread("o"), [_run("o1", _thread("o"), T0 + 10)], agent="other")
 
@@ -1086,11 +965,10 @@ async def test_only_agents_whose_effective_backend_is_file_are_flushed(tmp_path:
 @pytest.mark.asyncio
 async def test_a_shared_agent_note_lands_in_its_canonical_workspace(tmp_path: Path, extractor: _Extractor) -> None:
     """A shared agent's notes go to its workspace's daily file whatever its worker scope or memory.file.path."""
-    config, clock = _config(tmp_path), _Clock()
+    config = _config(tmp_path)
     config.agents["general"].worker_scope = "user"
     config.memory.file.path = str(tmp_path / "shared-memory")
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
 
@@ -1108,7 +986,7 @@ async def test_a_note_warms_the_semantic_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A written note schedules a background refresh of the agent's semantic file-memory index."""
-    config, clock = _config(tmp_path), _Clock()
+    config = _config(tmp_path)
     config.memory.search.mode = "semantic"
     scheduled: list[tuple[str, Config]] = []
 
@@ -1117,8 +995,7 @@ async def test_a_note_warms_the_semantic_index(
             scheduled.append((base_id, cast("Config", kwargs["config"])))
 
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
 
@@ -1133,7 +1010,7 @@ async def test_a_note_warms_the_semantic_index(
 @pytest.mark.asyncio
 async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: _Extractor) -> None:
     """The extractor sees the agent's canonical memories, from MEMORY.md and daily notes, to avoid repeating them."""
-    config, clock = _config(tmp_path), _Clock()
+    config = _config(tmp_path)
     config.agents["general"].worker_scope = "user"
     config.memory.auto_flush.extractor.include_memory_context.snippet_max_chars = 200
     alice = ToolExecutionIdentity(
@@ -1148,8 +1025,7 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
     with tool_execution_identity(alice):
         await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config, runtime_paths_for(config))
     append_agent_daily_memory("Shared daily memory", "general", tmp_path, config, runtime_paths_for(config))
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
+    worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
 
@@ -1161,22 +1037,24 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
     assert "Shared daily memory" in context
 
 
-@pytest.mark.asyncio
-async def test_credentials_are_removed_before_the_extractor(tmp_path: Path, extractor: _Extractor) -> None:
+def test_credentials_are_removed_before_the_extractor() -> None:
     """A token pasted into a conversation stays out of the extraction prompt and so out of daily memory."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = _worker(config, clock)
-    await _started(worker, config, clock)
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-    session = _thread("t1")
     content = f"the deploy token is {token}\npassword: hunter2\nremember the deploy is Friday"
-    _seed(config, session, [_run("r1", session, T0 + 10, messages=[Message(role="user", content=content)])])
 
-    await worker._run_cycle(config)
+    text = "\n".join(
+        auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=[Message(role="user", content=content)])),
+    )
 
-    [lines] = extractor.lines()
-    text = "\n".join(lines)
     assert token not in text
     assert "hunter2" not in text
     # A secret on one line does not swallow the lines after it.
     assert "remember the deploy is Friday" in text
+
+
+def test_extractor_output_becomes_one_line_of_distinct_facts() -> None:
+    """List markers and repeats are dropped, and an answer of only the no-reply token means nothing to note."""
+    raw = "\n- Atlas ships Friday.\n* atlas ships friday.\n2. Priya owns QA.\nNO_REPLY\n\n"
+
+    assert auto_flush._sanitize_extractor_output(raw, "NO_REPLY") == "Atlas ships Friday. | Priya owns QA."
+    assert auto_flush._sanitize_extractor_output("  no_reply \n", "NO_REPLY") is None

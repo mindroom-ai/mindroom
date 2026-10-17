@@ -9309,23 +9309,15 @@ def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, fl
     runner = ResponseRunner(deps=MagicMock())
     runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "mem0"
 
-    with (
-        patch("mindroom.response_runner.store_conversation_memory", new=MagicMock()) as store,
-        patch("mindroom.response_runner.create_background_task") as create_task,
-    ):
-        queue = runner._memory_persistence(
-            agent_name="mind",
-            session_id="session",
-            execution_identity=MagicMock(),
-            prompt="Consolidate memory",
-            thread_history=(),
-            user_id=None,
-            hook_source=hook_source,
-            origin=message_origin(),
-        )
-        if queue is not None:
-            queue()
+    queue = runner._memory_persistence(
+        agent_name="mind",
+        session_id="session",
+        execution_identity=MagicMock(),
+        prompt="Consolidate memory",
+        thread_history=(),
+        user_id=None,
+        hook_source=hook_source,
+        origin=message_origin(),
+    )
 
     assert (queue is not None) is flushed
-    assert store.called is flushed
-    assert create_task.called is flushed

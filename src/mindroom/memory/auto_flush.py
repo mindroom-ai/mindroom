@@ -216,7 +216,8 @@ def _record_failure(entry: _ConversationState, settings: MemoryAutoFlushConfig, 
     """Count one failed attempt, back off from when it failed, and return whether to give up on the failing turns."""
     entry["failing_since"] = entry["failing_since"] or failed_at
     entry["failures"] += 1
-    entry["retry_at"] = failed_at + _retry_cooldown_seconds(settings, entry["failures"])
+    cooldown = settings.retry_cooldown_seconds * 2 ** (entry["failures"] - 1)
+    entry["retry_at"] = failed_at + min(settings.max_retry_cooldown_seconds, cooldown)
     return failed_at - entry["failing_since"] >= settings.stale_ttl_seconds
 
 
@@ -264,30 +265,11 @@ def _normalize_extractor_line(line: str, no_reply_token: str) -> str | None:
 
 
 def _sanitize_extractor_output(raw_output: str, no_reply_token: str) -> str | None:
-    cleaned = raw_output.strip()
-    if not cleaned:
-        return None
-    if cleaned.upper() == no_reply_token.upper():
-        return None
-
-    normalized_lines = [
-        normalized
-        for line in cleaned.splitlines()
-        if (normalized := _normalize_extractor_line(line, no_reply_token)) is not None
-    ]
-
-    if not normalized_lines:
-        return None
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for line in normalized_lines:
-        key = line.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(line)
-    return " | ".join(deduped[:10])
+    unique: dict[str, str] = {}
+    for line in raw_output.splitlines():
+        if (normalized := _normalize_extractor_line(line, no_reply_token)) is not None:
+            unique.setdefault(normalized.lower(), normalized)
+    return " | ".join(list(unique.values())[:10]) or None
 
 
 def _existing_memory_context(memories: list[MemoryResult], config: Config) -> str:
@@ -296,9 +278,8 @@ def _existing_memory_context(memories: list[MemoryResult], config: Config) -> st
     if context_config.memory_snippets <= 0:
         return ""
 
-    max_memories = max(context_config.memory_snippets * 8, context_config.memory_snippets)
     snippets: list[str] = []
-    for memory in reversed(memories[:max_memories]):
+    for memory in reversed(memories[: context_config.memory_snippets * 8]):
         text = memory.get("memory", "").strip()
         if not text:
             continue
@@ -320,7 +301,7 @@ async def _extract_memory_summary(
     session_id: str,
     lines: list[str],
     existing_context: str,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> str | None:
     extractor = config.memory.auto_flush.extractor
     existing_block = (
@@ -369,16 +350,6 @@ async def _extract_memory_summary(
     content = response.content
     raw_output = content if isinstance(content, str) else str(content or "")
     return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
-
-
-def _retry_cooldown_seconds(settings: MemoryAutoFlushConfig, failures: int) -> int:
-    if failures <= 0:
-        return settings.retry_cooldown_seconds
-    multiplier = 2 ** max(0, failures - 1)
-    return min(
-        settings.max_retry_cooldown_seconds,
-        settings.retry_cooldown_seconds * multiplier,
-    )
 
 
 @dataclass

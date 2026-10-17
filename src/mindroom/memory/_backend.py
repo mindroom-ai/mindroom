@@ -64,7 +64,6 @@ class ResolvedMemoryBackend(Protocol):
         config: Config,
         *,
         limit: int,
-        preserve_resolved_storage_path: bool = False,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> list[MemoryResult]:
         """List memories stored for an agent scope."""

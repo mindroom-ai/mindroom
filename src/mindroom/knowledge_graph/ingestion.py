@@ -265,10 +265,9 @@ class KnowledgeGraphIngestionWorker:
         """
         settings = config.knowledge_graph.ingest
         finished, blocked_until = finished_runs(session.runs, config, now=now)
-        unredacted = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
-        if unredacted is None:
+        finished = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+        if finished is None:
             return None
-        finished = unredacted
         entry = state["sessions"].get(session.session_id)
         if entry is None:
             entry = state["sessions"][session.session_id] = _new_session_state()
