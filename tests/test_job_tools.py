@@ -52,6 +52,12 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+_NO_SUCH_JOB = (
+    "No job with this ID is available to you in this conversation. The ID may be wrong or incomplete, the job may "
+    "have been deleted after its retention period, it may belong to another conversation or caller, or your access "
+    'to it may have changed. Call job(action="list") to see the jobs you can access.'
+)
+
 
 @pytest.mark.asyncio
 async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path) -> None:
@@ -141,7 +147,10 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True])
 async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path: Path, *, native: bool) -> None:
-    """A new turn rediscovers saved results while foreign requesters cannot list them."""
+    """A new turn rediscovers saved results while foreign callers can neither list nor reach them.
+
+    A foreign or revoked job reads exactly like an ID that never existed, so a caller never learns that it exists.
+    """
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
@@ -182,10 +191,12 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
         ):
             with tool_runtime_context(foreign):
                 assert json.loads(await tools.job("list")) == []
+                assert await tools.job("wait", "durable") == _NO_SUCH_JOB
+                assert await tools.job("cancel", "durable") == _NO_SUCH_JOB
         allowed = False
         with tool_runtime_context(context):
             assert json.loads(await tools.job("list")) == []
-            assert "not available" in await tools.job("wait", "durable")
+            assert await tools.job("wait", "durable") == _NO_SUCH_JOB
     finally:
         await runtime.shutdown()
 
@@ -468,7 +479,7 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
 
                 monkeypatch.setattr(ToolJobStore, "load_payload", missing)
                 release.set()
-                assert await waiting == "Tool job is not available in this conversation."
+                assert await waiting == _NO_SUCH_JOB
         retried = await runtime.wait("read", owner=owner, depth=0, timeout=0)
         assert retried.claim is not None
         await runtime.release_wait("read", retried.claim)
@@ -519,7 +530,8 @@ async def test_cancel_returns_at_once_and_leaves_the_outcome_to_the_notice(tmp_p
         ("wait", {}, "job_id is required"),
         ("list", {"limit": 0}, "limit"),
         ("wait", {"job_id": "missing", "wait_timeout": -1}, "wait_timeout"),
-        ("cancel", {"job_id": "missing"}, "not available"),
+        ("wait", {"job_id": "missing"}, _NO_SUCH_JOB),
+        ("cancel", {"job_id": "missing"}, _NO_SUCH_JOB),
     ],
 )
 async def test_job_errors_return_as_tool_results(

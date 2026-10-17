@@ -14,6 +14,7 @@ from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
+    JobUnavailableError,
     describe_job,
     format_job_handle,
     get_background_runtime,
@@ -30,6 +31,13 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+# One answer for every reason, so a caller never learns whether a job of another conversation or caller exists.
+_UNAVAILABLE = (
+    "No job with this ID is available to you in this conversation. The ID may be wrong or incomplete, the job may "
+    "have been deleted after its retention period, it may belong to another conversation or caller, or your access "
+    'to it may have changed. Call job(action="list") to see the jobs you can access.'
+)
 
 
 def is_job_function(function: Function) -> bool:
@@ -224,6 +232,8 @@ class JobTools(Toolkit):
                 return "Unknown job action."
             # The job stops on its own time; the next notice reports how it ended.
             return format_job_handle(await runtime.cancel(job_id, owner=owner, depth=0))
+        except JobUnavailableError:
+            return _UNAVAILABLE
         except ValueError as error:
-            # Unavailable jobs and invalid limits, offsets, or wait budgets are the model's to correct.
+            # Invalid limits, offsets, or wait budgets are the model's to correct.
             return str(error)

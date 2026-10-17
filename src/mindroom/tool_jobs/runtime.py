@@ -65,6 +65,10 @@ class JobAccessError(ValueError):
     """The requested job is unavailable to this caller or runtime."""
 
 
+class JobUnavailableError(JobAccessError):
+    """No job with the requested ID is available to this caller, whether unknown, deleted, foreign, or revoked."""
+
+
 class JobRecoveryBlockedError(RuntimeError):
     """Another executor still owns work that this runtime cannot safely settle."""
 
@@ -381,7 +385,7 @@ class ToolJobRuntime:
         self._ensure_open()
         entry = self._entries.get(job_id)
         if entry is None or not self._visible(entry, owner, depth):
-            raise JobAccessError(_UNAVAILABLE)
+            raise JobUnavailableError(_UNAVAILABLE)
         return entry
 
     def _waited_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> tuple[_Entry, bool]:
@@ -394,7 +398,7 @@ class ToolJobRuntime:
         self._ensure_open()
         entry = self._entries.get(job_id)
         if entry is None or not self._owns(entry.job, owner, depth) or self._denied(entry.job):
-            raise JobAccessError(_UNAVAILABLE)
+            raise JobUnavailableError(_UNAVAILABLE)
         return entry, self._authorize(entry.job)
 
     async def _publish(
@@ -456,7 +460,7 @@ class ToolJobRuntime:
             return await asyncio.to_thread(lambda: deepcopy(unsaved))
         payload_json = await self._store.load_payload(job.job_id)
         if payload_json is None:
-            raise JobAccessError(_UNAVAILABLE)
+            raise JobUnavailableError(_UNAVAILABLE)
         return await asyncio.to_thread(json.loads, payload_json)
 
     async def recover(self) -> None:
