@@ -16,7 +16,7 @@ from mindroom.timing import timed
 from mindroom.tool_system.events import strip_visible_tool_markers
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
 
     import nio
     import structlog
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal.store import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -45,8 +44,6 @@ class ResponseOutcome:
     thread_summary_thread_id: str | None = None
     thread_summary_message_count_hint: int | None = None
     thread_summary_entity_name: str | None = None
-    memory_prompt: str | None = None
-    memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
 
 
 @dataclass(frozen=True)

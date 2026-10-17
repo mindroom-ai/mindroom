@@ -78,7 +78,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
-    prepare_memory_and_model_context,
+    _prepare_memory_and_model_context,
 )
 from mindroom.response_turn import CompletedAttempt, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -371,7 +371,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, memory_thread_history, model_prompt, model_thread_history = prepare_memory_and_model_context(
+        memory_prompt, memory_thread_history, model_prompt, model_thread_history = _prepare_memory_and_model_context(
             "report",
             [],
             config=config,
@@ -397,7 +397,7 @@ class TestUserIdPassthrough:
 
         existing_model_prompt = "[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report."
 
-        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
+        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = _prepare_memory_and_model_context(
             "report",
             [],
             config=config,
@@ -417,7 +417,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
+        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = _prepare_memory_and_model_context(
             "plain text message",
             [],
             config=config,
@@ -437,7 +437,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = prepare_memory_and_model_context(
+        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = _prepare_memory_and_model_context(
             "current",
             [
                 make_visible_message(

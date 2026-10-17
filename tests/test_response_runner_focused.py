@@ -126,9 +126,9 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
+    _prepare_memory_and_model_context,
     _response_typing_indicator,
     _ResponseGenerationOutcome,
-    prepare_memory_and_model_context,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
@@ -5263,7 +5263,7 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
         scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$event1"),
     )
     prepared_request = await coordinator._prepare_request_after_lock(request)
-    _memory_prompt, memory_history, _model_prompt, _model_history = prepare_memory_and_model_context(
+    _memory_prompt, memory_history, _model_prompt, _model_history = _prepare_memory_and_model_context(
         prepared_request.prompt,
         prepared_request.thread_history,
         config=coordinator.deps.runtime.config,

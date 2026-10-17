@@ -605,7 +605,7 @@ def _timestamp_thread_history_user_turns(
     return timestamped_history
 
 
-def prepare_memory_and_model_context(
+def _prepare_memory_and_model_context(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -2472,12 +2472,6 @@ class ResponseRunner:
             thread_summary_thread_id=target.resolved_thread_id,
             thread_summary_message_count_hint=continuation.thread_summary_message_count_hint,
             thread_summary_entity_name=continuation.entity_name,
-            memory_prompt=(
-                continuation.memory_prompt
-                if continuation.memory_prompt is not None
-                else continuation.request_body or None
-            ),
-            memory_thread_history=self._approval_memory_history(continuation),
         )
 
     def _approval_post_response_deps(self, continuation: ApprovalContinuation) -> PostResponseEffectsDeps:
@@ -2545,8 +2539,12 @@ class ResponseRunner:
         return count, replace(runtime, skill_review_capture=capture)
 
     def _approval_memory_persistence(self, continuation: ApprovalContinuation) -> Callable[[], None] | None:
-        """Return the normal agent-memory handoff for a completed continuation."""
-        if continuation.entity_kind != "agent":
+        """Return the normal memory handoff for a completed continuation."""
+        if continuation.entity_kind == "agent":
+            agent_name: str | list[str] = continuation.entity_name
+        elif continuation.entity_name in self.deps.runtime.config.teams:
+            agent_name = list(continuation.team_member_names)
+        else:
             return None
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
@@ -2555,7 +2553,7 @@ class ResponseRunner:
         if execution_identity is None:
             return None
         return self._memory_persistence(
-            agent_name=continuation.entity_name,
+            agent_name=agent_name,
             session_id=continuation.session_id,
             execution_identity=execution_identity,
             prompt=(
@@ -2569,7 +2567,7 @@ class ResponseRunner:
     def _memory_persistence(
         self,
         *,
-        agent_name: str,
+        agent_name: str | list[str],
         session_id: str,
         execution_identity: ToolExecutionIdentity,
         prompt: str,
@@ -2577,35 +2575,38 @@ class ResponseRunner:
         user_id: str | None,
         hook_source: str | None,
     ) -> Callable[[], None] | None:
-        """Build the shared completed-agent memory handoff, or None for a turn that is not memory."""
+        """Build the completed-turn memory handoff for an agent or a team's members, or None for a non-memory turn."""
         if is_automation_hook_source(hook_source):
             # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
             return None
 
         def queue() -> None:
-            mark_auto_flush_dirty_session(
-                self.deps.storage_path,
-                self.deps.runtime.config,
-                agent_name=agent_name,
-                session_id=session_id,
-                execution_identity=execution_identity,
-            )
-            if self.deps.runtime.config.resolve_entity(agent_name).memory_backend == "mem0":
-                create_background_task(
-                    store_conversation_memory(
-                        prompt,
-                        agent_name,
-                        self.deps.storage_path,
-                        session_id,
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                        thread_history,
-                        user_id,
-                        execution_identity=execution_identity,
-                    ),
-                    name=f"memory_save_{agent_name}_{session_id}",
-                    owner=self.deps.runtime,
+            if isinstance(agent_name, str):
+                mark_auto_flush_dirty_session(
+                    self.deps.storage_path,
+                    self.deps.runtime.config,
+                    agent_name=agent_name,
+                    session_id=session_id,
+                    execution_identity=execution_identity,
                 )
+                # A file-memory agent's conversation is saved by auto-flush; a team's goes to its shared memory.
+                if self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
+                    return
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    agent_name,
+                    self.deps.storage_path,
+                    session_id,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    thread_history,
+                    user_id,
+                    execution_identity=execution_identity,
+                ),
+                name=f"memory_save_{agent_name if isinstance(agent_name, str) else 'team'}_{session_id}",
+                owner=self.deps.runtime,
+            )
 
         return queue
 
@@ -4674,14 +4675,12 @@ class ResponseRunner:
                 post_response_deps=lambda: self._post_response_deps(request),
             )
         requester_user_id = request.user_id or ""
-        _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
-            prepare_memory_and_model_context(
-                request.prompt,
-                request.thread_history,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                model_prompt=request.model_prompt,
-            )
+        memory_prompt, memory_thread_history, prepared_prompt, model_thread_history = _prepare_memory_and_model_context(
+            request.prompt,
+            request.thread_history,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            model_prompt=request.model_prompt,
         )
         assert turn_models is not None
         model_name = turn_models.team_model_name
@@ -4836,6 +4835,20 @@ class ResponseRunner:
             session_id=session_id,
             session_type=session_type,
             create_storage=team_storage_factory,
+        )
+        # A configured team keeps the conversations it answers in its members' shared memory.
+        queue_memory_persistence = (
+            self._memory_persistence(
+                agent_name=agent_names,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                prompt=memory_prompt,
+                thread_history=memory_thread_history,
+                user_id=request.user_id,
+                hook_source=request.response_envelope.hook_source,
+            )
+            if self.deps.agent_name in self.deps.runtime.config.teams
+            else None
         )
 
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
@@ -5091,8 +5104,6 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
-                memory_prompt=_memory_prompt,
-                memory_thread_history=_memory_thread_history,
             )
 
         placeholder_state.settlement_started = True
@@ -5107,6 +5118,7 @@ class ResponseRunner:
             build_post_response_outcome=build_team_post_response_outcome,
             post_response_deps=lambda: self._post_response_deps(
                 request,
+                queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
             ),
             streaming_delivery_error_handler=settle_team_streaming_delivery_error,
@@ -5959,7 +5971,7 @@ class ResponseRunner:
             return None
         request = prepared_request
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
-            prepare_memory_and_model_context(
+            _prepare_memory_and_model_context(
                 request.prompt,
                 request.thread_history,
                 config=self.deps.runtime.config,
@@ -6100,8 +6112,6 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
-                memory_prompt=memory_prompt,
-                memory_thread_history=memory_thread_history,
             )
 
         placeholder_state.settlement_started = True

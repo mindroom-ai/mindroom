@@ -629,7 +629,7 @@ class TestAgentBot(AgentBotTestBase):
             await cast("Any", response_function)(None)
             return None
 
-        def prepare_memory_and_model_context(
+        def _prepare_memory_and_model_context(
             prompt: str,
             thread_history: Sequence[ResolvedVisibleMessage],
             *,
@@ -680,7 +680,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
-                prepare_memory_and_model_context=prepare_memory_and_model_context,
+                _prepare_memory_and_model_context=_prepare_memory_and_model_context,
                 reprioritize_auto_flush_sessions=MagicMock(),
                 apply_post_response_effects=AsyncMock(),
             ),
@@ -2729,7 +2729,7 @@ class TestAgentBot(AgentBotTestBase):
         failure_message = "setup failed"
 
         with patch(
-            "mindroom.response_runner.prepare_memory_and_model_context",
+            "mindroom.response_runner._prepare_memory_and_model_context",
             side_effect=RuntimeError(failure_message),
         ):
             await bot._turn_controller._execute_response_action(

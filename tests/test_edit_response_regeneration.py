@@ -1116,7 +1116,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
         patch_response_runner_module(
             team_response=mock_team_response,
