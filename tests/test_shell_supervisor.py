@@ -13,7 +13,7 @@ import sys
 import tempfile
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 
@@ -22,7 +22,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.script_runs import shim as script_run_shim
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import run_command
+from mindroom.shell.execution import run_command, shell_request_budget_seconds
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
@@ -115,7 +115,8 @@ async def _run(
     argv: list[str],
     *,
     namespace: str = "ns",
-    timeout: float = 30,  # noqa: ASYNC109
+    timeout: float | None = 30,  # noqa: ASYNC109
+    on_timeout: Literal["background", "kill"] = "background",
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
 ) -> str:
@@ -127,6 +128,7 @@ async def _run(
         cwd=None,
         tail=100,
         timeout=timeout,
+        on_timeout=on_timeout,
         handle=handle,
         max_runtime_seconds=max_runtime_seconds,
     )
@@ -184,6 +186,42 @@ async def test_run_returns_output() -> None:
     registry: dict[str, ProcessRecord] = {}
     async with _running_server(registry) as socket_path:
         assert await _run(socket_path, ["echo", "hello supervisor"]) == "hello supervisor"
+
+
+@pytest.mark.asyncio
+async def test_a_stopping_run_has_no_limit_without_a_timeout_and_stops_at_one() -> None:
+    """The shell tool's runs wait however long a command takes, or stop it at its timeout with its output so far."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        finished = await _run(socket_path, ["bash", "-c", "sleep 0.3; echo done"], timeout=None, on_timeout="kill")
+        stopped = await _run(socket_path, ["bash", "-c", "echo started; sleep 300"], timeout=0.5, on_timeout="kill")
+
+    assert finished == "done"
+    assert stopped == "Stopped after 0.5s.\nOutput:\nstarted"
+    assert registry == {}
+
+
+@pytest.mark.asyncio
+async def test_a_supervised_run_relays_its_progress_before_its_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that asks for progress gets the command's output tail while it runs, then the usual result."""
+    monkeypatch.setattr("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1)
+    registry: dict[str, ProcessRecord] = {}
+    reports: list[str] = []
+    async with _running_server(registry) as socket_path:
+        result = await run_command_via_supervisor(
+            socket_path,
+            namespace="ns",
+            argv=["bash", "-c", "echo started; sleep 0.5; echo done"],
+            env=_MINIMAL_ENV,
+            cwd=None,
+            tail=100,
+            timeout=None,
+            on_timeout="kill",
+            on_progress=reports.append,
+        )
+
+    assert result.message == "started\ndone"
+    assert reports[0] == "started"
 
 
 @pytest.mark.asyncio
@@ -367,12 +405,15 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
         )
         handle = _extract_handle(result)
         try:
+            # The leader creates the pid file before writing it, so wait for its content.
             for _ in range(100):
-                if child_path.exists():
+                if child_path.exists() and child_path.read_text():
                     break
                 await asyncio.sleep(0.01)
-            assert child_path.exists()
-            child_pid = int(child_path.read_text())
+            assert child_path.exists(), "the leader never started its child"
+            child_pid_text = child_path.read_text()
+            assert child_pid_text, "the leader never recorded its child's pid"
+            child_pid = int(child_pid_text)
             release_path.touch()
             for _ in range(100):
                 if registry[handle].process.returncode is not None:
@@ -1019,10 +1060,12 @@ async def test_supervisor_sigkill_terminates_supervised_process_group(
     )
     supervised_pid = int(result.split("PID ")[1].split(")")[0])
     for _ in range(40):
-        if ready_path.exists():
+        if ready_path.exists() and ready_path.read_text(encoding="utf-8"):
             break
         await asyncio.sleep(0.05)
-    script_pid, descendant_pid = map(int, ready_path.read_text(encoding="utf-8").split())
+    ready = ready_path.read_text(encoding="utf-8")
+    assert ready, "the supervised script never recorded its pids"
+    script_pid, descendant_pid = map(int, ready.split())
 
     supervisor = manager._supervisor
     assert supervisor is not None
@@ -1103,10 +1146,12 @@ async def test_finished_script_kills_same_group_descendants(
     child_pid: int | None = None
     try:
         for _ in range(40):
-            if child_pid_path.exists():
+            if child_pid_path.exists() and child_pid_path.read_text(encoding="utf-8"):
                 break
             await asyncio.sleep(0.05)
-        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        child_pid_text = child_pid_path.read_text(encoding="utf-8")
+        assert child_pid_text, "the script never recorded its child's pid"
+        child_pid = int(child_pid_text)
 
         assert "FINISHED" in await _wait_for_finished(socket_path, handle)
         await assert_linux_pid_not_running(child_pid)
@@ -1205,37 +1250,19 @@ async def test_toolkit_supervisor_result_includes_workspace_cwd(
 
 
 @pytest.mark.asyncio
-async def test_toolkit_routes_through_supervisor_across_instances(
+async def test_toolkit_stops_a_supervised_command_past_its_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     manager: _ShellSupervisorManager,
 ) -> None:
-    """With the socket env set, handles must work across fresh toolkit instances.
-
-    This simulates the sandbox subprocess path where every run/check/kill
-    request executes in a separate short-lived process.
-    """
+    """Through the supervisor, as in a worker, a command past its timeout stops with its output so far."""
     monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, manager.ensure())
-
-    tool_run = _get_toolkit(tmp_path)
-    run_fn = tool_run.async_functions["run_shell_command"].entrypoint
+    run_fn = _get_toolkit(tmp_path).async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
-    result = await run_fn(["bash", "-c", "echo client-mode; sleep 300"], timeout=0)
-    handle = _extract_handle(result)
 
-    await asyncio.sleep(0.3)
-    tool_check = _get_toolkit(tmp_path)
-    check_fn = tool_check.functions["check_shell_command"].entrypoint
-    assert check_fn is not None
-    status = await asyncio.to_thread(check_fn, handle)
-    assert "RUNNING" in status
-    assert "client-mode" in status
+    result = await run_fn(["bash", "-c", "echo client-mode; sleep 300"], timeout=1)
 
-    tool_kill = _get_toolkit(tmp_path)
-    kill_fn = tool_kill.functions["kill_shell_command"].entrypoint
-    assert kill_fn is not None
-    kill_result = await asyncio.to_thread(kill_fn, handle, True)
-    assert "Force-killed" in kill_result
+    assert result == "Stopped after 1s.\nOutput:\nclient-mode"
 
 
 @pytest.mark.asyncio
@@ -1257,12 +1284,8 @@ async def test_toolkit_reports_unavailable_supervisor(
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_mode_shell_background_handle_across_requests(tmp_path: Path) -> None:
-    """Background handles must survive per-request subprocess isolation.
-
-    Each run/check/kill request executes in its own sandbox subprocess; the
-    handle lives in the runner's shell supervisor, not in any request process.
-    """
+def test_subprocess_mode_shell_stops_a_command_past_its_timeout(tmp_path: Path) -> None:
+    """A per-request sandbox subprocess relays the shell call to the supervisor, which stops it at its timeout."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
@@ -1289,14 +1312,9 @@ def test_subprocess_mode_shell_background_handle_across_requests(tmp_path: Path)
         assert isinstance(response.result, str)
         return response.result
 
-    result = execute("run_shell_command", {"args": ["bash", "-c", "echo bg-e2e; sleep 300"], "timeout": 0})
-    handle = _extract_handle(result)
+    result = execute("run_shell_command", {"args": ["bash", "-c", "echo bg-e2e; sleep 300"], "timeout": 1})
 
-    status = execute("check_shell_command", {"handle": handle})
-    assert "RUNNING" in status
-
-    kill_result = execute("kill_shell_command", {"handle": handle, "force": True})
-    assert "Force-killed" in kill_result
+    assert result == "Stopped after 1s.\nOutput:\nbg-e2e"
 
 
 # ---------------------------------------------------------------------------
@@ -1304,21 +1322,14 @@ def test_subprocess_mode_shell_background_handle_across_requests(tmp_path: Path)
 # ---------------------------------------------------------------------------
 
 
-def test_shell_run_timeout_seconds_parses_kwargs() -> None:
-    """The dispatch budget helper should read the requested foreground timeout."""
-
-    def prepared(function_name: str, kwargs: dict[str, object]) -> object:
-        return sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
-            tool_name="shell",
-            function_name=function_name,
-            kwargs=kwargs,
-        )
-
-    helper = sandbox_runner_module._shell_run_timeout_seconds
-    assert helper(prepared("run_shell_command", {"timeout": 300})) == 300.0
-    assert helper(prepared("run_shell_command", {})) == 120.0
-    assert helper(prepared("run_shell_command", {"timeout": "nope"})) == 120.0
-    assert helper(prepared("check_shell_command", {"timeout": 300})) == 0.0
+def test_shell_request_budget_covers_the_requested_foreground_wait() -> None:
+    """A worker shell request may take its command's foreground timeout plus the answer's grace."""
+    assert shell_request_budget_seconds("shell", "run_shell_command", {"timeout": 300}) == 330.0
+    assert shell_request_budget_seconds("shell", "run_shell_command", {}) == 150.0
+    assert shell_request_budget_seconds("shell", "run_shell_command", {"timeout": None}) == 150.0
+    assert shell_request_budget_seconds("shell", "run_shell_command", {"timeout": "nope"}) == 150.0
+    assert shell_request_budget_seconds("shell", "other_function", {"timeout": 300}) == 0.0
+    assert shell_request_budget_seconds("coding", "run_shell_command", {"timeout": 300}) == 0.0
 
 
 def test_shell_subprocess_dispatch_context_injects_socket_and_budget(

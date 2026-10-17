@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import stat
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -786,55 +787,157 @@ def test_run_device_pairing_uses_empty_namespace_when_non_string(namespace: obje
     assert result.namespace_invalid is False
 
 
-def test_pair_local_install_shows_qr_only_when_terminal(tmp_path: Path) -> None:
-    """QR code appears only when console.is_terminal is True."""
+class _TerminalBuffer(io.StringIO):
+    """Captured output that reports itself as a terminal, as a person's shell would."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _pairing_output(tmp_path: Path, console: Console, responses: list[httpx.Response] | None = None) -> str:
+    """Pair through a fake service, by default approving on the first poll, and return what `console` printed."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\nrouter:\n  model: default\n")
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
-
-    # Terminal: QR shown
-    terminal_out = io.StringIO()
-    terminal_console = Console(file=terminal_out, force_terminal=True)
     post = _fake_transport(
-        [httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)],
+        responses or [httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)],
         [],
     )
-
     cli_connect.pair_local_install(
         runtime_paths,
-        console=terminal_console,
+        console=console,
         provisioning_url="https://provisioning.example",
         persist_env=False,
         post_request=post,
         sleep=lambda _seconds: None,
     )
+    assert isinstance(console.file, io.StringIO)
+    # Drop the spinner's cursor and erase codes, which a terminal applies in place.
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\r", "", console.file.getvalue())
 
-    terminal_output = terminal_out.getvalue()
-    assert "or enter code ABCD-EFGH" in terminal_output
-    assert "Approve only if the page shows code ABCD-EFGH" in terminal_output
-    assert "█" in terminal_output or "▀" in terminal_output  # QR present
 
-    # Non-terminal: QR hidden
-    non_terminal_out = io.StringIO()
-    non_terminal_console = Console(file=non_terminal_out, force_terminal=False)
-    post = _fake_transport(
-        [httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)],
-        [],
+@pytest.fixture
+def terminal_console(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Console]:
+    """Return a console that writes to a capturable terminal of the given width."""
+    # The suite's dumb terminal would turn off the live terminal view.
+    monkeypatch.setenv("TERM", "xterm-256color")
+    return lambda width: Console(file=_TerminalBuffer(), color_system=None, width=width)
+
+
+@pytest.mark.parametrize("width", [80, 120])
+def test_pair_local_install_in_a_terminal_shows_the_link_alone_and_the_qr_beside_the_code(
+    tmp_path: Path,
+    terminal_console: Callable[[int], Console],
+    width: int,
+) -> None:
+    """A terminal gets a clickable unwrapped link, then the QR code next to the pair code to check."""
+    output = _pairing_output(tmp_path, terminal_console(width))
+    lines = output.splitlines()
+
+    assert "  https://chat.example/connect?code=ABCD-EFGH" in lines
+    assert any("█" in line and "Pair code  ABCD-EFGH" in line for line in lines)
+    assert any("█" in line and line.rstrip().endswith("code ABCD-EFGH.") for line in lines)
+    assert "Waiting for approval · the code expires at " in output
+
+
+def test_pair_local_install_in_a_narrow_terminal_stacks_the_code_below_the_qr(
+    tmp_path: Path,
+    terminal_console: Callable[[int], Console],
+) -> None:
+    """Without room beside the QR code, the pair code and its check follow below it."""
+    lines = _pairing_output(tmp_path, terminal_console(60)).splitlines()
+
+    qr_rows = [index for index, line in enumerate(lines) if "█" in line]
+    details_row = next(index for index, line in enumerate(lines) if "Pair code  ABCD-EFGH" in line)
+    assert qr_rows
+    assert details_row > qr_rows[-1]
+    assert "code ABCD-EFGH." in lines
+
+
+def test_pair_local_install_in_a_terminal_shows_each_renewed_code(
+    tmp_path: Path,
+    terminal_console: Callable[[int], Console],
+) -> None:
+    """An expired code is followed by its replacement, each with its own link and check."""
+    output = _pairing_output(
+        tmp_path,
+        terminal_console(60),
+        [
+            httpx.Response(200, json=_START),
+            httpx.Response(200, json={"status": "expired"}),
+            httpx.Response(
+                200,
+                json={**_START, "pair_code": "WXYZ-2345", "approve_url": "https://chat.example/connect?code=WXYZ-2345"},
+            ),
+            httpx.Response(200, json=_CONNECTED),
+        ],
     )
 
-    cli_connect.pair_local_install(
-        runtime_paths,
-        console=non_terminal_console,
-        provisioning_url="https://provisioning.example",
-        persist_env=False,
-        post_request=post,
-        sleep=lambda _seconds: None,
+    first = output.index("code ABCD-EFGH.")
+    second = output.index("code WXYZ-2345.")
+    assert first < output.index("  https://chat.example/connect?code=WXYZ-2345") < second
+    assert output.count("Or enter the code in MindRoom Chat") == 2
+
+
+def test_terminal_qr_code_has_fixed_colors_without_a_strip_below(monkeypatch: pytest.MonkeyPatch) -> None:
+    """White-on-black modules scan in light themes too, and the last half-block row keeps the terminal background."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    console = Console(file=io.StringIO(), color_system="truecolor", width=120)
+    session = cli_connect.DevicePairSession(
+        pair_code="ABCD-EFGH",
+        device_secret="device-secret",  # noqa: S106
+        approve_url="https://chat.example/connect?code=ABCD-EFGH",
+        poll_interval_seconds=3,
+        expires_at=datetime(2099, 9, 26, 12, 10, tzinfo=UTC),
     )
 
-    non_terminal_output = non_terminal_out.getvalue()
-    assert "or enter code ABCD-EFGH" in non_terminal_output
-    assert "█" not in non_terminal_output
-    assert "▀" not in non_terminal_output
+    console.print(cli_connect._terminal_pairing_request(session, width=120))
+
+    assert isinstance(console.file, io.StringIO)
+    qr_lines = [line for line in console.file.getvalue().splitlines() if "█" in line or "▀" in line]
+    black_background = "\x1b[38;2;255;255;255;48;2;0;0;0m"
+    assert all(black_background in line for line in qr_lines[:-1])
+    assert black_background not in qr_lines[-1]
+    assert "\x1b[38;2;255;255;255m▀" in qr_lines[-1]
+
+
+def test_pair_local_install_in_a_dumb_terminal_prints_plain_lines_with_qr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dumb terminal, such as an Emacs shell buffer, cannot draw the spinner but still shows the QR code."""
+    monkeypatch.setenv("TERM", "dumb")
+    output = _pairing_output(tmp_path, Console(file=_TerminalBuffer()))
+
+    assert "  https://chat.example/connect?code=ABCD-EFGH\n" in output
+    assert "Waiting for approval (Ctrl+C to cancel)…" in output
+    assert "▀" in output
+    assert "Connect to MindRoom Chat" not in output
+
+
+@pytest.mark.parametrize("force_terminal", [False, True])
+def test_pair_local_install_without_a_terminal_prints_plain_lines_without_qr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_terminal: bool,
+) -> None:
+    """Logs and the macOS app, which reads the link from its own line, get plain lines and no QR code.
+
+    `FORCE_COLOR` makes Rich treat a pipe as a terminal, which must not bring the spinner into logs.
+    """
+    monkeypatch.setenv("TERM", "xterm-256color")
+    output = _pairing_output(tmp_path, Console(file=io.StringIO(), force_terminal=force_terminal, color_system=None))
+
+    assert (
+        "\nConnect this machine to MindRoom:\n"
+        "  https://chat.example/connect?code=ABCD-EFGH\n"
+        "  or enter code ABCD-EFGH in MindRoom Chat → Settings → Local MindRoom\n"
+        "  Approve only if the page shows code ABCD-EFGH\n"
+        "Waiting for approval (Ctrl+C to cancel)…\n"
+    ) in output
+    assert "█" not in output
+    assert "▀" not in output
+    assert "Connect to MindRoom Chat" not in output
 
 
 def test_run_device_pairing_raises_on_expired_when_no_renew() -> None:
@@ -1345,14 +1448,16 @@ def test_run_device_pairing_times_out_at_expiry_while_the_service_is_unreachable
     ("env", "refused_homeserver"),
     [
         ({"MATRIX_HOMESERVER": "https://matrix.example.org"}, "https://matrix.example.org"),
-        ({}, "http://localhost:8008"),
+        ({}, None),
+        ({"MATRIX_HOMESERVER": "http://localhost:8008"}, "http://localhost:8008"),
         ({"MATRIX_HOMESERVER": "https://matrix.example.org", "MINDROOM_PROVISIONING_URL": "https://p.example"}, None),
         ({"MATRIX_HOMESERVER": "https://mindroom.chat"}, None),
-        ({"MATRIX_HOMESERVER": "https://matrix.mindroom.chat/"}, None),
+        ({"MATRIX_HOMESERVER": "https://matrix.mindroom.chat/"}, "https://matrix.mindroom.chat/"),
+        ({"MATRIX_HOMESERVER": "https://mindroom.chat:443"}, "https://mindroom.chat:443"),
     ],
 )
 def test_self_hosted_pairing_error(tmp_path: Path, env: dict[str, str], refused_homeserver: str | None) -> None:
-    """Pairing is refused for any effective non-hosted homeserver, including the localhost default, without a provisioning URL."""
+    """Pairing accepts the hosted default and refuses explicit self-hosted homeservers without provisioning."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n")
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env=env)

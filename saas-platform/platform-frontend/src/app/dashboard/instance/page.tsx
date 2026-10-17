@@ -133,7 +133,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
         return <CheckCircle className="w-5 h-5 text-green-500" />
       case 'provisioning':
       case 'restarting':
-        return <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
+        return <Loader2 className="w-5 h-5 text-brand-600 dark:text-brand-400 animate-spin" />
       case 'stopped':
       case 'deprovisioned':
         return <Clock className="w-5 h-5 text-yellow-500" />
@@ -173,7 +173,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
   if (loading || (!instance && subscriptionLoading)) {
     return (
       <div className="flex items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
+        <Loader2 className="w-8 h-8 animate-spin text-brand-600 dark:text-brand-400" />
       </div>
     )
   }
@@ -189,7 +189,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           </p>
           <button
             onClick={() => router.push(nextStep?.href ?? '/dashboard')}
-            className="px-8 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
+            className="px-8 py-3 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
           >
             {nextStep?.label ?? 'Go to dashboard'}
           </button>
@@ -236,8 +236,8 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
               <span className={`
                 font-medium capitalize
                 ${instance.status === 'running' ? 'text-green-600' : ''}
-                ${instance.status === 'provisioning' ? 'text-orange-600' : ''}
-                ${instance.status === 'restarting' ? 'text-orange-600' : ''}
+                ${instance.status === 'provisioning' ? 'text-brand-700 dark:text-brand-300' : ''}
+                ${instance.status === 'restarting' ? 'text-brand-700 dark:text-brand-300' : ''}
                 ${instance.status === 'stopped' ? 'text-yellow-600' : ''}
                 ${instance.status === 'deprovisioned' ? 'text-gray-600' : ''}
                 ${instance.status === 'failed' ? 'text-red-600' : ''}
@@ -253,7 +253,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
 
           {/* Action Buttons */}
           {instance.status === 'restarting' && (
-            <div className="flex items-center gap-2 text-orange-600">
+            <div className="flex items-center gap-2 text-brand-700 dark:text-brand-300">
               <Loader2 className="w-4 h-4 animate-spin" />
               <span className="text-sm font-medium">Restarting...</span>
             </div>
@@ -291,7 +291,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           {!subscriptionLoading && nextStep && (instance.status === 'stopped' || instance.status === 'deprovisioned') && (
             <button
               onClick={() => router.push(nextStep.href)}
-              className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-brand-700 text-white rounded-lg hover:bg-brand-800 transition-colors"
             >
               {nextStep.label}
             </button>
@@ -316,7 +316,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
             <button
               onClick={() => handleAction('reprovision')}
               disabled={actionLoading !== null}
-              className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-brand-700 text-white rounded-lg hover:bg-brand-800 disabled:opacity-50 transition-colors"
             >
               {actionLoading === 'reprovision' ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -331,7 +331,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
             <div className="flex gap-2">
               <a
                 href={supportMailtoHref}
-                className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
+                className="flex items-center gap-2 px-4 py-2 bg-brand-700 text-white rounded-lg hover:bg-brand-800 transition-colors"
               >
                 <AlertCircle className="w-4 h-4" />
                 Contact Support
@@ -375,9 +375,9 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
         <Card>
           <CardHeader className="mb-6">Access Your MindRoom</CardHeader>
           <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-5 bg-gradient-to-r from-orange-50 to-yellow-50 dark:from-orange-900/10 dark:to-yellow-900/10 rounded-2xl border border-orange-200/50 dark:border-orange-800/30">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-5 bg-gradient-to-r from-brand-50 to-white dark:from-brand-900/20 dark:to-transparent rounded-2xl border border-brand-200/50 dark:border-brand-800/30">
               <div className="flex items-center gap-3">
-                <Globe className="w-5 h-5 text-orange-600 dark:text-orange-400" />
+                <Globe className="w-5 h-5 text-brand-700 dark:text-brand-400" />
                 <div>
                   <p className="font-medium dark:text-white">MindRoom App</p>
                   <p className="text-sm text-gray-600 dark:text-gray-400 break-all">{instance.frontend_url}</p>
@@ -387,7 +387,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
                 href={instance.frontend_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center justify-center gap-2 px-6 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all whitespace-nowrap"
+                className="flex items-center justify-center gap-2 px-6 py-2.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all whitespace-nowrap"
               >
                 Open MindRoom
                 <ExternalLink className="w-4 h-4" />

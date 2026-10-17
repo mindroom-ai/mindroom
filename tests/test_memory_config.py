@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -40,7 +44,13 @@ from mindroom.model_defaults import (
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
+from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
+
+
+def _fake_mem0_llm() -> SimpleNamespace:
+    """Return a stand-in for Mem0's default Ollama LLM, whose client call MindRoom counts."""
+    return SimpleNamespace(config=SimpleNamespace(model="gemma4"), client=SimpleNamespace(chat=MagicMock()))
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -154,28 +164,43 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_temperature", "expected_top_p", "legacy_request_builder"),
+        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "legacy_request_builder"),
         [
-            ("gpt-6-astra", None, None, False),
-            (OPENAI_GPT_LUNA, None, None, False),
-            (OPENAI_GPT_SOL, None, None, False),
-            ("gpt-5.6-luna", 0.1, None, False),
-            ("gpt-5.6-terra", 0.1, None, False),
+            ("gpt-6-astra", None, None, False, False),
+            (OPENAI_GPT_LUNA, None, None, False, False),
+            (OPENAI_GPT_SOL, None, None, False, False),
+            ("gpt-5.6-luna", None, None, False, False),
+            ("gpt-5.6-terra", None, None, False, False),
+            ("gpt-5.4-mini", None, None, False, False),
+            ("gpt-5-mini", None, None, False, False),
+            ("gpt-5-2025-08-07", None, None, False, False),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.1, 0.8, False),
-            (OPENAI_GPT_SOL, None, None, True),
+            ("gpt-4", 0.1, 0.8, True, False),
+            (OPENAI_GPT_SOL, None, None, False, True),
         ],
-        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-4", "sol-legacy-mem0"],
+        ids=[
+            "astra",
+            "luna",
+            "sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.4-mini",
+            "gpt-5-mini",
+            "gpt-5-snapshot",
+            "gpt-4",
+            "sol-legacy-mem0",
+        ],
     )
-    async def test_mem0_openai_sampling_support_is_model_specific(
+    async def test_mem0_openai_request_parameters_are_model_specific(
         self,
         tmp_path: Path,
         model_id: str,
         expected_temperature: float | None,
         expected_top_p: float | None,
+        sends_max_tokens: bool,
         legacy_request_builder: bool,
     ) -> None:
-        """Memory extraction must omit only sampling controls rejected by its model."""
+        """Memory extraction omits for GPT-5 and later models what Mem0 omits for the reasoning models it knows."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="ollama",
@@ -229,6 +254,9 @@ class TestMemoryConfig:
         assert {name: request_params[name] for name in expected_sampling if name in request_params} == {
             name: value for name, value in expected_sampling.items() if value is not None
         }
+        assert ("max_tokens" in request_params) is sends_max_tokens
+        # A max_completion_tokens cap would also count reasoning tokens and could leave no answer.
+        assert "max_completion_tokens" not in request_params
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
@@ -750,7 +778,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(vector_store=object())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -758,6 +786,53 @@ class TestMemoryConfig:
         assert result is expected_memory
         mock_ensure_sentence_transformers_dependencies.assert_called_once_with(_runtime_paths(tmp_path))
         mock_from_config.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.tool_system.dependencies.check_deps_installed", return_value=True)
+    @patch.object(AsyncMemory, "from_config")
+    async def test_create_memory_instance_waits_for_installs_off_event_loop(
+        self,
+        mock_from_config: MagicMock,
+        mock_check_deps_installed: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Local-embedder Mem0 checks dependencies and waits for a running install without stalling the event loop."""
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="sentence_transformers",
+                config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
+            ),
+            llm=None,
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
+        install_running = threading.Event()
+        finish_install = threading.Event()
+
+        def run_install() -> None:
+            with optional_dependency_environment(exclusive=True):
+                install_running.set()
+                finish_install.wait(5)
+
+        installer = threading.Thread(target=run_install)
+        installer.start()
+        try:
+            assert install_running.wait(5)
+            creation = asyncio.create_task(
+                create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path)),
+            )
+            started = time.monotonic()
+            await asyncio.sleep(0.2)
+            # A blocked event loop would only finish this sleep after the install's 5 s timeout.
+            assert time.monotonic() - started < 2
+            assert not creation.done()
+        finally:
+            finish_install.set()
+            installer.join(5)
+        assert await creation is mock_from_config.return_value
+        mock_check_deps_installed.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_memory_instance_replaces_mem0_openai_embedder_with_strict_adapter(
@@ -782,7 +857,7 @@ class TestMemoryConfig:
             api_key="sk-test",
             openai_client=client,
         )
-        memory = SimpleNamespace(vector_store=object(), embedding_model=object())
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),

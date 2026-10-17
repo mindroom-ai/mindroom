@@ -28,7 +28,7 @@ export function LaunchButton({ instanceUrl, authToken, status }: LaunchButtonPro
         flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
         ${isDisabled
           ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-          : 'bg-orange-500 text-white hover:bg-orange-600 shadow-lg hover:shadow-xl'
+          : 'bg-brand-600 text-white hover:bg-brand-700 shadow-lg hover:shadow-xl'
         }
       `}
     >

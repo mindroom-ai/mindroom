@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
@@ -60,7 +61,7 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # tests/test_claude_stream_usage.py::test_completed_claude_stream_counts_its_usage_once;
 # tests/test_claude_stream_usage.py::test_claude_stream_that_fails_after_starting_counts_nothing;
 # tests/test_claude_stream_usage.py::test_stalled_claude_stream_counts_nothing;
-# tests/test_vertex_claude_context_guard.py::test_stream_attempt_forgets_earlier_start_usage.
+# tests/test_vertex_claude_context_guard.py::test_stream_attempt_forgets_earlier_start_usage_before_fitting.
 
 
 class ClaudeProviderSDKCompat:
@@ -297,7 +298,8 @@ def request_kwargs_with_leading_tool_results(request_kwargs: dict[str, Any]) -> 
 # or .zip attachment fails the whole request with HTTP 400 ("document.source.
 # base64.media_type: Input should be 'application/pdf'") on every tool round.
 # Agno also never checks inline media against the provider's request body limit
-# (Vertex rejects Claude requests over 30 MB, Bedrock over 20 MB).
+# (Vertex rejects Claude requests over 30 MB, Bedrock over 20 MB) or its per-image
+# limit (5 MB of base64 on Bedrock and Vertex, 10 MB on the direct API).
 # Upstream issue: No matching issue identified; unsupported Claude document types are untracked.
 # Upstream PR: None identified.
 # Remove when: The pinned Agno Claude formatter keeps files Claude cannot read
@@ -305,25 +307,33 @@ def request_kwargs_with_leading_tool_results(request_kwargs: dict[str, Any]) -> 
 # Coverage: tests/test_claude_inline_media.py::test_unsupported_documents_become_text_notes_while_pdf_stays_inline;
 # tests/test_claude_inline_media.py::test_vertex_claude_request_payload_describes_unsupported_documents;
 # tests/test_claude_inline_media.py::test_inline_media_past_the_request_size_budget_becomes_a_text_note;
-# tests/test_claude_inline_media.py::test_bedrock_uses_a_smaller_inline_media_budget_than_vertex.
+# tests/test_claude_inline_media.py::test_bedrock_uses_a_smaller_inline_media_budget_than_vertex;
+# tests/test_claude_inline_media.py::test_image_over_the_per_image_limit_becomes_a_text_note_on_bedrock_and_vertex;
+# tests/test_claude_inline_media.py::test_text_documents_count_toward_the_request_size_budget.
 _BASE64_DOCUMENT_MEDIA_TYPE = "application/pdf"
 # Vertex rejects Claude requests over 30 MB, the direct API over 32 MB, and
 # Bedrock over 20 MB. Leave room for the text, tools, and history around the
-# inline base64 media.
+# inline media.
 MAX_INLINE_MEDIA_BYTES = 24_000_000
 BEDROCK_MAX_INLINE_MEDIA_BYTES = 16_000_000
+# Claude rejects a base64 image over 10 MB on the direct API and over 5 MB on
+# Bedrock and Vertex ("image exceeds 5 MB maximum: ... bytes > 5242880 bytes").
+MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024
+PARTNER_MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 def request_kwargs_with_supported_inline_media(
     request_kwargs: dict[str, Any],
     *,
     max_inline_bytes: int,
+    max_image_bytes: int,
 ) -> dict[str, Any]:
     """Replace inline media Claude would reject with a short text note.
 
-    Base64 documents other than PDF are always replaced. Base64 images and PDFs
-    that would push the request's inline media past ``max_inline_bytes`` are
-    replaced too, keeping earlier blocks. The input structure is never mutated.
+    Base64 documents other than PDF and base64 images over ``max_image_bytes``
+    are always replaced. Images and documents that would push the request's
+    inline media past ``max_inline_bytes`` are replaced too, keeping earlier
+    blocks. The input structure is never mutated.
     """
     messages = request_kwargs.get("messages")
     if not isinstance(messages, list):
@@ -341,6 +351,7 @@ def request_kwargs_with_supported_inline_media(
             content,
             inline_bytes,
             max_inline_bytes,
+            max_image_bytes,
         )
         if prepared_content is None:
             continue
@@ -356,11 +367,12 @@ def _content_with_supported_inline_media(
     content: list[Any],
     inline_bytes: int,
     max_inline_bytes: int,
+    max_image_bytes: int,
 ) -> tuple[list[Any] | None, int]:
     """Return one turn's content with notes in place of rejected media, or None when unchanged."""
     prepared_content: list[Any] | None = None
     for block_index, block in enumerate(content):
-        note, inline_bytes = _inline_media_note(block, inline_bytes, max_inline_bytes)
+        note, inline_bytes = _inline_media_note(block, inline_bytes, max_inline_bytes, max_image_bytes)
         if note is None:
             continue
         if prepared_content is None:
@@ -373,17 +385,23 @@ def _inline_media_note(
     block: object,
     inline_bytes: int,
     max_inline_bytes: int,
+    max_image_bytes: int,
 ) -> tuple[dict[str, str] | None, int]:
-    """Return a note replacing one base64 media block, or the request's new inline byte total."""
+    """Return a note replacing one inline media block, or the request's new inline byte total."""
     block_dict = as_dict(block)
     source = as_dict(block_dict.get("source")) if block_dict is not None else None
-    if block_dict is None or source is None or source.get("type") != "base64":
+    source_type = source.get("type") if source is not None else None
+    if block_dict is None or source is None or source_type not in {"base64", "text"}:
         return None, inline_bytes
     kind = block_dict.get("type")
     media_type = source.get("media_type")
-    data_bytes = len(source.get("data") or "")
-    if kind == "document" and media_type != _BASE64_DOCUMENT_MEDIA_TYPE:
+    data = source.get("data") or ""
+    # The SDK sends text as escaped JSON, where a newline or quote takes two bytes.
+    data_bytes = len(json.dumps(data, ensure_ascii=False).encode()) if source_type == "text" else len(data)
+    if kind == "document" and source_type == "base64" and media_type != _BASE64_DOCUMENT_MEDIA_TYPE:
         reason = f"Claude reads only PDF and plain-text documents inline, not {media_type}"
+    elif kind == "image" and data_bytes > max_image_bytes:
+        reason = f"its {data_bytes / 1_000_000:.1f} MB inline payload exceeds the provider's per-image limit"
     elif inline_bytes + data_bytes > max_inline_bytes:
         reason = (
             f"its {data_bytes / 1_000_000:.1f} MB inline payload would push the request past the provider's size limit"

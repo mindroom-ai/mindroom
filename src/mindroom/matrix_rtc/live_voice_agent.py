@@ -5,14 +5,12 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-import traceback
 from collections import deque
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.logging_config import get_logger
-from mindroom.matrix_rtc.transcript import merge_spoken_turns
+from mindroom.logging_config import exception_frames, get_logger
+from mindroom.matrix_rtc.spoken_turns import merge_spoken_turns
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     LiveVoiceAgentOptions,
@@ -31,14 +29,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
 _EMPTY_DELEGATION_RESPONSE = "No response is available from the agent for this request."
-
-
-def _exception_frames(error: BaseException) -> list[str]:
-    """Retain stack locations without exception text, source lines, or locals."""
-    return [
-        f"{Path(frame.filename).name}:{frame.lineno} ({frame.name})"
-        for frame in traceback.extract_tb(error.__traceback__)
-    ]
 
 
 def _commentary_chunks(text: str) -> Iterator[str]:
@@ -148,7 +138,7 @@ class _LiveDelegationRunner:
                     "call_live_delegation_failed",
                     delegation_id=delegation.id,
                     error_type=type(error).__name__,
-                    traceback_frames=_exception_frames(error),
+                    traceback_frames=exception_frames(error),
                 )
                 if self._closed or generation != self._generation:
                     return
@@ -188,7 +178,7 @@ class _LiveDelegationRunner:
             logger.warning(
                 "call_live_delegation_delivery_failed",
                 error_type=type(error).__name__,
-                traceback_frames=_exception_frames(error),
+                traceback_frames=exception_frames(error),
             )
 
     def on_reconnected(self) -> None:
@@ -225,9 +215,7 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             self._exit_task: asyncio.Task[None] | None = None
             self._voice_started_at = time.time()
             self._voice_usage: dict[str, LiveVoiceUsage] = {}
-            self._failed_usage: dict[str, LiveVoiceUsage] = {}
             self._usage_tasks: set[asyncio.Task[None]] = set()
-            self._usage_lock = asyncio.Lock()
 
         async def on_enter(self) -> None:
             session = self.duplex_session
@@ -294,20 +282,10 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 finalized=event["type"] == "session.closed" or (previous is not None and previous.finalized),
             )
             self._voice_usage[session_id] = usage
-            task = asyncio.create_task(self._record_usage(usage))
+            # The call audio process only forwards usage to MindRoom, which retries failed saves.
+            task = asyncio.ensure_future(options.record_usage(usage))
             self._usage_tasks.add(task)
             task.add_done_callback(self._usage_tasks.discard)
-
-        async def _record_usage(self, usage: LiveVoiceUsage) -> None:
-            if options.record_usage is not None:
-                async with self._usage_lock:
-                    try:
-                        await options.record_usage(usage)
-                    except Exception as error:
-                        self._failed_usage[usage.provider_session_id] = usage
-                        logger.warning("call_live_usage_save_failed", error_type=type(error).__name__)
-                    else:
-                        self._failed_usage.pop(usage.provider_session_id, None)
 
         async def on_exit(self) -> None:
             self._exiting = True
@@ -331,10 +309,6 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 await asyncio.gather(self._provider_close_task, return_exceptions=True)
             if self._usage_tasks:
                 await asyncio.gather(*self._usage_tasks)
-            for usage in tuple(self._failed_usage.values()):
-                await self._record_usage(usage)
-            if self._failed_usage:
-                logger.error("call_live_usage_unpersisted", sessions=len(self._failed_usage))
 
     return LiveCallAgent()
 

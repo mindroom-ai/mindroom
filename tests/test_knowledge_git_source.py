@@ -2530,3 +2530,26 @@ async def test_git_refuses_a_knowledge_folder_swapped_for_a_link(tmp_path: Path)
 
     assert (victim / "doc.md").read_text(encoding="utf-8") == "victim-only note"
     assert sorted(path.name for path in victim.iterdir()) == ["doc.md"]
+
+
+@pytest.mark.asyncio
+async def test_git_never_runs_in_a_knowledge_folder_inside_a_shared_directory(tmp_path: Path) -> None:
+    """The owner's worker writes a shared directory, so it could swap the folder for a link while Git runs there."""
+    _remote_work, remote_bare = _committed_remote(tmp_path, "own content")
+    docs_path = tmp_path / "mindroom_data" / "shared_directories" / "alice" / "report" / "docs"
+    docs_path.mkdir(parents=True)
+    config = _git_docs_config(tmp_path, docs_path, remote_bare)
+    runtime_paths = runtime_paths_for(config)
+    source = GitKnowledgeSource(
+        base_id="docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        source_path=docs_path.resolve(),
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
+        lfs_hydrated_head_path=tmp_path / "lfs-head.txt",
+    )
+
+    with pytest.raises(RuntimeError, match="inside a shared directory"):
+        await source.sync()
+
+    assert list(docs_path.iterdir()) == []

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
@@ -61,6 +61,7 @@ __all__ = [
     "SandboxScriptControlRequest",
     "SandboxScriptRunRequest",
     "SandboxScriptRunResponse",
+    "SandboxScriptStatusRequest",
     "SandboxScriptStatusResponse",
     "cancel_script_in_worker",
     "prepare_script_worker_before_serving",
@@ -174,6 +175,14 @@ class SandboxScriptRunRequest(BaseModel):
     max_runtime_seconds: int = Field(gt=0, strict=True)
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
     config_snapshot: dict[str, Any] | None = None
+
+
+class SandboxScriptStatusRequest(BaseModel):
+    """Worker identity for a status poll, sent in the body because access logs record URLs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_key: str = Field(min_length=1, max_length=1024)
 
 
 class SandboxScriptControlRequest(BaseModel):
@@ -461,14 +470,14 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     return SandboxScriptRunResponse(ok=True)
 
 
-@router.get("/{run_id}", response_model=SandboxScriptStatusResponse)
+@router.post("/{run_id}/status", response_model=SandboxScriptStatusResponse)
 async def status_script_in_worker(
     request: Request,
     run_id: _RunId,
-    worker_key: Annotated[str, Query(min_length=1, max_length=1024)],
+    payload: SandboxScriptStatusRequest,
 ) -> SandboxScriptStatusResponse:
     """Poll one namespaced supervisor handle without owning lifecycle state."""
-    normalized_worker_key = _normalized_worker_key(request, worker_key)
+    normalized_worker_key = _normalized_worker_key(request, payload.worker_key)
     try:
         socket_path = await asyncio.to_thread(ensure_shell_supervisor)
     except ShellSupervisorStartupError as exc:

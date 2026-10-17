@@ -22,9 +22,8 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("kwargs", "name", "arguments"),
     [
-        ({"command": "echo hi"}, "run_shell_command", {"args": "echo hi", "timeout": 120, "tail": 100}),
-        ({"operation": "poll", "handle": "shell:a"}, "check_shell_command", {"handle": "shell:a"}),
-        ({"operation": "stop", "handle": "shell:a"}, "kill_shell_command", {"handle": "shell:a", "force": False}),
+        ({"command": "echo hi"}, "run_shell_command", {"args": "echo hi", "tail": 100}),
+        ({"command": "echo hi", "timeout": 5}, "run_shell_command", {"args": "echo hi", "tail": 100, "timeout": 5}),
     ],
 )
 async def test_facade_passes_effective_canonical_binding(
@@ -35,18 +34,11 @@ async def test_facade_passes_effective_canonical_binding(
 ) -> None:
     """Renaming presentation must not replace approval/hook names or arguments."""
 
-    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
+    async def run_shell_command(args: str, timeout: int | None = None, tail: int = 100) -> str:  # noqa: ASYNC109
         del timeout, tail
         return args
 
-    def check_shell_command(handle: str) -> str:
-        return handle
-
-    def kill_shell_command(handle: str, force: bool = False) -> str:
-        del force
-        return handle
-
-    source = Toolkit(name="shell", tools=[run_shell_command, check_shell_command, kill_shell_command])
+    source = Toolkit(name="shell", tools=[run_shell_command])
     catalog = await _catalog(tmp_path, [source])
     seen = []
     fc = FunctionCall(function=Function(name="bash"), call_id="real-provider-call")
@@ -87,10 +79,8 @@ async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -
     "kwargs",
     [
         {},
-        {"command": "x", "handle": "h"},
-        {"operation": "poll"},
-        {"operation": "stop", "command": "x", "handle": "h"},
-        {"operation": "other", "command": "x"},
+        {"command": ""},
+        {"command": "   "},
     ],
 )
 async def test_invalid_facade_shapes_fail_before_owner(kwargs: dict[str, Any]) -> None:
@@ -98,7 +88,7 @@ async def test_invalid_facade_shapes_fail_before_owner(kwargs: dict[str, Any]) -
         pytest.fail("invalid operation reached owner")
 
     facade = MinimalBashTools(execute=execute)
-    with pytest.raises(ValueError, match=r"requires|require|Unsupported"):
+    with pytest.raises(ValueError, match=r"^Bash requires a command$"):
         await facade.bash(**kwargs)
 
 

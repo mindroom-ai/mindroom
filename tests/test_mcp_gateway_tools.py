@@ -137,6 +137,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("approved_egress", "request_network_access"),
         ("attachments", "list_attachments"),
         ("callback_manager", "mint_callback"),
+        ("claude_agent", "claude_send"),
         ("dynamic_workflow", "list_workflows"),
         ("external_trigger_manager", "list_triggers"),
         ("matrix_api", "matrix_api"),
@@ -150,20 +151,20 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("usage_stats", "get_my_private_usage"),
     ],
 )
-async def test_room_runtime_tools_are_hidden_and_cannot_be_selected(
+async def test_room_and_conversation_tools_are_hidden_and_cannot_be_selected(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
     toolkit: str,
     function: str,
     deferred: bool,
 ) -> None:
-    """Room-dependent tools cannot be discovered or reached through direct gateway calls."""
+    """Tools that need a Matrix room or an agent conversation cannot be discovered or reached through the gateway."""
     config = context.config.model_copy(deep=True)
     config.agents["personal"].tools = ["calculator", ToolConfigEntry(name=toolkit, defer=deferred)]
     context = replace(context, config=config)
 
     def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Gateway constructed a room-dependent toolkit")
+        pytest.fail("Gateway constructed a toolkit that MCP calls cannot use")
 
     monkeypatch.setattr(agents, "build_agent_toolkit", forbidden)
     result = await gateway.search_tools(context)
@@ -175,6 +176,53 @@ async def test_room_runtime_tools_are_hidden_and_cannot_be_selected(
         await gateway.invoke_tool(context, toolkit=toolkit, function=function, arguments={}),
     ):
         assert response == {
+            "error": {"code": "tool_not_found", "message": "This tool is not assigned to the selected agent."},
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broker_on", [False, True])
+async def test_egress_credentials_is_offered_only_while_the_broker_is_on(tmp_path: Path, *, broker_on: bool) -> None:
+    """With the broker off an agent that lists the egress credentials tool does not offer it through the gateway."""
+    paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_CONNECTIONS_AGENT": "personal",
+            "MATRIX_HOMESERVER": "https://example.org",
+            **({"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}),
+        },
+    )
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "models": {"default": {"provider": "ollama", "id": "test-model"}},
+            "agents": {
+                "personal": {
+                    "display_name": "Personal assistant",
+                    "tools": ["calculator", "egress_credentials"],
+                    "private": {"per": "user_agent"},
+                    "access": {"users": ["@alice:example.org"]},
+                },
+            },
+        },
+        paths,
+    )
+    snapshot = ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config)
+    context = resolve_connection_agent(resolve_connection_user(snapshot, "@alice:example.org"), "personal")
+
+    searched = await gateway.search_tools(context)
+    schema = await gateway.get_tool(context, toolkit="egress_credentials", function="list_egress_credentials")
+
+    assert "error" not in searched
+    assert [item["toolkit"] for item in searched["results"]] == (
+        ["calculator", "egress_credentials"] if broker_on else ["calculator"]
+    )
+    if broker_on:
+        assert "error" not in schema
+        assert schema["function"] == "list_egress_credentials"
+    else:
+        assert schema == {
             "error": {"code": "tool_not_found", "message": "This tool is not assigned to the selected agent."},
         }
 

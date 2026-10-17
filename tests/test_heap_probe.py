@@ -13,11 +13,15 @@ from mindroom import heap_probe
 from mindroom.constants import RuntimePaths
 from mindroom.heap_probe import (
     _HEAP_PROBE_INTERVAL_ENV,
+    _HEAP_REFREEZE_INTERVAL_ENV,
     _heap_probe_interval_seconds,
+    _heap_refreeze_interval_seconds,
     _log_heap_type_probe,
+    _refreeze_runtime_heap,
+    _run_heap_refreeze,
     _run_heap_type_probe,
     freeze_startup_heap,
-    start_heap_type_probe,
+    start_heap_tasks,
 )
 
 
@@ -56,15 +60,143 @@ def test_interval_rejects_short_negative_nonfinite_or_non_numeric_values(raw: st
         _heap_probe_interval_seconds(_fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: raw}))
 
 
+async def _never_ready() -> None:
+    await asyncio.Event().wait()
+
+
 @pytest.mark.asyncio
-async def test_start_is_a_no_op_when_disabled() -> None:
-    """The default configuration starts no task at all."""
+async def test_start_is_a_no_op_when_both_heap_tasks_are_disabled() -> None:
+    """Disabling the refreeze and leaving the probe off starts no task at all."""
     tasks_before = asyncio.all_tasks()
 
-    assert start_heap_type_probe(_fake_runtime_paths()) is None
-    assert start_heap_type_probe(_fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: "0"})) is None
+    assert start_heap_tasks(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: "0"}), runtime_ready=_never_ready) == []
+    assert (
+        start_heap_tasks(
+            _fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: "0", _HEAP_PROBE_INTERVAL_ENV: "0"}),
+            runtime_ready=_never_ready,
+        )
+        == []
+    )
 
     assert asyncio.all_tasks() == tasks_before
+
+
+def test_refreeze_interval_defaults_to_one_hour_and_zero_disables_it() -> None:
+    """Unset and blank keep the hourly refreeze; zero disables it; other values are seconds."""
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths()) == 3600.0
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: " "})) == 3600.0
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: "0"})) is None
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: " 900.5 "})) == 900.5
+
+
+@pytest.mark.parametrize("raw", ["59.9", "-60", "inf", "nan", "hourly"])
+def test_refreeze_interval_rejects_short_negative_nonfinite_or_non_numeric_values(raw: str) -> None:
+    """A refreeze interval that is not 0 or at least one minute fails loudly instead of being clamped."""
+    with pytest.raises(ValueError, match=_HEAP_REFREEZE_INTERVAL_ENV):
+        _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: raw}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "env",
+    [
+        {_HEAP_REFREEZE_INTERVAL_ENV: "1", _HEAP_PROBE_INTERVAL_ENV: "60"},
+        {_HEAP_REFREEZE_INTERVAL_ENV: "60", _HEAP_PROBE_INTERVAL_ENV: "1"},
+    ],
+)
+async def test_an_invalid_interval_fails_before_any_heap_task_exists(env: dict[str, str]) -> None:
+    """Shutdown cannot cancel a task that startup created before failing, so validation comes first."""
+    tasks_before = asyncio.all_tasks()
+
+    with pytest.raises(ValueError, match="at least 60 seconds"):
+        start_heap_tasks(_fake_runtime_paths(**env), runtime_ready=_never_ready)
+
+    assert asyncio.all_tasks() == tasks_before
+
+
+def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replaced bots must be collectable again, and garbage must be gone before the survivors are frozen."""
+    gc_calls: list[str] = []
+    frozen = [12_000]
+
+    def unfreeze() -> None:
+        gc_calls.append("unfreeze")
+        frozen[0] = 0
+
+    def collect() -> int:
+        gc_calls.append("collect")
+        return 4_321
+
+    def freeze() -> None:
+        gc_calls.append("freeze")
+        frozen[0] = 3_000_000
+
+    fake_gc = SimpleNamespace(unfreeze=unfreeze, collect=collect, freeze=freeze, get_freeze_count=lambda: frozen[0])
+    monkeypatch.setattr(heap_probe, "gc", fake_gc)
+
+    with capture_logs() as logs:
+        _refreeze_runtime_heap()
+
+    assert gc_calls == ["unfreeze", "collect", "freeze"]
+    [record] = [entry for entry in logs if entry["event"] == "runtime_heap_refrozen"]
+    assert record["frozen_objects"] == 3_000_000
+    assert record["collected"] == 4_321
+    assert record["collect_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bots built during startup are frozen as soon as the runtime is ready, then again after each interval."""
+    steps: list[object] = []
+    ready = asyncio.Event()
+    parked = asyncio.Event()
+    monkeypatch.setattr(
+        heap_probe,
+        "gc",
+        SimpleNamespace(
+            unfreeze=lambda: steps.append("unfreeze"),
+            collect=lambda: 0,
+            freeze=lambda: steps.append("freeze"),
+            get_freeze_count=lambda: 0,
+        ),
+    )
+
+    async def _sleep(seconds: float) -> None:
+        steps.append(seconds)
+        if steps.count(seconds) == 2:
+            parked.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(_run_heap_refreeze(600.0, ready=ready.wait, sleep=_sleep))
+    await asyncio.sleep(0)
+    assert steps == []
+
+    ready.set()
+    await asyncio.wait_for(parked.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert steps == ["unfreeze", "freeze", 600.0, "unfreeze", "freeze", 600.0]
+
+
+@pytest.mark.asyncio
+async def test_default_start_runs_only_the_named_refreeze_task() -> None:
+    """Without a probe interval the primary gets the refreeze task alone, and shutdown can cancel it."""
+    with capture_logs() as logs:
+        tasks = start_heap_tasks(_fake_runtime_paths(), runtime_ready=_never_ready)
+        assert [task.get_name() for task in tasks] == ["heap_refreeze"]
+        await asyncio.sleep(0)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert all(task.cancelled() for task in tasks)
+    [started] = [entry for entry in logs if entry["event"] == "heap_refreeze_started"]
+    assert started["interval_seconds"] == 3600.0
+    assert [entry for entry in logs if entry["event"] == "runtime_heap_refrozen"] == []
 
 
 def test_probe_logs_bounded_type_histogram_and_rss(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,8 +282,10 @@ async def test_probe_task_logs_once_per_interval_and_stops_on_cancel(monkeypatch
 async def test_start_helper_returns_named_task_that_cancels_cleanly() -> None:
     """An opted-in primary gets one named background task that shutdown can cancel before any walk."""
     with capture_logs() as logs:
-        task = start_heap_type_probe(_fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: "60"}))
-        assert task is not None
+        [task] = start_heap_tasks(
+            _fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: "60", _HEAP_REFREEZE_INTERVAL_ENV: "0"}),
+            runtime_ready=_never_ready,
+        )
         assert task.get_name() == "heap_type_probe"
         await asyncio.sleep(0)
         task.cancel()

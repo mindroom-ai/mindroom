@@ -16,7 +16,6 @@ from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.projection import register_cli_media
 from mindroom.approval.tool_owners import validate_approval_tool_owners
-from mindroom.constants import MID_TURN_GENERATION_METADATA_KEY
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.history.interrupted_replay import (
@@ -71,14 +70,6 @@ class CliFollowUpTurn:
     initial_continuation_count: int
     delegation_depth: int
     media: MediaInputs
-
-
-def _folded_tool_call_ids(persisted: RunOutput) -> set[str]:
-    """Return the run's provider calls a mid-turn fold summarized out of its messages."""
-    if MID_TURN_GENERATION_METADATA_KEY not in (persisted.metadata or {}):
-        return set()
-    held = {call.get("id") for message in persisted.messages or [] for call in message.tool_calls or []}
-    return {tool.tool_call_id for tool in persisted.tools or [] if tool.tool_call_id and tool.tool_call_id not in held}
 
 
 async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed recovery attempt
@@ -346,8 +337,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         interrupted_tools=interrupted_trace,
         run_metadata=persisted.metadata,
         response_event_id=continuation.response_event_id,
-        # Calls the fold summarized stay out, including ones the paused presentation trace restored above.
-        folded_tool_call_ids=_folded_tool_call_ids(persisted),
     )
     await save_cli_session(
         agent,

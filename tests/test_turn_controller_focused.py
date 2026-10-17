@@ -4,8 +4,7 @@ These tests construct ``TurnController`` directly from ``TurnControllerDeps`` â€
 no ``AgentBot``/orchestrator boot â€” with real ``TurnPolicy``, ``ConversationResolver``,
 ``TurnStore`` (disk-backed ledger), and ``CoalescingGate`` collaborators, and typed
 recording fakes only at the execution and delivery seams (``ResponseRunner``,
-``DeliveryGateway``). They pin the turn contract from
-``docs/architecture/bot-runtime.md``: precheck filtering (via ``IngressValidator``),
+``DeliveryGateway``). They pin the turn contract: precheck filtering (via ``IngressValidator``),
 replay-guard rejection, policy decision routing, ingress-level command dispatch
 with terminal TurnStore outcomes (commands are control inputs that never enter
 the coalescing gate), durable dedup across restarts, and the controller-owned
@@ -868,6 +867,8 @@ def _obligation_runner(
             source_has_live_owner=harness.gate.has_pending_source_event,
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,
             replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
         schedule_trigger_sender_is_managed=lambda sender: sender == principal_id,
@@ -5480,17 +5481,18 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
     )
     reached, release = asyncio.Event(), asyncio.Event()
     first = True
+    plan_turn = TurnPolicy.plan_turn
 
-    async def hold_after_strict_authorization(_client: nio.AsyncClient, _room_id: str) -> bool:
+    async def hold_after_strict_authorization(policy: TurnPolicy, *args: object, **kwargs: object) -> object:
         nonlocal first
         if first:
             first = False
             assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
             reached.set()
             await release.wait()
-        return False
+        return await plan_turn(policy, *args, **kwargs)
 
-    monkeypatch.setattr("mindroom.text_ingress_dispatch.is_dm_room", hold_after_strict_authorization)
+    monkeypatch.setattr(TurnPolicy, "plan_turn", hold_after_strict_authorization)
     await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     try:
         await dispatcher.drain_once()

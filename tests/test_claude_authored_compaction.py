@@ -14,7 +14,7 @@ from anthropic import AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
 
-from mindroom.history.native import _restore_native_history
+from mindroom.history.native import restore_native_history
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
@@ -33,7 +33,8 @@ async def test_authored_checkpoint_replays_after_rebuild_without_foreign_checkpo
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json=_response([_CHECKPOINT, _TEXT]))
+        body = {"input_tokens": 100} if len(requests) == 3 else _response([_CHECKPOINT, _TEXT])
+        return httpx.Response(200, json=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         client = (
@@ -69,6 +70,16 @@ async def test_authored_checkpoint_replays_after_rebuild_without_foreign_checkpo
         )
         rebuilt = model_type(id="claude-sonnet-5", async_client=client, betas=["compact-2026-01-12"], **kwargs)
         await rebuilt.ainvoke(messages, Message(role="assistant"))
+        if vertex:
+            assert (
+                await rebuilt._count_request_input_tokens(
+                    messages,
+                    tools=None,
+                    response_format=None,
+                    compress_tool_results=False,
+                )
+                == 100
+            )
 
     assert requests[0]["context_management"] == _POLICY
     assert "Foreign model summary" not in json.dumps(requests[0]["messages"])
@@ -76,6 +87,10 @@ async def test_authored_checkpoint_replays_after_rebuild_without_foreign_checkpo
     blocks = [block for message in requests[1]["messages"] for block in message["content"]]
     assert _CHECKPOINT in blocks
     assert foreign_block not in blocks
+    if vertex:
+        assert "context_management" not in requests[2]
+        assert "Launch port 4321." in json.dumps(requests[2]["messages"])
+        assert "Foreign model summary" not in json.dumps(requests[2]["messages"])
     assert rebuilt.native_compaction is not None
     assert rebuilt.native_compaction.threshold is None
 
@@ -105,7 +120,7 @@ def test_authored_approval_restore_requires_compatible_saved_policy(change: str)
     )
     if change == "summary":
         session.summary = SessionSummary(summary="New portable summary")
-    _restore_native_history(rebuilt, persisted_run=run, session=session)
+    restore_native_history(rebuilt, persisted_run=run, session=session)
     if change == "none":
         assert rebuilt.native_compaction is not None
         assert rebuilt.native_compaction.threshold is None

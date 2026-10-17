@@ -156,7 +156,7 @@ async def test_chunk_events_report_actual_sizing_strategy(
 async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
     summary_inputs: list[str] = []
 
     async def fail_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -191,7 +191,7 @@ async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
 async def test_no_run_fit_warning_uses_token_budget_field(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock()),

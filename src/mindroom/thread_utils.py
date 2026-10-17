@@ -189,12 +189,12 @@ def has_multiple_non_agent_users_in_thread(
     Senders that are MindRoom agents or listed in ``config.bot_accounts`` are
     excluded from the count. Human bridge aliases count as their canonical
     identity, without changing the original message sender.
+    Each distinct sender is classified once: long threads repeat a few
+    senders, and classifying one is far costlier than reading a message.
     """
     non_agent_senders: set[str] = set()
-    if current_sender_id and is_human_requester_id(current_sender_id, config, runtime_paths):
-        non_agent_senders.add(resolve_human_requester_alias(current_sender_id, config, runtime_paths))
-    for msg in thread_history:
-        sender = msg.sender
+    senders = dict.fromkeys([current_sender_id, *(msg.sender for msg in thread_history)])
+    for sender in senders:
         if sender and is_human_requester_id(sender, config, runtime_paths):
             non_agent_senders.add(resolve_human_requester_alias(sender, config, runtime_paths))
             if len(non_agent_senders) > 1:

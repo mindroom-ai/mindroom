@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
 from dataclasses import FrozenInstanceError, dataclass, field, replace
@@ -1755,6 +1756,50 @@ def test_current_codec_rejects_incomplete_ledger_records() -> None:
         )
         is None
     )
+
+
+def _gc_tracked_objects_reachable_from(root: object) -> int:
+    """Count the collector-tracked objects a value keeps alive, excluding classes and their modules."""
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen or isinstance(current, type) or not gc.is_tracked(current):
+            continue
+        seen.add(id(current))
+        pending.extend(gc.get_referents(current))
+    return len(seen)
+
+
+def _decoded_revision_replay(entry_count: int) -> Mapping[str, RevisionReplay]:
+    """Round-trip one record with ``entry_count`` replay entries through the ledger codec."""
+    replay = {
+        f"$edit-{index}": RevisionReplay("$event", 1_000 + index, response_event_id="$response")
+        for index in range(entry_count)
+    }
+    record = TurnRecord.create(
+        ["$event"],
+        anchor_event_id="$event",
+        response_event_id="$response",
+        revision_replay=replay,
+    )
+    loaded = TurnRecordCodec._from_ledger_record(
+        "$event",
+        json.loads(json.dumps(TurnRecordCodec._to_ledger_record(record))),
+    )
+    assert loaded is not None
+    assert loaded.revision_replay is not None
+    assert dict(loaded.revision_replay) == replay
+    return loaded.revision_replay
+
+
+def test_decoded_revision_replay_does_not_track_one_object_per_entry() -> None:
+    """The ledger keeps every record for the process lifetime, so full collections must not walk each entry."""
+    one_entry = _decoded_revision_replay(1)
+    many_entries = _decoded_revision_replay(40)
+    gc.collect()
+
+    assert _gc_tracked_objects_reachable_from(many_entries) == _gc_tracked_objects_reachable_from(one_entry)
 
 
 @pytest.mark.asyncio

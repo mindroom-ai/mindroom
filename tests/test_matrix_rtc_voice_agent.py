@@ -20,9 +20,9 @@ from livekit.agents.voice import io as agents_io
 from openai import AsyncOpenAI
 from structlog.testing import capture_logs
 
-from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
+    CallAgentResponse,
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
     RealtimeCallUsage,

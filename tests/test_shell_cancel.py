@@ -14,8 +14,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.shell import execution as shell_execution
+from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tools.shell import _process_registry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -112,15 +113,38 @@ async def _stop_recorded_child(pid: int, stop_file: Path) -> None:
     await _assert_pid_dead(pid)
 
 
-@pytest.fixture(autouse=True)
-def clear_process_registry() -> Iterator[None]:
-    """Ensure subprocess registry state does not leak between tests."""
-    _process_registry.clear()
-    yield
-    for record in list(_process_registry.values()):
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(record.pid, signal.SIGKILL)
-    _process_registry.clear()
+@pytest.fixture
+def registry() -> Iterator[dict[str, ProcessRecord]]:
+    """Kill anything a failing background test leaves registered."""
+    records: dict[str, ProcessRecord] = {}
+    yield records
+    kill_all_records(records)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_cancelled_during_its_grace_still_kills_what_ignored_sigterm(tmp_path: Path) -> None:
+    """A stop that is itself cancelled while waiting out SIGTERM still kills a process that ignored it."""
+    pid_file = tmp_path / "member.pid"
+    process = await asyncio.create_subprocess_exec(
+        "bash",
+        "-c",
+        '(trap "" TERM; echo "$BASHPID" > "$1"; exec tail -f /dev/null) & wait',
+        "bash",
+        str(pid_file),
+        start_new_session=True,
+    )
+    member = await _wait_for_pid(pid_file)
+    try:
+        stopping = asyncio.create_task(shell_execution._terminate_process_group(process, grace_period=30))
+        # The leader dies of SIGTERM while its member ignores it and keeps the group alive.
+        await asyncio.wait_for(process.wait(), timeout=10)
+        stopping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        await _assert_pid_dead(member)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(member, signal.SIGKILL)
 
 
 @pytest.mark.asyncio
@@ -153,7 +177,6 @@ async def test_run_shell_command_cancellation_kills_subprocess(tmp_path: Path) -
     await _assert_pid_dead(pid)
     killpg_mock.assert_called()
     assert elapsed < 2.0
-    assert _process_registry == {}
 
 
 @pytest.mark.asyncio
@@ -186,13 +209,14 @@ async def test_run_shell_command_cancellation_cleans_up_reader_tasks(tmp_path: P
         await task
 
     await _assert_pid_dead(pid)
-    assert _process_registry == {}
 
 
 @pytest.mark.asyncio
-async def test_run_shell_command_cancellation_cleans_up_background_handle(tmp_path: Path) -> None:
-    """Cancellation after timeout backgrounding should drop the unusable handle."""
-    run_shell_command = _get_run_shell_command(tmp_path)
+async def test_cancellation_after_backgrounding_drops_the_undeliverable_handle(
+    tmp_path: Path,
+    registry: dict[str, ProcessRecord],
+) -> None:
+    """A background run cancelled while its handle is being registered kills the command and drops the handle."""
     pid_file = tmp_path / "background.pid"
     command = [
         sys.executable,
@@ -217,10 +241,20 @@ async def test_run_shell_command_cancellation_cleans_up_background_handle(tmp_pa
         await real_sleep(delay)
 
     with patch("mindroom.shell.execution.asyncio.sleep", new=controlled_sleep):
-        task = asyncio.create_task(run_shell_command(command, timeout=0))
+        task = asyncio.create_task(
+            run_command(
+                registry,
+                namespace="test",
+                argv=command,
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=100,
+                timeout=0,
+            ),
+        )
         pid = await _wait_for_pid(pid_file)
         await background_registered.wait()
-        assert len(_process_registry) == 1
+        assert len(registry) == 1
 
         task.cancel()
         release_background_sleep.set()
@@ -228,7 +262,6 @@ async def test_run_shell_command_cancellation_cleans_up_background_handle(tmp_pa
             await task
 
     await _assert_pid_dead(pid)
-    assert _process_registry == {}
 
 
 @pytest.mark.asyncio
@@ -277,4 +310,3 @@ async def test_run_shell_command_cancellation_after_foreground_exit_does_not_ter
                     await task
 
     terminate_process_group.assert_not_awaited()
-    assert _process_registry == {}

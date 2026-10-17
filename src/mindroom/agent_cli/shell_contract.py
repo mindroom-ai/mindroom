@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal, get_args
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-_ShellOperationName = Literal["run_shell_command", "check_shell_command", "kill_shell_command"]
+_ShellOperationName = Literal["run_shell_command"]
 SHELL_OPERATION_NAMES: tuple[_ShellOperationName, ...] = get_args(_ShellOperationName)
 AGENT_CLI_URL_ENV = "MINDROOM_AGENT_CLI_URL"
 AGENT_CLI_TOKEN_ENV = "MINDROOM_AGENT_CLI_TOKEN"  # noqa: S105 - environment variable name

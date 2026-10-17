@@ -56,6 +56,7 @@ import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.scheduling.tasks as scheduling_module
+import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ResponseTurnContext
 from mindroom.authorization import _ReplyAuthorizationDecision
@@ -151,6 +152,7 @@ from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -1837,7 +1839,7 @@ class DiesAfterAcknowledgement:
         )
 
 
-# Drops contract 2's journal handoff, for tests that are not about it. Named
+# Drops the outbox-enqueue journal handoff, for tests that are not about it. Named
 # rather than a bare lambda so a reader can see that the handoff was
 # deliberately stubbed here, not forgotten. Tests that care what the handoff
 # settles use a real journal store instead.
@@ -2926,6 +2928,12 @@ def build_private_template_dir(tmp_path: Path) -> Callable[..., Path]:
     return _build
 
 
+@pytest.fixture
+def test_ca_pem() -> str:
+    """Return a valid test CA certificate in PEM format."""
+    return make_test_ca_pem()
+
+
 @pytest_asyncio.fixture
 async def aioresponse() -> AsyncGenerator[aioresponses, None]:
     """Async fixture for mocking HTTP responses in tests."""
@@ -2972,7 +2980,7 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     Tests use ':localhost' Matrix IDs and non-namespaced localparts unless they
     explicitly opt into a different runtime context.
     """
-    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+    monkeypatch.setenv("MATRIX_HOMESERVER", "http://localhost:8008")
     monkeypatch.delenv("MATRIX_SERVER_NAME", raising=False)
     monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
@@ -3069,6 +3077,12 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Separate each test's pinned instances; tests still own shutdown of live resources."""
+    monkeypatch.setattr(tool_jobs_instances, "_instances", {})
 
 
 @pytest.fixture(autouse=True)
@@ -3249,7 +3263,7 @@ def enforce_turn_authorization() -> None:
 def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", session: SessionT) -> SessionT:
     """Persist a session row and every run it holds, in order, and return the session.
 
-    Production code writes runs explicitly (``save_runs``/``replace_runs``);
+    Production code writes runs explicitly (``save_runs``/``delete_runs``);
     tests seed whole histories with this instead.
     """
     storage.upsert_session(session)

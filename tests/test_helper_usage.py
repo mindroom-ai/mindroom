@@ -7,16 +7,19 @@ import json
 import threading
 from dataclasses import dataclass, field, replace
 from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
-from agno.metrics import MessageMetrics, RunMetrics
+from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools.calculator import CalculatorTools
+from openai.types import CompletionUsage
 
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agents import create_agent
@@ -36,6 +39,7 @@ from mindroom.history.session_context import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session, get_team_session
@@ -355,6 +359,78 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 22
     assert sum(row.run_count for row in report.model_breakdown) == 0
+
+
+@pytest.mark.asyncio
+async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -> None:
+    """Each Mem0 extraction call is one request row, so the conversation's request detail stays complete."""
+    run = _completed_run("ordinary")
+    run.user_id = "@user:localhost"
+    run.model = "reply-model"
+    run.model_provider = "test-provider"
+    run.metrics = RunMetrics(
+        input_tokens=7,
+        output_tokens=3,
+        total_tokens=10,
+        details={
+            "model": [
+                ModelMetrics(
+                    id="reply-model",
+                    provider="test-provider",
+                    input_tokens=7,
+                    output_tokens=3,
+                    total_tokens=10,
+                ),
+            ],
+        },
+    )
+    for message in run.messages or []:
+        if message.role == "assistant":
+            message.metrics = MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+            message.created_at = 1_790_000_000
+            message.provider_data = {"mindroom_model": {"id": "reply-model", "provider": "test-provider"}}
+    session = _session("session", runs=[run])
+    session.user_id = "@user:localhost"
+    session.session_data = {"session_metrics": run.metrics.to_dict()}
+    config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
+    usage = CompletionUsage(prompt_tokens=120, completion_tokens=30, total_tokens=150)
+    create = MagicMock(return_value=SimpleNamespace(usage=usage))
+    llm = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-6-luna"),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+    )
+    install_mem0_usage_capture(llm, "openai")
+    try:
+        with counted_mem0_usage() as calls:
+            llm.client.chat.completions.create()
+            llm.client.chat.completions.create()
+        extraction = mem0_usage_run(calls)
+        assert extraction is not None
+        await record_helper_usage(
+            extraction,
+            owner=HelperUsageOwner(
+                storage_factory=partial(create_session_storage, "test_agent", config, paths, execution_identity=None),
+                session_id="session",
+            ),
+            invocation_id=extraction.run_id or "",
+            kind="memory_extraction",
+            requester_id="@user:localhost",
+        )
+
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert report.totals.total_tokens == 310
+        assert report.request_breakdown is not None
+        assert [
+            (row.kind, row.model_provider, row.model, row.totals.total_tokens) for row in report.request_breakdown
+        ] == [
+            ("run", "test-provider", "reply-model", 10),
+            ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
+            ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
+        ]
+        assert report.request_coverage is not None
+        assert report.request_coverage.unavailable_sources == 0
+    finally:
+        storage.close()
 
 
 @pytest.mark.asyncio

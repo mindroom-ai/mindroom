@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
+    from agno.tools.function import Function
+
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.event_journal import (
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "JOB_APPROVAL_TYPE",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "BackgroundScriptToolOrigin",
@@ -48,6 +51,7 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "approval_gated",
     "arm_scheduled_call_approval",
     "claim_scheduled_call",
     "evaluate_tool_approval",
@@ -65,6 +69,8 @@ __all__ = [
 
 # Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
+# A policy-gated call whose approval is the first phase of the background job it runs as, instead of a paused run.
+JOB_APPROVAL_TYPE = "mindroom_job"
 # The terminal card edit carries the reason twice, and nio encrypts it as ASCII-escaped JSON that base64 grows by 4/3.
 # Escaping turns one emoji into 12 bytes, so the reply is bounded by escaped size to keep the edit below the event limit.
 _MAX_RESOLUTION_REASON_JSON_BYTES = 2000
@@ -173,6 +179,11 @@ def _clear_script_cache() -> None:
 
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+
+
+def approval_gated(function: Function) -> bool:
+    """Return whether a call waits for a human decision, by pausing its run or as the first phase of its job."""
+    return bool(function.requires_confirmation or function.approval_type == JOB_APPROVAL_TYPE)
 
 
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:

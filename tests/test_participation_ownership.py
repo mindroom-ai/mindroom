@@ -23,9 +23,9 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.participation import ParticipationGate
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.claude_prompt_cache import (
-    _prepare_claude_request_kwargs,
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
+    prepare_claude_request_kwargs,
 )
 from mindroom.providers.synthetic_model import SyntheticModel
 
@@ -127,7 +127,7 @@ async def test_claude_wire_payload_preserves_prefix_with_transient_context() -> 
         async def ainvoke(self, messages: list[Message], *_args: object, **kwargs: object) -> ModelResponse:
             formatted, system = format_messages(messages)
             requests.append(
-                _prepare_claude_request_kwargs(
+                prepare_claude_request_kwargs(
                     self,
                     {
                         "messages": formatted,

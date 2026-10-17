@@ -177,6 +177,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 
 - **Persistent memory** — agents remember people, preferences, and context across conversations and platforms (Mem0 + ChromaDB, stored on your disk).
 - **Automatic skill learning** — opt-in background reviews turn work an agent repeats into a small library of reusable skills, following the self-improvement loop of Hermes Agent ([Skills](https://docs.mindroom.chat/skills/#automatic-skill-learning)).
+- **Automatic knowledge graph** — an agent you opt in gets a [Graphiti](https://github.com/getzep/graphiti) graph of the people, projects, and documents its conversations and tool results reveal, with when each fact held and where it came from, and a scheduled `exploration` can have it read the sources its tools and MCP servers reach to fill the graph in ([Knowledge Graph](https://docs.mindroom.chat/knowledge-graph/)).
 - **Knowledge bases (RAG)** — point an agent at a folder or Git repository; MindRoom indexes it and can watch it for changes ([Knowledge Bases](https://docs.mindroom.chat/knowledge/)).
 
 **Tools and computers**
@@ -317,7 +318,7 @@ To work on MindRoom itself, run it from a checkout.
 <details>
 <summary><b>Run from source</b></summary>
 
-Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
+Requires Python 3.12–3.14 and [uv](https://github.com/astral-sh/uv).
 For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
 The repository dev shell provides Node.js 24 and Bun.
 
@@ -390,6 +391,8 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
+- `!jobs` - List the background jobs running here
+- `!cancel_job <id|all>` - Cancel a background job, or all of them here
 - `!config <operation>` - Manage configuration
 - `!desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
 - `!mode <agent> minimal|standard|show|reset` - Switch one agent between standard tools and a Bash-only interface

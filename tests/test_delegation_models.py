@@ -20,10 +20,9 @@ from mindroom.delegation.execution import drive_delegations
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,8 +59,6 @@ async def test_subagent_model_selection(
         paths,
         thread_id="$thread",
         model_name="default",
-        room_id="!room:example.org",
-        set_by="@alice:example.org",
         entity_names=("leader", "worker"),
         config=config,
     )

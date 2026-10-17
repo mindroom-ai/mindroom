@@ -20,7 +20,6 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agno_compat_model_hooks import install_tool_result_callback
-from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
@@ -113,6 +112,7 @@ def stream_attempt_with_model[ChunkT](
     )
 
 
+_QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER = "persisted"
 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
@@ -201,7 +201,7 @@ def bind_mid_turn_conversation_context(
 
 def _has_queued_notice_marker(message: Message) -> bool:
     provider_data = message.provider_data
-    return isinstance(provider_data, dict) and provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
+    return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
         True,
         _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
     )
@@ -211,7 +211,7 @@ def _queued_notice_marker(message: Message) -> bool | str | None:
     provider_data = message.provider_data
     if not isinstance(provider_data, dict):
         return None
-    marker = provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
+    marker = provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY)
     return marker if marker in (True, _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER) else None
 
 
@@ -282,7 +282,7 @@ def _append_queued_notice_if_needed(
             role="user",
             content=notice_text,
             provider_data={
-                QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
+                _QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
                 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
             },
         ),
@@ -340,26 +340,15 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
     context = _queued_message_notice_context.get()
     if context is None or context.mid_turn_gate is None or context.state is None:
         return
-    pending = context.state.pending_message_snapshot()
+    state = context.state
+    pending = state.pending_message_snapshot()
     if not pending:
         return
-    if not context.notice_fired:
-        try:
-            finish = await context.mid_turn_gate.should_finish(pending)
-        except Exception:
-            # Agno logs and ignores post-tool callback failures, so restore the default here.
-            finish = False
-        if finish and not context.notice_fired and pending == context.state.pending_message_snapshot():
-            for message in pending:
-                if context.notice_fired or pending != context.state.pending_message_snapshot():
-                    break
-                try:
-                    await context.mid_turn_gate.acknowledge_deferred(message)
-                except Exception:
-                    logger.warning("mid_turn_reaction_failed")
-            # Matrix delivery can yield to a newer correction or a concurrent handoff.
-            if not context.notice_fired and pending == context.state.pending_message_snapshot():
-                return
+    if not context.notice_fired and await context.mid_turn_gate.defers(
+        pending,
+        current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
+    ):
+        return
     _append_queued_notice_if_needed(messages=messages, function_call_results=(), notice_text=notice_text, judged=True)
 
 
@@ -459,7 +448,7 @@ def _new_persisted_queued_notice(response_turn_id: str, notice_text: str) -> Mes
         role="user",
         content=notice_text,
         provider_data={
-            QUEUED_MESSAGE_NOTICE_MARKER_KEY: _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+            _QUEUED_MESSAGE_NOTICE_MARKER_KEY: _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
             _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
         },
     )

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
 import sys
+import tempfile
 import textwrap
+import threading
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +29,7 @@ from mindroom.tool_system.dependencies import (
     auto_install_optional_extra_for_import_retry,
     check_deps_installed,
     install_command_for_current_python,
+    optional_dependency_environment,
 )
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -588,3 +593,197 @@ def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: p
     assert _install_optional_extras(["wikipedia"], quiet=True)
     assert calls["sync"] == 0
     assert calls["env"] == 1
+
+
+_DEPENDENCY_PROCESS_SCRIPT = """
+import importlib.metadata
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+from mindroom.tool_system import dependencies
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+sys.prefix = str(root)
+sys.path.insert(0, str(root))
+receipt = root / 'uv-receipt.toml'
+info = root / 'transient_embedding-1.dist-info'
+
+
+def install(extras, *, quiet):
+    if mode == 'writer':
+        info.mkdir()
+        (info / 'top_level.txt').write_text('transient_embedding\\n')
+        print('installing', flush=True)
+        assert sys.stdin.readline().strip() == 'publish'
+        (info / 'METADATA').write_text('Metadata-Version: 2.1\\nName: transient-embedding\\nVersion: 1\\n')
+    receipt.write_text('[tool]\\nrequirements = [{ name = "mindroom", extras = ' + json.dumps(extras) + ' }]\\n')
+    return True
+
+
+dependencies._install_via_uv_tool = install
+if mode == 'reader':
+    from mindroom.embeddings import signatures
+    from mindroom.constants import resolve_primary_runtime_paths
+
+    class Embedder:
+        def __init__(self, **kwargs):
+            for name in importlib.metadata.packages_distributions()['transient_embedding']:
+                assert importlib.metadata.version(name) == '1'
+            self.sentence_transformer_client = object()
+
+    signatures.ensure_sentence_transformers_dependencies = lambda paths: None
+    signatures._serialized_sentence_transformers_class = lambda: Embedder
+    paths = resolve_primary_runtime_paths(config_path=root / 'other-runtime' / 'config.yaml', process_env={})
+    print('ready', flush=True)
+    signatures.create_sentence_transformers_embedder(paths)
+    print('imported complete metadata', flush=True)
+elif mode == 'mem0_reader':
+    import asyncio
+    from types import ModuleType, SimpleNamespace
+    from mindroom.config.main import Config
+    from mindroom.constants import resolve_primary_runtime_paths
+    from mindroom.memory import config as memory_config
+
+    class Memory:
+        vector_store = object()
+        llm = SimpleNamespace(config=SimpleNamespace(model='gemma4'), client=SimpleNamespace(chat=lambda **_: None))
+
+        @classmethod
+        def from_config(cls, config):
+            for name in importlib.metadata.packages_distributions()['transient_embedding']:
+                assert importlib.metadata.version(name) == '1'
+            return cls()
+
+    mem0 = ModuleType('mem0')
+    mem0.AsyncMemory = Memory
+    sys.modules['mem0'] = mem0
+    memory_config.ensure_sentence_transformers_dependencies = lambda paths: None
+    memory_config._install_chroma_similarity_scores = lambda store: None
+    config = Config()
+    config.memory.embedder.provider = 'sentence_transformers'
+    config.memory.llm = None
+    paths = resolve_primary_runtime_paths(config_path=root / 'mem0-runtime' / 'config.yaml', process_env={})
+    print('ready', flush=True)
+    asyncio.run(memory_config.create_memory_instance(root / 'memory', config, paths))
+    print('imported complete metadata', flush=True)
+else:
+    if mode != 'writer':
+        print('ready', flush=True)
+    assert dependencies._install_optional_extras(['duckduckgo' if mode == 'writer' else 'browser'], quiet=True)
+    print('installed', flush=True)
+"""
+
+
+def _dependency_process_line(process: subprocess.Popen[str]) -> str:
+    assert process.stdout is not None
+    lines: queue.Queue[str] = queue.Queue()
+    threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
+    return lines.get(timeout=20).strip()
+
+
+@pytest.mark.parametrize("contender", ["reader", "mem0_reader", "installer"])
+def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
+    """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (environment / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "mindroom", extras = ["website"] }]\n',
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(environment), "writer"],
+        env={**os.environ, "HOME": str(tmp_path), "TMPDIR": str(scratch)},
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    reader: subprocess.Popen[str] | None = None
+    try:
+        assert writer.stdout is not None
+        assert writer.stdin is not None
+        assert _dependency_process_line(writer) == "installing"
+        reader = subprocess.Popen(
+            [sys.executable, "-u", "-c", textwrap.dedent(_DEPENDENCY_PROCESS_SCRIPT), str(environment), contender],
+            env={**os.environ, "HOME": str(tmp_path), "TMPDIR": str(scratch)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert reader.stdout is not None
+        assert _dependency_process_line(reader) == "ready"
+        # A contender has reached its dependency operation while the writer's
+        # dist-info directory deliberately has no METADATA yet.
+        with pytest.raises(subprocess.TimeoutExpired):
+            reader.wait(timeout=0.3)
+        writer.stdin.write("publish\n")
+        writer.stdin.flush()
+        writer_output, writer_error = writer.communicate(timeout=20)
+        assert writer.returncode == 0, writer_error
+        assert "installed" in writer_output
+        reader_output, reader_error = reader.communicate(timeout=20)
+        assert reader.returncode == 0, reader_error
+        expected = "installed" if contender == "installer" else "imported complete metadata"
+        assert expected in reader_output
+        extras = tomllib.loads((environment / "uv-receipt.toml").read_text())["tool"]["requirements"][0]["extras"]
+        assert set(extras) == (
+            {"duckduckgo", "website"} if contender != "installer" else {"browser", "duckduckgo", "website"}
+        )
+    finally:
+        for process in (writer, reader):
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=20)
+
+
+def test_unrelated_tool_constructors_run_in_parallel() -> None:
+    """Deferred tool builds remain concurrent while sharing the dependency read lock."""
+    tool_name = "test_parallel_optional_tool"
+    rendezvous = threading.Barrier(2)
+
+    class DummyToolkit:
+        name = tool_name
+
+        def __init__(self) -> None:
+            rendezvous.wait(timeout=10)
+
+    TOOL_REGISTRY[tool_name] = lambda: DummyToolkit
+    TOOL_METADATA[tool_name] = ToolMetadata(
+        name=tool_name,
+        file_access=ToolFileAccess.NONE,
+        display_name="Parallel Test Tool",
+        description="Temporary constructor concurrency test",
+        category=ToolCategory.DEVELOPMENT,
+        status=ToolStatus.AVAILABLE,
+        setup_type=SetupType.NONE,
+        config_fields=[],
+        dependencies=[],
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tools = list(
+                pool.map(lambda _: get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None), range(2)),
+            )
+        assert all(isinstance(tool, DummyToolkit) for tool in tools)
+    finally:
+        TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows temporary directories are per user")
+def test_optional_dependency_lock_directory_must_be_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Other local users cannot share or plant this user's lock directory."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    lock_dir = tmp_path / f"mindroom-optional-dependencies-{os.getuid()}"
+    lock_dir.mkdir()
+    lock_dir.chmod(0o755)
+    with pytest.raises(PermissionError, match="only the current user"), optional_dependency_environment():
+        pass
+    lock_dir.chmod(0o700)
+    with optional_dependency_environment():
+        assert len(list(lock_dir.glob("*.lock"))) == 1

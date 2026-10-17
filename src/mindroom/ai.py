@@ -58,8 +58,6 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
-from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, without_fold_records
-from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
 from mindroom.history.replay import apply_replay_plan
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
@@ -116,6 +114,9 @@ from mindroom.response_turn import (
 from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_jobs.notices import append_turn_start_job_note
+from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     AuditedToolExecution,
@@ -125,6 +126,7 @@ from mindroom.tool_system.events import (
     format_tool_combined,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -382,7 +384,12 @@ async def _finalize_agent_turn_model(
     if model is None and holder.agent is not None:
         model = holder.agent.model
     if model is not None:
-        await run_coroutine_until_complete(aclose_anthropic_async_client(model))
+
+        async def close() -> None:
+            await aclose_anthropic_async_client(model)
+
+        if not defer_execution_cleanup(close, resource=model):
+            await run_coroutine_until_complete(close())
 
 
 def _build_agent_turn_callbacks(
@@ -1314,6 +1321,9 @@ async def _prepare_agent_run_context(
     """Prepare one agent response lifecycle through metadata assembly."""
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
+    if delegation_depth == 0 and ctx.agent_mode != "minimal":
+        # Only a top-level standard reply can collect jobs, so only it hears which ended.
+        ctx = replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items))
     prepared_run = await _prepare_agent_and_prompt(
         ctx,
         prompt=prompt,
@@ -1348,7 +1358,6 @@ async def _prepare_agent_run_context(
             note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
         agent = prepared_run.agent
-        bind_compaction_lifecycle(agent, compaction_lifecycle, turn_recorder)
         if agent.model is not None:
             ai_runtime.install_queued_message_notice_hook(
                 agent.model,
@@ -1363,9 +1372,8 @@ async def _prepare_agent_run_context(
             thread_id=ctx.thread_id,
             requester_id=ctx.requester_id,
             correlation_id=ctx.correlation_id,
-            tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
             model_params=model_params_payload(agent.model) if agent.model is not None else {},
-            extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
+            extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
         )
         if ctx.agent_mode == "minimal":
             metadata = dict(metadata or {}) | {"agent_mode": "minimal"}
@@ -1419,6 +1427,7 @@ async def run_delegated_child_response(
         runtime_paths,
         refresh_scheduler=refresh_scheduler,
         execution_identity=identity,
+        only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     context = get_tool_runtime_context()
     child_context = child_tool_runtime_context(context, child) if context is not None else None
@@ -1437,25 +1446,42 @@ async def run_delegated_child_response(
         active_model_name=child.model_name,
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
     )
+    # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
     with tool_runtime_context(child_context):
-        return await ai_response(
-            turn,
-            prompt=prompt,
-            runtime_paths=runtime_paths,
-            config=active_config,
-            knowledge=knowledge.knowledge,
-            run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
-            include_interactive_questions=False,
-            include_openai_compat_guidance=identity.channel == "openai_compat",
-            tool_function_filter=context.tool_function_filter if context is not None else None,
-            execution_identity=identity,
-            delegation_depth=child.depth,
-            refresh_scheduler=refresh_scheduler,
-            attempt_model_runtime=ToolRuntimeModelBinding(),
-            supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
-            collect_streamed_response=True,
-            turn_recorder=TurnRecorder(user_message=prompt),
+        return await run_with_tool_execution_identity(
+            identity,
+            operation=lambda: ai_response(
+                turn,
+                prompt=prompt,
+                runtime_paths=runtime_paths,
+                config=active_config,
+                knowledge=knowledge.knowledge,
+                run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
+                include_interactive_questions=False,
+                include_openai_compat_guidance=identity.channel == "openai_compat",
+                tool_function_filter=context.tool_function_filter if context is not None else None,
+                execution_identity=identity,
+                delegation_depth=child.depth,
+                refresh_scheduler=refresh_scheduler,
+                attempt_model_runtime=ToolRuntimeModelBinding(),
+                supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
+                collect_streamed_response=True,
+                show_tool_calls=False,
+                turn_recorder=TurnRecorder(user_message=prompt),
+            ),
         )
+
+
+def _with_background_tool_jobs(
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ResponseTurnContext:
+    """Run the turn's managed calls as background jobs while the instance runs them, except in a voice call."""
+    return replace(
+        ctx,
+        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
+    )
 
 
 async def ai_response(  # noqa: C901, PLR0915
@@ -1537,6 +1563,7 @@ async def ai_response(  # noqa: C901, PLR0915
         Agent response string
 
     """
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.agent_mode == "minimal":
@@ -2073,6 +2100,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _require_turn_session_id(ctx)

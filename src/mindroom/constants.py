@@ -23,6 +23,7 @@ ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
+DEFAULT_MATRIX_HOMESERVER = "https://mindroom.chat"
 # Raise the per-room Classic Sync timeline limit above the homeserver default
 # (~10) so a room has to flood much harder before the server truncates its
 # timeline and forces a limited-sync gap backfill.
@@ -764,7 +765,7 @@ _WORKER_EGRESS_PROXY_URL_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY
 _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
 _WORKER_EGRESS_PROXY_VAULT_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
 _WORKER_EGRESS_PROXY_CA_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
-_WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
+WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
 
 
 def _git_config_env(process_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
@@ -795,6 +796,58 @@ def _git_config_env(process_env: Mapping[str, str], entries: list[tuple[str, str
     return env
 
 
+def compose_worker_proxy_env(
+    process_env: Mapping[str, str],
+    *,
+    proxy_url: str,
+    username: str,
+    password: str,
+    ca_file: str | None,
+    no_proxy: str,
+) -> dict[str, str]:
+    """Compose worker proxy execution env from explicit parameters.
+
+    Percent-encodes username and password as basic-auth userinfo, sets HTTP(S)_PROXY,
+    NO_PROXY, git proxy config, and CA bundle env vars when ca_file is given.
+
+    Returns the composed env dict (never empty when called with valid params).
+    """
+    scheme, _, rest = proxy_url.partition("://")
+    # Percent-encode proxy basic-auth userinfo so URL-significant characters
+    # (@ : / # ? % +, whitespace) cannot make HTTP clients mis-parse auth.
+    authed = f"{scheme}://{quote(username, safe='')}:{quote(password, safe='')}@{rest}"
+    env = {
+        "HTTP_PROXY": authed,
+        "HTTPS_PROXY": authed,
+        "http_proxy": authed,
+        "https_proxy": authed,
+        # Git/libcurl does not always preemptively send proxy credentials from
+        # HTTPS_PROXY userinfo on CONNECT. Environment-backed Git config makes
+        # the same proxy explicit without writing user/global git config.
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
+    }
+    env.update(
+        _git_config_env(
+            process_env,
+            [
+                ("http.proxy", authed),
+                ("http.proxyAuthMethod", "basic"),
+            ],
+        ),
+    )
+    if ca_file:
+        env["REQUESTS_CA_BUNDLE"] = ca_file
+        env["CURL_CA_BUNDLE"] = ca_file
+        env["SSL_CERT_FILE"] = ca_file
+        # git and node do not honor the bundles above: git needs GIT_SSL_CAINFO
+        # (else `git clone` over HTTPS rejects the MITM proxy's certificate)
+        # and node only *adds* roots via NODE_EXTRA_CA_CERTS.
+        env["GIT_SSL_CAINFO"] = ca_file
+        env["NODE_EXTRA_CA_CERTS"] = ca_file
+    return env
+
+
 def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]:
     """Return the per-worker egress proxy env overlay for python/shell, or ``{}``.
 
@@ -815,41 +868,15 @@ def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]
     if not token:
         return {}
     vault = (process_env.get(_WORKER_EGRESS_PROXY_VAULT_ENV) or "").strip()
-    scheme, _, rest = proxy_url.partition("://")
-    # Percent-encode proxy basic-auth userinfo so URL-significant characters
-    # (@ : / # ? % +, whitespace) cannot make HTTP clients mis-parse auth.
-    authed = f"{scheme}://{quote(token, safe='')}:{quote(vault, safe='')}@{rest}"
-    env = {
-        "HTTP_PROXY": authed,
-        "HTTPS_PROXY": authed,
-        "http_proxy": authed,
-        "https_proxy": authed,
-        # Git/libcurl does not always preemptively send proxy credentials from
-        # HTTPS_PROXY userinfo on CONNECT. Environment-backed Git config makes
-        # the same proxy explicit without writing user/global git config.
-        "NO_PROXY": _WORKER_EGRESS_NO_PROXY,
-        "no_proxy": _WORKER_EGRESS_NO_PROXY,
-    }
-    env.update(
-        _git_config_env(
-            process_env,
-            [
-                ("http.proxy", authed),
-                ("http.proxyAuthMethod", "basic"),
-            ],
-        ),
-    )
     ca_file = (process_env.get(_WORKER_EGRESS_PROXY_CA_FILE_ENV) or "").strip()
-    if ca_file:
-        env["REQUESTS_CA_BUNDLE"] = ca_file
-        env["CURL_CA_BUNDLE"] = ca_file
-        env["SSL_CERT_FILE"] = ca_file
-        # git and node do not honor the bundles above: git needs GIT_SSL_CAINFO
-        # (else `git clone` over HTTPS rejects the MITM proxy's certificate)
-        # and node only *adds* roots via NODE_EXTRA_CA_CERTS.
-        env["GIT_SSL_CAINFO"] = ca_file
-        env["NODE_EXTRA_CA_CERTS"] = ca_file
-    return env
+    return compose_worker_proxy_env(
+        process_env,
+        proxy_url=proxy_url,
+        username=token,
+        password=vault,
+        ca_file=ca_file or None,
+        no_proxy=WORKER_EGRESS_NO_PROXY,
+    )
 
 
 def build_execution_tool_env(
@@ -904,9 +931,20 @@ def runtime_env_flag(
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def is_hosted_matrix_homeserver(homeserver: str) -> bool:
+    """Return whether a homeserver matches the hosted provisioning service's configured URL."""
+    # The service binds registration to its exact homeserver URL, allowing only
+    # surrounding whitespace and trailing slashes (_normalize_homeserver_url in
+    # scripts/local_mindroom_provisioning_service.py).
+    return homeserver.strip().rstrip("/") == DEFAULT_MATRIX_HOMESERVER
+
+
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
-    return runtime_paths.env_value("MATRIX_HOMESERVER", default="http://localhost:8008") or "http://localhost:8008"
+    homeserver = runtime_paths.env_value("MATRIX_HOMESERVER") or DEFAULT_MATRIX_HOMESERVER
+    if is_hosted_matrix_homeserver(homeserver):
+        return DEFAULT_MATRIX_HOMESERVER
+    return homeserver
 
 
 def runtime_matrix_ssl_verify(runtime_paths: RuntimePaths) -> bool:
@@ -1095,16 +1133,15 @@ ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
+# Run metadata key holding the trusted hook source of the message that started the run, such as an automation prompt.
+HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
-# Run metadata key holding the id of the newest mid-turn compaction the run's stored record reflects.
-MID_TURN_GENERATION_METADATA_KEY = "mindroom_mid_turn_generation"
 MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
-QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"

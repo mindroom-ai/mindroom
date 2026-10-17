@@ -1,97 +1,26 @@
 # History compaction
 
-History preparation chooses native provider checkpoints when the resolved policy permits them, or portable conversation summaries when configured.
-The provider choice, configuration schema, durable state format, and retry attempt limit are independent of this module split.
+This page records the assumptions and decisions behind portable history compaction, its summary rows, and seen-message tracking.
+User-facing behavior is in [Context Window](../configuration/history.md#context-window), Agno workarounds are in the [Agno compatibility inventory](agno-compatibility.md), and provider request workarounds are in `history/summary_provider_compat.py` and `history/claude_replay_compat.py`.
+When upgrading Agno or a provider SDK, run those modules' contract tests before removing a workaround.
 
-## Ownership
+## Assumptions
 
-All paths below are relative to `src/mindroom/`.
+Session rows and runs are saved whole from in-memory snapshots, so a stale save can arrive after a compaction or a redaction has moved on.
+The summary rows are therefore authoritative: `session.summary` is derived from the owner scope's latest row on every read, and run writes refuse a stale copy of a folded run or of a run a cut removed.
+A compaction, a redaction, and an approval's completion can overlap on one scope, so each summary chunk checks, under the write lock, that the history it summarized is still the stored history before it appends.
 
-| Module | Owns |
-| --- | --- |
-| `history/policy.py` | Resolving configuration and deciding whether compaction is available or needed. |
-| `history/runtime.py` | Preparing one response, model construction, compaction notices, failure handling, and applying the final replay decision. |
-| `history/session_context.py` | Canonical agent/team scope identity, opening the correct session store, and closing owned handles. |
-| `history/replay.py` | Materializing visible persisted history, rendering the compaction summary message, estimating history and request cost, and fitting replay limits. |
-| `history/mid_turn_compaction.py` | Sizing each model request of a reply, folding everything but the system prompt, current prompt, transient messages, and queued notices into a summary, and committing a stored conversation's fold as a positioned generation. |
-| `history/compaction.py` | Selecting runs, executing summary chunks, switching fallback models, and committing chunk progress. |
-| `history/summary_input.py` | Serializing conversation and prior summary into bounded inputs; preserving a progress-making run envelope when shrinking. |
-| `history/message_content.py` | The shared text and media projection used by serialization and token estimation. |
-| `history/summary_call.py` | One cancellable summary call, a typed wall deadline, complete-output validation, and bounded retry policy. |
-| `history/storage.py` | Durable scope state, the cached replay summary, seen ids derived from live runs and the archive, archive reconciliation before each run, and generation-precise redaction. |
-| `history/archive.py` | The `<session_table>_compactions` and `<session_table>_compacted_runs` tables: summary generations and archived runs, moved in one transaction with the live run rows. |
-| `history/archive_schema.py` | The archive table layout, shared with the legacy migration. |
-| `history/legacy_compaction_state.py` | The one-time migration, run when a conversation database opens, that adopts scope state written when compaction deleted runs as content-free generations. |
-| `history/legacy_summary_system_prompt.py` | Recognizing and removing Agno's summary block in a system message a run paused with before the summary became a history message. |
-| `history/native.py` | Selecting and configuring native compaction for the resolved history route. |
-| `native_compaction.py` | Provider-neutral checkpoint and native replay data. |
+## Decisions
 
-`SummaryModel` binds the serving model, its configured name, and its input budget.
-A fallback switch replaces that whole value, so later chunks cannot accidentally use the previous model's budget or identity.
-Persisted replay fitting runs once before a reply; the mid-turn hook measures every model request of the reply, anchored on the latest response's provider usage when this loop received one, except on native routes, which size the projected request by estimate.
+- Compaction keeps every run in Agno's runs table and appends a summary row positioned after the newest run it covers, instead of moving runs into a second store, because keeping two stores consistent produced repeated bugs once summaries had to cover part of a running turn (see `docs/dev/2026-10-12-compaction-log-store-design.md`).
+- Edits and redactions cut the log from the earliest element holding the event; rows that only end earlier summaries (barriers) survive cuts, so retired summaries never replay again.
+  Summaries written when compaction deleted runs cannot be split by run, so while such a summary is in force, redacting an event it may contain cuts at it, removing every run and summary row of the scope.
+- Seen ids are derived from the loaded runs and the summary rows after the latest barrier rather than stored, so they follow the remaining history after compaction or redaction.
+  Every redaction change drops the scope's metadata seen ids, because dropping ids can only re-offer messages, never hide them.
+- A completed approval moves to the end of the log, after the turns that happened while it waited, because its continuation saw them.
+- Persisted replay fitting and the Vertex full-request guard stay separate because they measure different inputs at different boundaries.
 
-## Compatibility code
+## Limitations
 
-Agno internals use named `agno_compat_<subject>.py` boundaries beside their owners.
-Each boundary records the upstream issue or tracking gap, proposed PR, removal condition, and regression coverage in source comments.
-The [Agno compatibility inventory](agno-compatibility.md) covers the full runtime; the table below describes the history-related boundaries and the shared tool-hook patch.
-
-| Module | Workaround and installation point |
-| --- | --- |
-| `history/agno_compat_message_builder.py` | Preserves roleful Team inputs, strips historical inline media, inserts the compaction summary before replayed history, records each request's session, and reconciles stored history before a continuation fetches it in Agent/Team message builders; installed explicitly by `agents._initialize_agent_instance` and `teams._create_team_instance`. |
-| `agno_compat_model_hooks.py` `install_request_preparation` | Awaits the mid-turn compaction hook before every provider request of an Agent or Team model; installed by `history/mid_turn_compaction.install_mid_turn_compaction` from `create_agent` and team creation, before the model-call cap. |
-| `session_storage/agno_compat_session_persistence.py` | Guards and adapts Agno's asynchronous persistence against the owned session store; installed by `agent_storage._create_sqlite_state_storage` before filesystem work. |
-| `agno_compat_prepared_tools.py` | Shares private Agent/Team tool preparation between RTC execution and prompt inspection; temporarily supplies Team tool instructions, restoring the original list even on failure. |
-| `tool_system/agno_compat_tool_hooks.py` | Adapts Agno's private sync/async hook chains to deferred results and owner-controlled synchronous execution; installed by `tool_system/tool_hooks.py`, which retains dispatch, approval, and cancellation ownership. |
-| `history/claude_replay_compat.py` | Removes stale signed reasoning from completed portable turns after rewriting; native checkpoint replay retains its separate provider policy. |
-| `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested Claude/OpenAI SDK retries, and classifies provider completion signals. |
-| `providers/agno_compat_provider_errors.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
-
-Importing the history engine does not install either global Agno patch.
-The explicit installers remain idempotent, and the persistence patch retains its pinned-version guard.
-When upgrading Agno or a provider SDK, inspect these compatibility modules first and run their contract tests before removing a workaround.
-Mantle currently needs its existing HTTP transport passed explicitly when copying SDK client options.
-
-## Invariants
-
-- The summary is never stored in a run: the builder derives it from the session's cached latest generation for every request that replays history, marks it `from_history`, and Agno drops it when it stores the run, so an approval resume rebuilds it with its history and later turns cannot replay it twice; Agno's own system-prompt summary is off for every Agent and Team.
-- A run-local summary (a request without persisted replay) is an ordinary run message and never suppresses the scope summary.
-- Mid-turn compaction of a scoped request summarizes the scope's visible runs no fold covers and the running turn's exchanges, as in-memory per-exchange snapshots the summary chunker sizes with the summary model's own estimator, and writes nothing until the last chunk succeeds.
-- It then commits one positioned generation: the summary, the running run as its position (`through_run_id`), the frozen list of runs it covered, and the event ids its summary represents; no run moves during the turn.
-- With no await in between, the run records that generation in `mindroom_mid_turn_generation`, Agno's live session object gets the new summary, and the request is rewritten, so a cancellation or failure before that point leaves the run's record and the request whole.
-- Reconcile, which runs before every reply and in the builder before every continuation fetches history, settles each positioned generation from durable state: unapplied (the stored run names an older fold or none, after a crash) is deleted and the run kept, unless it already archived runs, which a late save of the run's older record can never undo; orphaned (the run is neither stored nor archived) is invalidated; applied ones receive their still-live covered runs.
-- Edit and redaction roll back from the earliest generation that archived, covers, or is positioned on a removed run, after first settling positioned generations; the invalidation that rollback and retirement share also removes a positioned generation's shortened position run, live or archived.
-- New runs are indexed after every live and archived run, so an index is never reused and one order spans the live table and the archive, even after compaction archived or an edit removed the newest runs.
-- Archived runs keep their live-table `run_index`, and a rollback restores them at it, so restored runs and older live runs compaction skipped keep their order; rows archived before this index existed append in archive order.
-- A rollback restores only the runs stored before the earliest removed run, live or archived, so removing an older resumed run also removes the newer runs its fold archived, as it does before reconcile archives them and after a later compaction archives the resumed run; an archived hit also removes the live runs stored after it, while a fold whose position run is live or removed removes nothing more than the removal pass did.
-- A positioned generation's event ids count as compacted history while it is active, even when its run ends paused, cancelled, or failed and is not history-visible.
-- Tool results fold with the latest assistant tool call even across an interleaved projection such as an approval receipt.
-- Run-local compaction summarizes the same per-exchange snapshots in as many chunks as needed and commits nothing until all of them are summarized.
-- Folded assistant requests keep their usage in run metadata, which the usage projection merges ahead of the run's remaining requests.
-
-- Summary instructions occupy their own system message; serialized conversation and prior summary occupy the user message.
-- System/developer prompt roles and bulky request metadata are excluded from the portable conversation input.
-- Claude summaries stopped by an output or context limit, and incomplete OpenAI Chat/Responses summaries, cannot be committed as complete summaries.
-- Summary overrides preserve effective output-cap precedence while removing thinking from typed fields, request parameters, and raw body parameters.
-- The outer retry policy disables Agno-level retries; Claude and OpenAI summary adapters also disable SDK retries while preserving caller-owned clients and transports.
-- If the saved summary alone exceeds the final history budget, replay preparation raises an explicit budget error before a reply model call; the durable summary and already committed compaction progress remain intact.
-- A chunk moves its runs, member runs included, into the archive and records its summary generation in the same transaction that deletes their live rows; nothing compaction touches is lost.
-- The session summary is a cache of the latest generation's summary, written after that transaction; before each run, reconciliation refreshes it from the archive and deletes live runs that are already archived.
-- A row whose cached summary had to be refreshed was written from an older snapshot, so reconciliation also drops its metadata seen ids; dropping ids can only re-offer messages, never hide them.
-- Seen ids are derived rather than stored: live runs supply their own, the archive supplies those of the runs the replayed summary covers, and session metadata keeps only ids no stored run carries, such as team consumption.
-- Archived runs keep the seen ids they counted while live apart from the wider set redaction matches, so compaction never changes which messages count as seen.
-- Metadata seen ids have no archive counterpart, so a stale whole-row session write can restore ids a redaction dropped; that only withholds those messages from unseen thread context.
-- Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
-- Redacting an event represented by an archived run removes that run and everything after it, returns the generation's earlier runs to replay, and replays the previous generation's summary; older live runs compaction skipped, such as a pending approval, stay.
-- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids or retained source ownership) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
-- A live run removed for any other event only retires the scope's summaries, because legacy provenance may be incomplete; live runs stay, except a mid-turn fold's shortened position run, and archived runs stay stored without counting as compacted history.
-- Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
-- After any redaction change, the scope's metadata seen ids are dropped and the derived ids follow the remaining history, so removed messages return as unseen thread context unless a stale whole-row write restores those metadata ids (see above).
-- Redaction keeps the archived runs it removes as content-free tombstones, so a stale save of such a run is pruned like any other archived run; only conversation deletion removes archive rows.
-- State written by releases before the archive is adopted once, when the conversation database opens and before any response loads it; the archive tables' presence marks it done.
-
-- Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
-
-The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts, and `tests/test_compaction_fuzz.py` checks the archive invariants over generated histories with interrupted chunks, stale session writes, and redactions.
-
-See [Context Window](../configuration/history.md#context-window).
+Metadata seen ids, such as team consumption, have no summary-row counterpart, so a stale whole-row session write can restore ids that a redaction dropped; that only withholds those messages from unseen thread context.
+Stored history grows until the conversation is deleted.

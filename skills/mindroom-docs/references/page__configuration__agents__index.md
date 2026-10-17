@@ -59,6 +59,7 @@ agents:
 | `display_name` | string | *required* | Name shown in Matrix |
 | `role` | string | `""` | System prompt describing the agent's purpose and expertise |
 | `model` | string | `"default"` | Key of an entry under `models:` |
+| `cheap_model` | string or null | `null` | Cheaper model key this agent may switch to; used by `cold_cache`. Inherits `defaults.cheap_model`. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `tools` | list | `[]` | Tool names or single-key dicts with per-agent overrides; see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration). The agent gets these plus `defaults.tools`, without duplicates |
 | `include_default_tools` | bool | `true` | Set `false` to leave out `defaults.tools` and its overrides for this agent |
 | `skills` | list | `[]` | Skill names the agent can use; see [Skills](https://docs.mindroom.chat/skills/) |
@@ -72,11 +73,13 @@ agents:
 | `mcp_gateway_shared_credentials` | bool | `false` | Let users who may use this agent call its tools through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) even though its worker scope is `shared` or unset. Every caller then runs them with the agent's shared credentials and worker, without its instructions. Agents with `private` or `worker_scope: user` or `user_agent` are available without it |
 | `participation` | object | `null` | Opt into adaptive replies in existing multi-human threads; see [Adaptive Participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) |
 | `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing) |
+| `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning), a persistent profile of user preferences |
 | `learning_mode` | string | `null` | `always` learns after every turn; `agentic` lets the agent decide through a tool call |
+| `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory but not `learning`. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
@@ -89,7 +92,7 @@ agents:
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages; see [Tool Calls During Streaming](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
-| `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments; `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
+| `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `file` and `coding` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports) |
@@ -201,6 +204,8 @@ These defaults apply to each agent that leaves the same field unset:
 | `markdown` | `true` |
 | `learning` | `true` |
 | `learning_mode` | `always` |
+| `cheap_model` | `null`; ignored for an agent whose `model` is the same. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
+| `knowledge_graph` | `false` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compress_tool_results` | `false` |
 | `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
@@ -210,7 +215,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `worker_scope` | `null` |
 | `file_access` | `workspace` |
 | `allow_self_config` | `false` |
-| `automations` | `[]`; private agents never inherit them, and agents without file memory skip the built-ins. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
+| `automations` | `[]`; private agents inherit them only as `personal_rooms.agent`, and agents without file memory skip the built-ins. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 
 `defaults.tools` (default `[scheduler]`) is added to every agent with `include_default_tools: true`; set it to `[]` to add nothing.
 It accepts the same per-tool overrides as `agents.<name>.tools`.

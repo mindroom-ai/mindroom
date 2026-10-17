@@ -18,6 +18,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import authorize_delegation, live_delegation_config, prepare_child_turn
 from mindroom.delegation.personas import (
+    caller_knowledge_names,
     caller_skill_names,
     caller_toolkit_names,
     follow_up_refusal,
@@ -27,6 +28,8 @@ from mindroom.delegation.personas import (
 )
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
+from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
@@ -107,9 +110,9 @@ class DelegateTools(Toolkit):
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(config, runtime_paths, delegate_to, execution_identity)
         self._workspace_root = workspace_root
-        # An authored subagent's own tools and skills cap the copies it authors, on every channel.
+        # An authored subagent's own tools, skills, and knowledge bases cap the copies it authors, on every channel.
         self._persona = persona
-        # A caller that may run itself may also author that copy's prompt, tools, skills, or profile.
+        # A caller that may run itself may also author that copy's prompt, tools, skills, knowledge, or profile.
         self._authoring = agent_name in delegate_to
 
         super().__init__(
@@ -121,7 +124,7 @@ class DelegateTools(Toolkit):
         delegate_function.description = self._build_run_subagent_description()
         hidden = {
             *(() if self._minimal_targets else ("minimal",)),
-            *(() if self._authoring else ("system_prompt", "tools", "skills", "profile")),
+            *(() if self._authoring else ("system_prompt", "tools", "skills", "knowledge", "profile")),
         }
         if hidden:
             # Offer no option this caller cannot use. Agno keeps explicitly set
@@ -143,9 +146,23 @@ class DelegateTools(Toolkit):
             else describe_agent(target_name, self._config)
             for target_name in self._delegate_to
         ]
-        return self._config.render_prompt(
+        instructions = self._config.render_prompt(
             "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
+        )
+        if self._background_jobs_available():
+            instructions += "\n" + self._config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS")
+        return instructions
+
+    def _background_jobs_available(self) -> bool:
+        # A nested subagent's calls run inline inside its parent's job, so only a top-level caller can wait on one.
+        return (
+            self._delegation_depth == 0
+            and background_tool_jobs_enabled(self._config, self._runtime_paths)
+            and not toolkit_is_background_excluded("delegate", self._config, self._runtime_paths)
+            and self._execution_identity is not None
+            and self._execution_identity.channel == "matrix"
+            and get_background_runtime(self._runtime_paths) is not None
         )
 
     def _build_run_subagent_description(self) -> str:
@@ -163,6 +180,14 @@ class DelegateTools(Toolkit):
             if self._minimal_targets
             else ""
         )
+        background = self._background_jobs_available()
+        background_guidance = (
+            "Managed Matrix calls accept background_after: null waits, zero returns a Job ID immediately, "
+            "and a positive number is how many seconds to wait before the child continues in the background. "
+            "A newer message you answer releases the wait while the child keeps working. "
+            if background
+            else ""
+        )
         return (
             "Run one allowed configured agent as a fresh subagent and wait for its result.\n"
             f"Allowed subagents for this caller: {available_targets}.\n"
@@ -170,10 +195,11 @@ class DelegateTools(Toolkit):
             "the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\n"
             "Selecting your own name starts a fresh copy of yourself, if listed. "
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
+            f"{background_guidance}"
             "Set model to a configured model name to override the child's model for this session. "
             f"Available models: {', '.join(sorted(self._config.models))}. "
             "Omit model or pass null to use the child's normal thread, room, or configured model. "
-            "The caller waits; this does not create a Matrix thread. "
+            f"{'This' if background else 'The caller waits; this'} does not create a Matrix thread. "
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
             "follow-ups keep the child's model and mode.\n"
             f"{minimal_guidance}"
@@ -188,13 +214,14 @@ class DelegateTools(Toolkit):
         minimal = " or minimal=true" if self._agent_name in self._minimal_targets else ""
         return (
             "To author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, "
-            "and optionally tools, a subset of your toolkit names or toolkit.function entries, and skills, a subset "
-            "of your skill names. Omit tools to keep all of yours; a copy that lists tools gets only the skills it "
-            "lists, and one that lists neither keeps all your skills. The child keeps your workspace, credentials, "
-            "and approval rules, sees that prompt instead of your configured role and instructions, and gets only "
-            "those tools and skills. "
+            "and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of "
+            "your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all "
+            "of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without "
+            "tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and "
+            "approval rules, sees that prompt instead of your configured role and instructions, and gets only those "
+            "tools, skills, and knowledge bases. "
             "Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with "
-            "description and optional tools, skills, model, and mode, then the system prompt as the body. "
+            "description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. "
             f"An explicit model{minimal} overrides the profile. "
             "Follow-ups keep the subagent's prompt even if its profile later changes.\n"
             f"{self._profile_listing()}"
@@ -213,6 +240,7 @@ class DelegateTools(Toolkit):
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         skills: list[str] | None = None,
+        knowledge: list[str] | None = None,
         profile: str | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
@@ -228,7 +256,8 @@ class DelegateTools(Toolkit):
             system_prompt: Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt.
             tools: Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours.
             skills: Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too.
-            profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, and skills.
+            knowledge: Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too.
+            profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
@@ -241,6 +270,7 @@ class DelegateTools(Toolkit):
             system_prompt=system_prompt,
             tools=tools,
             skills=skills,
+            knowledge=knowledge,
             profile=profile,
             model=model,
             minimal=minimal,
@@ -257,6 +287,7 @@ class DelegateTools(Toolkit):
                 self._runtime_paths,
                 self._workspace_root,
             ),
+            available_knowledge=lambda: caller_knowledge_names(self._agent_name, live_delegation_config(self._config)),
             cap=self._persona,
         )
         if isinstance(request, str):

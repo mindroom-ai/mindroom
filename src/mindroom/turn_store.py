@@ -17,7 +17,7 @@ from mindroom.handled_turns import (
     TurnRecordCodec,
     same_turn_identity,
 )
-from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_for_sources
+from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_answering
 from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
@@ -35,6 +35,8 @@ from mindroom.turn_record import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
+
+    from agno.db.base import BaseDb
 
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
@@ -901,10 +903,9 @@ class TurnStore:
                     partial(self.redacted_history_events, target),
                 )
             removed_any = await run_blocking_until_complete(
-                remove_runs_for_sources,
+                _remove_runs_for_sources,
                 storage,
                 target.session_id,
-                session_type,
                 scope,
                 turn_record.indexed_event_ids,
             )
@@ -919,6 +920,19 @@ class TurnStore:
                 history_scope=scope.key,
             )
         return removed_any
+
+
+def _remove_runs_for_sources(
+    storage: BaseDb,
+    session_id: str,
+    scope: HistoryScope,
+    source_event_ids: tuple[str, ...],
+) -> bool:
+    """Remove what answered each source and everything after it; return whether anything went."""
+    removed_any = False
+    for source_event_id in source_event_ids:
+        removed_any = remove_runs_answering(storage, session_id, scope, source_event_id) or removed_any
+    return removed_any
 
 
 def _merged_redaction_tombstones(

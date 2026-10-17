@@ -24,7 +24,7 @@ from mindroom.delegation.sessions import (
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
-from tests.test_delegate_tools import _runtime_paths
+from tests.delegation_helpers import _runtime_paths
 from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:
@@ -169,6 +169,16 @@ def _self_child(
     )
 
 
+@pytest.mark.parametrize("field", ["tools", "skills", "knowledge"])
+@pytest.mark.parametrize("value", ["docs", [1]])
+def test_persona_snapshot_with_malformed_names_is_rejected(field: str, value: object) -> None:
+    """A snapshot whose name lists are not lists of strings is refused rather than read as characters."""
+    snapshot = {"source_kind": "inline", "source_name": "", "system_prompt": "P", "tools": None, field: value}
+
+    with pytest.raises(TypeError, match="Invalid subagent persona snapshot"):
+        SubagentPersona.from_dict(snapshot)
+
+
 @pytest.mark.asyncio
 async def test_persona_round_trips_through_session_record(tmp_path: Path) -> None:
     """A retained handle rebuilds the exact authored persona after a reload."""
@@ -181,6 +191,7 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
         system_prompt="You are a critic {x}.",
         tools=("file",),
         skills=("research",),
+        knowledge=("docs",),
     )
     child = _self_child(config, owner, persona)
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
@@ -196,6 +207,32 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
     ).children == [
         child,
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tools", "kept_knowledge"), [(("file",), ()), (None, None)])
+async def test_persona_snapshot_without_knowledge_follows_its_tool_list(
+    tmp_path: Path,
+    tools: tuple[str, ...] | None,
+    kept_knowledge: tuple[str, ...] | None,
+) -> None:
+    """A persona saved before authored knowledge existed keeps the knowledge it had: none beside a tool list, else all."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=tools)
+    child = _self_child(config, owner, persona)
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
+    payload = json.loads(record.read_text())
+    del payload["child"]["persona"]["knowledge"]
+    record.write_text(json.dumps(payload))
+
+    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
+
+    assert restored.persona is not None
+    assert restored.persona.knowledge is None
+    assert restored.persona.kept_knowledge == kept_knowledge
 
 
 @pytest.mark.asyncio

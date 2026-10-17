@@ -30,11 +30,10 @@ from mindroom.history.compaction import (
     _emit_compaction_hook,
     _rewrite_working_session_for_compaction,
     compact_scope_history,
-    summarize_runs,
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.storage import (
-    archive_compaction_chunk,
+    append_compaction_chunk,
     read_scope_state,
     set_force_compaction_state,
 )
@@ -77,7 +76,7 @@ from tests.conftest import (
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
-    StoredGeneration,
+    StoredSummaryRow,
     _agent,
     _close_test_storages,
     _completed_run,
@@ -86,8 +85,8 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _plugin,
     _session,
-    archived_run_ids,
-    compaction_generations,
+    folded_run_ids,
+    summary_rows_of,
 )
 
 if TYPE_CHECKING:
@@ -111,7 +110,7 @@ async def _rewrite_single_run(
     fallback_summary_input_budget: int | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
-    # Compaction archives runs of a stored conversation.
+    # Compaction folds runs of a stored conversation.
     seed_session(storage, working_session)
     return await _rewrite_working_session_for_compaction(
         storage=storage,
@@ -370,10 +369,10 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     retry_sleep.assert_not_awaited()
     # The second chunk rebuilds its input with the fallback's token estimator.
     assert build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"].keywords["model_id"] == fallback.id
-    assert archived_run_ids(storage) == ["run-1", "run-2"]
-    assert compaction_generations(storage, "agent:test_agent") == [
-        StoredGeneration(summary="first chunk summary", summary_model="fallback-model-id", legacy=False),
-        StoredGeneration(summary="merged summary", summary_model="fallback-model-id", legacy=False),
+    assert folded_run_ids(storage) == ["run-1", "run-2"]
+    assert summary_rows_of(storage, "agent:test_agent") == [
+        StoredSummaryRow(summary="first chunk summary", summary_model="fallback-model-id", legacy=False),
+        StoredSummaryRow(summary="merged summary", summary_model="fallback-model-id", legacy=False),
     ]
     assert rewrite_result.compacted_run_count == 2
     assert rewrite_result.served_by.model is fallback
@@ -401,8 +400,8 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.archive_compaction_chunk",
-            wraps=archive_compaction_chunk,
+            "mindroom.history.compaction.append_compaction_chunk",
+            wraps=append_compaction_chunk,
         ) as persist_spy,
         pytest.raises(ModelSafeguardRefusalError),
     ):
@@ -461,8 +460,8 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.archive_compaction_chunk",
-            wraps=archive_compaction_chunk,
+            "mindroom.history.compaction.append_compaction_chunk",
+            wraps=append_compaction_chunk,
         ) as persist_spy,
     ):
         rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
@@ -473,7 +472,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     assert summary_inputs[1] == summary_inputs[0]
     retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
     assert persist_spy.call_count == 1
-    assert [run.run_id for run in persist_spy.call_args.kwargs["archived_runs"]] == ["run-1"]
+    assert list(persist_spy.call_args.kwargs["included_run_ids"]) == ["run-1"]
 
 
 @pytest.mark.parametrize(
@@ -510,8 +509,8 @@ async def test_rewrite_bounds_retry_attempts(
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.archive_compaction_chunk",
-            wraps=archive_compaction_chunk,
+            "mindroom.history.compaction.append_compaction_chunk",
+            wraps=append_compaction_chunk,
         ) as persist_spy,
         pytest.raises(type(error)),
     ):
@@ -537,8 +536,8 @@ async def test_rewrite_propagates_non_retryable_provider_error_without_persistin
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch(
-            "mindroom.history.compaction.archive_compaction_chunk",
-            wraps=archive_compaction_chunk,
+            "mindroom.history.compaction.append_compaction_chunk",
+            wraps=append_compaction_chunk,
         ) as persist_spy,
         pytest.raises(ModelProviderError, match="invalid request"),
     ):
@@ -558,8 +557,8 @@ async def test_rewrite_propagates_cancellation_without_retrying_or_persisting(tm
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch(
-            "mindroom.history.compaction.archive_compaction_chunk",
-            wraps=archive_compaction_chunk,
+            "mindroom.history.compaction.append_compaction_chunk",
+            wraps=append_compaction_chunk,
         ) as persist_spy,
         pytest.raises(asyncio.CancelledError),
     ):
@@ -591,8 +590,8 @@ async def test_rewrite_propagates_cancellation_during_transient_retry_delay(tmp_
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.archive_compaction_chunk",
-            wraps=archive_compaction_chunk,
+            "mindroom.history.compaction.append_compaction_chunk",
+            wraps=append_compaction_chunk,
         ) as persist_spy,
     ):
         rewrite_task = asyncio.create_task(_rewrite_single_run(storage=storage, working_session=working_session))
@@ -1851,52 +1850,3 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
     assert progress_events[0].compacted_run_count == 1
     assert progress_events[0].runs_before == 2
     assert progress_events[0].runs_remaining == 1
-
-
-@pytest.mark.asyncio
-async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None:
-    """Chunked run-local summaries switch once to the fallback, which then writes every later chunk."""
-    runs = [
-        _completed_run(
-            f"run-{index}",
-            messages=[
-                Message(role="user", content=f"RUN{index}-MARKER " + ("u" * 16_000)),
-                Message(role="assistant", content="a" * 16_000),
-            ],
-        )
-        for index in (1, 2)
-    ]
-    primary = FakeModel(id="summary-model", provider="fake")
-    fallback = FakeModel(id="fallback-model-id", provider="fake")
-    summary_mock = AsyncMock(
-        side_effect=[
-            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
-            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
-            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
-        ],
-    )
-
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
-        summary = await summarize_runs(
-            summary_model=SummaryModel(model=primary, name="summary-model", input_budget_tokens=6_000),
-            fallback_summary_model=SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
-            previous_summary=None,
-            runs=runs,
-            session_id="session-1",
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
-            summary_prompt="Summarize.",
-            timeout_seconds=30,
-            on_response=None,
-        )
-
-    assert summary.summary == "merged summary"
-    assert summary.served_by.name == "fallback-model"
-    assert [call.kwargs["model"] for call in summary_mock.await_args_list] == [primary, fallback, fallback]
-    summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
-    assert "RUN1-MARKER" in summary_inputs[1]
-    assert "RUN2-MARKER" in summary_inputs[2]
-    assert "first chunk summary" in summary_inputs[2]

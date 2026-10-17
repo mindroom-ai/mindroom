@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from contextvars import Context
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -100,7 +101,8 @@ class PlaywrightMCPSession:
         future = asyncio.get_running_loop().create_future()
         self._queue.put_nowait(_QueuedCall(name, arguments, future))
         if self._actor_task is None:
-            self._actor_task = asyncio.create_task(self._run_actor(), name="playwright_mcp_session")
+            # The actor serves every later call, so it must not keep the contextvars of the call that opens it.
+            self._actor_task = asyncio.create_task(self._run_actor(), name="playwright_mcp_session", context=Context())
         try:
             async with asyncio.timeout(self._timeout):
                 return await future

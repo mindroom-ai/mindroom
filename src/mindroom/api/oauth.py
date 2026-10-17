@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+import re
+from dataclasses import dataclass, replace
 from html import escape
-from typing import TYPE_CHECKING
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import authenticate_user, login_redirect_for_request, verify_user
+from mindroom.api.auth import authenticate_user, dashboard_cors_origins, login_redirect_for_request, verify_user
 from mindroom.api.credentials_oauth_flows import (
     consume_pending_oauth_request,
     issue_pending_oauth_state,
+    pending_oauth_opener_origin,
     pending_oauth_state_requires_browser_user,
 )
 from mindroom.api.credentials_target import (
@@ -54,6 +56,7 @@ from mindroom.oauth.credential_lifecycle import (
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
     load_oauth_credentials_status,
+    oauth_account_label,
     oauth_credentials_usable,
     oauth_verified_claim,
     refresh_oauth_credentials,
@@ -78,20 +81,23 @@ from mindroom.oauth.service import (
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
-    build_tool_execution_identity,
+    build_requester_execution_identity,
 )
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import WorkerScope
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 logger = get_logger(__name__)
-_OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete"
+# What a popup's OAuth page posts to the page that opened it, which then stops waiting.
+_OAUTH_OPENER_MESSAGE_TYPE = "mindroom-oauth"
+_OAUTH_POPUP_CLOSE_DELAY_MS = 1500
+_OAUTH_CANCELLED_MESSAGE = "You cancelled. Nothing was connected."
 _OAUTH_STALE_CONNECTION_MESSAGE = (
     "This OAuth connection changed before the request completed. Start the connection again from the dashboard "
     "or request a fresh connection link from the conversation."
@@ -130,8 +136,13 @@ class OAuthStatusResponse(BaseModel):
     has_service_account_config: bool = False
     reset_required: bool = False
     email: str | None = None
+    account_label: str | None = None
     hosted_domain: str | None = None
     capabilities: list[str] = Field(default_factory=list)
+
+
+class _UnknownOAuthProviderError(HTTPException):
+    """The provider in the URL is not registered; its detail repeats the URL text, which browser pages never show."""
 
 
 def _load_provider(request: Request, provider_id: str) -> tuple[OAuthProvider, RuntimePaths]:
@@ -139,7 +150,7 @@ def _load_provider(request: Request, provider_id: str) -> tuple[OAuthProvider, R
     providers = load_oauth_providers_for_snapshot(snapshot)
     provider = providers.get(provider_id)
     if provider is None:
-        raise HTTPException(status_code=404, detail=f"Unknown OAuth provider: {provider_id}")
+        raise _UnknownOAuthProviderError(status_code=404, detail=f"Unknown OAuth provider: {provider_id}")
     return provider, snapshot.runtime_paths
 
 
@@ -296,6 +307,8 @@ async def _issue_authorization_url(
             code_verifier=code_verifier,
             token_url=endpoints.token_url,
             browser_user_required=connect_target is None or connect_target.binding.worker_scope != "shared",
+            # The page that started the flow, so the popup's last page can tell it how the flow ended.
+            opener_origin=_validated_opener_origin(request.headers.get("origin"), provider, runtime_paths),
         )
         auth_url = await provider.authorization_uri_async(
             runtime_paths,
@@ -359,24 +372,6 @@ def _verify_conversation_connect_target_authorized(request: Request, target: OAu
     return config
 
 
-def _conversation_execution_identity(
-    agent_name: str,
-    requester_id: str,
-    runtime_paths: RuntimePaths,
-) -> ToolExecutionIdentity:
-    """Build the execution identity a conversation-issued OAuth link froze for one requester."""
-    return build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-
-
 def _conversation_connect_context(
     request: Request,
     provider: OAuthProvider,
@@ -393,7 +388,11 @@ def _conversation_connect_context(
     if binding.worker_scope != "shared":
         _verify_connect_target_authorized(request, requester_id, runtime_paths)
     config = _verify_conversation_connect_target_authorized(request, target)
-    identity = _conversation_execution_identity(agent_name, requester_id, runtime_paths)
+    identity = build_requester_execution_identity(
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+    )
     worker_target = build_agent_toolkit_worker_target(
         config.resolve_entity(agent_name).execution_scope,
         agent_name,
@@ -499,7 +498,11 @@ def _verify_browser_reset_intent(
     # as, so the one-time bearer link is the delegated authority for a configured
     # credential manager and is consumed on POST instead.
     if intent.binding.worker_scope == "shared":
-        identity = _conversation_execution_identity(agent_name, intent.requester_id, runtime_paths)
+        identity = build_requester_execution_identity(
+            agent_name=agent_name,
+            runtime_paths=runtime_paths,
+            requester_id=intent.requester_id,
+        )
     else:
         _verify_connect_target_authorized(request, intent.requester_id, runtime_paths)
         identity = require_agent_oauth_connection_authorized(
@@ -557,22 +560,201 @@ def _script_json(value: object) -> str:
     return json.dumps(value).replace("</", "<\\/")
 
 
-def _oauth_browser_error_response(message: str, *, status_code: int) -> HTMLResponse:
-    """Render a browser-readable OAuth error without exposing a raw API payload."""
-    title = "OAuth connection changed" if status_code == 409 else "OAuth reset unavailable"
-    escaped_message = escape(message)
+_OAUTH_PAGE_STYLE = """
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #f4f5f7;
+        color: #1b1f24;
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      main {
+        box-sizing: border-box;
+        width: min(26rem, calc(100% - 2rem));
+        padding: 1.5rem;
+        border: 1px solid #d8dce1;
+        border-top: 4px solid var(--accent);
+        border-radius: 0.75rem;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+      main.success { --accent: #1a7f37; }
+      main.error { --accent: #c62828; }
+      h1 { margin: 0 0 0.5rem; font-size: 1.25rem; }
+      p { margin: 0 0 1.25rem; overflow-wrap: anywhere; }
+      button {
+        padding: 0.5rem 1rem;
+        border: 0;
+        border-radius: 0.5rem;
+        background: #1b1f24;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #14171a; color: #e8eaed; }
+        main { border-color: #333a42; background: #1e2227; box-shadow: none; }
+        button { background: #e8eaed; color: #14171a; }
+      }
+"""
+
+
+def _oauth_browser_page(
+    title: str,
+    message: str,
+    *,
+    tone: Literal["success", "error"],
+    status_code: int = 200,
+    script: str = "",
+) -> HTMLResponse:
+    """Render one browser-facing OAuth page: a titled message and a button that closes the popup."""
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><title>{title}</title></head>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{escape(title)}</title>
+    <style>{_OAUTH_PAGE_STYLE}    </style>
+  </head>
   <body>
-    <h1>{title}</h1>
-    <p>{escaped_message}</p>
+    <main class="{tone}">
+      <h1>{escape(title)}</h1>
+      <p>{escape(message)}</p>
+      <button type="button" id="close-window">Close window</button>
+    </main>
+    <script>
+      document.getElementById("close-window").addEventListener("click", () => window.close());{script}
+    </script>
   </body>
 </html>""",
         status_code=status_code,
         headers=_OAUTH_BROWSER_SECURITY_HEADERS,
     )
+
+
+@dataclass(frozen=True)
+class _OpenerNotice:
+    """Whom a popup's last page tells how the flow ended: a registered provider's opener, at its origin if known.
+
+    `opener_origin` is the validated origin of the page that started the flow (`_validated_opener_origin`).
+    """
+
+    provider_id: str
+    opener_origin: str | None = None
+
+
+def _opener_notice_script(notice: _OpenerNotice, status: Literal["connected", "cancelled", "error"]) -> str:
+    """Return page script that tells the popup's opener how the flow ended, then closes the popup after a moment.
+
+    The message goes to the opener origin the flow recorded, else to the page's own origin, never to `*`, so only a
+    MindRoom page that opened the popup (the Connections page or the dashboard) can read it. On its own origin the
+    page posts only to a same-origin opener: one opened from a chat link, or from no page, stays open so its text can
+    be read. A recorded origin of another MindRoom host cannot be checked that way, as the opener is cross-origin.
+    """
+    message = {"type": _OAUTH_OPENER_MESSAGE_TYPE, "status": status, "provider": notice.provider_id}
+    return f"""
+      const mindroomTarget = {_script_json(notice.opener_origin)} || window.location.origin;
+      let mindroomOpener = null;
+      try {{
+        if (
+          window.opener &&
+          !window.opener.closed &&
+          (mindroomTarget !== window.location.origin || window.opener.location.origin === window.location.origin)
+        ) {{
+          mindroomOpener = window.opener;
+        }}
+      }} catch (error) {{
+        // Another site opened this window; it can neither read the message nor show the outcome.
+      }}
+      if (mindroomOpener) {{
+        mindroomOpener.postMessage({_script_json(message)}, mindroomTarget);
+        window.setTimeout(() => window.close(), {_OAUTH_POPUP_CLOSE_DELAY_MS});
+      }}"""
+
+
+def _oauth_browser_error_response(
+    message: str,
+    *,
+    status_code: int,
+    title: str | None = None,
+    notice: _OpenerNotice | None = None,
+    outcome: Literal["cancelled", "error"] = "error",
+) -> HTMLResponse:
+    """Render a browser-readable OAuth error without exposing a raw API payload.
+
+    Without a `title`, the page is a reset or conflict page: 409 means the connection changed under the request.
+    With a `notice`, the page also tells its MindRoom opener the `outcome` (`_opener_notice_script`).
+    """
+    if title is None:
+        title = "OAuth connection changed" if status_code == 409 else "OAuth reset unavailable"
+    script = "" if notice is None else _opener_notice_script(notice, outcome)
+    return _oauth_browser_page(title, message, tone="error", status_code=status_code, script=script)
+
+
+def _validated_opener_origin(origin: str | None, provider: OAuthProvider, runtime_paths: RuntimePaths) -> str | None:
+    """Return `origin` when a popup's last page may post to it: its completion origin or a dashboard CORS origin.
+
+    The dashboard's CORS `*` allows every origin to call the API, never to receive this message, so it adds none.
+    """
+    allowed = {_oauth_success_origin(provider, runtime_paths), *dashboard_cors_origins(runtime_paths)} - {"*"}
+    return origin if origin in allowed else None
+
+
+def _opener_notice(request: Request, provider_id: str, *, from_state: bool = False) -> _OpenerNotice | None:
+    """Return the notice for a page answering `request`: a registered provider, at a validated opener origin.
+
+    The origin is the request's own Origin header, or with `from_state` the one the callback's pending state recorded.
+    That state is read, never consumed, so this works before the callback is handled and for a refusal of it.
+    An unknown provider gets none, so a page names only a real provider, never other URL text.
+    """
+    try:
+        provider, runtime_paths = _load_provider(request, provider_id)
+    except _UnknownOAuthProviderError:
+        return None
+    origin = (
+        pending_oauth_opener_origin(request, provider.id, request.query_params.get("state"))
+        if from_state
+        else request.headers.get("origin")
+    )
+    return _OpenerNotice(provider.id, _validated_opener_origin(origin, provider, runtime_paths))
+
+
+def _oauth_flow_error_response(exc: HTTPException, *, notice: _OpenerNotice | None) -> HTMLResponse:
+    """Show a refusal of the browser's own OAuth step (authorize or callback) as a page for the popup.
+
+    An unknown provider in the URL gets a fixed text, so the page never repeats text from the URL. `notice` says whose
+    opener hears of the error, if anyone's.
+    """
+    title = "OAuth connection changed" if exc.status_code == 409 else "Account connection failed"
+    message = "Unknown OAuth provider." if isinstance(exc, _UnknownOAuthProviderError) else str(exc.detail)
+    return _oauth_browser_error_response(message, status_code=exc.status_code, title=title, notice=notice)
+
+
+_OAUTH_ERROR_CODE = re.compile(r"[a-z_]{1,64}")
+
+
+def _oauth_provider_error_response(error: str, *, notice: _OpenerNotice | None) -> HTMLResponse:
+    """Show the provider's own `error` for the callback; only a plain OAuth error code is repeated, never free text.
+
+    `access_denied` means the user declined at the provider, so the page and its opener hear that they cancelled.
+    """
+    code = error if _OAUTH_ERROR_CODE.fullmatch(error) else None
+    if code == "access_denied":
+        return _oauth_browser_error_response(
+            _OAUTH_CANCELLED_MESSAGE,
+            status_code=400,
+            title="Authorization cancelled",
+            notice=notice,
+            outcome="cancelled",
+        )
+    message = "OAuth provider returned an error" + (f": {code}" if code else "") + ". Nothing was connected."
+    return _oauth_browser_error_response(message, status_code=400, title="Account connection failed", notice=notice)
 
 
 def _oauth_success_origin(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
@@ -595,8 +777,25 @@ async def authorize(
     request: Request,
     agent_name: str | None = None,
     connect_token: str | None = None,
-) -> RedirectResponse:
-    """Start a provider OAuth flow from a browser-openable MindRoom URL."""
+) -> Response:
+    """Start a provider OAuth flow from a browser-openable MindRoom URL.
+
+    The browser opens this URL, so a refusal (an unknown, expired, or foreign connect link) is a page it can show,
+    with the same status as the JSON error would have had.
+    """
+    try:
+        return await _authorize(provider_id, request, agent_name=agent_name, connect_token=connect_token)
+    except HTTPException as exc:
+        return _oauth_flow_error_response(exc, notice=_opener_notice(request, provider_id))
+
+
+async def _authorize(
+    provider_id: str,
+    request: Request,
+    *,
+    agent_name: str | None,
+    connect_token: str | None,
+) -> Response:
     provider, runtime_paths = _load_provider(request, provider_id)
     connect_target = None
     if connect_token:
@@ -762,39 +961,27 @@ async def reset_and_authorize(
 
 
 @router.get("/{provider_id}/success", response_class=HTMLResponse)
-async def success(provider_id: str, request: Request) -> HTMLResponse:
-    """Signal OAuth completion to the dashboard popup opener."""
+async def success(provider_id: str, request: Request, opener_origin: str | None = None) -> HTMLResponse:
+    """Signal OAuth completion to the dashboard popup opener, at `opener_origin` when it is an allowed origin."""
     await _require_oauth_api_user(request)
-    provider, _runtime_paths = _load_provider(request, provider_id)
-    return _oauth_success_response(provider)
+    provider, runtime_paths = _load_provider(request, provider_id)
+    return _oauth_success_response(provider, _validated_opener_origin(opener_origin, provider, runtime_paths))
 
 
-def _oauth_success_response(provider: OAuthProvider) -> HTMLResponse:
-    """Render a browser-readable OAuth completion response."""
-    message = {
-        "type": _OAUTH_COMPLETE_MESSAGE_TYPE,
-        "provider": provider.id,
-        "status": "connected",
-    }
-    escaped_display_name = escape(provider.display_name)
-    html = f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>{escaped_display_name} connected</title>
-  </head>
-  <body>
-    <p>{escaped_display_name} is connected. You can close this window.</p>
-    <script>
-      const message = {_script_json(message)};
-      if (window.opener && !window.opener.closed) {{
-        window.opener.postMessage(message, "*");
-      }}
-      window.close();
-    </script>
-  </body>
-</html>"""
-    return HTMLResponse(html)
+def _oauth_success_response(provider: OAuthProvider, opener_origin: str | None) -> HTMLResponse:
+    """Render a browser-readable OAuth completion response that also tells the popup's opener."""
+    return _oauth_browser_page(
+        f"{provider.display_name} connected",
+        f"{provider.display_name} is connected. You can close this window.",
+        tone="success",
+        script=_opener_notice_script(_OpenerNotice(provider.id, opener_origin), "connected"),
+    )
+
+
+def _success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePaths, opener_origin: str | None) -> str:
+    """Return the success page URL, carrying the flow's opener origin for the page to post to."""
+    url = oauth_success_redirect_url(provider, runtime_paths)
+    return url if opener_origin is None else f"{url}?{urlencode({'opener_origin': opener_origin})}"
 
 
 async def _store_callback_credentials(
@@ -889,11 +1076,23 @@ async def _complete_oauth_callback(
 
 @router.get("/{provider_id}/callback")
 async def callback(provider_id: str, request: Request) -> Response:
-    """Handle a provider OAuth callback and store scoped credentials."""
+    """Handle a provider OAuth callback and store scoped credentials.
+
+    The provider sends the browser here, so every refusal, a cancelled authorization included, is a page the popup
+    can show, with the same status as the JSON error would have had.
+    """
+    # Read before handling, which consumes the state that recorded the opener's origin.
+    notice = _opener_notice(request, provider_id, from_state=True)
     error = request.query_params.get("error")
     if error:
-        raise HTTPException(status_code=400, detail=f"OAuth provider returned an error: {error}")
+        return _oauth_provider_error_response(error, notice=notice)
+    try:
+        return await _handle_callback(provider_id, request, notice)
+    except HTTPException as exc:
+        return _oauth_flow_error_response(exc, notice=notice)
 
+
+async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNotice | None) -> Response:
     code = request.query_params.get("code")
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
@@ -915,17 +1114,35 @@ async def callback(provider_id: str, request: Request) -> Response:
             state=state,
         )
     except OAuthCredentialConflictError:
-        return _oauth_browser_error_response(_OAUTH_STALE_CONNECTION_MESSAGE, status_code=409)
+        return _oauth_browser_error_response(_OAUTH_STALE_CONNECTION_MESSAGE, status_code=409, notice=notice)
 
+    opener_origin = notice.opener_origin if notice is not None else None
     if not dashboard_flow:
-        return _oauth_success_response(provider)
-    return RedirectResponse(url=oauth_success_redirect_url(provider, runtime_paths))
+        return _oauth_success_response(provider, opener_origin)
+    return RedirectResponse(url=_success_redirect_url(provider, runtime_paths, opener_origin))
 
 
 @router.get("/{provider_id}/status")
 async def status(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthStatusResponse:
     """Return scoped connection status for one provider."""
     await _require_oauth_api_user(request)
+    return await authenticated_connection_status(provider_id, request, agent_name=agent_name)
+
+
+async def authenticated_connection_status(
+    provider_id: str,
+    request: Request,
+    *,
+    agent_name: str | None,
+    refresh: bool = True,
+    bootstrap_client: bool = True,
+) -> OAuthStatusResponse:
+    """Return scoped connection status for a request the caller has already authenticated.
+
+    Callers that load several providers for one request authenticate once and call this per provider.
+    `refresh=False` and `bootstrap_client=False` skip the token refresh and the OAuth client bootstrap, as in
+    `connection_status`.
+    """
     provider, runtime_paths = _load_provider(request, provider_id)
     target = _resolve_oauth_credentials_target(
         request,
@@ -933,18 +1150,56 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         agent_name=agent_name,
     )
     context = _credential_context(provider, runtime_paths, target)
-    return await connection_status(request, context)
+    return await connection_status(request, context, refresh=refresh, bootstrap_client=bootstrap_client)
 
 
-async def connection_status(request: Request, context: OAuthCredentialContext) -> OAuthStatusResponse:
-    """Load connection state after the caller has authorized the credential target."""
+@dataclass(frozen=True)
+class PersonalConnectionView:
+    """What one viewer may see and do with a provider's connection."""
+
+    connected: bool
+    can_connect: bool
+    reset_required: bool
+    account_label: str | None
+
+
+def personal_connection_view(result: OAuthStatusResponse, *, can_manage: bool) -> PersonalConnectionView:
+    """Mask a provider status for a viewer; the Connections portal and the egress pages share this view.
+
+    Shared service accounts are runtime configuration, never a personal account: managers see no connection to
+    manage and users see the service as connected. Only managers may connect. Everyone who uses the agent sees the
+    connected account, since they all act as it; a requester-scoped account is only ever read from the viewer's
+    own connection, and the broker refuses it on shared agents.
+    """
+    personal = not result.has_service_account_config
+    return PersonalConnectionView(
+        connected=result.connected and (personal or not can_manage),
+        can_connect=result.has_client_config and personal and can_manage,
+        reset_required=result.reset_required,
+        account_label=result.account_label if personal else None,
+    )
+
+
+async def connection_status(
+    request: Request,
+    context: OAuthCredentialContext,
+    *,
+    refresh: bool = True,
+    bootstrap_client: bool = True,
+) -> OAuthStatusResponse:
+    """Load connection state after the caller has authorized the credential target.
+
+    `refresh=False` skips the token refresh, so a listing never waits on the provider's token endpoint.
+    `bootstrap_client=False` reads only the stored OAuth client and never bootstraps one over the network: `connected`
+    is the same (it uses the stored client either way), and `has_client_config` stays false until a client is stored.
+    """
     provider, runtime_paths = context.provider, context.runtime_paths
     credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context)
     credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
         provider.client_config_resolution(runtime_paths)
-        if has_service_account_config
+        if has_service_account_config or not bootstrap_client
         else await _client_config_resolution_for_request(
             request,
             provider,
@@ -954,7 +1209,7 @@ async def connection_status(request: Request, context: OAuthCredentialContext) -
     )
     has_client_config = client_config_resolution is not None
     credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
-    if credentials_usable and has_client_config and not has_service_account_config:
+    if refresh and credentials_usable and has_client_config and not has_service_account_config:
         try:
             refreshed_credentials = await refresh_oauth_credentials(context)
         except OAuthProviderError as exc:
@@ -991,9 +1246,31 @@ async def connection_status(request: Request, context: OAuthCredentialContext) -
         has_service_account_config=has_service_account_config,
         reset_required=credential_status.reset_required,
         email=oauth_verified_claim(credentials, "email"),
+        account_label=oauth_account_label(credentials),
         hosted_domain=oauth_verified_claim(credentials, "hd"),
         capabilities=list(provider.status_capabilities),
     )
+
+
+async def agent_connection_status(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    config: Config,
+    refresh: bool = True,
+) -> OAuthStatusResponse:
+    """Load connection state for an agent's worker target after the caller has authorized that agent."""
+    context = resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        credentials_manager,
+        worker_target,
+        config=config,
+    )
+    return await connection_status(request, context, refresh=refresh)
 
 
 @router.post("/{provider_id}/disconnect")

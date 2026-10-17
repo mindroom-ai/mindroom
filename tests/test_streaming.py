@@ -20,6 +20,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom import interactive
 from mindroom import reply_lifecycle as rl
 from mindroom import streaming as streaming_mod
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
@@ -66,7 +67,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.final_delivery import StreamTransportOutcome
@@ -99,8 +100,6 @@ class _FakeGateway:
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="send", content=dict(content), display_text=content["body"]))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -112,8 +111,6 @@ class _FakeGateway:
         event_id: str,
         new_content: dict[str, Any],
         new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text, event_id=event_id))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
@@ -156,7 +153,7 @@ async def _run_stream(
     config: Config,
     response_stream: AsyncIterator[object],
     *,
-    visible_progress_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -320,8 +317,14 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("accepted", [True, False])
 async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config, *, accepted: bool) -> None:
-    """Only acknowledged plain text reaches progress observers, never buffered text or trace details."""
+    """Only acknowledged text and the tool trace it was sent with reach observers, never buffered updates."""
     visible: list[str] = []
+    traces: list[tuple[ToolTraceEntry, ...]] = []
+
+    def note_progress(body: str, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        visible.append(body)
+        traces.append(tuple(tool_trace))
+
     entered = asyncio.Event()
     release = asyncio.Event()
     gateway = _FakeGateway()
@@ -330,22 +333,21 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
         client: object,
         room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,
     ) -> DeliveredMatrixEvent | None:
         entered.set()
         await release.wait()
         if not accepted:
             return None
-        return await gateway.send(client, room_id, content, retry_sync_recovery=retry_sync_recovery)
+        return await gateway.send(client, room_id, content)
 
     streaming = StreamingResponse(
         target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        visible_progress_callback=visible.append,
+        visible_progress_callback=note_progress,
     )
-    streaming.tool_trace = [ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")]
+    sent_entry = ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")
+    streaming.tool_trace = [sent_entry]
     client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
     with patch("mindroom.streaming.send_message_result", new=delayed_send):
         delivery = asyncio.create_task(push_stream_chunk(streaming, "Published reply", client))
@@ -353,6 +355,7 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
             await entered.wait()
             assert visible == []
             streaming.accumulated_text += " buffered later"
+            streaming.tool_trace.append(ToolTraceEntry("tool_call_started", "shell", args_preview="buffered"))
             release.set()
             if accepted:
                 await delivery
@@ -365,6 +368,7 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
                 delivery.cancel()
                 await asyncio.gather(delivery, return_exceptions=True)
     assert visible == (["Published reply"] if accepted else [])
+    assert traces == ([(sent_entry,)] if accepted else [])
     if accepted:
         assert visible == [gateway.ops[0].content["body"]]
 
@@ -372,13 +376,15 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 async def test_stream_driver_publishes_only_visible_text_to_progress_callback(config: Config) -> None:
-    """The stream driver forwards its observer without forwarding rich tool arguments."""
+    """The stream driver forwards acknowledged text with the tool trace it was sent with."""
     visible: list[str] = []
+    traces: list[tuple[ToolTraceEntry, ...]] = []
     published = asyncio.Event()
     gateway = _FakeGateway()
 
-    def note_progress(text: str) -> None:
+    def note_progress(text: str, tool_trace: Sequence[ToolTraceEntry]) -> None:
         visible.append(text)
+        traces.append(tuple(tool_trace))
         published.set()
 
     async def stream() -> AsyncIterator[object]:
@@ -396,7 +402,27 @@ async def test_stream_driver_publishes_only_visible_text_to_progress_callback(co
     assert visible
     assert "I found the file" in visible[0]
     assert "read_file" in visible[0]
+    # Arguments travel only as trace data, which the mid-turn judge renders as tags.
     assert "private path" not in "\n".join(visible)
+    assert traces[0] == (ToolTraceEntry("tool_call_started", "read_file", args_preview="private path"),)
+
+
+@pytest.mark.asyncio
+async def test_hidden_tool_calls_publish_no_trace_to_progress_callback(config: Config) -> None:
+    """Hidden tool calls leave no markers, so marker-shaped agent text must not meet their trace."""
+    traces: list[tuple[ToolTraceEntry, ...]] = []
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        visible_progress_callback=lambda _body, trace: traces.append(tuple(trace)),
+        show_tool_calls=False,
+    )
+    streaming.tool_trace = [ToolTraceEntry("tool_call_started", "shell", args_preview="private")]
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+    with patch("mindroom.streaming.send_message_result", new=_FakeGateway().send):
+        await push_stream_chunk(streaming, "Example:\n\n🔧 `shell` [1]", client)
+    assert traces == [()]
 
 
 @pytest.mark.asyncio
@@ -443,8 +469,6 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_content.update(content)
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -543,8 +567,6 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         _client: object,
         _room_id: str,
         content: dict[str, Any],
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_bodies.append(content["body"])
         streaming.accumulated_text = "Answer buffered while the placeholder is in flight"
@@ -556,8 +578,6 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         _event_id: str,
         new_content: dict[str, Any],
         _new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_bodies.append(new_content["body"])
         return DeliveredMatrixEvent(event_id="$answer-edit", content_sent=dict(new_content))
@@ -619,8 +639,6 @@ async def test_terminal_failure_note_ack_is_visible_but_not_substantive(
         _event_id: str,
         new_content: dict[str, Any],
         _new_text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         return DeliveredMatrixEvent(event_id="$terminal-edit", content_sent=dict(new_content))
 
@@ -756,6 +774,63 @@ def test_only_in_progress_edits_hide_an_unfinished_interactive_block(config: Con
     assert in_progress.display_text == "Thinking..."
     assert in_progress.committed_state.visible_body_state == "placeholder_only"
     assert "```interactive" in streaming_mod._prepare_delivery_from_snapshot(final).display_text
+
+
+def test_only_a_final_edit_warns_about_an_unfinished_interactive_block(config: Config) -> None:
+    """A block still arriving is not malformed yet; only a final reply that never closes it logs a warning."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = 'Here is the plan.\n\n```interactive\n{"question": "Which step first?", "options": ['
+    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    final = streaming._delivery_snapshot(
+        is_final=True,
+        allow_empty_progress=False,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    assert progress is not None
+    assert final is not None
+
+    with patch.object(interactive.logger, "warning") as mock_warning:
+        assert streaming_mod._prepare_delivery_from_snapshot(progress).display_text == "Here is the plan."
+    mock_warning.assert_not_called()
+
+    with patch.object(interactive.logger, "warning") as mock_warning:
+        streaming_mod._prepare_delivery_from_snapshot(final)
+    mock_warning.assert_called_once()
+    assert mock_warning.call_args.args == ("Interactive block not parsed",)
+
+
+_PICK_BLOCK_JSON = '{"question": "Pick one", "options": [{"emoji": "✅", "label": "Yes", "value": "yes"}]}'
+
+
+@pytest.mark.parametrize(
+    "streamed",
+    [
+        # An introduction on the opening fence line, then a second block still arriving.
+        f'Please choose: ```interactive\n{_PICK_BLOCK_JSON}\n```\n\n```interactive\n{{"question": "Second',
+        # A four-backtick opener closed by three backticks, which the parser accepts.
+        f"Before.\n````interactive\n{_PICK_BLOCK_JSON}\n```",
+    ],
+)
+def test_in_progress_edits_render_every_complete_interactive_block(config: Config, streamed: str) -> None:
+    """Edits show each block the parser accepts as its question and keep a block still arriving hidden."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = streamed
+    snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    assert snapshot is not None
+
+    shown = streaming_mod._prepare_delivery_from_snapshot(snapshot).display_text
+
+    assert "Pick one" in shown
+    assert "Second" not in shown
+    assert "```" not in shown
 
 
 @pytest.mark.asyncio
@@ -1074,6 +1149,7 @@ async def _run_resumed_stream(
     response_stream: AsyncIterator[object],
     *,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
+    resumed: UnfinishedStreamedReply = _STOPPED_REPLY,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -1084,7 +1160,7 @@ async def _run_resumed_stream(
         streaming_cls=streaming_cls,
         existing_event_id="$reply",
         adopt_existing_placeholder=True,
-        resumed=_STOPPED_REPLY,
+        resumed=resumed,
     )
 
 

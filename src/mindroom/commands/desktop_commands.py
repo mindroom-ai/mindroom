@@ -88,6 +88,7 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         f"--controller-user-id {shlex.quote(controller.user_id)}",
         f"--controller-device-id {shlex.quote(controller.device_id)}",
         f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
+        f"--allow-requester {shlex.quote(scope.requester_id)}",
         f"--allow-agent {shlex.quote(scope.agent_name)}",
     ]
     if cloudflare_access:

@@ -85,6 +85,27 @@ class CoalescingConfig(BaseModel):
     )
 
 
+class BackgroundToolJobsConfig(BaseModel):
+    """Generic execution policy for registered toolkits; its feature switch and exclusions are pinned at startup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False, description="Enable managed tool waits and durable jobs; requires restart.")
+    exclude_toolkits: list[str] = Field(
+        default_factory=list,
+        description="Registered toolkit names that keep their own waiting behavior; requires restart.",
+    )
+    approval_wait_timeout: float | None = Field(
+        default=300,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Seconds a reply waits for the approval of a gated call that runs as a job before continuing while the job "
+            "waits; null waits until the decision or a newer message."
+        ),
+    )
+
+
 class DebugConfig(BaseModel):
     """Debug and diagnostic settings."""
 
@@ -413,7 +434,13 @@ class DefaultsConfig(BaseModel):
         ),
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
+    knowledge_graph: bool = Field(default=False, description="Default knowledge graph setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
+    cheap_model: str | None = Field(
+        default=None,
+        description="Cheaper model key for agents without their own cheap_model, used by cold_cache",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     compaction: CompactionConfig | None = Field(
         default_factory=CompactionConfig,
         description="Default text compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
@@ -522,7 +549,7 @@ class DefaultsConfig(BaseModel):
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, "
+            "MindRoom always uses provider temperature defaults for OpenAI GPT-5 and GPT-6 models, Vertex Claude, "
             "Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and "
             "Gemini 3.5 Flash-Lite thread summaries."
         ),
@@ -717,8 +744,8 @@ class ModelConfig(BaseModel):
             "the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. "
             "An explicit compaction.model or compaction.fallback_model also needs its own context_window for "
             "summary generation. "
-            "With compaction enabled, every model request of a reply is also checked against it, and the reply "
-            "compacts when its next request would not fit"
+            "On vertexai_claude models it additionally "
+            "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )
     stream_idle_timeout_seconds: float | None = Field(

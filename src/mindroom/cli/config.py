@@ -23,6 +23,8 @@ from mindroom import constants
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import upsert_env_values, write_private_env_text
+from mindroom.cli.help_format import PanelOrderedGroup, examples
+from mindroom.cli.interactive import secret, section, select
 from mindroom.model_defaults import (
     CONFIG_INIT_ADDITIONAL_MODELS,
     CONFIG_INIT_HELPER_MODELS,
@@ -58,8 +60,9 @@ console = Console()
 _err_console = Console(stderr=True)
 
 config_app = typer.Typer(
+    cls=PanelOrderedGroup,
     name="config",
-    help="Manage MindRoom configuration files.",
+    help="Create, edit, and validate config.yaml.",
     rich_markup_mode="rich",
     no_args_is_help=True,
 )
@@ -111,9 +114,9 @@ _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
 }
 
 _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
-    ("MATRIX_HOMESERVER", "https://mindroom.chat"),
+    ("MATRIX_HOMESERVER", constants.DEFAULT_MATRIX_HOMESERVER),
     ("MATRIX_SERVER_NAME", "mindroom.chat"),
-    ("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
+    ("MINDROOM_PROVISIONING_URL", constants.DEFAULT_MATRIX_HOMESERVER),
     ("MINDROOM_NAMESPACE", ""),
     ("MATRIX_REGISTRATION_TOKEN", ""),
 )
@@ -125,12 +128,21 @@ _PROVIDER_HELP = "Default model provider for the generated config."
 _PROVIDER_CHOICES_TEXT = (
     "anthropic, azure, bedrock_claude, codex, kimi, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
 )
-# Presets that need exactly one API key, which first-run setup asks for; the others need logins or more settings.
-_API_KEY_PRESET_LABELS: dict[_ProviderPreset, str] = {
-    "anthropic": "Anthropic",
-    "openai": "OpenAI",
-    "openrouter": "OpenRouter",
+# The provider menu in its display order, default first: each preset's name and what it needs.
+_PROVIDER_PRESET_MENU: dict[_ProviderPreset, tuple[str, str]] = {
+    "openai": ("OpenAI", "API key"),
+    "anthropic": ("Anthropic", "API key"),
+    "openrouter": ("OpenRouter", "API key"),
+    "codex": ("Codex", "ChatGPT sign-in through `codex login`"),
+    "kimi": ("Kimi Code", "Kimi sign-in through `kimi`"),
+    "ollama": ("Ollama", "Local models served by Ollama"),
+    "llama_cpp": ("llama.cpp", "Local models served by llama.cpp"),
+    "azure": ("Azure OpenAI", "Azure OpenAI key and endpoint in .env"),
+    "bedrock_claude": ("AWS Bedrock", "Claude on AWS Bedrock, AWS credentials in .env"),
+    "vertexai_claude": ("Vertex AI", "Claude on Vertex AI, Google Cloud project in .env"),
 }
+# Presets that need exactly one API key, which first-run setup asks for; the others need logins or more settings.
+_API_KEY_PRESETS: frozenset[_ProviderPreset] = frozenset({"anthropic", "openai", "openrouter"})
 
 # First-run setup for presets without a single API key; MindRoom starts right after, and `.env` is read only at startup.
 _FIRST_RUN_PROVIDER_STEPS: dict[_ProviderPreset, str] = {
@@ -459,7 +471,16 @@ def format_validation_errors(
     console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")
 
 
-@config_app.command("init")
+@config_app.command(
+    "init",
+    rich_help_panel="Create and edit",
+    epilog=examples(
+        ("mindroom config init", "For MindRoom Chat"),
+        ("mindroom config init --provider anthropic", "With Anthropic models"),
+        ("mindroom config init --matrix-server self-hosted", "For your own homeserver"),
+        ("mindroom config init --print", "Print instead of writing"),
+    ),
+)
 def config_init(
     path: Path | None = typer.Option(  # noqa: B008
         None,
@@ -559,11 +580,14 @@ def create_first_run_config(
     elif (selected_preset := _normalize_provider_preset(provider)) is None:
         msg = f"Invalid --provider value. Use: {_PROVIDER_CHOICES_TEXT}."
         raise ValueError(msg)
-    console.print(f"[yellow]No MindRoom config found at {config_path}.[/yellow]")
     console.print(
-        "Let's create one for MindRoom Chat (mindroom.chat). "
-        "For your own Matrix server, press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.",
+        f"\n[bold]Welcome to MindRoom![/bold] Let's create your config at {escape(str(config_path))} "
+        "for MindRoom Chat (mindroom.chat).",
     )
+    console.print(
+        "[dim]Own Matrix server? Press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.[/dim]",
+    )
+    console.print(section("Model provider"))
     selected_preset = selected_preset or _prompt_provider_preset()
     provider_api_key = _prompt_provider_key(selected_preset, runtime_paths, env_path, interactive=interactive)
     _write_starter_setup(
@@ -576,11 +600,10 @@ def create_first_run_config(
         replace_env_file=False,
         provider_api_key=provider_api_key,
     )
-    if selected_preset not in _API_KEY_PRESET_LABELS:
+    if selected_preset not in _API_KEY_PRESETS:
         console.print("\nMindRoom keeps starting; your agents can answer once you:")
         console.print(f"  {_FIRST_RUN_PROVIDER_STEPS[selected_preset].format(env_path=env_path)}")
         _print_local_model_commands(selected_preset)
-    console.print()
 
 
 def _prompt_provider_key(
@@ -593,23 +616,14 @@ def _prompt_provider_key(
     """Ask a terminal for the preset's API key with hidden input; return None when none was typed or none is needed."""
     from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
 
-    label = _API_KEY_PRESET_LABELS.get(selected_preset)
     env_key = _preset_api_key_env(selected_preset)
-    if label is None or env_key is None:
+    if selected_preset not in _API_KEY_PRESETS or env_key is None:
         return None
     if get_secret_from_env(env_key, runtime_paths):
         console.print(f"Using {env_key} from your environment.")
         return None
-    value = (
-        typer.prompt(
-            f"{label} API key (input hidden, press Enter to skip)",
-            default="",
-            show_default=False,
-            hide_input=True,
-        ).strip()
-        if interactive
-        else ""
-    )
+    label, _ = _PROVIDER_PRESET_MENU[selected_preset]
+    value = secret(f"{label} API key (input hidden, press Enter to skip)").strip() if interactive else ""
     if not value:
         console.print(
             f"Skipped. Connect your provider in the dashboard once MindRoom is running, "
@@ -687,7 +701,7 @@ def _write_starter_setup(
     return env_changed
 
 
-@config_app.command("show")
+@config_app.command("show", rich_help_panel="Inspect")
 def config_show(
     path: Path | None = CONFIG_PATH_OPTION,
     raw: bool = typer.Option(
@@ -721,7 +735,7 @@ def config_show(
     console.print(_yaml_syntax(content, line_numbers=True, word_wrap=True))
 
 
-@config_app.command("edit")
+@config_app.command("edit", rich_help_panel="Create and edit")
 def config_edit(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
@@ -760,7 +774,7 @@ def config_edit(
         raise typer.Exit(e.returncode) from None
 
 
-@config_app.command("validate")
+@config_app.command("validate", rich_help_panel="Inspect")
 def config_validate(
     path: Path | None = typer.Option(  # noqa: B008
         None,
@@ -813,7 +827,7 @@ def config_validate(
     check_env_keys(config, runtime_paths=runtime_paths)
 
 
-@config_app.command("resolve")
+@config_app.command("resolve", rich_help_panel="Inspect")
 def config_resolve(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
@@ -846,7 +860,7 @@ def config_resolve(
     )
 
 
-@config_app.command("path")
+@config_app.command("path", rich_help_panel="Inspect")
 def config_path_cmd(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
@@ -936,14 +950,14 @@ def validate_config_source_quiet(
     return _call_config_loader_quietly(validate)
 
 
-@config_app.command("use-local-model")
+@config_app.command("use-local-model", rich_help_panel="Create and edit")
 def config_use_local_model(
     model: str = typer.Option(..., help="Model ID served by the local inference engine."),
     base_url: str = typer.Option(..., help="OpenAI-compatible local server URL."),
     api_key: str = typer.Option(LOCAL_OPENAI_API_KEY_DEFAULT, help="Local server authentication key."),
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
-    """Use a local model as the default, keeping explicitly selected agent models.
+    """Make a local model the default, keeping agents' explicit model choices.
 
     A backup is saved before replacing YAML. Configurations composed with
     !include must be edited in their authored source files instead.
@@ -1071,17 +1085,12 @@ def _normalize_provider_preset(provider: str) -> _ProviderPreset | None:
 
 
 def _prompt_provider_preset() -> _ProviderPreset:
-    """Prompt the user for a starter provider preset."""
-    while True:
-        raw_value = typer.prompt(
-            "Choose provider preset [anthropic/azure/bedrock_claude/codex/kimi/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
-            default="openai",
-            show_default=True,
-        )
-        provider_preset = _normalize_provider_preset(raw_value)
-        if provider_preset is not None:
-            return provider_preset
-        console.print(f"[red]Invalid choice.[/red] Enter {_PROVIDER_CHOICES_TEXT}.")
+    """Ask for a starter provider preset from the provider menu."""
+    width = max(len(label) for label, _ in _PROVIDER_PRESET_MENU.values()) + 2
+    return select(
+        "Which model provider should your agents use?",
+        [(preset, f"{label:<{width}}{needs}") for preset, (label, needs) in _PROVIDER_PRESET_MENU.items()],
+    )
 
 
 def _model_settings_block(model_preset: ModelPreset) -> str:
@@ -1181,6 +1190,17 @@ models:
   default:
 {model_block}{additional_models_block}{commented_model_options_block}
 
+mcp_servers:
+  # Reads and sends Matrix messages as the account you log in with.
+  # Log in once with: uvx matrix-mcp auth sso <homeserver URL>
+  # See https://matrix-mcp.mindroom.chat/
+  matrix_mcp:
+    transport: stdio
+    command: uvx
+    args:
+      - matrix-mcp
+      - serve
+
 agents:
   mind:
     display_name: Mind
@@ -1217,10 +1237,26 @@ agents:
       - update_awareness
       - todo
       - matrix_message
+      - name: matrix_room
+        defer: true
       - name: thread_model
         defer: true
       - thread_tags
       - thread_summary
+      - thread_resolution
+      - compact_context
+      - callback_manager
+      - chat_ui
+      - script
+      - name: mcp_matrix_mcp
+        defer: true
+    delegate_to:
+      - mind
+    skill_learning:
+      enabled: true
+    automations:
+      - prompt_curation
+      - dreaming
     skills:
       - mindroom-docs
     instructions:
@@ -1247,6 +1283,11 @@ room_defaults:
   admins:
     - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
+rooms:
+  personal:
+    # Also the room's topic, so creating it needs no model call.
+    description: Your private room with Mind, who remembers across sessions 🧠
+
 matrix_space:
   enabled: true
   name: MindRoom
@@ -1270,6 +1311,14 @@ memory:
 
 authorization:
   config_command_enabled: false
+
+tool_approval:
+  rules:
+    - match: resolve_thread
+      action: require_approval
+
+background_tool_jobs:
+  enabled: true
 
 defaults:
   # Execution tools (shell, file, python, coding, docker) run directly in the
@@ -1299,12 +1348,12 @@ def _env_template(
     """
     api_key = _new_dashboard_api_key()
     if matrix_server == "mindroom.chat":
-        matrix_homeserver = "https://mindroom.chat"
+        matrix_homeserver = constants.DEFAULT_MATRIX_HOMESERVER
         extra_matrix = (
             "# Matrix server_name override (needed when federation hostname differs)\n"
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
             "# Hosted provisioning API; lets `mindroom run` pair with your MindRoom Chat account\n"
-            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
+            f"MINDROOM_PROVISIONING_URL={constants.DEFAULT_MATRIX_HOMESERVER}\n\n"
             "# Optional hosted installation namespace. Leave blank for existing unnamespaced rooms.\n"
             "MINDROOM_NAMESPACE=\n\n"
             "# Leave MATRIX_REGISTRATION_TOKEN empty on mindroom.chat; pairing replaces it.\n"

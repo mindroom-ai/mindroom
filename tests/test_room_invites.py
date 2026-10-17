@@ -17,7 +17,7 @@ from uuid import UUID
 import nio
 import pytest
 
-from mindroom import bot_room_lifecycle
+from mindroom import bot_room_lifecycle, thread_summary
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -1903,6 +1903,39 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
 
     bot.client.room_messages.assert_awaited_once()
     send_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_router_welcome_gets_thread_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The welcome is titled without counting toward automatic summaries."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(room_id="!empty:localhost", chunk=[], start="", end=None),
+    )
+    install_send_response_mock(bot, AsyncMock(return_value="$welcome"))
+    send_message_result = AsyncMock(return_value=None)
+    monkeypatch.setattr(thread_summary, "send_message_result", send_message_result)
+
+    assert await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
+
+    content = send_message_result.await_args.args[2]
+    assert content["m.relates_to"]["event_id"] == "$welcome"
+    assert content["io.mindroom.thread_summary"]["summary"] == "Welcome to MindRoom"
+    assert content["io.mindroom.thread_summary"]["message_count"] == 0
+    assert content["io.mindroom.thread_summary"]["model"] == "manual"
 
 
 @pytest.mark.asyncio

@@ -1926,7 +1926,6 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths,
             room_id=room.room_id,
             mode="room",
-            set_by="@admin:localhost",
         )
         resolved_targets: list[MessageTarget] = []
 

@@ -1030,7 +1030,6 @@ def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
         "reply_to_event_id": "$reply",
         "requester_id": "@user:hs",
         "correlation_id": "corr-1",
-        "tools_schema": [],
         "model_params": {},
         "matrix_event_id": "$reply",
     }

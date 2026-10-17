@@ -49,6 +49,8 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 
 if TYPE_CHECKING:
@@ -170,7 +172,6 @@ def build_matrix_run_metadata(
     thread_id: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,
-    tools_schema: list[dict[str, object]] | None = None,
     model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -186,10 +187,6 @@ def build_matrix_run_metadata(
         metadata["requester_id"] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
-    if tools_schema is not None:
-        metadata["tools_schema"] = tools_schema
-    else:
-        metadata.setdefault("tools_schema", [])
     if model_params is not None:
         metadata["model_params"] = model_params
     else:
@@ -310,6 +307,9 @@ class ResponseTurnContext:
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
+    background_tool_jobs: bool = False
+    # Set for a voice call's turn: no reply owns its calls' outcomes afterwards, so they finish inside it.
+    inline_tools: bool = False
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
@@ -960,6 +960,7 @@ async def _open_scope_off_event_loop(
         await run_blocking_until_complete(manager.__exit__, None, None, None)
 
 
+@owned_tool_execution(enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def run_blocking_response_turn(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -976,6 +977,7 @@ async def run_blocking_response_turn(
         ):
             await _remove_history_of_redacted_events(ctx, scope_context)
             run.scope_context = scope_context
+            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
@@ -983,6 +985,7 @@ async def run_blocking_response_turn(
                 try:
                     with helper_usage_context(scope_context):
                         resolution = await adapter.run_attempt(run, continuation)
+                    await finalize_consumption()
                     settled = _settle_blocking_attempt(
                         ctx,
                         adapter,
@@ -996,6 +999,7 @@ async def run_blocking_response_turn(
                     await cli_lifetime.retire_attempt()
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
+                    await finalize_consumption()
                 if isinstance(settled, str):
                     return settled
                 continuation = settled
@@ -1271,6 +1275,7 @@ def _settle_completed_attempt(
     )
 
 
+@owned_tool_execution(enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def stream_response_turn[ChunkT](
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
@@ -1318,6 +1323,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             await _remove_history_of_redacted_events(ctx, scope_context)
             run.scope_context = scope_context
+            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             initial_count = (
@@ -1343,6 +1349,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                     resolution = item.resolution
                                     continue
                                 yield item
+                    await finalize_consumption()
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, SkippedAttempt):
@@ -1416,6 +1423,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     await cli_lifetime.retire_attempt()
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
+                    await finalize_consumption()
                 if not keep_going:
                     return
             _raise_continuation_budget_exhausted()

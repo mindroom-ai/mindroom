@@ -36,6 +36,8 @@ agents:
 
 With `none`, the agent gets no memories in its prompt, stores none after its turns, and does not receive the `memory` tool.
 `none` does not turn off [Agno Learning](#agno-learning); set `learning: false` as well to disable all built-in memory and learning.
+Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
+What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written, and [Agno Learning](#agno-learning) reads conversations without this removal.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
 OpenClaw-compatible agents use this same backend selection.
 
@@ -126,7 +128,7 @@ When the embedder rejects its credential, semantic memory search reports the cau
 Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
 With `provider: ollama`, `config.host` points extraction at a different Ollama server, but a configured `OLLAMA_HOST` takes precedence; other providers ignore `host`.
-With `provider: openai`, use `gpt-6-luna`; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 models reject.
+With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 
 ```yaml
 memory:

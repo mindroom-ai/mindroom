@@ -78,7 +78,12 @@ def config_install_bundle(
     revision: str | None = typer.Option(None, help="Record this bootstrap revision in the installed tree."),
     json_output: bool = typer.Option(False, "--json", help="Print a filesystem receipt as JSON."),
 ) -> None:
-    """Validate and install a complete tree; use check-applied to confirm runtime reload."""
+    """Validate and install a complete config tree.
+
+    To confirm the running MindRoom reloaded it, pass the installed config file and the receipt fingerprint:
+
+    `mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300`
+    """
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.
     from mindroom.config.bundle import install_config_bundle  # noqa: PLC0415
@@ -124,7 +129,10 @@ def config_classify_change(
     ),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """Classify tree differences; exit 0 YAML/include sources only, 1 other changes, 2 error."""
+    """Classify the differences between two config trees.
+
+    Exits 0 when only YAML or include sources changed, 1 for other changes, and 2 on error.
+    """
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.
     from mindroom.config.bundle import classify_bundle_change  # noqa: PLC0415
@@ -285,7 +293,10 @@ def config_apply_bundle(
     timeout: float = typer.Option(10.0, min=0.001, help="HTTP timeout in seconds."),
     json_output: bool = typer.Option(False, "--json", help="Print the final receipt as JSON."),
 ) -> None:
-    """Hot-apply a source-only tree change; exit 0 applied, 1 pending, 2 failed, 3 rolled back, 4 unconfirmed, 5 restart."""
+    """Hot-apply a config tree change limited to YAML or include sources.
+
+    Exits 0 when applied, 1 pending, 2 failed, 3 rolled back, 4 unconfirmed, and 5 when a restart is required.
+    """
     receipt = _apply_bundle(
         source,
         target,

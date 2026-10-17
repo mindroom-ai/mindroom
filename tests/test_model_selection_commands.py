@@ -64,8 +64,6 @@ async def test_explicit_model_operation(
         paths,
         thread_id="$root",
         model_name="default",
-        room_id=ROOM,
-        set_by=USER,
         entity_names=("helper",),
         config=config,
     )
@@ -122,8 +120,6 @@ async def test_structured_set_keeps_exact_key_in_storage_reply_and_ack(tmp_path:
         paths,
         thread_id="$root",
         model_name="default",
-        room_id=ROOM,
-        set_by=USER,
         entity_names=("helper",),
         config=config,
     )
@@ -171,8 +167,6 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         paths,
         thread_id="$root",
         model_name="default",
-        room_id=ROOM,
-        set_by=USER,
         entity_names=("helper",),
         config=config,
     )
@@ -297,8 +291,6 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
         paths,
         thread_id="$root",
         model_name="later",
-        room_id=ROOM,
-        set_by=USER,
         entity_names=("helper",),
         config=config,
     )

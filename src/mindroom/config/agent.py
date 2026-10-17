@@ -23,6 +23,7 @@ from mindroom.config.access import (
     validate_concrete_matrix_user_ids,
 )
 from mindroom.config.automations import AutomationList  # noqa: TC001
+from mindroom.config.cold_cache import ColdCacheConfig  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
@@ -264,6 +265,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Opt-in judgments for messages queued during this agent's response across all rooms",
     )
+    cold_cache: ColdCacheConfig | None = Field(
+        default=None,
+        description="Opt-in switch of an idle thread to cheap_model for the rest of the thread",
+    )
     access: ResponderAccessConfig | None = Field(
         default=None,
         description="Optional membership-based conversation access policy",
@@ -289,6 +294,10 @@ class AgentConfig(BaseModel):
     )
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
+    knowledge_graph: bool | None = Field(
+        default=None,
+        description="Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
+    )
     learning_mode: AgentLearningMode | None = Field(
         default=None,
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
@@ -296,6 +305,11 @@ class AgentConfig(BaseModel):
     model: str = Field(
         default="default",
         description="Configured model alias used for this agent's replies",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
+    cheap_model: str | None = Field(
+        default=None,
+        description="Cheaper model alias this agent may switch to, used by cold_cache",
         json_schema_extra=dashboard_hint(reference="model"),
     )
     memory_backend: MemoryBackend | None = Field(
@@ -570,7 +584,10 @@ class RoomConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
-    description: str = Field(default="", description="Dashboard-facing room purpose")
+    description: str = Field(
+        default="",
+        description="Room purpose shown in the dashboard and used as the topic of a new room or a room without one",
+    )
     join_policy: RoomJoinPolicy | None = Field(default=None, description="Room-specific join-policy override")
     listed: bool | None = Field(default=None, description="Room-specific directory-listing override")
     encrypted: bool | None = Field(

@@ -22,7 +22,7 @@ from mindroom.private_storage.private_instance_identity import (
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
-from mindroom.tool_system.worker_routing import build_tool_execution_identity, worker_dir_name
+from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_RELATIVE_PATH,
@@ -64,9 +64,11 @@ _REQUIRED_COLUMNS = frozenset(
     {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
 )
 _USAGE_REQUIRED_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
+# A dated read keeps snapshots last written in range, so a run resumed after ``since`` keeps its new requests.
 # Malformed snapshots stay in a dated read, so the reader reports them instead of SQLite failing the whole store.
 _USAGE_SINCE_CONDITION = (
-    "CASE WHEN json_valid(usage_data) THEN json_extract(usage_data, '$.created_at') >= ? ELSE 1 END"
+    "CASE WHEN json_valid(usage_data) THEN "
+    "COALESCE(json_extract(usage_data, '$.updated_at'), json_extract(usage_data, '$.created_at')) >= ? ELSE 1 END"
 )
 
 
@@ -229,15 +231,10 @@ def discover_private_usage_sources(
         if agent_config.private is None:
             continue
         for user_id in sorted(requester_ids):
-            identity = build_tool_execution_identity(
-                channel="matrix",
+            identity = build_requester_execution_identity(
                 agent_name=agent_name,
                 runtime_paths=runtime_paths,
                 requester_id=user_id,
-                room_id=None,
-                thread_id=None,
-                resolved_thread_id=None,
-                session_id=None,
             )
             try:
                 agent_sources = discover_self_usage_sources(
@@ -477,7 +474,7 @@ def iter_usage_storage_rows(
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
     """Read independent usage snapshots and optional cumulative session counters without writes.
 
-    ``since`` reads only runs created at or after that epoch time and skips session counters,
+    ``since`` reads only runs last updated at or after that epoch time and skips session counters,
     which cover a session's whole history.
     """
     if mode not in {"runs", "both"}:

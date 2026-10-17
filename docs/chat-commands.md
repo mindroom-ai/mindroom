@@ -18,6 +18,8 @@ This page lists every command and fully covers `!help`, `!hi`, and `!config`; th
 | `!list_schedules` | List pending scheduled tasks | [Scheduling](scheduling.md#list_schedules) |
 | `!cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](scheduling.md#cancel_schedule) |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](scheduling.md#edit_schedule) |
+| `!jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
+| `!cancel_job <id\|all>` | Cancel a background job by the short ID `!jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
 | `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](tools/desktop.md#desktop) |
 | `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](tools/agent-cli.md#mode) |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](configuration/models.md#model) |
@@ -105,4 +107,5 @@ When `defaults.show_stop_button` is `true` (the default), MindRoom adds that �
 Setting `show_stop_button: false` hides only that reaction; a 🛑 reaction you add yourself still cancels.
 
 The stop button only works on messages still being generated, and 🛑 reactions from agents are ignored.
+The exception is an agent's [`stop_reply`](tools/matrix-and-attachments.md#stop_reply) call, which stops a reply on behalf of the user it works for.
 See [Cancellation and Errors](streaming.md#cancellation-and-errors) for how a cancelled response is finalized.

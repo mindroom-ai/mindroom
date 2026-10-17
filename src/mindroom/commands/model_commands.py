@@ -52,9 +52,7 @@ def _apply_model_selection(
         config=config,
         runtime_paths=runtime_paths,
         entity_names=entity_names,
-        room_id=room_id,
         thread_id=thread_id,
-        requester_user_id=requester_user_id,
     )
     return text, None
 
@@ -80,17 +78,13 @@ def _set_thread_model(
     config: Config,
     runtime_paths: RuntimePaths,
     entity_names: tuple[str, ...],
-    room_id: str,
     thread_id: str,
-    requester_user_id: str,
 ) -> str:
     """Persist the override for the entities the requester may address and describe it for either command path."""
     set_thread_model_override(
         runtime_paths,
         thread_id=thread_id,
         model_name=model_name,
-        room_id=room_id,
-        set_by=requester_user_id,
         entity_names=entity_names,
         config=config,
     )
@@ -214,7 +208,5 @@ def handle_model_command(
         config=config,
         runtime_paths=runtime_paths,
         entity_names=addressable_responder_names(requester_user_id, room_id, config, runtime_paths, membership_index),
-        room_id=room_id,
         thread_id=thread_id,
-        requester_user_id=requester_user_id,
     )

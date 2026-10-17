@@ -260,3 +260,33 @@ def test_worker_egress_proxy_env_names_have_single_source() -> None:
         == constants._WORKER_EGRESS_PROXY_CA_FILE_ENV
         == WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
     )
+
+
+def test_compose_refactor_keeps_agent_vault_output(tmp_path: Path) -> None:
+    """compose_worker_proxy_env produces the same output as the old worker_proxy_execution_env."""
+    token_path = tmp_path / "token"
+    token_path.write_text("av_sess_worker_token\n", encoding="utf-8")
+    process_env = {
+        "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
+        "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
+        "MINDROOM_WORKER_EGRESS_PROXY_VAULT": "agent-vault-worker",
+        "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE": "/etc/agent-vault/ca.pem",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "*",
+    }
+
+    # Old interface
+    old_result = worker_proxy_execution_env(process_env)
+
+    # New interface via compose_worker_proxy_env
+    new_result = constants.compose_worker_proxy_env(
+        process_env,
+        proxy_url="http://agent-vault:14322",
+        username="av_sess_worker_token",
+        password="agent-vault-worker",  # noqa: S106
+        ca_file="/etc/agent-vault/ca.pem",
+        no_proxy="localhost,127.0.0.1,::1,.svc,.cluster.local",
+    )
+
+    assert old_result == new_result

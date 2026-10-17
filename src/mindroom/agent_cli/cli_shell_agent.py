@@ -10,6 +10,8 @@ from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.shell_access import minimal_shell_problems
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.approval.tool_approval import approval_gated
+from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.declarations import declare_tool_schema_source
@@ -88,10 +90,12 @@ def wrap_native_shell_window(tools: Sequence[Toolkit]) -> bool:
 def _cli_callable(function: Function) -> bool:
     """Offer only calls that finish inside the shell command, without approval, questions, or run control.
 
-    Approval-gated functions carry `requires_confirmation`, or were removed where approvals cannot pause.
+    Approval-gated functions were removed already where approvals cannot pause. The job controls stay with the reply:
+    a job read through the CLI is never saved as the reply's own call, so it would be reported again.
     """
     return not (
-        function.requires_confirmation
+        approval_gated(function)
+        or is_job_function(function)
         or function.requires_user_input
         or function.external_execution
         or function.stop_after_tool_call
@@ -129,6 +133,15 @@ class CliShellAgent(KnowledgeToolDescribingAgent):
         catalog = PreparedAgentToolCatalog(self, run_context, run_response, session, runtime)
         try:
             await catalog.prepare(tools, include=_cli_callable)
+            owner = lifetime.owner
+            if (
+                owner is not None
+                and owner.catalog.agent is self
+                and owner.catalog.run_context.run_id == run_context.run_id
+            ):
+                # Agno rebuilds the tools with a fresh run context when it continues this paused run, such as
+                # after a subagent returns, so the paused run's catalog retires and CLI calls join the continuation.
+                await owner.retire_binding()
             bind_response_owner(
                 catalog,
                 runtime=runtime,

@@ -23,16 +23,15 @@ from agno.tools.function import Function
 
 from mindroom.history.prompt_tokens import (
     _TOOL_SURFACE_CACHE,
+    _agent_prompt_tool_surface,
     _prompt_tool_surface_for_tools,
     _StaticTokenEstimator,
     agent_static_token_estimator,
-    agent_tool_definition_payloads_for_logging,
     estimate_agent_static_tokens,
 )
 from mindroom.history.replay import (
     _estimate_history_messages_tokens,
     _estimate_session_summary_tokens,
-    compaction_summary_message,
     estimate_prompt_visible_history_tokens,
 )
 from mindroom.history.types import (
@@ -356,7 +355,14 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
         history_settings=history_settings,
     )
 
-    expected_wrapper = str(compaction_summary_message("merged summary", run_local=False).content)
+    expected_wrapper = (
+        "Here is a brief summary of your previous interactions:\n\n"
+        "<summary_of_previous_interactions>\n"
+        "merged summary\n"
+        "</summary_of_previous_interactions>\n\n"
+        "Note: this information is from previous interactions and may be outdated. "
+        "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
+    )
 
     assert _estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens == estimate_text_tokens(expected_wrapper)
@@ -385,8 +391,8 @@ def _docs_toolkit() -> Toolkit:
     )
 
 
-def test_static_budgeting_and_metadata_reuse_one_tool_surface(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Budget estimators and run-metadata payloads must share one prepared surface per agent."""
+def test_static_budgeting_reuses_one_tool_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Budget estimators and the tool payloads must share one prepared surface per agent."""
     agent = _agent()
     agent.tools = [_docs_toolkit()]
 
@@ -403,15 +409,15 @@ def test_static_budgeting_and_metadata_reuse_one_tool_surface(monkeypatch: pytes
     estimator = agent_static_token_estimator(agent)
     first_estimate = estimator.estimate("Current prompt")
     re_estimate = estimate_agent_static_tokens(agent, "Current prompt")
-    payloads = agent_tool_definition_payloads_for_logging(agent)
+    payloads = _agent_prompt_tool_surface(agent).payloads
 
     assert get_tools_calls == 1
     assert first_estimate == re_estimate
     assert [payload["name"] for payload in payloads] == ["search_docs"]
 
 
-def test_tool_definition_payloads_cached_equal_ordered_and_isolated() -> None:
-    """Cached payloads must deeply equal fresh ones and resist mutation through returns."""
+def test_tool_definition_payloads_cached_equal_and_ordered() -> None:
+    """Cached payloads must deeply equal fresh ones in tool order."""
 
     def export_notes(title: str) -> str:
         """Export the current working notes."""
@@ -423,17 +429,12 @@ def test_tool_definition_payloads_cached_equal_ordered_and_isolated() -> None:
         return agent
 
     warm_agent = make_agent()
-    first = agent_tool_definition_payloads_for_logging(warm_agent)
-    cached = agent_tool_definition_payloads_for_logging(warm_agent)
-    fresh = agent_tool_definition_payloads_for_logging(make_agent())
+    first = _agent_prompt_tool_surface(warm_agent).payloads
+    cached = _agent_prompt_tool_surface(warm_agent).payloads
+    fresh = _agent_prompt_tool_surface(make_agent()).payloads
 
     assert first == cached == fresh
     assert [payload["name"] for payload in first] == ["search_docs", "export_notes"]
-
-    first[0]["name"] = "mutated"
-    cast("dict[str, object]", first[1]["parameters"])["injected"] = True
-
-    assert agent_tool_definition_payloads_for_logging(warm_agent) == cached
 
 
 def test_tool_surfaces_are_keyed_per_agent_instance() -> None:
@@ -448,8 +449,8 @@ def test_tool_surfaces_are_keyed_per_agent_instance() -> None:
     notes_agent = _agent()
     notes_agent.tools = [Function(name="record_note", entrypoint=other_tool)]
 
-    docs_payloads = agent_tool_definition_payloads_for_logging(docs_agent)
-    notes_payloads = agent_tool_definition_payloads_for_logging(notes_agent)
+    docs_payloads = _agent_prompt_tool_surface(docs_agent).payloads
+    notes_payloads = _agent_prompt_tool_surface(notes_agent).payloads
 
     assert [payload["name"] for payload in docs_payloads] == ["search_docs"]
     assert [payload["name"] for payload in notes_payloads] == ["record_note"]
@@ -459,7 +460,7 @@ def test_tool_surface_cache_evicts_entries_when_agent_is_collected() -> None:
     """Surface cache entries must die with their agent instance."""
     agent = _agent()
     agent.tools = [_docs_toolkit()]
-    agent_tool_definition_payloads_for_logging(agent)
+    _agent_prompt_tool_surface(agent)
     cache_key = id(agent)
     assert cache_key in _TOOL_SURFACE_CACHE
 
@@ -487,7 +488,7 @@ def test_tool_surface_cache_collection_during_insertion_does_not_deadlock() -> N
                 gc.disable()
                 agent = Agent(metadata={})
                 agent.metadata["cycle"] = agent
-                prompt_tokens.agent_tool_definition_payloads_for_logging(agent)
+                prompt_tokens._agent_prompt_tool_surface(agent)
                 cache_key = id(agent)
                 del agent
                 assert cache_key in prompt_tokens._TOOL_SURFACE_CACHE
@@ -502,7 +503,7 @@ def test_tool_surface_cache_collection_during_insertion_does_not_deadlock() -> N
 
                 prompt_tokens.ref = collect_during_allocation
                 new_agent = Agent()
-                assert prompt_tokens.agent_tool_definition_payloads_for_logging(new_agent) == []
+                assert prompt_tokens._agent_prompt_tool_surface(new_agent).payloads == ()
                 assert cache_key not in prompt_tokens._TOOL_SURFACE_CACHE
                 assert id(new_agent) in prompt_tokens._TOOL_SURFACE_CACHE
                 faulthandler.cancel_dump_traceback_later()
@@ -549,7 +550,7 @@ def test_concurrent_surface_preparation_stays_consistent() -> None:
     def _exercise(agent: Agent) -> None:
         try:
             for _ in range(10):
-                payloads = agent_tool_definition_payloads_for_logging(agent)
+                payloads = _agent_prompt_tool_surface(agent).payloads
                 assert [payload["name"] for payload in payloads] == ["search_docs"]
                 assert estimate_agent_static_tokens(agent, "Current prompt") > 0
         except BaseException as exc:

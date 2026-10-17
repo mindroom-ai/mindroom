@@ -18,6 +18,7 @@ from backend.deps import (
     verify_user_allow_deleted,
 )
 from backend.metrics import get_admin_metric, get_auth_metric, reset_security_metrics
+from supabase import AuthApiError, AuthRetryableError
 from main import app
 
 
@@ -91,6 +92,7 @@ class TestDeps:
 
         assert exc_info.value.status_code == 401
         assert exc_info.value.detail == "Invalid token"
+        assert not auth_monitor.failed_attempts.get("unknown")
 
     @pytest.mark.asyncio
     async def test_verify_user_creates_account(
@@ -365,6 +367,86 @@ class TestDeps:
 
         assert exc_info.value.status_code == 401
         assert get_admin_metric("unauthorized") == 1
+        assert len(auth_monitor.failed_attempts["unknown"]) == 1
+
+    @staticmethod
+    async def _lock_out_with_malformed_headers(verify) -> None:
+        for _ in range(auth_monitor.MAX_FAILURES):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify("malformed")
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verify", [verify_user, verify_admin])
+    async def test_malformed_headers_lock_the_client_out_of_both_paths(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify
+    ):
+        """Malformed headers on either path lock the client out of both, before Supabase is asked."""
+        reset_security_metrics()
+        await self._lock_out_with_malformed_headers(verify)
+
+        for locked_out in (verify_user, verify_admin):
+            with pytest.raises(HTTPException) as exc_info:
+                await locked_out("Bearer some-token")
+            assert exc_info.value.status_code == 429
+        mock_auth_client.auth.get_user.assert_not_called()
+        assert get_admin_metric("blocked") == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            AuthApiError("invalid JWT: unable to parse or verify signature", 403, "bad_jwt"),
+            AuthApiError("Session from session_id claim in JWT does not exist", 403, "session_not_found"),
+            AuthApiError("invalid JWT", 401, "bad_jwt"),
+        ],
+        ids=["bad-jwt", "session-ended", "bad-jwt-401"],
+    )
+    @pytest.mark.parametrize("verify", [verify_user, verify_admin])
+    async def test_supabase_token_rejections_never_lock_a_client_out(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify, error: Exception
+    ):
+        """Supabase also rejects authentic tokens of ended sessions, so rejections are reported but never counted."""
+        reset_security_metrics()
+        mock_auth_client.auth.get_user.side_effect = error
+
+        for _ in range(auth_monitor.MAX_FAILURES + 1):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify("Bearer revoked-token")
+            assert exc_info.value.status_code == 401
+
+        assert not auth_monitor.failed_attempts.get("unknown")
+        assert not auth_monitor.is_blocked("unknown")
+        if verify is verify_admin:
+            assert get_admin_metric("unauthorized") == auth_monitor.MAX_FAILURES + 1
+            assert get_admin_metric("error") == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            AuthRetryableError("upstream unavailable", 503),
+            AuthApiError("Database error querying schema", 500, "unexpected_failure"),
+            AuthApiError("Request rate limit reached", 429, "over_request_rate_limit"),
+        ],
+        ids=["unreachable", "server-error", "rate-limited"],
+    )
+    @pytest.mark.parametrize("verify", [verify_user, verify_admin])
+    async def test_supabase_outage_does_not_count_toward_the_lockout(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, verify, error: Exception
+    ):
+        """Supabase failing to answer or erroring is not a failed attempt and is reported as an error."""
+        reset_security_metrics()
+        mock_auth_client.auth.get_user.side_effect = error
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify("Bearer some-token")
+
+        assert exc_info.value.status_code == 401
+        assert not auth_monitor.failed_attempts.get("unknown")
+        if verify is verify_admin:
+            assert get_admin_metric("error") == 1
+            assert get_admin_metric("unauthorized") == 0
 
     def test_ensure_supabase(self):
         """Test ensure_supabase returns client."""

@@ -516,7 +516,6 @@ class VisibleVoiceEchoLifecycle:
                         event_id=event_id,
                         new_text=normalized_event.body,
                         extra_content=extra_content,
-                        retry_sync_recovery=True,
                     ),
                 )
                 if not edited:

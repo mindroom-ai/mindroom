@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 from agno.run.base import RunStatus
 
-from mindroom.constants import MID_TURN_GENERATION_METADATA_KEY
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -31,23 +30,10 @@ class TurnRecorder:
     outcome: str = "pending"
     original_status: RunStatus | None = None
     interrupted_persisted: bool = False
-    # The newest mid-turn compaction this turn's run record reflects, kept apart from the metadata snapshots
-    # the drivers replace.
-    mid_turn_generation: int | None = None
-    # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves their previews out.
-    mid_turn_folded_tool_call_ids: set[str] = field(default_factory=set)
 
     def set_run_metadata(self, metadata: dict[str, Any] | None) -> None:
         """Replace the current Matrix run metadata snapshot."""
         self.run_metadata = dict(metadata) if metadata is not None else None
-
-    def record_mid_turn_generation(self, generation_id: int, *, folded_tool_call_ids: Iterable[str]) -> None:
-        """Remember the turn's newest mid-turn compaction and the tool calls it folded.
-
-        An interrupted record of the run then still names the compaction and keeps only the tool work after it.
-        """
-        self.mid_turn_generation = generation_id
-        self.mid_turn_folded_tool_call_ids.update(folded_tool_call_ids)
 
     def set_run_id(self, run_id: str | None) -> None:
         """Replace the current top-level Agno run identifier."""
@@ -145,14 +131,9 @@ class TurnRecorder:
             partial_text=self.assistant_text,
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
-            run_metadata=(
-                {**(self.run_metadata or {}), MID_TURN_GENERATION_METADATA_KEY: self.mid_turn_generation}
-                if self.mid_turn_generation is not None
-                else self.run_metadata
-            ),
+            run_metadata=self.run_metadata,
             response_event_id=self.response_event_id,
             original_status=self.original_status or RunStatus.cancelled,
-            folded_tool_call_ids=self.mid_turn_folded_tool_call_ids,
         )
 
     def claim_interrupted_persistence(self) -> bool:

@@ -9,8 +9,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from agno.team import Team
-
 from mindroom.constants import prompt_roles_for_history_storage, resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.history.team_scope import ad_hoc_team_scope_id
@@ -22,6 +20,7 @@ from mindroom.session_storage.agent_storage import (
     get_agent_session,
     get_team_session,
 )
+from mindroom.tool_jobs.resources import defer_execution_cleanup
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -72,13 +71,6 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
     if isinstance(agent_id, str) and agent_id:
         return HistoryScope(kind="agent", scope_id=agent_id)
     return None
-
-
-def resolve_target_history_scope(target: Agent | Team) -> HistoryScope | None:
-    """Return the persisted history scope a live agent or team replays."""
-    if isinstance(target, Team):
-        return HistoryScope(kind="team", scope_id=target.id or "")
-    return resolve_history_scope(target)
 
 
 def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
@@ -144,7 +136,7 @@ def _open_scope_storage(
     try:
         yield storage
     finally:
-        storage.close()
+        close_execution_storage(storage)
 
 
 def _build_scope_session_context(
@@ -340,6 +332,16 @@ def create_scope_session_storage(
     )
 
 
+def close_execution_storage(storage: BaseDb) -> None:
+    """Close a concrete DB handle after accepted tool users have settled."""
+
+    async def close() -> None:
+        storage.close()
+
+    if not defer_execution_cleanup(close, resource=storage):
+        storage.close()
+
+
 def _close_unique_state_dbs(*storages: BaseDb | None) -> None:
     """Close each distinct state DB handle at most once."""
     seen: set[int] = set()
@@ -350,7 +352,7 @@ def _close_unique_state_dbs(*storages: BaseDb | None) -> None:
         if storage_id in seen:
             continue
         seen.add(storage_id)
-        storage.close()
+        close_execution_storage(storage)
 
 
 def close_agent_runtime_state_dbs(

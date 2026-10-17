@@ -775,6 +775,16 @@ async def test_continuation_decision_wakes_its_owning_bot_sources() -> None:
     owner.retry_approval_sources.assert_called_once_with("!room:example.org", ("$source-1", "$source-2"))
 
 
+def test_job_card_grants_bind_to_the_principal_its_entity_pauses_replies_under() -> None:
+    """A job card's timed approvals share a paused reply's scope only through the same responder principal."""
+    owner = MagicMock()
+    owner.journal_principal.return_value.principal_id = "code@@mindroom_code:localhost"
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda name: owner if name == "code" else None)
+
+    assert transport.responder_principal_id("code") == "code@@mindroom_code:localhost"
+    assert transport.responder_principal_id("removed") is None
+
+
 @pytest.mark.asyncio
 async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_cards(tmp_path: Path) -> None:
     """One corrupt visible deadline cannot abort the room's remaining recovery page."""

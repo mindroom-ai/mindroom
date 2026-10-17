@@ -52,6 +52,7 @@ from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerE
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.runtime import (
@@ -1195,7 +1196,7 @@ class ScriptRuntimeLifecycle:
         try:
             await asyncio.to_thread(backend.touch_worker, worker_key)
         except WorkerBackendError:
-            logger.warning("script_worker_touch_pending", worker_key=worker_key, exc_info=True)
+            logger.warning("script_worker_touch_pending", worker=worker_log_id(worker_key), exc_info=True)
 
     def touch_live_workers(self, backend: WorkerBackend) -> None:
         """Refresh active-run worker leases immediately before idle cleanup."""
@@ -1211,7 +1212,7 @@ class ScriptRuntimeLifecycle:
             except WorkerBackendError:
                 logger.warning(
                     "script_worker_touch_pending",
-                    worker_key=worker_key,
+                    worker=worker_log_id(worker_key),
                     exc_info=True,
                 )
                 raise

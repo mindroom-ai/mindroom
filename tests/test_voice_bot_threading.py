@@ -373,7 +373,6 @@ async def test_voice_message_in_main_room_creates_thread(
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", return_value="🎤 what is the weather"),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -429,7 +428,6 @@ async def test_voice_message_in_thread_continues_thread(
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", return_value="🎤 show me the forecast"),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -488,7 +486,6 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
             new=AsyncMock(return_value="$thread_root"),
         ),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -612,7 +609,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
             queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.parametrize(
@@ -692,7 +689,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -834,8 +831,8 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
     assert dispatch_count == 1
     assert pre_stt_signal.pending_human_messages == 0
     assert alternate_signal.pending_human_messages == 0
-    assert not pre_stt_signal.is_set()
-    assert not alternate_signal.is_set()
+    assert not pre_stt_signal.has_pending_human_messages()
+    assert not alternate_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -931,7 +928,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
 
     assert dispatch_count == 1
     assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.is_set()
+    assert not queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio

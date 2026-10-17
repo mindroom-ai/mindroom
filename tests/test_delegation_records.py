@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.delegation.state import SubagentPersona
+from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.redaction import REDACTED
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
@@ -1008,6 +1009,23 @@ async def test_private_child_record_uses_requester_scope_and_caller_receipt(tmp_
     wrong_scope["child_execution_identity"] = wrong_identity
     with pytest.raises(FileNotFoundError):
         await owner.reopen(module.DelegationRecordLocator.from_dict(wrong_scope))
+
+
+@pytest.mark.asyncio
+async def test_a_private_child_record_registers_the_child_instance_owner(tmp_path: Path) -> None:
+    """A delegation can write a private child's first data before the child runs; its owner record must come first."""
+    module = _records_module()
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = module.DelegationRecordOwner(_config(private_child=True), runtime_paths)
+    await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+        delegation_id="first-child-data",
+    )
+
+    instances = private_instances_for_agent(runtime_paths.storage_root, "child", "user")
+    assert [instance.requester_id for instance in instances] == ["@alice:localhost"]
 
 
 def test_locator_rejects_malformed_present_execution_identity() -> None:

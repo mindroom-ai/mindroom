@@ -1,4 +1,4 @@
-"""Check CI workflow policies: least-privilege tokens, pinned actions, and cancelling superseded pull request runs."""
+"""Check CI workflow policies: least-privilege tokens, pinned actions, cancelling superseded pull request runs, and named tests."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
+# A test file a step names relative to its working directory.
+_TEST_PATH = re.compile(r"(?<![\w./-])tests/[\w./-]+\.py\b")
 # Jobs that install or run repository or dependency code chosen by the pushed commit.
 _CODE_RUNNING_JOBS = (
     ("docs.yml", "build"),
@@ -107,7 +109,7 @@ def test_security_scan_pins_the_tools_it_installs() -> None:
 
 
 def test_security_scan_audits_the_locked_dependencies(tmp_path: Path) -> None:
-    """A bare pip-audit checks only its own environment, so the audit reads the requirements exported from uv.lock."""
+    """A bare pip-audit checks only its own environment, so the audit reads the requirements exported from each uv.lock."""
     steps = _load_workflow("security-scan.yml")["jobs"]["scan"]["steps"]
     audit = next(step["run"] for step in steps if step.get("name") == "Python dependency audit")
     bash = shutil.which("bash")
@@ -116,20 +118,26 @@ def test_security_scan_audits_the_locked_dependencies(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     # Exit like pip-audit does on findings, which must stay advisory.
-    (bin_dir / "pip-audit").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/pip-audit-args"\nexit 1\n')
+    (bin_dir / "pip-audit").write_text('#!/bin/sh\nprintf "%s\\n" "$@" -- >> "$RUNNER_TEMP/pip-audit-args"\nexit 1\n')
     (bin_dir / "pip-audit").chmod(0o755)
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path)}
 
     subprocess.run([bash, "-e", "-c", audit], cwd=ROOT, env=env, check=True)
 
     requirements = tmp_path / "requirements.txt"
+    platform_backend_requirements = tmp_path / "platform-backend-requirements.txt"
+    audit_flags = ["--disable-pip", "--no-deps", "-r"]
     assert (tmp_path / "pip-audit-args").read_text().splitlines() == [
-        "--disable-pip",
-        "--no-deps",
-        "-r",
+        *audit_flags,
         str(requirements),
+        "--",
+        *audit_flags,
+        str(platform_backend_requirements),
+        "--",
     ]
     assert re.search(r"^agno==", requirements.read_text(encoding="utf-8"), re.MULTILINE)
+    # The platform backend locks its own dependencies, which the root lock file does not contain.
+    assert re.search(r"^stripe==", platform_backend_requirements.read_text(encoding="utf-8"), re.MULTILINE)
 
 
 def test_pypi_publish_job_only_downloads_and_publishes_the_built_wheel() -> None:
@@ -192,3 +200,16 @@ def test_pull_request_workflows_cancel_only_superseded_pull_request_runs(name: s
 def test_serialized_workflows_cancel_only_superseded_pull_request_runs(name: str) -> None:
     """A cancelled in-progress run marks its main commit failed, so only pull request runs may be cancelled."""
     assert _load_workflow(name)["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_workflow_steps_name_only_test_files_that_exist() -> None:
+    """A step that names a missing test file fails collection instead of running the checks it was added for."""
+    named = []
+    for path in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for job in _load_workflow(path.name).get("jobs", {}).values():
+            default = job.get("defaults", {}).get("run", {}).get("working-directory", ".")
+            for step in job.get("steps", []):
+                base = ROOT / step.get("working-directory", default)
+                named += [(path.name, base / test) for test in _TEST_PATH.findall(step.get("run", ""))]
+    assert named
+    assert [(name, str(test.relative_to(ROOT))) for name, test in named if not test.is_file()] == []

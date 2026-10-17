@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import inspect
 import json
 from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
@@ -17,12 +18,13 @@ from functools import partial
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.base import BaseDb, SessionType
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
@@ -43,7 +45,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt as approval_receipt
-from mindroom.approval.response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
@@ -51,6 +53,8 @@ from mindroom.cancellation import current_task_is_process_shutdown, request_task
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.cold_cache import ColdCacheConfig
+from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import (
@@ -103,6 +107,7 @@ from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
@@ -121,9 +126,9 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
+    _prepare_memory_and_model_context,
     _response_typing_indicator,
     _ResponseGenerationOutcome,
-    prepare_memory_and_model_context,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
@@ -156,9 +161,12 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
 )
-from mindroom.teams import _TeamStreamPresentation
+from mindroom.teams import _TeamStreamPresentation, continue_paused_team_run
+from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
@@ -2981,8 +2989,10 @@ async def test_agent_continuation_runs_only_approved_calls(
         toolkit_owners=toolkit_owners_for_agents([agent]),
     )
     assert captured is not None
-    plan = await runner._approval_responses.plan_pause(
+    plan = await plan_approval_calls(
         identify_approval_tools(captured, default_agent_name="general"),
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
         requester_id="@user:localhost",
         toolkit_owners=captured.toolkit_owners,
     )
@@ -3232,8 +3242,10 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         patch("mindroom.approval.response.resolve_tool_approval_approver", side_effect=resolve_approver),
         patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate_policy),
     ):
-        await runner._approval_responses.plan_pause(
+        await plan_approval_calls(
             ((tool, "call-1", "dangerous", "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
@@ -3294,8 +3306,10 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value=None),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-1", "dangerous", "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
@@ -3322,11 +3336,13 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
             new=AsyncMock(side_effect=[(True, 60.0), (False, 60.0)]),
         ),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (human_tool, "call-human", "publish_report", "general"),
                 (policy_tool, "call-policy", "read_report", "general"),
             ),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "publish_report"): "test_toolkit", ("general", "read_report"): "test_toolkit"},
         )
@@ -3351,11 +3367,13 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         ),
         patch("mindroom.approval.response.evaluate_tool_approval", side_effect=evaluate),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (automatic, "call-auto", "conditional_read", "general"),
                 (gated, "call-gated", "conditional_write", "general"),
             ),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={
                 ("general", "conditional_read"): "test_toolkit",
@@ -3408,11 +3426,13 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
             new=AsyncMock(return_value=(True, 60.0)),
         ),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (first, "call-1", "dangerous_one", "general"),
                 (second, "call-2", "dangerous_two", "general"),
             ),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous_one"): "test_toolkit", ("general", "dangerous_two"): "test_toolkit"},
         )
@@ -4095,7 +4115,9 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     body = "🤝 **Team Response** (General):\n\n**General**: The report is clean."
 
-    async def continue_team(*, progress: ProgressPublisher | None, **_kwargs: object) -> CompletedApprovalRun:
+    async def continue_team(*, progress: ProgressPublisher | None, **kwargs: object) -> CompletedApprovalRun:
+        # The runner's call must fit the real function, not only this fake.
+        inspect.signature(continue_paused_team_run).bind(progress=progress, **kwargs)
         assert progress is not None
         await progress(StructuredStreamChunk(content=body))
         return CompletedApprovalRun(response_text=body, metadata_content={})
@@ -4486,8 +4508,10 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
         "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-native", "native_confirmation", "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "native_confirmation"): "test_toolkit"},
         )
@@ -4525,8 +4549,10 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-exempt", function.name, "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
         )
@@ -4578,8 +4604,10 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-script", function.name, "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
         )
@@ -4994,7 +5022,10 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_mode="coordinate",
     )
     assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
-    continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
+    continued = create_autospec(
+        continue_paused_team_run,
+        return_value=CompletedApprovalRun(response_text="done", metadata_content={}),
+    )
 
     with (
         patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
@@ -5232,7 +5263,7 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
         scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$event1"),
     )
     prepared_request = await coordinator._prepare_request_after_lock(request)
-    _memory_prompt, memory_history, _model_prompt, _model_history = prepare_memory_and_model_context(
+    _memory_prompt, memory_history, _model_prompt, _model_history = _prepare_memory_and_model_context(
         prepared_request.prompt,
         prepared_request.thread_history,
         config=coordinator.deps.runtime.config,
@@ -5608,7 +5639,6 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     request = _plain_request(_target())
     runtime = await coordinator.prepare_response_runtime(request)
@@ -5616,7 +5646,6 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="default",
-        set_by="@admin:localhost",
     )
     active_models: list[str | None] = []
 
@@ -5703,7 +5732,6 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     original_begin_locked_turn = coordinator._begin_locked_turn
     active_models: list[str | None] = []
@@ -5713,7 +5741,6 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
             coordinator.deps.runtime_paths,
             room_id="!room:localhost",
             model_name="default",
-            set_by="@admin:localhost",
         )
         return await original_begin_locked_turn(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -6136,7 +6163,6 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     request = replace(_plain_request(_target()), scheduled_model=scheduled_model)
     runtime = await coordinator.prepare_response_runtime(request)
@@ -6144,7 +6170,6 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="default",
-        set_by="@admin:localhost",
     )
     active_models: list[str | None] = []
     transport = StreamTransportOutcome(
@@ -7930,6 +7955,169 @@ async def test_tools_get_the_reply_correlation_when_the_request_names_none(tmp_p
     assert observed == ["$selection"]
 
 
+async def _cold_cache_reply_model(
+    tmp_path: Path,
+    *,
+    scheduled_model: str | None = None,
+    room_model: str | None = None,
+    thread_model: str | None = None,
+    media: MediaInputs | None = None,
+    inherit_cheap_model: bool = False,
+    thread_id: str | None = "$event",
+    replies: int = 1,
+) -> tuple[list[str | None], list[dict[str, object]]]:
+    """Run replies for a cold-cache agent and return the models they used and the selector calls."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    config.models["cheap2"] = ModelConfig(provider="test", id="cheap2-model")
+    config.agents["general"] = config.agents["general"].model_copy(
+        update={"cheap_model": None if inherit_cheap_model else "cheap", "cold_cache": ColdCacheConfig()},
+    )
+    if inherit_cheap_model:
+        config.defaults.cheap_model = "cheap"
+    if room_model is not None:
+        set_room_model_override(coordinator.deps.runtime_paths, room_id="!room:localhost", model_name=room_model)
+    if thread_model is not None:
+        set_thread_model_override(
+            coordinator.deps.runtime_paths,
+            thread_id="$event",
+            model_name=thread_model,
+            entity_names=("general",),
+            config=config,
+        )
+    selector_calls: list[dict[str, object]] = []
+    active_models: list[str | None] = []
+
+    async def fake_select(_settings: ColdCacheConfig, *, cheap_model: str, **kwargs: object) -> str:
+        selector_calls.append({"cheap_model": cheap_model, **kwargs})
+        return cheap_model
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        active_models.append(ctx.active_model_name)
+        return "final text"
+
+    request = replace(
+        _plain_request(_target(thread_id=thread_id)),
+        scheduled_model=scheduled_model,
+        media=media,
+    )
+    with (
+        patch("mindroom.response_runner.select_cold_cache_model", new=fake_select),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        for _ in range(replies):
+            await coordinator.generate_response(request)
+    return active_models, selector_calls
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_model_used_for_reply(tmp_path: Path) -> None:
+    """An accepted cold-cache judgment replies with the smaller model, judged on this thread and prompt."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path)
+    assert active_models == ["cheap"]
+    assert len(selector_calls) == 1
+    call = selector_calls[0]
+    assert call["agent_name"] == "general"
+    assert call["agent_model"] == "default"
+    assert call["cheap_model"] == "cheap"
+    assert call["idle_seconds"] is None
+    assert call["context"] == ()
+    assert call["prompt"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_switch_stays_with_the_thread(tmp_path: Path) -> None:
+    """An accepted switch is saved as the thread's model, so later turns stay on it without another judgment."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, replies=2)
+    assert active_models == ["cheap", "cheap"]
+    assert len(selector_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_failed_switch_save_keeps_agent_model(tmp_path: Path) -> None:
+    """A switch that cannot be saved is skipped, and the reply still runs on the agent model."""
+    with patch("mindroom.response_runner.set_thread_model_override", side_effect=OSError("disk full")):
+        active_models, selector_calls = await _cold_cache_reply_model(tmp_path)
+    assert len(selector_calls) == 1
+    assert active_models == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_uses_default_cheap_model(tmp_path: Path) -> None:
+    """An agent without its own cheap_model switches to defaults.cheap_model."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, inherit_cheap_model=True)
+    assert active_models == ["cheap"]
+    assert [call["cheap_model"] for call in selector_calls] == ["cheap"]
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_skipped_in_room_mode(tmp_path: Path) -> None:
+    """Without a thread there is nothing to switch for good, so room-mode replies keep the agent model."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, thread_id=None)
+    assert selector_calls == []
+    assert active_models == ["default"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "expected_model"),
+    [
+        ({"scheduled_model": "cheap2"}, "cheap2"),
+        ({"room_model": "cheap2"}, "cheap2"),
+        # An override naming the agent's own model is still an explicit choice.
+        ({"room_model": "default"}, "default"),
+        ({"thread_model": "default"}, "default"),
+        ({"media": MediaInputs(images=[Image(content=b"png")])}, "default"),
+    ],
+)
+async def test_cold_cache_skipped_for_override(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_model: str,
+) -> None:
+    """Explicit model choices and media turns never consult the cold-cache judge."""
+    active_models, selector_calls = await _cold_cache_reply_model(tmp_path, **override)
+    assert selector_calls == []
+    assert active_models == [expected_model]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit_regeneration", [False, True])
+async def test_cold_cache_skipped_for_edit_regeneration(tmp_path: Path, edit_regeneration: bool) -> None:
+    """An edit regenerates the answer the agent model just gave, so its cache is warm and no judge runs."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    config.agents["general"] = config.agents["general"].model_copy(
+        update={"cheap_model": "cheap", "cold_cache": ColdCacheConfig()},
+    )
+    select = AsyncMock(return_value="cheap")
+    request = replace(_plain_request(_target(thread_id="$event")), edit_regeneration=edit_regeneration)
+    with (
+        patch("mindroom.response_runner.select_cold_cache_model", new=select),
+        patch("mindroom.response_runner.set_thread_model_override"),
+    ):
+        chosen = await coordinator._cold_cache_model(
+            request,
+            runtime_model=ResolvedRuntimeModel(model_name="default", context_window=None),
+            thread_id="$event",
+        )
+    assert (chosen, select.await_count) == (("default", 0) if edit_regeneration else ("cheap", 1))
+
+
 @pytest.mark.asyncio
 async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path: Path) -> None:
     """A schedule uses its model even with a room override, without changing later turns."""
@@ -7942,7 +8130,6 @@ async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path:
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
-        set_by="@admin:localhost",
     )
     active_models: list[str | None] = []
 
@@ -8695,14 +8882,14 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate)
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
-        finish = await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),))
+        finish = await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
     if failure not in {None, "oversized", "media"}:
         assert not finish
         assert payloads == []
     else:
         assert finish
         conversation = payloads[0]["state"]["conversation"]
-        evidence = json.loads(conversation[-1]["text"])
+        evidence = conversation[-1]["text"]
         assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
         root = conversation[0]["text"]
         # Earlier media reaches the judge as a placeholder rather than disabling judgment.
@@ -8711,7 +8898,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
             # A long message reaches the judge as its start and end rather than disabling judgment.
             assert root.endswith("Log every sleep.")
             assert "characters omitted" in root
-        assert evidence["active_request"] == "Continue"
+        assert evidence.startswith("<active_request>\nContinue\n</active_request>\n")
         assert "Stale input" not in str(payloads)
         assert "Future queued text" not in str(payloads)
 
@@ -8754,7 +8941,7 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     ):
         with pytest.raises(RuntimeError, match="stop before generation"):
             await runner._run_claimed_approval_lifecycle(continuation, target=target)
-        assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+        assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert build_lifecycle.call_args.kwargs["request"].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
 
@@ -8787,7 +8974,9 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
         ),
     ):
         await runner._prepare_request_after_lock(request)
-        assert await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),)) is finish
+        assert (
+            await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True) is finish
+        )
     assert len(evaluated) == int(finish)
 
 
@@ -8953,12 +9142,27 @@ async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent"])
+@pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent", "a job follow-up"])
 async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
-    """Like cron runs in Hermes, automation and agent requests have no person to learn from."""
+    """Like cron runs in Hermes, automation, agent requests, and job follow-ups have no person to learn from."""
 
     def update(request: ResponseRequest) -> ResponseRequest:
         envelope = request.response_envelope
+        if requested_by == "a job follow-up":
+            key = ConversationKey(
+                "general",
+                envelope.target.room_id,
+                envelope.target.resolved_thread_id,
+                request.user_id or "",
+                silent=False,
+            )
+            follow_up = follow_up_envelope(
+                key,
+                follow_up_id="job-follow-up:1",
+                sender_id="@mindroom_general:localhost",
+                prompt="",
+            )
+            return replace(request, response_envelope=replace(envelope, origin=follow_up.origin))
         if requested_by in {"a schedule", "a hook"}:
             source_kind = SCHEDULED_SOURCE_KIND if requested_by == "a schedule" else HOOK_SOURCE_KIND
             return replace(
@@ -9114,6 +9318,7 @@ def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, fl
             thread_history=(),
             user_id=None,
             hook_source=hook_source,
+            origin=message_origin(),
         )
         if queue is not None:
             queue()

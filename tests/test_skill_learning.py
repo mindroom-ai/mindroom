@@ -23,7 +23,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 from anthropic import AsyncAnthropic
 from google import genai
@@ -31,12 +30,14 @@ from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
+from mindroom.history import summary_rows
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
@@ -1307,8 +1308,17 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
         storage.delete_runs(["r1"])
         later = _tool_turn("r2", result="deployed to canary")
         later.session_id = "session"
-        summary = SessionSummary(summary="The user wants release notes in the #deploys channel.")
-        seed_session(storage, AgentSession(session_id="session", agent_id="mind", summary=summary, runs=[later]))
+        seed_session(storage, AgentSession(session_id="session", agent_id="mind", runs=[later]))
+        # The summary of the deleted reply sorts before every remaining run, as a compaction of it would.
+        assert summary_rows.append_summary(
+            storage,
+            session_id="session",
+            scope_key="agent:mind",
+            based_on=None,
+            covered=[],
+            summary="The user wants release notes in the #deploys channel.",
+            summary_model="summary-model",
+        )
     finally:
         storage.close()
     model = _model()
@@ -1429,6 +1439,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
         "no final answer",
         "no skill_manage",
         "skill_manage needs approval",
+        "skill_manage asks as its job",
         "compressed tool results",
         "conversation too long to fork",
         "no capture",
@@ -1446,6 +1457,9 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
     elif reason == "skill_manage needs approval":
         (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
         tool.requires_confirmation = True
+    elif reason == "skill_manage asks as its job":
+        (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
+        tool.approval_type = JOB_APPROVAL_TYPE
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
     capture = SkillReviewCapture()
     compression = _ShortenToolResults() if reason == "compressed tool results" else None

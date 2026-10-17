@@ -14,7 +14,7 @@ from .config import CONFIG_PATH_OPTION, console
 if TYPE_CHECKING:
     from mindroom.plugin_install import InstallResult
 
-plugins_app = typer.Typer(help="Validate and vendor external MindRoom plugins.")
+plugins_app = typer.Typer(help="Check, install, and update MindRoom plugins.")
 
 _PLUGINS_DIR_OPTION: Path | None = typer.Option(
     None,
@@ -59,7 +59,7 @@ def plugin_install(
     path: Path | None = CONFIG_PATH_OPTION,
     plugins_dir: Path | None = _PLUGINS_DIR_OPTION,
 ) -> None:
-    """Vendor one plugin from GitHub after it passes the strict compatibility check."""
+    """Install one plugin from GitHub after a strict compatibility check."""
     from mindroom.plugin_install import install_plugin, parse_plugin_spec  # noqa: PLC0415
 
     config_dir = _runtime_config_dir(path)

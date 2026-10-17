@@ -829,12 +829,14 @@ def _participant_request(
                 participant.get("system_prompt"),
                 participant.get("tools"),
                 participant.get("skills"),
+                None,
                 source_kind="workflow",
                 source_name=source_name,
             )
             raw_model = cast("str | None", participant.get("model"))
             mode = cast("AgentMode", participant.get("mode") or "standard")
-        persona = replace(persona, tools=persona.tools or ())
+        # Participants run without knowledge until workflow data grants are supported.
+        persona = replace(persona, tools=persona.tools or (), knowledge=())
         validate_persona_tools(persona.tools, available, cap)
         persona = capped_persona_skills(
             persona,

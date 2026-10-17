@@ -1,4 +1,4 @@
-"""Preflight and retained archives for owned, reconstructable session databases."""
+"""Preflight and retained archives for owned session databases."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ _REQUIRED_SESSION_COLUMNS = frozenset(
 # LEGACY_COMPAT: Session databases missing required schema columns.
 # Legacy format: Owned Agno session databases may lack columns required by the installed schema.
 # Last legacy release: schema-based boundary with no single release cutoff or safe row conversion.
-# Handling: Archive the reconstructable sessions directory before creating a current store; preserve its bytes.
+# Handling: Archive the sessions directory before creating a current store; preserve its bytes.
 # Coverage: tests/test_agent_session_storage_recovery.py::test_incompatible_session_schema_is_archived_before_real_session_use.
 @contextmanager
 def session_storage_preflight(

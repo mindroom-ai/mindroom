@@ -14,7 +14,6 @@ from agno.models.message import Message
 from mindroom.agno_compat_model_hooks import install_message_projection
 from mindroom.event_journal import ApprovalCall
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
-from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary, system_message_embeds_summary
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -89,9 +88,6 @@ class _ApprovalReceiptProjection:
         for message in self.outbound_messages:
             if message is self.receipt_message:
                 if self.original_system_message is not None:
-                    if not system_message_embeds_summary([message]):
-                        # A mid-turn compaction removed the legacy summary block from the projected copy.
-                        strip_embedded_summary(self.original_system_message)
                     published.append(self.original_system_message)
             else:
                 published.append(message)

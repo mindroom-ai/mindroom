@@ -244,7 +244,7 @@ async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
             minimal=True,
         )
 
-    assert "run, check, and kill shell permissions" in result, result
+    assert "`run_shell_command` shell permission" in result, result
     assert "Start a new subagent without minimal." in result
 
 

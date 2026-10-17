@@ -30,6 +30,7 @@ from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
+from mindroom.thread_summary import send_welcome_thread_summary
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
     from mindroom.matrix.users import AgentMatrixUser
 
@@ -113,6 +115,7 @@ class BotRoomLifecycleDeps:
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
+    get_conversation_reader: Callable[[], ConversationReader]
 
 
 class BotRoomLifecycle:
@@ -550,6 +553,15 @@ class BotRoomLifecycle:
             return False
         self._welcomed_room_ids.add(room_id)
         self._logger().info("Welcome message sent", room_id=room_id)
+        try:
+            await send_welcome_thread_summary(
+                self._client(),
+                room_id,
+                event_id,
+                self.deps.get_conversation_reader(),
+            )
+        except Exception:
+            self._logger().exception("Welcome thread summary send failed", room_id=room_id)
         return True
 
     async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:

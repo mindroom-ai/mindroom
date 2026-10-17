@@ -92,6 +92,8 @@ class ShellOutputCapture:
             self.stdout.file.close()
             raise
         self.incomplete = False
+        # Why incomplete output went unsaved, when its owner knows better than "interrupted".
+        self.interruption: str | None = None
         self.closed = False
 
     def publish(self, return_code: int | None) -> str:
@@ -114,7 +116,10 @@ class ShellOutputCapture:
             or return_code is None
             or return_code < 0
         ):
-            error = "Shell command or output capture was interrupted; no complete output file was saved."
+            error = (
+                self.interruption
+                or "Shell command or output capture was interrupted; no complete output file was saved."
+            )
         if error is not None:
             return json.dumps({"mindroom_tool_output": {"status": "error", "error": error}})
         assert return_code is not None

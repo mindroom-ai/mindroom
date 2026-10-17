@@ -561,7 +561,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert AI_RUN_METADATA_KEY not in summary_input
     assert MINDROOM_COMPACTION_METADATA_KEY not in summary_input
     assert MINDROOM_MATRIX_HISTORY_METADATA_KEY not in summary_input
-    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
+    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in summary_input
     assert "$request" in summary_input
     assert "2026-07-17T20:00:00Z" in summary_input
     assert "durable_outcome" in summary_input

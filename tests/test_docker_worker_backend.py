@@ -36,6 +36,7 @@ from mindroom.runtime_env_policy import (
     WORKER_COMPUTER_ENABLED_ENV,
 )
 from mindroom.script_runs.models import script_worker_key_for_run
+from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -675,6 +676,7 @@ def _backend(
     *,
     idle_timeout_seconds: float = 60.0,
     security_policy: Literal["runtime_default", "computer"] = "runtime_default",
+    runtime: str | None = None,
     config_text: str = "agents: {}\n",
     runtime_paths: RuntimePaths | None = None,
     storage_path: Path | None = None,
@@ -689,6 +691,7 @@ def _backend(
         host_config_path=tmp_path / "config.yaml" if host_config_path is None else host_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
         security_policy=security_policy,
+        runtime=runtime,
         ready_timeout_seconds=5.0,
         name_prefix="mindroom-worker",
         publish_host="127.0.0.1",
@@ -1698,6 +1701,65 @@ def test_docker_workers_run_with_read_only_root_filesystem(
     assert fake_client.containers.run_calls[1]["read_only"] is True
 
 
+def test_docker_workers_run_under_the_configured_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A sandboxed runtime such as gVisor or Kata keeps worker code off the host kernel."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime="runsc")
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert fake_client.containers.run_calls[0]["runtime"] == "runsc"
+
+
+@pytest.mark.parametrize(("raw_runtime", "expected_runtime"), [(" runsc ", "runsc"), ("", None)])
+def test_docker_worker_runtime_reads_from_env(
+    tmp_path: Path,
+    raw_runtime: str,
+    expected_runtime: str | None,
+) -> None:
+    """A blank runtime keeps the Docker daemon's default runtime."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_RUNTIME": raw_runtime,
+        },
+    )
+
+    assert _DockerWorkerBackendConfig.from_runtime(runtime_paths).runtime == expected_runtime
+
+
+def test_docker_backend_recreates_container_when_runtime_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Workers started under the daemon's default runtime are replaced once a runtime is configured."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    sandboxed_backend = DockerWorkerBackend(
+        config=replace(backend.config, runtime="runsc"),
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+    )
+    monkeypatch.setattr(
+        sandboxed_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{sandboxed_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+    sandboxed_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert [run_call["runtime"] for run_call in fake_client.containers.run_calls] == [None, "runsc"]
+
+
 def test_docker_workers_reach_the_docker_host_by_name(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1925,6 +1987,7 @@ agents:
         ("agents/other/workspace/docs", "directory"),
         ("private_instances/someone/docs", "directory"),
         ("workers/other/docs", "directory"),
+        ("shared_directories/other/report/docs", "directory"),
         ("knowledge/docs", "link"),
     ],
 )
@@ -5886,3 +5949,64 @@ def test_docker_computer_identity_validation_preserves_supported_users(
         },
     )
     assert _DockerWorkerBackendConfig.from_runtime(paths).user == (user or None)
+
+
+def _shared_worker_key(agent_name: str) -> str:
+    worker_key = resolve_worker_key(
+        "shared",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=agent_name,
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name=agent_name,
+    )
+    assert worker_key is not None
+    return worker_key
+
+
+def test_docker_workers_mount_shared_directories_for_owner_and_members(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The owner's worker mounts its shared directory read-write and an invited agent's worker read-only."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    create_shared_directory(backend._runtime_paths, owner="alpha", name="report")
+    add_shared_directory_member(backend._runtime_paths, owner="alpha", name="report", member="beta")
+    share = str((tmp_path / "shared_directories" / "alpha" / "report").resolve())
+
+    backend.ensure_worker(WorkerSpec(_shared_worker_key("alpha")), now=10.0)
+    backend.ensure_worker(WorkerSpec(_shared_worker_key("beta")), now=10.0)
+
+    alpha_volumes, beta_volumes = (
+        _volumes_by_source(run_call["volumes"]) for run_call in fake_client.containers.run_calls
+    )
+    assert alpha_volumes[share] == {"bind": "/app/worker/shared_directories/alpha/report", "mode": "rw"}
+    assert beta_volumes[share] == {"bind": "/app/worker/shared_directories/alpha/report", "mode": "ro"}
+
+
+def test_docker_worker_restarts_after_an_invitation_changes_its_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An invitation reaches a running worker by recreating it on its next use."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    create_shared_directory(backend._runtime_paths, owner="alpha", name="report")
+    handle = backend.ensure_worker(WorkerSpec(_shared_worker_key("beta")), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+
+    backend.ensure_worker(WorkerSpec(_shared_worker_key("beta")), now=20.0)
+    assert fake_client.containers.by_name[handle.worker_id] is existing_container
+
+    add_shared_directory_member(backend._runtime_paths, owner="alpha", name="report", member="beta")
+    backend.ensure_worker(WorkerSpec(_shared_worker_key("beta")), now=30.0)
+
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2

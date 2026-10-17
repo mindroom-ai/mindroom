@@ -10,9 +10,10 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 ## Tools On This Page
 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
-- [`shell`] - Shell commands with background handles, environment passthrough, and PATH prepends.
+- [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
+- [`shared_directories`] - Directories an agent creates and invites other agents to read.
 - [`docker`] - Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic without code execution.
 - [`reasoning`] - `think` and `analyze` scratchpad steps.
@@ -31,6 +32,7 @@ None of these tools needs credentials or dashboard setup; `docker` needs Docker 
 Whether the other tools here also run in a worker depends on the [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
 Change this with `defaults.worker_tools` or `agents.<name>.worker_tools`, as described in [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
 `worker_scope` decides how worker runtimes are shared between agents and users; see [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
+With [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) on, worker-routed `shell` and `python` calls can use stored API keys and connected accounts that the worker never sees.
 Only a worker isolates `shell`, `python`, and `docker`, because they execute code and are never confined by the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 
 ### Workspace and tool output files
@@ -73,7 +75,7 @@ Here `file_generation` saves into `exports` and `visualization` into `charts`, b
 ## [`file`]
 
 `file` provides `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): `workspace` (the default) rejects paths outside the workspace, and `unrestricted` allows any path the tool's process can reach.
+Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): `workspace` (the default) rejects paths outside the workspace and the agent's [shared directories](#shared_directories), and `unrestricted` allows any path the tool's process can reach.
 `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse paths inside a `.git` directory.
 `read_file()` refuses files over `max_file_length` characters or `max_file_lines` lines and asks for `read_file_chunk()` instead.
 `search_files()` matches glob patterns; use `search_content()` to search inside text files.
@@ -121,18 +123,16 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ## [`shell`]
 
-`shell` provides `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` accepts a shell command string or a list of argv strings.
+`shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
+The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
 With `mindroom_output_path`, the complete output is saved to that file instead.
 
-A command that exceeds `timeout` keeps running in the background, and the tool returns a `shell:...` handle.
-Poll it with `check_shell_command(handle)` and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
-A backgrounded command with `mindroom_output_path` saves its output when it finishes, and `check_shell_command()` then returns the file receipt.
-Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
-Records of finished commands are cleared about 10 minutes after they finish.
-For how stopping a response and worker restarts affect background commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
+A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
+Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
+While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
+A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
+For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
 
 Worker-routed `shell` sees only a small default environment; which variables pass by default and which `extra_env_passthrough` never passes are listed in [Shell environment and PATH](https://docs.mindroom.chat/deployment/sandbox-proxy/#shell-environment-and-path).
 
@@ -140,7 +140,7 @@ Worker-routed `shell` sees only a small default environment; which variables pas
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`. |
+| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()`. |
 | `all` | `boolean` | `no` | `false` | Enable all shell functions. |
 | `extra_env_passthrough` | `text` or `string[]` | `no` | `null` | Additional exported process environment variable names or glob patterns passed to shell commands; comma- or newline-separated in text form. It matches the exported process environment, not entries in the config's `.env` file. |
 | `shell_path_prepend` | `text` or `string[]` | `no` | `null` | Directories prepended to `PATH` for shell commands only, with duplicates removed; comma- or newline-separated in text form. |
@@ -163,9 +163,8 @@ agents:
 ```python
 run_shell_command("git status --short", tail=50)
 run_shell_command(["git", "status", "--short"], tail=50)
-run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
-check_shell_command("shell:abcd1234")
-kill_shell_command("shell:abcd1234")
+run_shell_command(["bash", "-lc", "make test"], timeout=900)
+run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
 
 ### Per-workspace environment
@@ -238,6 +237,68 @@ edit_file("docs/example.md", "old text", "new text")
 write_file("scratch/todo.txt", "first line\nsecond line\n")
 ls("src")
 ```
+
+## [`shared_directories`]
+
+`shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
+It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, and `list_shared_directories()`, and has no configuration fields.
+
+### Setup
+
+1. Run tools in dedicated Docker or Kubernetes workers.
+   Set the environment variable `MINDROOM_WORKER_BACKEND=docker` as in [dedicated Docker workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker), or the runtime chart's Helm value `workers.backend: kubernetes` as in [Kubernetes dedicated worker mode](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode).
+   Sharing also works without workers and with the Kubernetes `static_runner` sidecar, with weaker limits; see [Access by deployment](#access-by-deployment).
+2. Give the sharing agent `shared_directories` and a tool that writes files, such as `shell`, `file`, or `coding`.
+3. Give each reading agent `shell`, `python`, `file`, or `coding`; it does not need `shared_directories`.
+4. Make sure the user who asks for the invitation can use each reading agent outside the current room, as described under [Rules](#rules); in the example below, every member of `lobby` can.
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    rooms: [lobby]
+    tools:
+      - shell
+      - shared_directories
+  writer:
+    display_name: Writer
+    rooms: [lobby]
+    tools:
+      - file
+```
+
+Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
+It calls `create_shared_directory("report")` and `invite_to_shared_directory("report", "writer")`, and from then on both agents see the directory's path in their prompts.
+`list_shared_directories()` shows each directory an agent owns or joined, with its path and access.
+
+### Rules
+
+Only the agent that created a directory can invite, remove, or delete, and deleting a directory removes every file in it.
+Names use 1 to 64 lowercase letters, digits, `-`, or `_`, starting with a letter or digit.
+Private agents can neither create nor join shared directories.
+Creating or deleting a directory, and inviting or removing an agent, restarts each affected agent's dedicated worker on its next tool call, which ends that worker's background shells, tmux sessions, and computer sessions.
+
+The user who asks for an invitation must be allowed to use the invited agent outside the current room.
+Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default grant to members of the agent's managed `rooms` counts, but `access.current_room_members` does not; see [Responder access](https://docs.mindroom.chat/authorization/#responder-access).
+Otherwise the invitation fails with "The user you act for has no access to writer outside the current room, so it cannot be invited".
+
+Under `file_access: workspace`, `file` and `coding` accept paths inside the agent's shared directories when they run in a worker or when MindRoom runs without workers.
+When MindRoom uses workers but an agent's `file` or `coding` runs in the primary process, `workspace` keeps those tools out of shared directories; add them to the agent's `worker_tools`.
+Other path tools, such as `attachments` and `matrix_message`, stay inside the workspace, so copy a shared file into the workspace before sending it.
+
+### Access by deployment
+
+Where tools run decides who reaches a shared directory:
+
+| Where tools run | Owner | Invited agents | Other agents |
+|---|---|---|---|
+| Dedicated Docker or Kubernetes workers | Read and write | Read only | No access |
+| Kubernetes `static_runner` sidecar | Read and write | Read and write | Read and write |
+| No workers, through `file` and `coding` under `file_access: workspace` | Read and write | Read only | No access |
+
+`shell`, `python`, and tools under `file_access: unrestricted` that run in the primary process read and write every shared directory, whoever owns it, even when other tools use workers.
+The documented Compose and host-container `static_runner` setups mount only scratch storage, so tools running there cannot reach shared directories; use dedicated Docker workers instead.
+A `worker_scope: user` worker serves several agents, so each of them reaches every directory any of them owns or joined, with the widest access among them.
 
 ## [`docker`]
 

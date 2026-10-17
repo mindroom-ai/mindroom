@@ -371,7 +371,7 @@ def _trigger_api_context(
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "mindroom_data",
-        process_env={},
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
     )
     api_main.initialize_api_app(api_main.app, runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True

@@ -20,11 +20,14 @@ cached prefix stays byte-stable. Ordered output capture and replay live in
 from __future__ import annotations
 
 import re
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.model_defaults import OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
 from mindroom.providers.model_instance_checks import isinstance_of_loaded
+
+if TYPE_CHECKING:
+    from agno.models.openai import OpenAIResponses
 
 _OPENAI_RESPONSES_CLASS = ("agno.models.openai.responses", "OpenAIResponses")
 
@@ -77,7 +80,7 @@ def install_openai_deferred_tool_search(model: object, *, deferred_tool_names: f
     vars(model)[_DEFERRED_TOOL_NAMES_ATTR] = frozenset(deferred_tool_names)
 
 
-def model_deferred_tool_names(model: object) -> frozenset[str]:
+def model_deferred_tool_names(model: OpenAIResponses) -> frozenset[str]:
     """Return the wire tool names registered for deferred loading on one model."""
     deferred_tool_names = vars(model).get(_DEFERRED_TOOL_NAMES_ATTR)
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()

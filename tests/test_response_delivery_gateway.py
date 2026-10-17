@@ -52,7 +52,6 @@ from mindroom.event_journal.matrix_delivery import (
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
-from mindroom.history.types import CompactionLifecycleFailure
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.large_messages import (
@@ -70,7 +69,6 @@ from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     FakeOutbox,
     bind_runtime_paths,
-    delivered_matrix_side_effect,
     ignore_delivered_projection,
     ignore_final_delivery_handoff,
     make_outbox_mock,
@@ -3837,32 +3835,3 @@ async def test_a_late_bound_reply_edit_is_found_by_what_it_sent(tmp_path: Path, 
     sent = find.await_args.kwargs["delivery_content"]
     assert sent["m.new_content"]["body"] == "answer"
     assert sent["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$reply"}
-
-
-@pytest.mark.asyncio
-async def test_compaction_failure_notice_says_the_reply_continues_without_compaction(tmp_path: Path) -> None:
-    """A failed pre-reply or mid-turn compaction continues without compacting, not with trimmed history."""
-    gateway = _gateway(tmp_path)
-    with patch(
-        "mindroom.delivery_gateway.edit_message_outcome",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
-    ) as mock_edit:
-        await gateway._edit_compaction_lifecycle_failure(
-            target=MessageTarget.resolve(_ROOM_ID, None, "$reply"),
-            event=CompactionLifecycleFailure(
-                notice_event_id="$notice",
-                mode="auto",
-                session_id="session-1",
-                scope="agent:agent",
-                summary_model="summary-model",
-                status="failed",
-                duration_ms=5,
-                failure_reason="summary model unavailable",
-                history_budget_tokens=100_000,
-            ),
-        )
-
-    assert mock_edit.await_args is not None
-    assert mock_edit.await_args.args[3]["body"] == (
-        "Compaction failed; continuing without compaction. summary model unavailable"
-    )

@@ -41,17 +41,19 @@ from mindroom.runtime_env_policy import (
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
 )
-from mindroom.tool_system.dependencies import ensure_optional_deps
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     resolved_worker_key_scope,
     worker_dir_name,
     worker_key_agent_name,
+    worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
     plan_scoped_workspace_mounts,
+    plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
@@ -350,8 +352,9 @@ def _load_docker_client_and_errors(
     if ensure_dependencies:
         ensure_docker_dependencies(runtime_paths)
     try:
-        docker_module = importlib.import_module("docker")
-        docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
+        with optional_dependency_environment():
+            docker_module = importlib.import_module("docker")
+            docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
     except ModuleNotFoundError as exc:
         msg = (
             "The Docker worker backend could not import the Docker SDK. "
@@ -828,7 +831,7 @@ class DockerWorkerBackend:
                 ):
                     if state.exists and not control.exists:
                         msg = (
-                            f"Docker worker '{worker_key}' is missing the control identity metadata "
+                            f"Docker worker '{worker_log_id(worker_key)}' is missing the control identity metadata "
                             "required to retire its state root."
                         )
                         raise WorkerBackendError(msg)
@@ -839,17 +842,17 @@ class DockerWorkerBackend:
                         container_name=container_name,
                         worker_key=worker_key,
                     ):
-                        msg = f"Docker worker container does not match retirement key '{worker_key}'."
+                        msg = f"Docker worker container does not match retirement key '{worker_log_id(worker_key)}'."
                         raise WorkerBackendError(msg)
                     self._remove_container(container)
                     if self._read_container(container_name) is not None:
-                        msg = f"Docker worker '{worker_key}' still exists after retirement."
+                        msg = f"Docker worker '{worker_log_id(worker_key)}' still exists after retirement."
                         raise WorkerBackendError(msg)
                     self._projection_manager.retire_worker_projection(worker_name)
                     state.remove()
                     control.remove()
             except (OSError, RecursionError, TypeError, ValueError) as exc:
-                msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
+                msg = f"Failed to retire Docker worker '{worker_log_id(worker_key)}': {exc}"
                 raise WorkerBackendError(msg) from exc
 
     def record_failure(
@@ -1066,7 +1069,7 @@ class DockerWorkerBackend:
         ):
             msg = (
                 f"Docker container '{container_name}' is not owned by this MindRoom worker runtime. "
-                f"Remove it manually before running worker '{worker_key}'."
+                f"Remove it manually before running worker '{worker_log_id(worker_key)}'."
             )
             raise WorkerBackendError(msg)
         return container
@@ -1223,6 +1226,7 @@ class DockerWorkerBackend:
                 read_only=True,
                 tmpfs=_WORKER_TMPFS,
                 extra_hosts=_WORKER_EXTRA_HOSTS,
+                runtime=self.config.runtime,
                 **security_kwargs,
             )
 
@@ -1529,16 +1533,27 @@ class DockerWorkerBackend:
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None = None,
     ) -> list[tuple[Path, str, bool]]:
+        resolved_agent_policies = self._projection_manager.current_resolved_agent_policies()
+        state_scope_key = resolve_state_scope_worker_key(worker_key, state_scope_worker_key)
         mount_specs = [
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
             for workspace_mount in plan_scoped_workspace_mounts(
-                worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
+                worker_key=state_scope_key,
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=private_agent_names,
-                resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
+                resolved_agent_policies=resolved_agent_policies,
             )
         ]
+        mount_specs.extend(
+            (shared_mount.local_path, str(shared_mount.worker_visible_path), shared_mount.read_only)
+            for shared_mount in plan_shared_directory_mounts(
+                worker_key=state_scope_key,
+                runtime_paths=self._runtime_paths,
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+                resolved_agent_policies=resolved_agent_policies,
+            )
+        )
         validate_unique_worker_visible_paths(
             (container_path for _host_path, container_path, _read_only in mount_specs),
             worker_key=worker_key,
@@ -1589,6 +1604,8 @@ class DockerWorkerBackend:
         }
         if self.config.security_policy == "computer":
             config_payload["runtime_security"] = docker_worker_security_policy_signature()
+        if self.config.runtime is not None:
+            config_payload["runtime"] = self.config.runtime
         normalized = json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

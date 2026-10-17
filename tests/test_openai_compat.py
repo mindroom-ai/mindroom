@@ -464,8 +464,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
-    assert "check_shell_command" in exposed_tool_names
-    assert "kill_shell_command" in exposed_tool_names
+    assert "read_file" in exposed_tool_names
 
 
 def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:
@@ -1041,6 +1040,7 @@ class TestChatCompletions:
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
+        assert mock_ai.call_args.kwargs["show_tool_calls"] is False
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
@@ -5057,11 +5057,6 @@ class TestTeamCompletion:
                     new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
                 ),
                 patch(
-                    "mindroom.teams.team_tool_definition_payloads_for_logging",
-                    return_value=[{"name": "demo_tool", "description": "Demo"}],
-                    create=True,
-                ),
-                patch(
                     "mindroom.teams.model_params_payload",
                     return_value={"temperature": 0.7},
                     create=True,
@@ -5081,7 +5076,7 @@ class TestTeamCompletion:
 
         assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
         assert prepared_prompt.run_metadata is not None
-        assert prepared_prompt.run_metadata["tools_schema"] == [{"name": "demo_tool", "description": "Demo"}]
+        assert "tools_schema" not in prepared_prompt.run_metadata
         assert prepared_prompt.run_metadata["model_params"] == {"temperature": 0.7}
         assert prepared_prompt.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         with open_bound_scope_session_context(

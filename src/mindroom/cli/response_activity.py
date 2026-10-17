@@ -128,7 +128,10 @@ def check_active_responses(
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
     details: bool = typer.Option(False, "--details", help="Show authenticated responder and requester details."),
 ) -> None:
-    """Check live work; exit 0 idle, 1 busy, or 2 unavailable."""
+    """Check whether MindRoom has live work.
+
+    Exits 0 when idle, 1 when busy, and 2 when unavailable.
+    """
     try:
         runtime_paths = activate_cli_runtime(path=config_path)
         snapshot = _wait_for_idle(runtime_paths, url, timeout, details=details, wait=wait)

@@ -497,26 +497,36 @@ def test_agent_and_team_names_reject_internal_entity_name(section: str, entity_n
         Config(**config_data)
 
 
-def test_run_pairs_when_hosted_without_credentials(tmp_path: Path) -> None:
-    """Run command initiates pairing when MINDROOM_PROVISIONING_URL is set without credentials."""
+@pytest.mark.parametrize("env_content", [None, "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"])
+def test_run_pairs_when_hosted_without_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_content: str | None,
+) -> None:
+    """An existing config pairs with hosted Matrix whether hosted defaults are explicit or implicit."""
+    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     env_path = tmp_path / ".env"
-    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    if env_content is not None:
+        env_path.write_text(env_content, encoding="utf-8")
 
     pair_called = []
 
-    def fake_pair_local_install(runtime_paths: constants_mod.RuntimePaths, **_kwargs: object) -> None:  # noqa: ARG001
+    def fake_pair_local_install(runtime_paths: constants_mod.RuntimePaths, **_kwargs: object) -> None:
+        assert constants_mod.runtime_matrix_homeserver(runtime_paths) == "https://mindroom.chat"
         pair_called.append(True)
         # Write credentials to .env to simulate successful pairing
-        env_content = env_path.read_text(encoding="utf-8")
-        env_content += "\nMINDROOM_LOCAL_CLIENT_ID=test_id\nMINDROOM_LOCAL_CLIENT_SECRET=test_secret\n"
-        env_path.write_text(env_content, encoding="utf-8")
+        env_path.write_text(
+            (env_content or "") + "\nMINDROOM_LOCAL_CLIENT_ID=test_id\nMINDROOM_LOCAL_CLIENT_SECRET=test_secret\n",
+            encoding="utf-8",
+        )
 
     seen_credentials = []
 
     async def fake_run(*, config_path: Path | None, storage_path: Path | None, **_kwargs: object) -> None:
         runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+        assert constants_mod.runtime_matrix_homeserver(runtime_paths) == "https://mindroom.chat"
         seen_credentials.append(
             (
                 runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID"),

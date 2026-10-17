@@ -670,32 +670,3 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
             assert connection.execute("SELECT run_id, usage_data FROM test_agent_sessions_usage").fetchall() == []
     finally:
         storage.close()
-
-
-def _traced(call_id: str, *, parent: str | None = None, completed: bool = True) -> ToolTraceEntry:
-    return ToolTraceEntry(
-        type="tool_call_completed" if completed else "tool_call_started",
-        tool_name="run_shell_command",
-        tool_call_id=call_id,
-        parent_bash_call_id=parent,
-    )
-
-
-def test_a_stopped_reply_keeps_only_tool_calls_its_fold_did_not_summarize() -> None:
-    """A folded shell call's nested tools leave with it, completed or still running, and later calls stay."""
-    recorder = TurnRecorder(user_message="question")
-    recorder.completed_tools = [
-        _traced("bash-folded"),
-        _traced("nested-folded", parent="bash-folded"),
-        _traced("after"),
-    ]
-    recorder.interrupted_tools = [
-        _traced("nested-running", parent="bash-folded", completed=False),
-        _traced("running", completed=False),
-    ]
-    recorder.record_mid_turn_generation(4, folded_tool_call_ids={"bash-folded"})
-
-    snapshot = recorder.interrupted_snapshot()
-
-    assert [tool.tool_call_id for tool in snapshot.completed_tools] == ["after"]
-    assert [tool.tool_call_id for tool in snapshot.interrupted_tools] == ["running"]

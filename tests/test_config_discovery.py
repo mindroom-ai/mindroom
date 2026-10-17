@@ -50,6 +50,7 @@ _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
 _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     # Canonical prepared dispatch installs its explicitly retained runtime identity.
     "src/mindroom/tool_system/agent_tool_calls.py",
+    "src/mindroom/tool_jobs/agno_execution.py",  # Accepted application-call ownership boundary.
     "src/mindroom/api/openai_compat.py",
     "src/mindroom/api/sandbox_runner.py",
     "src/mindroom/bot.py",
@@ -691,6 +692,34 @@ class TestResolveConfigRelativePath:
         assert constants_mod.runtime_matrix_homeserver(runtime_paths=runtime_paths) == "https://hs.example"
         assert constants_mod.runtime_matrix_server_name(runtime_paths=runtime_paths) == "server.example"
         assert config.get_domain(runtime_paths) == "server.example"
+
+    @pytest.mark.parametrize(
+        ("process_env", "env_homeserver", "expected"),
+        [
+            ({}, None, "https://mindroom.chat"),
+            ({"MATRIX_HOMESERVER": ""}, None, "https://mindroom.chat"),
+            ({"MATRIX_HOMESERVER": " https://mindroom.chat/ "}, None, "https://mindroom.chat"),
+            ({}, "http://localhost:8008", "http://localhost:8008"),
+            ({"MATRIX_HOMESERVER": "https://matrix.example.org"}, None, "https://matrix.example.org"),
+            ({"MATRIX_HOMESERVER": "http://localhost:8008"}, "https://mindroom.chat", "http://localhost:8008"),
+        ],
+    )
+    def test_matrix_homeserver_defaults_to_hosted_without_overriding_explicit_settings(
+        self,
+        tmp_path: Path,
+        process_env: dict[str, str],
+        env_homeserver: str | None,
+        expected: str,
+    ) -> None:
+        """A missing or empty URL uses hosted Matrix; configured URLs retain their precedence."""
+        if env_homeserver is not None:
+            (tmp_path / ".env").write_text(f"MATRIX_HOMESERVER={env_homeserver}\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env=process_env,
+        )
+
+        assert constants_mod.runtime_matrix_homeserver(runtime_paths) == expected
 
     def test_config_domain_uses_sibling_env_matrix_homeserver(
         self,

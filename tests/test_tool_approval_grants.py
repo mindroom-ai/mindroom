@@ -13,7 +13,8 @@ from agno.models.response import ToolExecution
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
 from mindroom.approval.receipt import build_approval_receipt
-from mindroom.approval.response import ApprovalResponseCoordinator
+from mindroom.approval.response import ApprovalResponseCoordinator, plan_approval_calls
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.approval.transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
@@ -21,12 +22,14 @@ from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalDecisionMetadata,
+    BackgroundApprovalDecision,
     DeliveryStage,
     EventClass,
     EventJournalStore,
     EventKind,
     InboundEvent,
     MatrixDelivery,
+    StoredApprovalCard,
 )
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
@@ -152,8 +155,10 @@ async def test_only_policy_pause_offers_timed_approval(
         requires_confirmation=True,
         approval_type=approval_type,
     )
-    plan = await coordinator.plan_pause(
+    plan = await plan_approval_calls(
         ((tool, "call-authored", "shell", "code"),),
+        config=coordinator.config(),
+        runtime_paths=coordinator.runtime_paths,
         requester_id="@human:test",
         toolkit_owners={("code", "shell"): "test_toolkit"},
     )
@@ -249,8 +254,10 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 requires_confirmation=True,
                 approval_type="mindroom_policy",
             )
-            plan = await coordinator.plan_pause(
+            plan = await plan_approval_calls(
                 ((tool, "call-" + name, "shell", "code"),),
+                config=coordinator.config(),
+                runtime_paths=coordinator.runtime_paths,
                 requester_id="@human:test",
                 toolkit_owners={("code", "shell"): "test_toolkit"},
             )
@@ -1306,6 +1313,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
         prepare_event=prepare,
         send_delivery=send,
         transport_sender=lambda: "@router:test",
+        responder_principal=lambda entity_name: "agent@" + entity_name,
     )
 
 
@@ -1523,4 +1531,269 @@ async def test_timed_action_delivers_its_scope_without_startup_recovery(
         assert len(sent) == 1
         assert sent[0].payload["auto_approval"]["revoked_at"] is not None
     finally:
+        await manager.shutdown()
+
+
+# A job's approval wait rereads its durable decision once a second.
+_JOB_DECISION_WAIT_SECONDS = 5.0
+
+
+def _job_card_event_id(name: str) -> str:
+    return f"$script-approval:tool-job:{name}:call-{name}"
+
+
+def _job_call(
+    manager: ApprovalManager,
+    name: str,
+    *,
+    agent: str = "code",
+    requester: str = "@human:test",
+    approver: str | None = None,
+    thread: str | None = "$thread",
+    operation: str | None = "binding:shell",
+) -> asyncio.Task[BackgroundApprovalDecision]:
+    """Ask about one gated call the way a background job does, through a card the job owns."""
+    return asyncio.create_task(
+        manager.request_background_approval(
+            origin=BackgroundScriptToolOrigin(
+                run_id="tool-job:" + name,
+                call_id="call-" + name,
+                requester_id=requester,
+                toolkit_name="test_toolkit",
+                function_name="shell",
+            ),
+            room_id="!room:test",
+            thread_id=thread,
+            agent_name=agent,
+            requester_id=requester,
+            approver_user_id=approver or requester,
+            tool_name="shell",
+            arguments={"command": name},
+            timeout_seconds=600,
+            entity_name=agent,
+            grant_operation=None if operation is None else ApprovalOperation(operation, "shell"),
+        ),
+    )
+
+
+async def _posted_job_card(journal: EventJournalStore, name: str) -> StoredApprovalCard:
+    cards = journal.principal("router@shared")
+    for _attempt in range(1000):
+        stored = await cards.pending_approval_card(room_id="!room:test", card_event_id=_job_card_event_id(name))
+        if stored is not None:
+            return stored
+        await asyncio.sleep(0.001)
+    message = f"Job card {name!r} was not posted."
+    raise AssertionError(message)
+
+
+async def _stop(tasks: list[asyncio.Task[BackgroundApprovalDecision]]) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ineligible",
+    [None, "room-level conversation", "tool's own confirmation", "another approver", "unknown responder"],
+)
+async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    ineligible: str | None,
+) -> None:
+    """A job's card offers the same options under the same conditions, scoped to the same conversation."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    if ineligible == "unknown responder":
+        manager.responder_principal = lambda _entity_name: None
+    call = {
+        "room-level conversation": {"thread": None},
+        "tool's own confirmation": {"operation": None},
+        "another approver": {"approver": "@admin:test"},
+    }.get(ineligible or "", {})
+    waiting = [_job_call(manager, "first", **call)]
+    try:
+        content = (await _posted_job_card(journal, "first")).card["content"]
+        if ineligible is None:
+            assert content["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
+            scope = content["approval_scope"]
+            assert (scope["entity_name"], scope["invoking_agent"], scope["operation"]) == (
+                "code",
+                "code",
+                {"tool_name": "shell"},
+            )
+            assert scope["id"] != "0" * 64
+        else:
+            assert "auto_approve_options" not in content
+            assert "approval_scope" not in content
+            approver = str(call.get("approver", "@human:test"))
+            assert not (await _approve(manager, _job_card_event_id("first"), sender=approver)).consumed
+            decision = await journal.principal("router@shared").background_approval_decision(
+                run_id="tool-job:first",
+                call_id="call-first",
+            )
+            assert decision is None
+    finally:
+        await _stop(waiting)
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_timed_approval_on_a_job_card_covers_later_job_and_reply_calls(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Choosing a timed option on a job's card approves its call and records the grant a paused reply's would."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    sent: list[MatrixDelivery] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery)
+        return "$" + delivery.delivery_id
+
+    manager.send_delivery = send
+    first = _job_call(manager, "first")
+    try:
+        await _posted_job_card(journal, "first")
+        assert (await _approve(manager, _job_card_event_id("first"))).consumed
+        assert (await asyncio.wait_for(first, _JOB_DECISION_WAIT_SECONDS)).status == "approved"
+        grant = await journal.principal("router@shared").approval_grant_for_card(
+            room_id="!room:test",
+            card_event_id=_job_card_event_id("first"),
+        )
+        assert grant is not None
+        assert (grant.thread_id, grant.requester_id, grant.entity_name, grant.invoking_agent) == (
+            "$thread",
+            "@human:test",
+            "code",
+            "code",
+        )
+        sent.clear()
+        # A later job call is approved without a card, and its receipt names the grant.
+        later = await asyncio.wait_for(_job_call(manager, "later"), _JOB_DECISION_WAIT_SECONDS)
+        assert later == BackgroundApprovalDecision(status="approved", reason=None)
+        [receipt] = sent
+        assert receipt.stage is DeliveryStage.INITIAL
+        assert receipt.payload["status"] == "approved"
+        assert receipt.payload["arguments"] == {"command": "later"}
+        assert receipt.payload["approval_provenance"]["grant_id"] == grant.grant_id
+        assert "auto_approve_options" not in receipt.payload
+        assert (
+            await journal.principal("router@shared").pending_approval_card(
+                room_id="!room:test",
+                card_event_id=_job_card_event_id("later"),
+            )
+            is None
+        )
+        # So is a later call that pauses a reply in the same conversation.
+        await _card(journal, manager, "reply")
+        continuation = await journal.principal("agent@code").approval_continuation("reply")
+        assert continuation is not None
+        assert continuation.calls[0].decision is not None
+        assert continuation.calls[0].decision.value == "approved"
+    finally:
+        await _stop([first])
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_timed_approval_on_a_reply_card_covers_pending_and_later_job_calls(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A grant from a paused reply's card approves a job's waiting card and its later calls in that conversation."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    waiting = _job_call(manager, "waiting")
+    try:
+        await _posted_job_card(journal, "waiting")
+        first = await _card(journal, manager, "first")
+        assert (await _approve(manager, first)).consumed
+        assert (await asyncio.wait_for(waiting, _JOB_DECISION_WAIT_SECONDS)).status == "approved"
+        later = await asyncio.wait_for(_job_call(manager, "later"), _JOB_DECISION_WAIT_SECONDS)
+        assert later.status == "approved"
+    finally:
+        await _stop([waiting])
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outside", ["agent", "requester", "thread", "operation", "revoked", "expired"])
+async def test_job_call_outside_an_active_grant_still_asks(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outside: str,
+) -> None:
+    """A grant covers only its own conversation, agent, and operation, and never once revoked or expired."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    first = await _card(journal, manager, "first")
+    await _approve(manager, first)
+    grant = await journal.principal("router@shared").approval_grant_for_card(room_id="!room:test", card_event_id=first)
+    assert grant is not None
+    if outside == "revoked":
+        revoked = await manager.handle_grant_revocation(
+            room_id="!room:test",
+            sender_id="@human:test",
+            card_event_id=first,
+            grant_id=grant.grant_id,
+            authorize_responder=lambda _entity_name: True,
+        )
+        assert revoked.consumed
+    if outside == "expired":
+        monkeypatch.setattr("time.time_ns", lambda: grant.expires_at_ns)
+    call = {
+        "agent": {"agent": "helper"},
+        "requester": {"requester": "@other:test"},
+        "thread": {"thread": "$other-thread"},
+        "operation": {"operation": "binding:remote-delete"},
+    }.get(outside, {})
+    asking = _job_call(manager, "asking", **call)
+    try:
+        await _posted_job_card(journal, "asking")
+        assert not asking.done()
+        assert (
+            await journal.principal("router@shared").background_approval_decision(
+                run_id="tool-job:asking",
+                call_id="call-asking",
+            )
+            is None
+        )
+    finally:
+        await _stop([asking])
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ended_job_denies_its_open_timed_card(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A job that ends before the decision denies its card, whose timed option then grants nothing."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    ended = _job_call(manager, "ended")
+    later = None
+    try:
+        stored = await _posted_job_card(journal, "ended")
+        assert stored.card["content"]["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
+        await _stop([ended])
+        assert await manager.settle_pending_background_approvals("tool-job:ended", reason="The job ended.") == 1
+        await _approve(manager, _job_card_event_id("ended"))
+        cards = journal.principal("router@shared")
+        assert await cards.background_approval_decision(run_id="tool-job:ended", call_id="call-ended") == (
+            BackgroundApprovalDecision(status="denied", reason="The job ended.")
+        )
+        assert (
+            await cards.approval_grant_for_card(room_id="!room:test", card_event_id=_job_card_event_id("ended")) is None
+        )
+        later = _job_call(manager, "later")
+        await _posted_job_card(journal, "later")
+        assert not later.done()
+    finally:
+        await _stop([ended] if later is None else [ended, later])
         await manager.shutdown()

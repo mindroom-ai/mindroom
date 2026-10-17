@@ -29,7 +29,11 @@ from mindroom.matrix.identity import (
     validate_email_to_matrix_mapping,
 )
 from mindroom.origins import normalized_origin
-from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
+from mindroom.tool_system.dependencies import (
+    auto_install_enabled,
+    auto_install_optional_extra_for_import_retry,
+    optional_dependency_environment,
+)
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -260,7 +264,8 @@ def _init_supabase_auth(
         return None
 
     try:
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
     except ModuleNotFoundError:
         disabled_hint = ""
         if not auto_install_enabled(runtime_paths):
@@ -271,7 +276,8 @@ def _init_supabase_auth(
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
             )
             raise ImportError(msg) from None
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
 
     return cast("_SupabaseClientProtocol", create_client(*credentials))
 
@@ -768,6 +774,49 @@ def _request_path_with_query(request: Request) -> str:
     return f"{path}?{query}" if query else path
 
 
+_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
+_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
+_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+)
+
+
+def _hosted_browser_origins(runtime_paths: RuntimePaths) -> list[str]:
+    """Return hosted browser origins allowed to make credentialed API calls."""
+    return list(
+        dict.fromkeys(
+            origin
+            for origin in (
+                normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                normalized_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+            )
+            if origin is not None
+        ),
+    )
+
+
+def dashboard_cors_origins(runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Return the browser origins the dashboard API serves cross-origin; `("*",)` when every origin is allowed.
+
+    `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` allows every origin. Otherwise
+    `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` lists them; unset, a hosted instance allows its own origins and any
+    other instance the local development servers.
+    """
+    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
+        return ("*",)
+    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
+    if configured_origins is None:
+        hosted_origins = tuple(_hosted_browser_origins(runtime_paths))
+        if hosted_origins:
+            return hosted_origins
+        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+
+
 def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings, next_path: str | None) -> str:
     origin = normalized_origin(auth_settings.public_url)
     if origin is None:
@@ -913,6 +962,15 @@ def _is_connections_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in ("/connections", "/api/connections"))
 
 
+def is_administrator(matrix_user_id: object, snapshot: ApiSnapshot) -> bool:
+    """Return whether a signed Matrix user is a platform administrator in the snapshot's config."""
+    return (
+        isinstance(matrix_user_id, str)
+        and snapshot.runtime_config is not None
+        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
+    )
+
+
 def _require_connections_route_authorized(
     request: Request,
     auth_user: dict[str, Any],
@@ -928,14 +986,27 @@ def _require_connections_route_authorized(
     if len(parts) == 5 and parts[1:3] == ["api", "oauth"] and parts[3] and parts[4] in {"callback", "success", "reset"}:
         # These handlers independently validate their state or reset capability.
         return
-    matrix_user_id = auth_user.get("matrix_user_id")
-    if (
-        isinstance(matrix_user_id, str)
-        and snapshot.runtime_config is not None
-        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
-    ):
+    if is_administrator(auth_user.get("matrix_user_id"), snapshot):
         return
+    if _is_browser_page_request(request):
+        # A user who opens a dashboard page lands on their own page, which says why, instead of a JSON refusal.
+        raise HTTPException(
+            status_code=303,
+            detail="Administrator access required",
+            headers={"Location": "/connections?notice=admin-only"},
+        )
     raise HTTPException(status_code=403, detail="Administrator access required")
+
+
+def _is_browser_page_request(request: Request) -> bool:
+    """Recognize a browser loading a page: a GET that accepts HTML, outside the API."""
+    path = request.scope["path"]
+    return (
+        request.method == "GET"
+        and "text/html" in request.headers.get("accept", "").lower()
+        and path != "/api"
+        and not path.startswith("/api/")
+    )
 
 
 async def require_connections_user(request: Request) -> dict[str, Any]:

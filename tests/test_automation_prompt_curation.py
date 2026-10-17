@@ -13,12 +13,13 @@ from mindroom.automations.prompt_curation import (
     _plan_curation,
     _verify_curation,
 )
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -55,8 +56,7 @@ def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAu
 
 def _plan(tmp_path: Path, **settings: object) -> tuple[_CurationPlan, Config, Path]:
     config, automation, root = _setup(tmp_path, **settings)
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation)
     assert plan is not None
     return plan, config, root
 
@@ -69,9 +69,8 @@ def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:
     """Small prompt files post no prompt."""
     config, automation, root = _setup(tmp_path)
     (root / "MEMORY.md").write_text("# Memory\n- Prefers terse replies.\n", encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
-    assert _plan_curation(config, paths, "mind", automation) is None
+    assert _plan_curation(config, root, "mind", automation) is None
 
 
 def test_the_plan_covers_memory_and_every_context_file_with_a_gradual_band(tmp_path: Path) -> None:
@@ -224,10 +223,9 @@ def test_a_planted_link_stops_the_check(tmp_path: Path) -> None:
     outside.write_text("secret\n", encoding="utf-8")
     (root / "USER.md").unlink()
     (root / "USER.md").symlink_to(outside)
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
     with pytest.raises((OSError, ValueError)):
-        _plan_curation(config, paths, "mind", automation)
+        _plan_curation(config, root, "mind", automation)
 
 
 ARCHIVE = "# Projects\n" + "Archived project detail. " * 80 + "\n"
@@ -236,8 +234,7 @@ ARCHIVE = "# Projects\n" + "Archived project detail. " * 80 + "\n"
 def _plan_with_archive(tmp_path: Path) -> tuple[_CurationPlan, Path]:
     config, automation, root = _setup(tmp_path)
     (root / "memory" / "projects.md").write_text(ARCHIVE, encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation)
     assert plan is not None
     return plan, root
 
@@ -273,8 +270,7 @@ def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_p
     """The loss baseline counts a topic file that was past 1 MiB at fire time, so it cannot pass as moved detail."""
     config, automation, root = _setup(tmp_path)
     (root / "memory" / "big.md").write_text("Old detail.\n" * 100_000, encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation)
     assert plan is not None
     _delete_without_moving(root)
 
@@ -290,8 +286,7 @@ def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
     (root / "memory" / "context.md").write_text(context, encoding="utf-8")
     (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     config.agents["mind"].context_files = ["memory/context.md"]
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation)
     assert plan is not None
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "memory" / "context.md").write_text(context.replace(SECTIONS[3], POINTER), encoding="utf-8")
@@ -310,3 +305,30 @@ def test_reorganizing_an_archive_without_losing_content_is_accepted(tmp_path: Pa
     result = _verify_curation(plan)
 
     assert (result.changed, result.findings) == (True, ())
+
+
+def test_a_private_instance_curates_its_own_context_files_not_the_shared_ones(tmp_path: Path) -> None:
+    """A private agent's agent-level context files load from the workspace every requester shares, so no one run cuts them."""
+    automation = PromptCurationAutomation(trigger_tokens=1_000)
+    agent = AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        context_files=["SHARED.md"],
+        private=AgentPrivateConfig(per="user_agent", context_files=["SOUL.md"]),
+    )
+    config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    identity = build_requester_execution_identity(
+        agent_name="mind",
+        runtime_paths=paths,
+        requester_id="@alice:example.test",
+    )
+    root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
+    assert root is not None
+    for name, text in (("MEMORY.md", MEMORY), ("SOUL.md", SOUL), ("SHARED.md", MEMORY)):
+        (root / name).write_text(text, encoding="utf-8")
+
+    plan = _plan_curation(config, root, "mind", automation)
+
+    assert plan is not None
+    assert list(plan.curated) == ["MEMORY.md", "SOUL.md"]

@@ -6,39 +6,23 @@ This throwaway monkey-patch mirrors the Agent message-builder path until Agno
 Team has the same upstream behavior.
 Both builders, and the entry points that resume paused runs, also remove
 ordinary inline payloads from persisted history while retaining marked, bounded
-tool images for replay, and place the scope's compaction summary before replayed
-history.
+tool images for replay.
 """
 
 from __future__ import annotations
 
-import asyncio
 import threading
-import weakref
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from agno.agent import _messages as agent_messages
-from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
-from agno.run.base import RunContext
 from agno.run.messages import RunMessages
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
-from agno.team import Team
 from agno.team import _messages as team_messages
 from agno.team import _run as team_run
 from agno.utils.log import log_warning
 
-from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay
-from mindroom.history.replay import compaction_summary_message, current_summary_text, is_scope_summary
-from mindroom.history.session_context import resolve_target_history_scope
-from mindroom.history.storage import reconcile_compaction_state
-
-if TYPE_CHECKING:
-    from agno.agent import Agent
 
 # AGNO_COMPAT: Team input loses message roles.
 # Reason: Team flattens roleful Message input into a single user message.
@@ -67,33 +51,6 @@ if TYPE_CHECKING:
 # tests/test_agno_compat_message_builder.py::test_inline_media_cleanup_strips_every_kind_only_from_history;
 # tests/test_agno_compat_message_builder.py::test_viewed_image_replay_keeps_only_newest_four_and_discloses_omissions;
 # tests/test_agno_compat_message_builder.py::test_history_viewed_image_projection_enforces_aggregate_byte_limit.
-
-# AGNO_COMPAT: Agno renders the session summary only inside its system message.
-# Reason: Agno appends session.summary to the system prompt when add_session_summary_to_context is on, so every
-# compaction rewrites the cached prompt prefix, and a string system_message (minimal agents) never shows it.
-# MindRoom turns that flag off and places the summary as the first history message in every new and continued
-# request instead.
-# Upstream issue: Tracking gap. Related open issues https://github.com/agno-agi/agno/issues/8790 (rolling
-# compaction, still injected into the system prompt) and https://github.com/agno-agi/agno/issues/9461 (unify
-# history, summary, and compression across agents, members, and workflows) do not propose a history-positioned
-# summary.
-# Upstream PR: None identified.
-# Remove when: Agno can replay the session summary as a history message for new and continued runs; the summary
-# must still replay exactly once and be counted once.
-# Coverage: tests/test_history_summary_message.py::test_summary_is_the_first_history_message_for_new_runs;
-# tests/test_history_summary_message.py::test_summary_is_reinserted_on_synchronous_continuation;
-# tests/test_history_summary_message.py::test_approval_resume_replays_the_summary_once.
-
-# AGNO_COMPAT: No public reference to the session a running loop writes when it ends.
-# Reason: Agno loads a run's session privately and writes that object back when the run ends, so mid-turn
-# compaction must update that same object; the builders record it with the run they built it for, and a model
-# request of any other run (a skill review reusing the model) is never compacted.
-# Upstream issue: Tracking gap; no issue identified for exposing the running loop's session or run.
-# Upstream PR: None identified.
-# Remove when: Agno exposes the session and run a model request belongs to, for example on a pre-request hook.
-# Coverage: tests/test_mid_turn_compaction.py::test_long_single_turn_compacts_mid_turn_and_continues;
-# tests/test_mid_turn_compaction.py::test_scoped_compaction_after_resume_keeps_the_run_local_summary;
-# tests/test_mid_turn_compaction.py::test_a_request_the_target_never_built_is_not_compacted.
 
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()
@@ -140,129 +97,20 @@ def _strip_history_inline_media(run_messages: RunMessages) -> RunMessages:
     return run_messages
 
 
-@dataclass
-class _BuiltRequests:
-    target: weakref.ref[object]
-    # Sessions by run id, oldest first; parallel delegations can run one member several times at once.
-    sessions: dict[str, AgentSession | TeamSession] = field(default_factory=dict)
-    # Continuation builders get no run id, so the first request after one claims its session, replacing the
-    # session its run's earlier loop was built from.
-    unclaimed: AgentSession | TeamSession | None = None
+def _without_history_inline_media(builder: _RunMessagesBuilder) -> _RunMessagesBuilder:
+    """Wrap one synchronous run-message builder with the history-media filter."""
 
-
-_BUILT_REQUESTS: dict[int, _BuiltRequests] = {}
-_RUNS_KEPT_PER_TARGET = 32
-
-
-def built_request_session(target: Agent | Team, run_id: str) -> AgentSession | TeamSession | None:
-    """Return the session Agno built the target's requests of ``run_id`` from, which it writes when the run ends.
-
-    None means the target's own builders never built this run, such as a skill review reusing the target's model.
-    """
-    built = _BUILT_REQUESTS.get(id(target))
-    if built is None or built.target() is not target:
-        return None
-    if built.unclaimed is not None:
-        built.sessions.pop(run_id, None)
-        built.sessions[run_id], built.unclaimed = built.unclaimed, None
-    return built.sessions.get(run_id)
-
-
-def _record_request_session(target: object, run_id: str | None, session: AgentSession | TeamSession) -> None:
-    # Agno's Agent and Team dataclasses are unhashable, so key by identity and drop the entry with the target.
-    key = id(target)
-    built = _BUILT_REQUESTS.get(key)
-    if built is None or built.target() is not target:
-        built = _BuiltRequests(weakref.ref(target, lambda _ref: _BUILT_REQUESTS.pop(key, None)))
-        _BUILT_REQUESTS[key] = built
-    if run_id is None:
-        built.unclaimed = session
-        return
-    built.sessions.pop(run_id, None)
-    built.sessions[run_id] = session
-    while len(built.sessions) > _RUNS_KEPT_PER_TARGET:
-        built.sessions.pop(next(iter(built.sessions)))
-
-
-def _insert_session_summary(run_messages: RunMessages, session: AgentSession | TeamSession) -> None:
-    """Place the scope's summary directly after the leading prompt messages, once."""
-    summary = current_summary_text(session)
-    if summary is None or any(is_scope_summary(m) for m in run_messages.messages):
-        return
-    index = next(
-        (i for i, message in enumerate(run_messages.messages) if message.role not in {"system", "developer"}),
-        len(run_messages.messages),
-    )
-    run_messages.messages.insert(index, compaction_summary_message(summary, run_local=False))
-
-
-def _prepare_history(
-    run_messages: RunMessages,
-    target: object,
-    kwargs: dict[str, object],
-    *,
-    continuation: bool,
-) -> RunMessages:
-    """Apply MindRoom's replay policy to one built request."""
-    session = kwargs.get("session")
-    if isinstance(session, (AgentSession, TeamSession)):
-        run_context = kwargs.get("run_context")
-        _record_request_session(target, run_context.run_id if isinstance(run_context, RunContext) else None, session)
-        replays_history = kwargs.get("add_history_to_context")
-        if continuation and replays_history is None:
-            replays_history = cast("Agent | Team", target).add_history_to_context
-        if replays_history and not (continuation and system_message_embeds_summary(run_messages.messages)):
-            _insert_session_summary(run_messages, session)
-    return _strip_history_inline_media(run_messages)
-
-
-# AGNO_COMPAT: Continuations fetch stored history with no owner hook before the fetch.
-# Reason: Agno's continuation builders read the stored runs a resumed run replays inside their private message
-# building, so MindRoom settles that stored history, archiving the runs a mid-turn compaction before the pause
-# covered, from inside the wrapped builders; a new run gets the same settling during reply preparation.
-# Upstream issue: Tracking gap; no issue identified for a hook before a continuation fetches history.
-# Upstream PR: None identified.
-# Remove when: Agno offers an owner hook that runs before a continuation reads stored history, for agents and teams,
-# sync and async; the settling itself stays MindRoom's and must still run before that read.
-# Coverage: tests/test_mid_turn_compaction.py::test_approval_resume_after_mid_turn_compaction;
-# tests/test_mid_turn_compaction.py::test_team_approval_resume_after_mid_turn_compaction.
-def _reconcile_continuation(target: object, kwargs: dict[str, object]) -> None:
-    """Settle the stored history a continuation is about to fetch, as reply preparation does for a new run.
-
-    A mid-turn compaction before the pause leaves its covered runs live until reconcile archives them.
-    """
-    session = kwargs.get("session")
-    entity = cast("Agent | Team", target)
-    # The compaction archive lives in SQLite session storage only.
-    if not isinstance(session, (AgentSession, TeamSession)) or not isinstance(entity.db, SqliteDb):
-        return
-    replays_history = kwargs.get("add_history_to_context")
-    if not (replays_history if replays_history is not None else entity.add_history_to_context):
-        return
-    scope = resolve_target_history_scope(entity)
-    if scope is not None:
-        reconcile_compaction_state(entity.db, session, scope)
-
-
-def _with_history_policy(builder: _RunMessagesBuilder, *, continuation: bool) -> _RunMessagesBuilder:
-    """Wrap one synchronous run-message builder with MindRoom's replay policy."""
-
-    def build(target: object, *args: object, **kwargs: object) -> RunMessages:
-        if continuation:
-            _reconcile_continuation(target, kwargs)
-        return _prepare_history(builder(target, *args, **kwargs), target, kwargs, continuation=continuation)
+    def build(*args: object, **kwargs: object) -> RunMessages:
+        return _strip_history_inline_media(builder(*args, **kwargs))
 
     return build
 
 
-def _with_history_policy_async(builder: _AsyncRunMessagesBuilder, *, continuation: bool) -> _AsyncRunMessagesBuilder:
-    """Wrap one asynchronous run-message builder with MindRoom's replay policy."""
+def _without_history_inline_media_async(builder: _AsyncRunMessagesBuilder) -> _AsyncRunMessagesBuilder:
+    """Wrap one asynchronous run-message builder with the history-media filter."""
 
-    async def build(target: object, *args: object, **kwargs: object) -> RunMessages:
-        if continuation:
-            # Reconcile reads and writes storage, so it stays off the event loop that serves every room.
-            await asyncio.to_thread(_reconcile_continuation, target, kwargs)
-        return _prepare_history(await builder(target, *args, **kwargs), target, kwargs, continuation=continuation)
+    async def build(*args: object, **kwargs: object) -> RunMessages:
+        return _strip_history_inline_media(await builder(*args, **kwargs))
 
     return build
 
@@ -279,52 +127,47 @@ def apply_patch() -> None:
         original_team_get_run_messages = cast("_RunMessagesBuilder", team_messages._get_run_messages)
         original_team_aget_run_messages = cast("_AsyncRunMessagesBuilder", team_messages._aget_run_messages)
 
-        def _get_run_messages(team: object, *args: object, **kwargs: object) -> RunMessages:
+        def _get_run_messages(*args: object, **kwargs: object) -> RunMessages:
             input_message = kwargs.get("input_message")
             if not _is_roleful_message_list(input_message):
-                run_messages = original_team_get_run_messages(team, *args, **kwargs)
-                return _prepare_history(run_messages, team, kwargs, continuation=False)
+                return _strip_history_inline_media(original_team_get_run_messages(*args, **kwargs))
 
             passthrough_kwargs = {**kwargs, "input_message": None}
-            run_messages = original_team_get_run_messages(team, *args, **passthrough_kwargs)
+            run_messages = original_team_get_run_messages(*args, **passthrough_kwargs)
             _append_input_messages(run_messages, cast("_RolefulInput", input_message))
-            return _prepare_history(run_messages, team, kwargs, continuation=False)
+            return _strip_history_inline_media(run_messages)
 
-        async def _aget_run_messages(team: object, *args: object, **kwargs: object) -> RunMessages:
+        async def _aget_run_messages(*args: object, **kwargs: object) -> RunMessages:
             input_message = kwargs.get("input_message")
             if not _is_roleful_message_list(input_message):
-                run_messages = await original_team_aget_run_messages(team, *args, **kwargs)
-                return _prepare_history(run_messages, team, kwargs, continuation=False)
+                return _strip_history_inline_media(await original_team_aget_run_messages(*args, **kwargs))
 
             passthrough_kwargs = {**kwargs, "input_message": None}
-            run_messages = await original_team_aget_run_messages(team, *args, **passthrough_kwargs)
+            run_messages = await original_team_aget_run_messages(*args, **passthrough_kwargs)
             _append_input_messages(run_messages, cast("_RolefulInput", input_message))
-            return _prepare_history(run_messages, team, kwargs, continuation=False)
+            return _strip_history_inline_media(run_messages)
 
         team_messages._get_run_messages = cast("Any", _get_run_messages)
         team_messages._aget_run_messages = cast("Any", _aget_run_messages)
-        agent_messages.get_run_messages = cast(
-            "Any",
-            _with_history_policy(agent_messages.get_run_messages, continuation=False),
-        )
+        agent_messages.get_run_messages = cast("Any", _without_history_inline_media(agent_messages.get_run_messages))
         agent_messages.aget_run_messages = cast(
             "Any",
-            _with_history_policy_async(agent_messages.aget_run_messages, continuation=False),
+            _without_history_inline_media_async(agent_messages.aget_run_messages),
         )
         agent_messages.get_continue_run_messages = cast(
             "Any",
-            _with_history_policy(agent_messages.get_continue_run_messages, continuation=True),
+            _without_history_inline_media(agent_messages.get_continue_run_messages),
         )
         agent_messages.aget_continue_run_messages = cast(
             "Any",
-            _with_history_policy_async(agent_messages.aget_continue_run_messages, continuation=True),
+            _without_history_inline_media_async(agent_messages.aget_continue_run_messages),
         )
         team_run._get_continue_run_messages = cast(
             "Any",
-            _with_history_policy(team_run._get_continue_run_messages, continuation=True),
+            _without_history_inline_media(team_run._get_continue_run_messages),
         )
         team_run._aget_continue_run_messages = cast(
             "Any",
-            _with_history_policy_async(team_run._aget_continue_run_messages, continuation=True),
+            _without_history_inline_media_async(team_run._aget_continue_run_messages),
         )
         _PATCHED = True

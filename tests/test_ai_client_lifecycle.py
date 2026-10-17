@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -12,9 +11,7 @@ import pytest
 from agno.models.message import Message
 
 from mindroom import ai
-from mindroom.constants import MID_TURN_GENERATION_METADATA_KEY
 from mindroom.history.types import PreparedHistoryState
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.conftest import make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -168,57 +165,3 @@ async def test_prepare_agent_run_context_closes_agent_when_metadata_assembly_fai
 
     assert raised.value is preparation_error
     close_unreturned_agent.assert_awaited_once_with(agent, None, None)
-
-
-@pytest.mark.asyncio
-async def test_a_fresh_attempt_does_not_inherit_the_fold_records_of_the_run_it_follows(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A follow-up after an approval resume seeds its metadata from the resumed run, but not that run's own folds."""
-    agent = cast("Any", SimpleNamespace(model=None))
-    prepared_run = ai._PreparedAgentRun(
-        agent=agent,
-        messages=(Message(role="user", content="hello"),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(),
-        runtime_model_name="default",
-    )
-    monkeypatch.setattr(ai, "_prepare_agent_and_prompt", AsyncMock(return_value=prepared_run))
-    ctx = replace(
-        make_turn_context("assistant"),
-        matrix_run_metadata={
-            MID_TURN_GENERATION_METADATA_KEY: 3,
-            COMPACTED_REQUESTS_METADATA_KEY: [{"input_tokens": 10}],
-            "room_topic": "kept",
-        },
-    )
-
-    run_context = await ai._prepare_agent_run_context(
-        ctx,
-        prompt="hello",
-        session_id="session-1",
-        runtime_paths=test_runtime_paths(tmp_path),
-        config=MagicMock(),
-        scope_context=None,
-        thread_history=None,
-        knowledge=None,
-        include_interactive_questions=True,
-        tool_function_filter=None,
-        include_openai_compat_guidance=False,
-        execution_identity=None,
-        compaction_lifecycle=None,
-        delegation_depth=0,
-        refresh_scheduler=None,
-        model_prompt=None,
-        current_timestamp_ms=None,
-        current_event_id=None,
-        current_prompt_is_structured=False,
-        turn_recorder=None,
-        pipeline_timing=None,
-    )
-
-    assert run_context.metadata is not None
-    assert MID_TURN_GENERATION_METADATA_KEY not in run_context.metadata
-    assert COMPACTED_REQUESTS_METADATA_KEY not in run_context.metadata
-    assert run_context.metadata["room_topic"] == "kept"

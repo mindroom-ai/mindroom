@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.logging_config import get_logger
+from mindroom.tool_approval_grants import ApprovalGrantScope
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -164,14 +165,22 @@ def reserve_deliveries(
         expected_membership_epoch=membership_epoch,
     ):
         return False
+    invoking_agents = {call.tool_call_id: call.invoking_agent for call in continuation.calls}
     for card in cards:
         scoped_card = approval_grants.reserve_identity(
             transaction,
             card_principal_id,
-            continuation_principal_id,
-            continuation,
             card,
-            membership_epoch,
+            ApprovalGrantScope(
+                room_id=continuation.room_id,
+                thread_id=continuation.thread_id,
+                requester_id=continuation.requester_id,
+                entity_name=continuation.entity_name,
+                responder_principal_id=continuation_principal_id,
+                invoking_agent=invoking_agents[card.tool_call_id],
+            ),
+            membership_epoch=membership_epoch,
+            target=(continuation_id, expected_generation),
         )
         if approval_grants.apply_active(transaction, card_principal_id, card=scoped_card):
             continue
@@ -1040,7 +1049,7 @@ def _card(row: Row) -> StoredApprovalCard | None:
         else:
             continuation_entity_name = None
             background_call_id = _required_background_call_id(row)
-            stored_identity = (background_run_id, -1, background_call_id)
+            stored_identity = (background_run_id, approval_card_state.DETACHED_GENERATION, background_call_id)
             scheduled_identity = scheduled_approvals.card_identity(card)
             if scheduled_identity is None:
                 target_kind = "background_script"
@@ -1048,7 +1057,7 @@ def _card(row: Row) -> StoredApprovalCard | None:
             else:
                 target_kind = "scheduled_call"
                 card_run_id, card_call_id = scheduled_identity
-            card_identity = (card_run_id, -1, card_call_id)
+            card_identity = (card_run_id, approval_card_state.DETACHED_GENERATION, card_call_id)
         resolution = approval_card_state.decode_resolution(row["resolution_json"])
     except (json.JSONDecodeError, TypeError, ValueError):
         _log_unreadable_card(row)

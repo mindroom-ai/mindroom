@@ -97,6 +97,11 @@ def test_saas_default_config_is_generated_from_config_init() -> None:
     assert "worker_tools" not in generated["defaults"]
     # The platform upgrades hosted instances, so tenants must not be told to update themselves.
     assert "update_awareness" not in yaml.dump(generated)
+    # `script` would run in the primary pod, and tenants cannot log in to matrix-mcp.
+    assert "mcp_servers" not in generated
+    assert not {"script", "mcp_matrix_mcp"} & {
+        tool["name"] if isinstance(tool, dict) else tool for tool in generated["agents"]["mind"]["tools"]
+    }
     # Hosted agents learn workspace skills by default.
     assert all(agent["skill_learning"] == {"enabled": True} for agent in generated["agents"].values())
 
@@ -289,11 +294,7 @@ def test_openai_presets_use_current_models() -> None:
         "openai/gpt-6-luna",
         1_050_000,
     )
-    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
-        "gpt-6-astra",
-        "gpt-6.1-sol",
-        "gpt-6-luna",
-    )
+    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES == ("gpt-5", "gpt-6")
 
 
 def test_glm_presets_use_current_generation() -> None:

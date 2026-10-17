@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -188,6 +188,32 @@ async def test_interruption_recovery_preserves_workspace_knowledge_links(
     run = json.loads((record_dir / "run.json").read_text())
     assert run["status"] == status
     assert run["error"] == "Interrupted"
+
+
+@pytest.mark.asyncio
+async def test_interruption_recovery_keeps_a_settlement_saved_before_a_crash(tmp_path: Path) -> None:
+    """Recovering a child from a stale snapshot adopts the settlement that already landed instead of failing on it."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    child.subagent_id = uuid4().hex
+    await reserve_subagent_turn(child, owner=_identity("leader", "parent-session"), runtime_paths=paths)
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    # The job saved this running snapshot; then cancellation settled the child, and the process died.
+    snapshot = replace(child)
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Delegation cancelled.")
+
+    await interrupt_child(snapshot, config=config, runtime_paths=paths, reason="Restarted", status="failed")
+
+    assert (snapshot.status, snapshot.result) == ("cancelled", "Delegation cancelled.")
+    run = json.loads((await _record_dir(child, config, paths) / "run.json").read_text())
+    assert (run["status"], run["error"]) == ("cancelled", "Delegation cancelled.")
 
 
 @pytest.mark.asyncio

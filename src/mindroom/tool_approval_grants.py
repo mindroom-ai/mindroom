@@ -60,6 +60,19 @@ class ApprovalOperation:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalGrantScope:
+    """The conversation, requester, and responder that a card's timed approval binds to."""
+
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+    # The entity whose conversation asked, and the journal principal of its Matrix account.
+    entity_name: str
+    responder_principal_id: str
+    invoking_agent: str
+
+
 def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]) -> ApprovalOperation | None:
     """Bind a concrete tool operation, including generic MCP dispatch targets."""
     for server_id, server in config.mcp_servers.items():

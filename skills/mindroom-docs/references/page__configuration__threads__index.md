@@ -197,7 +197,8 @@ With TypeSafe or OpenAI Decisions, the task continues only when the probability 
 The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
 Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
-Attachment contents, tool arguments and results, system prompts, and memory are never sent, but message text can still contain private information.
+Tool calls appear as `<tool name="..." input="..." output="..."/>` tags built from the previews the chat shows in its tool details: up to 1,200 characters of input and 500 of output per call, with recognized secrets already removed.
+Attachment contents, full tool output, system prompts, and memory are never sent, but message text and tool previews can still contain private information.
 
 The agent gets the wrap-up notice without a judgment when:
 
@@ -210,6 +211,7 @@ The agent gets the wrap-up notice without a judgment when:
 Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
+With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](https://docs.mindroom.chat/tools/agent-orchestration/#when-a-call-becomes-a-job).
 Queued messages are handled after the active response finishes either way.
 A reply waiting for a [tool approval](https://docs.mindroom.chat/tool-approval/) counts as responding, so messages queue behind it until the approval ends.
 A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.

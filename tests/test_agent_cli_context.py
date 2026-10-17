@@ -17,7 +17,6 @@ from agno.session.summary import SessionSummary
 
 from mindroom import agents
 from mindroom.config.agent import AgentConfig
-from mindroom.history.replay import is_compaction_summary
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_context_uses_same_agent_learning_and_replays_summary_as_history(
+async def test_context_uses_same_agent_learning_and_summary_and_restores_bootstrap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -52,6 +51,7 @@ async def test_context_uses_same_agent_learning_and_replays_summary_as_history(
         persist_runtime_state=False,
     )
     agent.system_message = "small bootstrap"
+    agent.add_session_summary_to_context = True
     agent.context_documents = {}
     agent._learning = LearningMachine()
     seen = []
@@ -77,13 +77,10 @@ async def test_context_uses_same_agent_learning_and_replays_summary_as_history(
         session=session,
         run_context=run,
         input="current user message",
-        add_history_to_context=True,
     )
     assert result.system_message.content == "small bootstrap"
-    assert is_compaction_summary(result.messages[1])
-    assert "complete previous summary" in str(result.messages[1].content)
     assert "private learned context" in agent.context_documents["agent-context"]
-    assert "complete previous summary" not in agent.context_documents["agent-context"]
+    assert "complete previous summary" in agent.context_documents["agent-context"]
     assert seen[0]["user_id"] == runtime.requester_id
     assert seen[0]["message"] == "current user message"
 

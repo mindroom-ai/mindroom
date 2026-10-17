@@ -4,7 +4,7 @@ icon: lucide/hash
 
 # Matrix & Threads
 
-These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, make low-level Matrix API calls, and reuse conversation attachments.
+These built-in tools let an agent work inside its current Matrix room and thread: inspect rooms, send voice notes, tag, resolve, move, and summarize threads, stop another agent's reply, make low-level Matrix API calls, and reuse conversation attachments.
 This page also covers automatic thread summaries.
 
 ## Tools On This Page
@@ -16,6 +16,7 @@ This page also covers automatic thread summaries.
 - [`thread_resolution`] - Resolve or reopen threads in the current room.
 - [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
+- [`stop_reply`] - Stop the reply another agent or team is writing in the current conversation.
 - [`thread_model`](../configuration/models.md#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
 - [`attachments`](../attachments.md#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
@@ -128,7 +129,8 @@ Writing a tag requires both the agent's Matrix account and the requesting user t
 ## [`thread_resolution`]
 
 `thread_resolution` lets an agent resolve or reopen threads in the current room.
-It is not in starter configs or default tool sets, so agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](agent-orchestration.md#self_config) adds it to its own tools.
+The `mindroom config init` starter gives it to Mind, with a [tool approval](../tool-approval.md) rule that makes each `resolve_thread` call wait for the requester's approval.
+It is not in default tool sets, so other agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](agent-orchestration.md#self_config) adds it to its own tools.
 
 `resolve_thread(thread_id=None)` adds the `resolved` state, and `reopen_thread(thread_id=None)` removes it.
 Without `thread_id`, both require an active thread.
@@ -191,6 +193,25 @@ Both fields are omitted for a thread whose complete history cannot be read, the 
 set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
 set_thread_summary("Routine status update.", pin=False)
 set_thread_summary("Summary for the import thread.", thread_id="$threadRoot", room_id="!ops:example.org")
+```
+
+## [`stop_reply`]
+
+`stop_agent_reply(agent_name)` stops the reply another agent or team is writing in the current room and thread.
+It is not in starter configs or default tool sets.
+
+The tool reacts 🛑 on that reply for the user the calling agent is working for, so it works like that user's own [Stop Button](../chat-commands.md#stop-button) and needs that user's access to the stopped agent.
+It returns an error without reacting when the calling agent is not acting for a user, such as in a run another agent started on its own.
+
+```yaml
+agents:
+  coordinator:
+    tools:
+      - stop_reply
+```
+
+```python
+stop_agent_reply("researcher")
 ```
 
 ## [`matrix_api`]
@@ -259,7 +280,7 @@ room_thread_summary_models:
 ```
 
 `defaults.thread_summary_temperature` (default `0.2`, `null` for provider defaults) applies when the provider supports a temperature override.
-Models that accept only their provider's default sampling always use it: Vertex AI Claude, Claude Fable, Opus, and Sonnet 5 and 5.x models, GPT-6 Astra, Sol, and Luna, and direct Gemini API Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
+These models always use their provider's default: Vertex AI Claude, Claude Fable, Opus, and Sonnet 5 and 5.x models, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
 The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags.
 Later summaries never change tags, so tags someone removed are not re-added.

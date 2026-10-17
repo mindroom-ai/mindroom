@@ -2,23 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
-from agno.db.sqlite import SqliteDb
-
-from mindroom.history.replay import compaction_summary_message, current_summary_text
-from mindroom.history.storage import reconcile_compaction_state
 from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings
 
 if TYPE_CHECKING:
-    from agno.db.base import BaseDb
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
-    from mindroom.history.types import HistoryScope, ResolvedHistoryExecutionPlan, ResolvedHistorySettings
+    from mindroom.history.types import ResolvedHistoryExecutionPlan, ResolvedHistorySettings
 
 
 def configure_native_history(
@@ -47,33 +41,16 @@ def configure_native_history(
         and hard_budget is not None
         and static_tokens < threshold < static_tokens + hard_budget
     )
+    summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
     model.configure_native_compaction(
         threshold=threshold if enabled else None,
-        history_generation=_history_generation(session),
+        history_generation=summary,
         allow_authored=enabled,
     )
     return model
 
 
-async def restore_paused_history(
-    model: object,
-    *,
-    persisted_run: RunOutput | TeamRunOutput,
-    storage: BaseDb,
-    session: AgentSession | TeamSession | None,
-    scope: HistoryScope | None,
-) -> None:
-    """Settle the stored history a paused run resumes on, then restore its native policy against it.
-
-    A mid-turn compaction before the pause is settled first, so the route identity reads the current summary.
-    """
-    # The compaction archive lives in SQLite session storage only.
-    if session is not None and scope is not None and isinstance(storage, SqliteDb):
-        await asyncio.to_thread(reconcile_compaction_state, storage, session, scope)
-    _restore_native_history(model, persisted_run=persisted_run, session=session)
-
-
-def _restore_native_history(
+def restore_native_history(
     model: object,
     *,
     persisted_run: RunOutput | TeamRunOutput,
@@ -85,19 +62,14 @@ def _restore_native_history(
     latest = next((message for message in reversed(persisted_run.messages or []) if message.role == "assistant"), None)
     model.restore_portable_replay(latest)
     saved = recorded_native_settings(latest) if latest is not None else None
+    summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
     model.configure_native_compaction(
         threshold=saved.threshold if saved is not None else None,
-        history_generation=_history_generation(session),
+        history_generation=summary,
         allow_authored=saved is not None and saved.threshold is None,
     )
     if model.native_compaction is not None and saved is not None and model.native_compaction.route != saved.route:
         model.configure_native_compaction(threshold=None)
-
-
-def _history_generation(session: AgentSession | TeamSession | None) -> str:
-    """Bind checkpoints to the exact summary message their requests carried."""
-    summary = current_summary_text(session) if session is not None else None
-    return str(compaction_summary_message(summary, run_local=False).content) if summary is not None else ""
 
 
 def native_history_route(model: NativeCompactionModel | None) -> str | None:

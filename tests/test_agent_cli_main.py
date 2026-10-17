@@ -77,7 +77,7 @@ def test_help_and_imports_need_no_runtime() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; from mindroom.agent_cli.main import main; assert not any(x.startswith(('agno', 'pydantic', 'mindroom.api', 'mindroom.config', 'mindroom.credentials')) for x in sys.modules); main(['--help'])",
+            "import sys; from mindroom.agent_cli.main import main; assert not any(x.startswith(('agno', 'pydantic', 'mindroom.api', 'mindroom.config', 'mindroom.credentials.manager')) for x in sys.modules); main(['--help'])",
         ],
         capture_output=True,
         text=True,

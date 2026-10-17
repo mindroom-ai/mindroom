@@ -27,7 +27,6 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_runner import ResponseShutdownTimeoutError
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
-from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -43,7 +42,7 @@ from tests.test_edit_regenerator import (
 )
 from tests.test_response_attempt import _Span
 from tests.test_response_delivery_gateway import _response_recovery_bot
-from tests.test_turn_store import _store, _store_with_storage
+from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -58,8 +57,6 @@ pytestmark = [pytest.mark.ledger_loads_from_disk, pytest.mark.usefixtures("enfor
 def _dispatcher(
     principal: PrincipalStore,
     callback: Callable[[nio.MatrixRoom, nio.RoomMessageFormatted], Awaitable[TurnDispatchOutcome]],
-    *,
-    source_has_live_owner: Callable[[str], bool] = lambda _event_id: False,
 ) -> JournalDispatcher:
     return JournalDispatcher(
         store=principal,
@@ -71,9 +68,11 @@ def _dispatcher(
             on_room_lifecycle=AsyncMock(),
             on_redaction=AsyncMock(),
             on_approval_continuation=AsyncMock(return_value=None),
-            source_has_live_owner=source_has_live_owner,
+            source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=lambda _event_id: False,
             replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@bot:localhost"),
     )
@@ -85,14 +84,13 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     tmp_path: Path,
     journal_store: EventJournalStore,
     shutdown_intent: RuntimeShutdownIntent,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The edit is left pending for the successor runtime, then replay commits the exact edit."""
+    # The store's storage is a mock here; which runs the edit removes is covered by the summary-row tests.
+    monkeypatch.setattr("mindroom.turn_store.remove_runs_answering", lambda *_args: False)
     principal = journal_store.principal("agent@alice")
-    store = await _store_with_storage(
-        journal_store,
-        create_state_storage(AGENT_NAME, tmp_path / "history", subdir="sessions", session_table="sessions"),
-        agent_name=AGENT_NAME,
-    )
+    store = await _store(journal_store, agent_name=AGENT_NAME)
     await store.record_responded_turn(_turn_record(source_event_prompts={ORIGINAL_EVENT_ID: "original"}))
     harness = _harness(tmp_path, turn_record=None)
     started = asyncio.Event()
@@ -134,11 +132,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
         )
         return TurnDispatchOutcome.DEFERRED if handed_off else TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-    def regenerating(_event_id: str) -> bool:
-        # As the response runner reports, a running regeneration owns the edit, so a retry pass does not start another.
-        return any(not regeneration.done() for regeneration in harness.regenerations)
-
-    dispatcher = _dispatcher(principal, callback, source_has_live_owner=regenerating)
+    dispatcher = _dispatcher(principal, callback)
     bot = _bot(tmp_path / "bot")
     bot.client = MindRoomAsyncClient("https://example.org", "@mindroom_general:localhost")
     bot._journal_dispatcher = dispatcher
@@ -146,7 +140,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     await admit_dispatch_event(dispatcher, harness.room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     dispatcher.release_turn_replay()
     dispatcher.start()
-    await asyncio.wait_for(started.wait(), timeout=30)
+    await asyncio.wait_for(started.wait(), timeout=2)
     await bot.stop(shutdown_intent=shutdown_intent)
     # The process ends with it the regeneration running off the room's lane.
     for regeneration in harness.regenerations:
@@ -165,7 +159,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
         return NEW_RESPONSE_EVENT_ID
 
     harness.generate_response.side_effect = recover
-    recovered = _dispatcher(principal, callback, source_has_live_owner=regenerating)
+    recovered = _dispatcher(principal, callback)
     assert await recovered.drain_once() == 1
     await asyncio.gather(*harness.regenerations)
     _reset_handled_turn_ledger_runtime()

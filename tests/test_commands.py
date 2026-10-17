@@ -48,6 +48,7 @@ def _test_runtime_paths(tmp_path: Path) -> RuntimePaths:
         config_dir=tmp_path,
         env_path=tmp_path / ".env",
         storage_root=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
     )
 
 
@@ -200,6 +201,21 @@ def test_all_commands_have_documentation() -> None:
     for cmd_type, (syntax, description) in _COMMAND_DOCS.items():
         assert syntax.startswith("!"), f"{cmd_type} syntax should start with '!'"
         assert len(description) > 0, f"{cmd_type} should have a description"
+
+
+def test_background_job_commands() -> None:
+    """`!jobs` lists the conversation's background jobs; `!cancel_job` cancels one or all of them."""
+    command = command_parser.parse("!jobs")
+    assert command is not None
+    assert command.type == CommandType.JOBS
+    command = command_parser.parse("!cancel_job abc123")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_JOB
+    assert command.args == {"job_id": "abc123"}
+    command = command_parser.parse("!cancel-job all")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_JOB
+    assert command.args == {"job_id": None}
 
 
 def test_cancel_schedule_command() -> None:

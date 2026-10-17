@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,7 +11,11 @@ import nio
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission, RoomMembershipPosition
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from tests.conftest import install_call_manager_mock
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_bot_ready_hook import (
@@ -21,6 +26,7 @@ from tests.test_bot_ready_hook import (
     _router_bot_with_orchestrator,
     _validated_reported_membership_admission,
 )
+from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -65,6 +71,54 @@ async def test_owned_departure_reconciles_app_state_on_receipt_replay(
         await bot._after_ingestion_admission(admission, facts, None)
     manager.on_sync_room_membership.assert_awaited_once_with(joined_room_ids=set(), left_room_ids={room_id})
     forget.assert_called_once_with(room_id)
+
+
+@pytest.mark.asyncio
+async def test_a_departure_cancels_the_agents_jobs_in_that_room(tmp_path: Path) -> None:
+    """Nobody can see or cancel an agent's jobs in a room it left, so leaving cancels those jobs, and only those."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!departed:localhost"
+    admission = _validated_reported_membership_admission(
+        bot,
+        room_id,
+        previous_membership="join",
+        membership="leave",
+        previous_epoch=0,
+    )
+    principal = bot.journal_principal()
+    await principal.load_or_create_ingestion_consumer(new_generation=_CONSUMER_GENERATION)
+    await principal.bind_ingestion_stream(generation=_CONSUMER_GENERATION, stream_id=_STREAM_ID)
+    await admit_room_membership(principal, room_id, "join")
+    facts = (await principal.admit_ingestion_batch(IngestionBatchAdmission(_STREAM_ID, 2, (admission,)))).record_facts[
+        0
+    ]
+    runtime = await tool_job_runtime(tmp_path / "jobs")
+    pin_background_tool_jobs(Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True)), bot.runtime_paths)
+    register_background_runtime(bot.runtime_paths, runtime)
+    owner = replace(job_owner(), agent_name=bot.agent_name, room_id=room_id)
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(runtime, "here", tool_name="run_tests", depth=0, adapter={}, owner=owner, operation=forever)
+        elsewhere = replace(owner, room_id="!elsewhere:localhost")
+        await start_job(
+            runtime,
+            "elsewhere",
+            tool_name="run_tests",
+            depth=0,
+            adapter={},
+            owner=elsewhere,
+            operation=forever,
+        )
+        with patch.object(bot._room_lifecycle, "forget_invited_room"):
+            await bot._after_ingestion_admission(admission, facts, None)
+        await wait_for_status(runtime, "here", "cancelled")
+        assert {job.job_id: job.status for job in runtime.retained_jobs()}["elsewhere"] == "running"
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

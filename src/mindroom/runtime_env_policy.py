@@ -16,6 +16,7 @@ __all__ = [
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
+    "EGRESS_BROKER_ENV_BY_KEY",
     "ENV_TEMPLATE_PLACEHOLDERS",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES",
@@ -125,6 +126,17 @@ WORKER_EGRESS_PROXY_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     },
 )
 
+# Deployment-level settings of the credential-injecting egress broker that runs
+# inside the primary; an unset port leaves it disabled.
+EGRESS_BROKER_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "port": "MINDROOM_EGRESS_BROKER_PORT",
+        "host": "MINDROOM_EGRESS_BROKER_HOST",
+        "url": "MINDROOM_EGRESS_BROKER_URL",
+        "token_ttl_seconds": "MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS",
+    },
+)
+
 VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
     {
         "AGNO_TELEMETRY": "false",
@@ -135,6 +147,7 @@ VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
         "COMPOSIO_DISABLE_VERSION_CHECK": "true",
         "DISABLE_TELEMETRY": "1",
         "DO_NOT_TRACK": "1",
+        "GRAPHITI_TELEMETRY_ENABLED": "false",
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "true",
         "LITELLM_LOCAL_MODEL_COST_MAP": "true",

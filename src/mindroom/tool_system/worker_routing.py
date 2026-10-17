@@ -30,6 +30,7 @@ _WORKER_ID_DIGEST_LENGTH = 24
 _DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH = 10
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
+SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 WORKER_CREDENTIALS_DIRNAME = "credentials"
 WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
@@ -54,6 +55,11 @@ class ToolExecutionIdentity:
     tenant_id: str | None = None
     account_id: str | None = None
     transport_agent_name: str | None = None
+
+    @property
+    def recipient(self) -> str:
+        """The entity whose Matrix account answers this caller: its team transport, or the agent itself."""
+        return self.transport_agent_name or self.agent_name
 
 
 type SerializedToolExecutionIdentity = dict[str, object]
@@ -321,6 +327,28 @@ def build_tool_execution_identity(
     )
 
 
+def build_requester_execution_identity(
+    *,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+    requester_id: str | None,
+) -> ToolExecutionIdentity:
+    """Build the Matrix execution identity that resolves one requester's state outside any conversation.
+
+    Without a requester it resolves only shared and unscoped state.
+    """
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+
+
 def resolve_worker_execution_scope(
     worker_scope: WorkerScope | None,
     execution_identity: ToolExecutionIdentity | None,
@@ -378,20 +406,10 @@ def resolve_worker_target(
         routing_agent_name=effective_agent_name,
         execution_identity=resolved_execution_identity,
         tenant_id=(
-            tenant_id
-            or (
-                resolved_execution_identity.tenant_id
-                if resolved_execution_identity is not None and resolved_execution_identity.tenant_id is not None
-                else None
-            )
+            tenant_id or (resolved_execution_identity.tenant_id if resolved_execution_identity is not None else None)
         ),
         account_id=(
-            account_id
-            or (
-                resolved_execution_identity.account_id
-                if resolved_execution_identity is not None and resolved_execution_identity.account_id is not None
-                else None
-            )
+            account_id or (resolved_execution_identity.account_id if resolved_execution_identity is not None else None)
         ),
         worker_key=resolved_worker_execution.worker_key,
         private_agent_names=private_agent_names,
@@ -526,20 +544,15 @@ def resolve_worker_key(
 
 def resolve_unscoped_worker_key(
     agent_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
     *,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Derive a stable backend worker key for unscoped sandbox execution."""
-    identity = execution_identity
-    tenant_key = normalize_worker_key_part(
-        tenant_id
-        or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
-        or account_id
-        or (identity.account_id if identity is not None and identity.account_id is not None else None)
-        or "default",
-    )
+    """Derive a stable backend worker key for unscoped sandbox execution.
+
+    Pass the tenant and account of the resolved worker target, which already fall back to its execution identity's.
+    """
+    tenant_key = normalize_worker_key_part(tenant_id or account_id or "default")
     effective_agent_name = normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
@@ -636,14 +649,21 @@ def _resolve_execution_identity_for_worker_scope(
     )
 
 
+def worker_log_id(worker_key: str) -> str:
+    """Return the digest that names a worker in logs, because worker keys embed requester identifiers.
+
+    `worker_dir_name` ends with it, so a logged worker can be found on disk.
+    """
+    return hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
+
+
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
     prefix = _normalize_worker_dir_part(worker_key)
     prefix = prefix[:_WORKER_DIRNAME_MAX_PREFIX_LENGTH].rstrip("._-")
     if not prefix:
         prefix = "worker"
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}-{digest}"
+    return f"{prefix}-{worker_log_id(worker_key)}"
 
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
@@ -711,7 +731,7 @@ def written_by_other_workers(relative_path: Path, worker_roots: Path = Path("wor
     parts = relative_path.parts
     return (
         relative_path.is_relative_to(worker_roots)
-        or parts[:1] == (_PRIVATE_INSTANCE_ROOT_DIRNAME,)
+        or parts[:1] in {(_PRIVATE_INSTANCE_ROOT_DIRNAME,), (SHARED_DIRECTORIES_DIRNAME,)}
         or (parts[:1] == ("agents",) and parts[2:3] == (_AGENT_WORKSPACE_DIRNAME,))
     )
 

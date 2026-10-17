@@ -14,6 +14,7 @@ from mindroom.api.worker_responses import (
     SandboxWorkerResponse,
     serialize_sandbox_worker_response,
 )
+from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -62,6 +63,7 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
         if touch_live_workers is not None:
             touch_live_workers(worker_manager)
         touch_computer_workers(request.app, worker_manager)
+        touch_workers_in_flight(worker_manager)
         cleaned_workers = [
             serialize_sandbox_worker_response(worker) for worker in worker_manager.cleanup_idle_workers()
         ]

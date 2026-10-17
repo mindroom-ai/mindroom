@@ -43,6 +43,7 @@ from mindroom.agents import (
     create_agent,
     get_agent_toolkit_names,
 )
+from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -52,7 +53,7 @@ from mindroom.config.agent import (
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
@@ -66,6 +67,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
+    private_instances_for_agent,
 )
 from mindroom.prompts import (
     HIDDEN_TOOL_CALLS_PROMPT,
@@ -79,9 +81,11 @@ from mindroom.runtime_resolution import (
 from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
-from mindroom.session_storage.agent_storage import get_agent_runtime_state_dbs
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_runtime_state_dbs
+from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -538,6 +542,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -557,6 +562,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -581,6 +587,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         file_access="workspace",
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
@@ -605,6 +612,7 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             file_access=file_access,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
+            shared_directories=(),
         )
         assert expected in rendered
         assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
@@ -612,6 +620,29 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): `duckdb`."
             in rendered
         )
+
+
+@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
+def test_agent_role_lists_the_shared_directories_the_agent_reaches(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """An agent learns the path, owner, and access of each shared directory it owns or joined."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    create_shared_directory(runtime_paths, owner="general", name="report")
+    create_shared_directory(runtime_paths, owner="calculator", name="sums")
+    add_shared_directory_member(runtime_paths, owner="general", name="report", member="calculator")
+    shares = runtime_paths.storage_root / "shared_directories"
+
+    calculator = _create_agent_for_test("calculator", config=config)
+    general = _create_agent_for_test("general", config=config)
+
+    assert (
+        f"- Shared directories: `{shares / 'calculator' / 'sums'}` (yours, read-write), "
+        f"`{shares / 'general' / 'report'}` (from general, read-only)."
+    ) in calculator.role
+    assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in general.role
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
@@ -624,6 +655,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         file_access="workspace",
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
     )
     assert "Not confined by file_access" not in rendered
 
@@ -1246,6 +1278,37 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
     assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
 
 
+@pytest.mark.parametrize("tool_name", ["memory", "self_config", "skill_manage"])
+def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name: str) -> None:
+    """Background tool jobs authorize a direct toolkit's calls only from the construction it records."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+    agent_runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        create=True,
+    )
+
+    toolkit = build_agent_toolkit(
+        tool_name,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        agent_runtime=agent_runtime,
+        execution_identity=None,
+    )
+
+    assert toolkit is not None
+    construction = get_toolkit_construction(toolkit)
+    assert construction is not None
+    assert construction.name == tool_name
+
+
 def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path) -> None:
     """Agents with an effective disabled memory backend should not receive MemoryTools."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -1338,6 +1401,24 @@ def test_resolve_agent_runtime_persists_private_instance_identity_on_materializa
         worker_key=worker_key,
         requester_id="requester-a",
     )
+
+
+def test_session_storage_records_the_owner_of_a_new_private_instance(tmp_path: Path) -> None:
+    """A turn can open its session storage before building the agent; the owner record must come first anyway."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    create_session_storage("general", bound_config, runtime_paths, execution_identity=execution_identity).close()
+    resolve_agent_runtime("general", bound_config, runtime_paths, execution_identity=execution_identity, create=True)
+
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == PrivateInstanceIdentity(
+        worker_key=worker_key,
+        requester_id="requester-a",
+    )
+    owners = private_instances_for_agent(runtime_paths.storage_root, "general", "user")
+    assert [owner.requester_id for owner in owners] == ["requester-a"]
 
 
 def test_resolve_agent_runtime_reconciles_a_populated_legacy_workspace_without_an_identity_record(
@@ -4071,6 +4152,73 @@ def test_native_approval_capability_preserves_tool_authored_confirmation() -> No
     assert filtered is toolkit
     assert toolkit.functions["native_confirmation"].requires_confirmation is True
     assert toolkit.functions["native_confirmation"].approval_type is None
+
+
+def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None:
+    """A gated call that can become a managed job asks as its job; a call that must finish in its run still pauses it."""
+    config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
+
+    def gated(*, connects: bool = False, **options: bool) -> Function:
+        toolkit = Toolkit(name="approval-test", tools=[Function(name="gated", entrypoint=lambda: None, **options)])
+        toolkit._requires_connect = connects
+        agents_module.apply_tool_approval_capability(
+            toolkit,
+            config,
+            supports_native_tool_approval=True,
+            approvals_as_jobs=True,
+        )
+        return toolkit.functions["gated"]
+
+    job = gated()
+    assert (job.requires_confirmation, job.approval_type) == (False, JOB_APPROVAL_TYPE)
+    for paused in (gated(stop_after_tool_call=True), gated(requires_user_input=True), gated(connects=True)):
+        assert (paused.requires_confirmation, paused.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
+    # An authored confirmation is the tool's own pause, never a job's approval.
+    authored = gated(requires_confirmation=True)
+    assert (authored.requires_confirmation, authored.approval_type) == (True, None)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "depth", "asks_as_job"),
+    [(True, 0, True), (False, 0, False), (True, 1, False)],
+    ids=["top-level", "jobs-off", "subagent"],
+)
+def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    depth: int,
+    asks_as_job: bool,
+) -> None:
+    """A subagent's calls keep pausing their run, as every call does with jobs off."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper", tools=["calculator", "shell"])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval=ToolApprovalConfig(
+                rules=[
+                    ApprovalRuleConfig(match="add", action="require_approval"),
+                    ApprovalRuleConfig(match="run_shell_command", action="require_approval"),
+                ],
+            ),
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
+        ),
+        runtime_paths,
+    )
+
+    agent = _create_agent_for_test("helper", config, delegation_depth=depth)
+
+    functions = {
+        name: function
+        for toolkit in agent.tools
+        if isinstance(toolkit, Toolkit)
+        for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
+    }
+    expected = JOB_APPROVAL_TYPE if asks_as_job else POLICY_CONFIRMATION_APPROVAL_TYPE
+    assert (functions["add"].requires_confirmation, functions["add"].approval_type) == (not asks_as_job, expected)
+    shell = functions["run_shell_command"]
+    assert (shell.requires_confirmation, shell.approval_type) == (not asks_as_job, expected)
 
 
 def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:

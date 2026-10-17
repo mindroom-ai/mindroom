@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, build_judgment_request
+from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, build_judgment_request, fit_judgment_request
 from mindroom.participation import PARTICIPATION_QUESTION
 
 
@@ -60,3 +60,23 @@ def test_incomplete_participation_input_never_produces_wire_bytes(
     assert not request.complete
     assert request.body is None
     assert request.incomplete_reason
+
+
+def test_fit_judgment_request_drops_oldest() -> None:
+    """Long threads reach the judge as their newest messages that fit, never as a refusal."""
+    history = [JudgmentMessage("user", f"message {index} " + "x" * 1_900) for index in range(20)]
+    request = fit_judgment_request(
+        PARTICIPATION_QUESTION,
+        history,
+        JudgmentMessage("user", "Current request"),
+        instructions="",
+        max_context_messages=63,
+    )
+    assert request is not None
+    assert request.complete
+    assert request.body is not None
+    conversation = json.loads(request.body)["state"]["conversation"]
+    assert conversation[-1] == {"role": "user", "text": "Current request"}
+    kept = [message["text"].split(" x")[0].split("x")[0].strip() for message in conversation[:-1]]
+    assert 0 < len(kept) < 20
+    assert kept == [f"message {index}" for index in range(20 - len(kept), 20)]

@@ -14,16 +14,16 @@ import pytest
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from sqlalchemy import Table, create_engine, event
 
 from mindroom.session_storage.agent_storage import (
     create_state_storage,
     get_agent_session,
     get_team_session,
-    replace_runs,
     runs_without,
     save_runs,
 )
@@ -109,6 +109,59 @@ def test_upsert_run_strips_prompt_roles_from_the_row_only(tmp_path: Path) -> Non
     assert [message.role for message in run.messages or []] == ["system", "user"]
 
 
+def test_loaded_runs_drop_their_stored_tool_schemas(tmp_path: Path) -> None:
+    """Older runs carry a copy of every tool schema; loading drops it and keeps the rest of the metadata."""
+    storage = _storage(tmp_path)
+    try:
+        run = _run("s1", "r1")
+        run.metadata = {"room_id": "!room:example.test", "tools_schema": [{"name": "demo", "description": "Demo"}]}
+        storage.upsert_session(_session("s1", []))
+        storage.upsert_run(run=run, session_id="s1", user_id="@alice:example.test", run_index=0)
+        storage.close()
+        storage = _storage(tmp_path)
+        loaded = get_agent_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    assert [loaded_run.metadata for loaded_run in loaded.runs or []] == [{"room_id": "!room:example.test"}]
+
+
+def test_loaded_team_runs_drop_tool_schemas_of_embedded_member_responses(tmp_path: Path) -> None:
+    """A paused team run stores its paused member responses inside its row; those lose the copy too."""
+    storage = create_state_storage("eng", tmp_path, subdir="sessions", session_table="eng_sessions")
+    schema = [{"name": "demo", "description": "Demo"}]
+    member_run = RunOutput(
+        run_id="m1",
+        agent_id="code",
+        session_id="t1",
+        parent_run_id="team1",
+        status=RunStatus.paused,
+        metadata={"tools_schema": schema},
+    )
+    team_run = TeamRunOutput(
+        run_id="team1",
+        team_id="eng",
+        session_id="t1",
+        status=RunStatus.paused,
+        member_responses=[member_run],
+        metadata={"tools_schema": schema},
+    )
+    try:
+        seed_session(storage, TeamSession(session_id="t1", team_id="eng", runs=[team_run]))
+        storage.close()
+        storage = create_state_storage("eng", tmp_path, subdir="sessions", session_table="eng_sessions")
+        loaded = get_team_session(storage, "t1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    [loaded_team_run] = loaded.runs or []
+    assert isinstance(loaded_team_run, TeamRunOutput)
+    assert loaded_team_run.metadata == {}
+    assert [member.metadata for member in loaded_team_run.member_responses] == [{}]
+
+
 def test_get_session_ignores_runs_limit(tmp_path: Path) -> None:
     """MindRoom's history layer reasons over the whole run list."""
     storage = _storage(tmp_path)
@@ -122,35 +175,6 @@ def test_get_session_ignores_runs_limit(tmp_path: Path) -> None:
     assert [run.run_id for run in limited.runs or []] == ["r1", "r2", "r3"]
 
 
-def test_replace_runs_deletes_only_the_dropped_rows(tmp_path: Path) -> None:
-    """Removing runs deletes their rows and leaves the survivors' rows unwritten."""
-    storage = _storage(tmp_path)
-    db_path = tmp_path / "sessions" / "code.db"
-    try:
-        seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
-        connection = sqlite3.connect(db_path)
-        try:
-            before = dict(connection.execute("SELECT run_id, updated_at FROM code_sessions_runs").fetchall())
-        finally:
-            connection.close()
-        session = get_agent_session(storage, "s1")
-        assert session is not None
-        removed = replace_runs(storage, session, [run for run in session.runs or [] if run.run_id != "r2"])
-        connection = sqlite3.connect(db_path)
-        try:
-            after = dict(connection.execute("SELECT run_id, updated_at FROM code_sessions_runs").fetchall())
-        finally:
-            connection.close()
-        reloaded_ids = _loaded_run_ids(storage, "s1")
-    finally:
-        storage.close()
-
-    assert removed == ["r2"]
-    assert [run.run_id for run in session.runs or []] == ["r1", "r3"]
-    assert reloaded_ids == ["r1", "r3"]
-    assert after == {"r1": before["r1"], "r3": before["r3"]}
-
-
 def test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors(tmp_path: Path) -> None:
     """Agno passes the run's position in the shortened session; the row must still come last."""
     storage = _storage(tmp_path)
@@ -159,7 +183,7 @@ def test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors(tmp_
         seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
         session = get_agent_session(storage, "s1")
         assert session is not None
-        replace_runs(storage, session, [run for run in session.runs or [] if run.run_id == "r3"])
+        storage.delete_runs(["r1", "r2"])
         # Position 1 in ["r3", "r4"] would sort before the surviving r3 (index 2).
         storage.upsert_run(run=_run("s1", "r4"), session_id="s1", user_id="@alice:example.test", run_index=1)
         loaded_ids = _loaded_run_ids(storage, "s1")
@@ -272,14 +296,12 @@ def test_session_json_is_written_once_and_legacy_json_still_loads(
     session_data = {"session_state": {"topic": "café", "enabled": True}}
     metadata = {"requester": "@alice:example.test", "nested": {"count": 2}}
     entity_data = {"name": "Code", "description": "Helpful assistant"}
-    summary = SessionSummary(summary="Earlier discussion", topics=["weather"])
     session_class = AgentSession if session_type == SessionType.AGENT else TeamSession
     session = session_class(
         session_id="json-session",
         user_id="@alice:example.test",
         session_data=session_data,
         metadata=metadata,
-        summary=summary,
         created_at=1_700_000_000,
     )
     if isinstance(session, AgentSession):
@@ -291,9 +313,8 @@ def test_session_json_is_written_once_and_legacy_json_still_loads(
         metadata,
         entity_data if session_type == SessionType.AGENT else None,
         entity_data if session_type == SessionType.TEAM else None,
-        {"summary": "Earlier discussion", "topics": ["weather"]},
     )
-    select_json = "SELECT session_data, metadata, agent_data, team_data, summary FROM code_sessions"
+    select_json = "SELECT session_data, metadata, agent_data, team_data FROM code_sessions"
     try:
         if bulk:
             assert len(storage.upsert_sessions([session])) == 1
@@ -303,14 +324,13 @@ def test_session_json_is_written_once_and_legacy_json_still_loads(
             stored = connection.execute(select_json).fetchone()
             assert tuple(json.loads(value) if value is not None else None for value in stored) == expected
             connection.execute(
-                "UPDATE code_sessions SET session_data = ?, metadata = ?, agent_data = ?, team_data = ?, summary = ?",
+                "UPDATE code_sessions SET session_data = ?, metadata = ?, agent_data = ?, team_data = ?",
                 tuple(json.dumps(value) if value is not None else None for value in stored),
             )
         loaded = storage.get_session("json-session", session_type)
         assert isinstance(loaded, session_class)
         assert loaded.session_data == session_data
         assert loaded.metadata == metadata
-        assert loaded.summary == summary
         assert (loaded.agent_data if isinstance(loaded, AgentSession) else loaded.team_data) == entity_data
         assert storage.upsert_session(loaded) is not None
         with sqlite3.connect(db_path) as connection:
@@ -333,8 +353,29 @@ def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
     assert tables == set()
 
 
-def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Path) -> None:
-    """A real 2.6.12 database is read as-is; deleting a legacy run scrubs it from the blob, saves append rows."""
+def _blob(db_path: Path) -> object:
+    connection = sqlite3.connect(db_path)
+    try:
+        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
+    finally:
+        connection.close()
+    return blob
+
+
+def _set_blob(db_path: Path, legacy_runs: list[object]) -> None:
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
+            (json.dumps(json.dumps(legacy_runs)),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_agno_2_blob_runs_become_rows_once(tmp_path: Path) -> None:
+    """A real 2.6.12 database's blob runs become run rows in blob order when it opens; the blob is cleared."""
     db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
 
     storage = _storage(tmp_path)
@@ -342,33 +383,303 @@ def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Pat
         loaded = get_agent_session(storage, "session-1")
         assert loaded is not None
         assert [run.run_id for run in loaded.runs or []] == ["run-1", "run-2", "run-3"]
-        replace_runs(storage, loaded, [run for run in loaded.runs or [] if run.run_id != "run-2"])
-        after_delete = _loaded_run_ids(storage, "session-1")
+        assert _run_rows(db_path) == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
+        assert _blob(db_path) is None
+        storage.delete_runs(["run-2"])
         save_runs(storage, loaded, [_run("session-1", "run-4")])
-        after_save = _loaded_run_ids(storage, "session-1")
     finally:
         storage.close()
 
-    # A restart must not resurrect the deleted legacy run through the blob merge.
     storage = _storage(tmp_path)
     try:
         after_restart = _loaded_run_ids(storage, "session-1")
     finally:
         storage.close()
 
-    assert after_delete == ["run-1", "run-3"]
-    assert after_save == ["run-1", "run-3", "run-4"]
     assert after_restart == ["run-1", "run-3", "run-4"]
-    assert _run_rows(db_path) == [("run-4", 0)]
+    assert _run_rows(db_path) == [("run-1", 0), ("run-3", 2), ("run-4", 3)]
     connection = sqlite3.connect(db_path)
     try:
-        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
         connection.close()
-    assert [run["run_id"] for run in json.loads(blob)] == ["run-1", "run-3"]
     # Opening a pre-existing file must not let agno's connect listener switch it to WAL.
     assert journal_mode == ("delete",)
+
+
+def test_blob_runs_keep_the_order_agno_read_them_in(tmp_path: Path) -> None:
+    """Blob order with table copies substituted, then table-only rows, as Agno's merge returned them."""
+    template = _storage(tmp_path / "template")
+    try:
+        seed_session(template, _session("session-1", ["template"]))
+    finally:
+        template.close()
+    connection = sqlite3.connect(tmp_path / "template" / "sessions" / "code.db")
+    try:
+        (runs_ddl,) = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'code_sessions_runs'",
+        ).fetchone()
+    finally:
+        connection.close()
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(runs_ddl)
+        for run_id, run_index, content in (("run-9", 0, "table only"), ("run-2", 1, "table copy")):
+            run = {"run_id": run_id, "agent_id": "code", "session_id": "session-1", "status": "COMPLETED"}
+            connection.execute(
+                "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, status, run_index, "
+                "run_data, created_at) VALUES (?, 'session-1', 'agent', 'code', 'COMPLETED', ?, ?, 1700000009)",
+                (run_id, run_index, json.dumps({**run, "content": content})),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    try:
+        loaded = get_agent_session(storage, "session-1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["run-1", "run-2", "run-3", "run-9"]
+    assert loaded.runs[1].content == "table copy"
+    assert _run_rows(db_path) == [("run-1", 0), ("run-2", 1), ("run-3", 2), ("run-9", 3)]
+
+
+def test_blob_entries_without_a_string_run_id_are_dropped(tmp_path: Path) -> None:
+    """Only entries a read could address by id become rows; member entries keep their parent."""
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    _set_blob(
+        db_path,
+        [
+            {"run_id": "team1", "agent_id": "code", "session_id": "session-1"},
+            {"session_id": "session-1", "parent_run_id": "team1"},
+            {"run_id": 7, "parent_run_id": ["team1"]},
+            {"run_id": None, "parent_run_id": None},
+            "not a dict",
+            {"run_id": "m1", "agent_id": "helper", "session_id": "session-1", "parent_run_id": "team1"},
+        ],
+    )
+
+    _storage(tmp_path).close()
+
+    assert _run_rows(db_path) == [("team1", 0), ("m1", 1)]
+    assert _blob(db_path) is None
+
+
+def _status_run(run_id: str, status: RunStatus, *, content: str | None = None) -> RunOutput:
+    return RunOutput(
+        run_id=run_id,
+        agent_id="code",
+        session_id="s1",
+        status=status,
+        content=content,
+        messages=[Message(role="user", content=run_id)],
+    )
+
+
+def _summary_after(db_path: Path, run_id: str) -> None:
+    """Position one summary row of the agent scope right after ``run_id``, as compaction would."""
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+            "SELECT 's1', 'agent:code', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = ?",
+            (run_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _stored_run_ids(db_path: Path, runs_table: str) -> list[str]:
+    connection = sqlite3.connect(db_path)
+    try:
+        return [row[0] for row in connection.execute(f"SELECT run_id FROM {runs_table} ORDER BY run_id")]  # noqa: S608
+    finally:
+        connection.close()
+
+
+def _stored_run(db_path: Path, run_id: str) -> tuple[int, str, str]:
+    connection = sqlite3.connect(db_path)
+    try:
+        return connection.execute(
+            "SELECT run_index, status, run_data FROM code_sessions_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+
+def test_new_runs_sort_after_every_summary_row(tmp_path: Path) -> None:
+    """Deleting the newest runs must not let a new run reuse an index a summary row sorts after."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        seed_session(
+            storage,
+            AgentSession(
+                session_id="s1",
+                agent_id="code",
+                runs=[_status_run(f"r{i}", RunStatus.completed) for i in range(3)],
+            ),
+        )
+        _summary_after(db_path, "r2")
+        storage.delete_runs(["r1", "r2"])
+        storage.upsert_run(_status_run("r3", RunStatus.completed), session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r3")[0] == 3
+    assert loaded == ["r3"]
+
+
+@pytest.mark.parametrize(
+    "stored_status",
+    [RunStatus.paused, RunStatus.cancelled, RunStatus.error],
+    ids=["approval", "cli-checkpoint", "interrupted-record"],
+)
+def test_a_non_visible_run_saved_visible_moves_to_the_end(tmp_path: Path, stored_status: RunStatus) -> None:
+    """A continuation finishing after newer turns and a compaction replays after the summary."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [_status_run("r0", stored_status), *(_status_run(f"r{i}", RunStatus.completed) for i in range(1, 4))]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        _summary_after(db_path, "r3")
+        storage.upsert_run(_status_run("r0", RunStatus.completed, content="approved"), session_id="s1")
+        loaded = get_agent_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r0")[0] == 4
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["r0"]
+
+
+def test_a_continuation_without_a_summary_replays_after_the_turns_it_waited_for(tmp_path: Path) -> None:
+    """The move holds without compaction too: the resumed run sorts after the turns its continuation saw."""
+    storage = _storage(tmp_path)
+    try:
+        runs = [_status_run("r0", RunStatus.paused), _status_run("r1", RunStatus.completed)]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        storage.upsert_run(_status_run("r0", RunStatus.completed), session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert loaded == ["r1", "r0"]
+
+
+def test_a_save_keeping_visibility_never_moves_a_run(tmp_path: Path) -> None:
+    """Re-saving a visible run, or a paused run that stays paused, keeps its place."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [
+            _status_run("r0", RunStatus.paused),
+            _status_run("r1", RunStatus.completed),
+            _status_run("r2", RunStatus.completed),
+        ]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        storage.upsert_run(_status_run("r1", RunStatus.completed, content="linked"), session_id="s1")
+        storage.upsert_run(_status_run("r0", RunStatus.paused, content="still waiting"), session_id="s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r0")[0] == 0
+    assert _stored_run(db_path, "r1")[0] == 1
+
+
+def test_a_folded_run_is_frozen(tmp_path: Path) -> None:
+    """A stale copy of a run behind the latest summary row changes neither its row nor its usage."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [
+            _status_run("p0", RunStatus.paused),
+            _status_run("r1", RunStatus.completed, content="original"),
+            _status_run("r2", RunStatus.completed),
+        ]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        _summary_after(db_path, "r2")
+        before = _stored_run(db_path, "r1")
+        with sqlite3.connect(db_path) as connection:
+            usage_before = connection.execute(
+                "SELECT usage_data FROM code_sessions_usage WHERE run_id = 'r1'",
+            ).fetchone()
+        storage.upsert_run(_status_run("r1", RunStatus.paused, content="stale paused"), session_id="s1")
+        storage.upsert_run(_status_run("r1", RunStatus.completed, content="stale completed"), session_id="s1")
+        storage.upsert_run(_status_run("p0", RunStatus.paused, content="still waiting"), session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "r1") == before
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute("SELECT usage_data FROM code_sessions_usage WHERE run_id = 'r1'").fetchone()
+            == usage_before
+        )
+    assert json.loads(_stored_run(db_path, "p0")[2])["content"] == "still waiting"
+    assert loaded == ["p0"]
+
+
+def test_a_member_of_a_folded_team_run_is_frozen(tmp_path: Path) -> None:
+    """A folded team run's member rows are as final as the team run."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    member = RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="original")
+    try:
+        seed_session(
+            storage,
+            TeamSession(
+                session_id="s1",
+                team_id="eng",
+                runs=[member, TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed)],
+            ),
+        )
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+                "SELECT 's1', 'team:eng', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = 't0'",
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        stale = RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="stale")
+        storage.upsert_run(stale, session_id="s1")
+    finally:
+        storage.close()
+
+    assert json.loads(_stored_run(db_path, "m0")[2])["content"] == "original"
+
+
+def test_a_removed_run_is_never_written_again(tmp_path: Path) -> None:
+    """A run a cut deleted, and a member row under it, stay gone when a late save arrives."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        seed_session(
+            storage,
+            AgentSession(session_id="s1", agent_id="code", runs=[_status_run("r0", RunStatus.completed)]),
+        )
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('gone', 's1')")
+        storage.upsert_run(_status_run("gone", RunStatus.completed), session_id="s1")
+        child = RunOutput(run_id="gone-member", agent_id="helper", session_id="s1", parent_run_id="gone")
+        storage.upsert_run(child, session_id="s1")
+        loaded = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert loaded == ["r0"]
+    assert _stored_run(db_path, "gone") is None
+    assert _stored_run(db_path, "gone-member") is None
 
 
 def test_failed_run_writes_leave_the_session_as_loaded() -> None:
@@ -377,52 +688,11 @@ def test_failed_run_writes_leave_the_session_as_loaded() -> None:
     original_runs = list(session.runs or [])
     storage = MagicMock()
     storage.upsert_run.side_effect = RuntimeError("disk full")
-    storage.delete_runs.side_effect = RuntimeError("disk full")
 
     with pytest.raises(RuntimeError):
         save_runs(storage, session, [_run("s1", "r3")])
-    with pytest.raises(RuntimeError):
-        replace_runs(storage, session, original_runs[:1])
 
     assert session.runs == original_runs
-
-
-def test_delete_runs_scrubs_the_legacy_blob_in_the_same_transaction(tmp_path: Path) -> None:
-    """A refused blob rewrite must roll back the row deletion; both land or neither does."""
-    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
-
-    storage = _storage(tmp_path)
-    try:
-        loaded = get_agent_session(storage, "session-1")
-        assert loaded is not None
-        save_runs(storage, loaded, [_run("session-1", "run-4")])
-        # A trigger stands in for any failure of the blob rewrite.
-        connection = sqlite3.connect(db_path)
-        try:
-            connection.execute(
-                "CREATE TRIGGER refuse_blob_rewrite BEFORE UPDATE OF runs ON code_sessions "
-                "BEGIN SELECT RAISE(ABORT, 'blob rewrite refused'); END",
-            )
-            connection.commit()
-        finally:
-            connection.close()
-        with pytest.raises(Exception, match="blob rewrite refused"):
-            storage.delete_runs(["run-1", "run-4"])
-        after_refusal = _loaded_run_ids(storage, "session-1")
-        connection = sqlite3.connect(db_path)
-        try:
-            connection.execute("DROP TRIGGER refuse_blob_rewrite")
-            connection.commit()
-        finally:
-            connection.close()
-        storage.delete_runs(["run-1", "run-4"])
-        after_delete = _loaded_run_ids(storage, "session-1")
-    finally:
-        storage.close()
-
-    assert after_refusal == ["run-1", "run-2", "run-3", "run-4"]
-    assert after_delete == ["run-2", "run-3"]
-    assert _run_rows(db_path) == []
 
 
 def test_save_runs_refuses_a_run_object_loaded_from_the_session() -> None:
@@ -445,57 +715,23 @@ def test_deleting_a_team_run_takes_its_member_rows_along(tmp_path: Path) -> None
     team_run = TeamRunOutput(run_id="team1", team_id="eng", session_id="t1")
     other = TeamRunOutput(run_id="team2", team_id="eng", session_id="t1")
     try:
-        session = seed_session(
+        seed_session(
             storage,
             TeamSession(session_id="t1", team_id="eng", runs=[team_run, member, grandchild, other]),
         )
-        kept = runs_without(session.runs or [], ["team1"])
-        removed = replace_runs(storage, session, kept)
+        storage.delete_runs(["team1"])
         reloaded = get_team_session(storage, "t1")
+        stored = _stored_run_ids(tmp_path / "sessions" / "eng.db", "eng_sessions_runs")
         storage.delete_runs(["team2"])
         after_direct_delete = get_team_session(storage, "t1")
     finally:
         storage.close()
 
-    assert [run.run_id for run in kept] == ["team2"]
-    assert sorted(removed) == ["m1", "m1-child", "team1"]
+    assert stored == ["team2"]
     assert reloaded is not None
     assert [run.run_id for run in reloaded.runs or []] == ["team2"]
     assert after_direct_delete is not None
     assert after_direct_delete.runs == []
-
-
-def test_delete_runs_scrubs_legacy_blob_descendants_too(tmp_path: Path) -> None:
-    """A 2.x blob can hold member entries under a team run; scrubbing the parent scrubs them."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    legacy_runs = [
-        {"run_id": "team1", "session_id": "s1"},
-        {"run_id": "m1", "session_id": "s1", "parent_run_id": "team1"},
-        {"run_id": "team2", "session_id": "s1"},
-    ]
-    connection = sqlite3.connect(create_agno_2_sessions_db(db_path))
-    try:
-        connection.execute(
-            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
-            (json.dumps(json.dumps(legacy_runs)),),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    try:
-        storage.delete_runs(["team1"])
-    finally:
-        storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
-    finally:
-        connection.close()
-    assert [run["run_id"] for run in json.loads(blob)] == ["team2"]
 
 
 def test_runs_without_removes_every_descendant() -> None:
@@ -517,42 +753,6 @@ def test_runs_without_drops_a_child_that_has_no_run_id() -> None:
     other = RunOutput(run_id="other", agent_id="code", session_id="t1")
 
     assert runs_without([root, orphan_child, other], ["root"]) == [other]
-
-
-def test_delete_runs_tolerates_malformed_legacy_blob_entries(tmp_path: Path) -> None:
-    """Entries with missing or non-string ids never match; they are carried along, not crashed on."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    legacy_runs = [
-        {"run_id": "team1", "session_id": "s1"},
-        {"session_id": "s1", "parent_run_id": "team1"},
-        {"run_id": 7, "parent_run_id": ["team1"]},
-        {"run_id": None, "parent_run_id": None},
-        "not a dict",
-        {"run_id": "keep", "parent_run_id": {"nested": True}},
-    ]
-    connection = sqlite3.connect(create_agno_2_sessions_db(db_path))
-    try:
-        connection.execute(
-            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
-            (json.dumps(json.dumps(legacy_runs)),),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    try:
-        storage.delete_runs(["team1"])
-    finally:
-        storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
-    finally:
-        connection.close()
-    assert json.loads(blob) == legacy_runs[2:]
 
 
 def test_cache_diagnostics_count_history_without_retaining_closed_adapters(
@@ -632,3 +832,167 @@ def test_cache_diagnostics_ignore_read_finishing_after_close(
             resume_report.set()
             read.result(timeout=5)
             storage.close()
+
+
+def test_a_concurrent_writer_cannot_land_between_the_index_read_and_the_insert(tmp_path: Path) -> None:
+    """A run save holds the write lock from its rule reads through its insert, so two saves never share an index."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    errors: list[str] = []
+
+    def write_during_index_read(_conn: object, _cursor: object, statement: str, *_args: object) -> None:
+        if "SELECT MAX(COALESCE" not in statement:
+            return
+        writer = sqlite3.connect(db_path, timeout=0)
+        try:
+            writer.execute(
+                "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, status, run_index, run_data, "
+                "created_at) VALUES ('raced', 's1', 'agent', 'code', 'COMPLETED', 1, '{}', 1700000000)",
+            )
+            writer.commit()
+        except sqlite3.OperationalError as error:
+            errors.append(str(error))
+        finally:
+            writer.close()
+
+    try:
+        seed_session(
+            storage,
+            AgentSession(session_id="s1", agent_id="code", runs=[_status_run("r0", RunStatus.completed)]),
+        )
+        event.listen(storage.db_engine, "before_cursor_execute", write_during_index_read)
+        try:
+            storage.upsert_run(_status_run("r1", RunStatus.completed), session_id="s1")
+        finally:
+            event.remove(storage.db_engine, "before_cursor_execute", write_during_index_read)
+    finally:
+        storage.close()
+
+    assert errors == ["database is locked"]
+    assert _run_rows(db_path) == [("r0", 0), ("r1", 1)]
+
+
+def test_a_refused_save_leaves_the_loaded_session_as_stored(tmp_path: Path) -> None:
+    """save_runs swaps in only the runs it wrote: a folded copy stays out, a removed one leaves the session."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        runs = [_status_run(f"r{index}", RunStatus.completed) for index in range(3)]
+        seed_session(storage, AgentSession(session_id="s1", agent_id="code", runs=runs))
+        _summary_after(db_path, "r0")
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('r2', 's1')")
+        loaded = get_agent_session(storage, "s1")
+        assert loaded is not None
+        save_runs(
+            storage,
+            loaded,
+            [
+                _status_run("r0", RunStatus.completed, content="stale folded copy"),
+                _status_run("r1", RunStatus.completed, content="written"),
+                _status_run("r2", RunStatus.completed, content="removed"),
+            ],
+        )
+    finally:
+        storage.close()
+
+    assert [(run.run_id, run.content) for run in loaded.runs or []] == [("r1", "written")]
+
+
+def test_a_first_save_of_a_member_under_a_folded_run_is_refused(tmp_path: Path) -> None:
+    """A member row never seen before is as final as the folded team run it belongs to."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    try:
+        team_run = TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed)
+        seed_session(storage, TeamSession(session_id="s1", team_id="eng", runs=[team_run]))
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+                "SELECT 's1', 'team:eng', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = 't0'",
+            )
+        storage.upsert_run(
+            RunOutput(run_id="m-new", agent_id="helper", session_id="s1", parent_run_id="t0"),
+            session_id="s1",
+        )
+    finally:
+        storage.close()
+
+    assert _stored_run(db_path, "m-new") is None
+
+
+def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_on_completion(tmp_path: Path) -> None:
+    """Only visible folded runs freeze; a paused team approval's members still save and the team run then moves."""
+    db_path = tmp_path / "sessions" / "code.db"
+    storage = _storage(tmp_path)
+    member = RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="before")
+    try:
+        seed_session(
+            storage,
+            TeamSession(
+                session_id="s1",
+                team_id="eng",
+                runs=[
+                    member,
+                    TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.paused),
+                    TeamRunOutput(run_id="t1", team_id="eng", session_id="s1", status=RunStatus.completed),
+                ],
+            ),
+        )
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "INSERT INTO code_sessions_summaries (session_id, scope_key, after_run_index, summary, created_at) "
+                "SELECT 's1', 'team:eng', run_index, 'summary', 1700000000 FROM code_sessions_runs WHERE run_id = 't1'",
+            )
+        storage.upsert_run(
+            RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0", content="after"),
+            session_id="s1",
+        )
+        storage.upsert_run(
+            TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed),
+            session_id="s1",
+        )
+        loaded = get_team_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert json.loads(_stored_run(db_path, "m0")[2])["content"] == "after"
+    assert _stored_run(db_path, "t0")[0] == 3
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["m0", "t0"]
+
+
+def test_storage_opens_when_another_owner_creates_the_runs_table_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owners opening one database at once can both find the runs table missing; the one that loses still opens."""
+    first = _storage(tmp_path)
+    first.upsert_session(AgentSession(session_id="s1", agent_id="code"))
+    first.close()
+    db_path = tmp_path / "sessions" / "code.db"
+    with sqlite3.connect(db_path) as connection:
+        tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "code_sessions_runs" not in tables
+    original_create = Table.create
+    other_owner = create_engine(f"sqlite:///{db_path}")
+
+    def create_after_another_owner(table: Table, bind: object, checkfirst: bool = False) -> None:
+        if table.name == "code_sessions_runs":
+            # Another owner's create lands between this owner's existence check and its CREATE TABLE.
+            monkeypatch.setattr(Table, "create", original_create)
+            original_create(table, other_owner)
+            original_create(table, bind, checkfirst=False)
+            return
+        original_create(table, bind, checkfirst=checkfirst)
+
+    monkeypatch.setattr(Table, "create", create_after_another_owner)
+    second = _storage(tmp_path)
+    try:
+        second.upsert_run(run=_run("s1", "r1"), session_id="s1", user_id=None)
+        stored = _loaded_run_ids(second, "s1")
+    finally:
+        second.close()
+        other_owner.dispose()
+
+    assert stored == ["r1"]
