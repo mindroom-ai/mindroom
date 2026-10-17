@@ -22,7 +22,7 @@ __all__ = [
     "REDACTION_FAILED",
     "URL_PATTERN",
     "nests_beyond_redaction_depth",
-    "redact_config_text",
+    "redact_authored_text",
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
@@ -586,8 +586,8 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
 
 
-def redact_config_text(value: str) -> str:
-    """Redact credential patterns in authored config text, showing the prose words log patterns would mask.
+def redact_authored_text(value: str) -> str:
+    """Redact credential patterns in text people write, such as config values or messages, keeping prose words.
 
     An ordinary word after "API key" or "bearer" and a kebab-case name such as ``sk-learn`` stay
     visible; URL credentials, secret assignments, and generated tokens are masked as in logs.

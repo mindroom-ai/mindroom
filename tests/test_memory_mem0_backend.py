@@ -708,6 +708,8 @@ async def test_conversation_memory_removes_credentials_before_mem0(
     """Mem0 extracts and stores memories from what it is given, so credential-like values are removed first."""
     config.memory.backend = "mem0"
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    # A line longer than redaction scans is dropped like an unreadable one.
+    oversized = "x" * 70_000
     history = [
         ResolvedVisibleMessage.synthetic(sender="@alice:example.org", body=f"My token is {token}", event_id="$1"),
         ResolvedVisibleMessage.synthetic(sender="@general:example.org", body="Noted, Atlas is yours.", event_id="$2"),
@@ -724,7 +726,8 @@ async def test_conversation_memory_removes_credentials_before_mem0(
     with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         await store_conversation_memory(
             # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
-            f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\nThe launch is Friday.',
+            f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
+            "API key rotation happens every Friday.\nThe launch is Friday.",
             "general",
             storage_path,
             "session-alice",
@@ -738,6 +741,9 @@ async def test_conversation_memory_removes_credentials_before_mem0(
     assert len(messages) == (3 if with_history else 1)
     assert all(token not in message["content"] and "correct horse" not in message["content"] for message in messages)
     assert REDACTION_FAILED not in messages[-1]["content"]
+    assert oversized not in messages[-1]["content"]
+    # Ordinary words after a credential keyword stay.
+    assert "API key rotation happens every Friday." in messages[-1]["content"]
     assert "The launch is Friday." in messages[-1]["content"]
     assert "env:" in messages[-1]["content"]
     if with_history:
