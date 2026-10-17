@@ -1,6 +1,6 @@
 """What people and agents said in stored turns, for background model calls.
 
-Skill reviews and the knowledge graph each send stored turns to a model. This module owns the decisions they share:
+Skill reviews, the knowledge graph, and file-memory auto-flush each send stored turns to a model. This module owns the decisions they share:
 which turns and messages are conversation and who said each message, so a prompt MindRoom wrote is never read as
 someone's words. Each reader renders and redacts the text itself.
 """

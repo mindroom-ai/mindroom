@@ -19,10 +19,10 @@ from uuid import uuid4
 
 from agno.agent import Agent
 
-from mindroom.automations.steps import is_automation_hook_source
-from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, tracking_dir
+from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
+from mindroom.history.conversation_text import one_line, utterances
 from mindroom.history.session_runs import (
     DELEGATION_SESSION_PREFIX,
     finished_runs,
@@ -143,24 +143,16 @@ def _start(entry: _ConversationState, runs: list[RunOutput], started_at: int) ->
     return run_key(older[-1]) if older else None
 
 
-def _is_automation_turn(run: RunOutput) -> bool:
-    """Return whether an automation started the turn; its maintenance work, such as a memory proposal, is not memory."""
-    hook_source = (run.metadata or {}).get(HOOK_SOURCE_RUN_METADATA_KEY)
-    return isinstance(hook_source, str) and is_automation_hook_source(hook_source)
-
-
 def _run_lines(run: RunOutput) -> list[str]:
-    """Return one turn as the ``role: text`` lines auto-flush extracts memories from."""
+    """Return what was said in one turn as the ``speaker: text`` lines auto-flush extracts memories from."""
     lines: list[str] = []
-    for message in run.messages or []:
-        if message.from_history or message.role not in {"user", "assistant"} or not isinstance(message.content, str):
-            continue
-        cleaned = " ".join(redact_memory_text(message.content).split())
+    for said in utterances(run):
+        cleaned = one_line(redact_memory_text(said.unredacted))
         if not cleaned:
             continue
         if len(cleaned) > _MAX_LINE_CHARS:
             cleaned = f"{cleaned[: _MAX_LINE_CHARS - 3]}..."
-        lines.append(f"{message.role}: {cleaned}")
+        lines.append(f"{said.sender or 'assistant'}: {cleaned}")
     return lines
 
 
@@ -235,16 +227,15 @@ def _record_unreadable(
 def _record_progress(
     entry: _ConversationState,
     pending: list[RunOutput],
-    flushable: list[RunOutput],
     covered: int,
     updated_at: int,
     blocked_until: float | None,
 ) -> None:
     """Move the marker past the turns flushed or given up, and mark the conversation done when none is left."""
     entry.update(failures=0, failing_since=0, retry_at=0)
-    if covered < len(flushable):
+    if covered < len(pending):
         # A long backlog spreads over passes; the conversation stays due because its recorded update time is unchanged.
-        entry["marker"] = list(run_key(flushable[covered - 1]))
+        entry["marker"] = list(run_key(pending[covered - 1]))
         return
     if pending:
         entry["marker"] = list(run_key(pending[-1]))
@@ -508,11 +499,10 @@ class MemoryAutoFlushWorker:
         entry = conversations.setdefault(session_id, _new_conversation())
         start = _start(entry, runs, state["agents"][scope.agent_name])
         pending = [run for run in runs if start is None or run_key(run) > start]
-        flushable = [run for run in pending if not _is_automation_turn(run)]
         skipped = 0
         batch: list[RunOutput] = []
         try:
-            if flushable:
+            if pending:
                 memories = await list_all_agent_memories(
                     scope.agent_name,
                     self.runtime_paths.storage_root,
@@ -522,8 +512,9 @@ class MemoryAutoFlushWorker:
                     execution_identity=scope.execution_identity,
                 )
                 # A note written by an attempt whose progress was not saved already covers its turns.
-                skipped = _already_flushed(flushable, session_id, memories)
-                batch, lines = _next_batch(flushable[skipped:], settings)
+                skipped = _already_flushed(pending, session_id, memories)
+                # A turn with nothing anyone said, such as an automation's, adds no lines, so it only moves the marker.
+                batch, lines = _next_batch(pending[skipped:], settings)
                 if lines:
                     await self._write_note(config, scope, session_id, batch[-1], lines, memories)
         except Exception as exc:
@@ -544,8 +535,8 @@ class MemoryAutoFlushWorker:
                 agent=scope.agent_name,
                 session_id=session_id,
             )
-            batch = _next_batch(flushable[skipped:], settings)[0]
-        _record_progress(entry, pending, flushable, skipped + len(batch), conversation.updated_at, blocked_until)
+            batch = _next_batch(pending[skipped:], settings)[0]
+        _record_progress(entry, pending, skipped + len(batch), conversation.updated_at, blocked_until)
         await self._persist(state)
         return 1
 

@@ -14,6 +14,7 @@ This record explains why file memory is the primary backend and why auto-flush e
 
 - Files are canonical because they keep memory portable and auditable; any semantic index over them is a secondary cache that can be discarded and rebuilt.
 - Auto-flush reads stored conversations, the same source and reader knowledge-graph ingestion uses, and keeps a per-conversation marker of the last turn it flushed, so stored history decides what is pending and no reply-path state can drift from it.
+- It takes what was said in each turn from the module skill reviews and the graph use, so the prompts MindRoom writes for job follow-ups and automations are not extracted as someone's words, and each line names its sender so a shared agent's notes say who said what.
 - Each daily note names the last turn it covers, so a retry after the note was written but its progress was not saved finds the note and skips those turns instead of writing it again.
 - A new conversation starts at the time auto-flush first ran, so an upgrade or first enablement never re-extracts history; an agent first seen later starts one pass interval before it was seen, so switching an agent to file memory does not extract its history either.
 - A private instance shares its agent's saved start instead of getting one when it is first listed, so a long pass or a listing that missed it never costs a new instance its first turns.

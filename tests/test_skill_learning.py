@@ -557,6 +557,7 @@ def _transcript(*runs: RunOutput, summary: str | None = None, budget_chars: int)
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:
     """Hermes' digest keeps the newest messages whole, never opens on a tool result, and marks omissions."""
     older = [Message(role="user", content=f"old request {index} " + "x" * 400) for index in range(30)]
+    older[1] = Message(role="user", content="old request 1 password: hunter2digest")
     recent = [
         Message(
             role="assistant",
@@ -570,6 +571,7 @@ def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> 
     digest, _, verbatim = transcript.partition("\n\nASSISTANT:\n")
     assert "USER (@alice:x): old request 0" in digest
     assert "x" * 301 not in digest
+    assert "hunter2digest" not in digest
     assert verbatim.startswith('\n-> calls shell({"cmd": "make"})')
     assert "TOOL RESULT (shell):\nresult 23" in verbatim
     assert "hunter2hunter2" not in transcript
