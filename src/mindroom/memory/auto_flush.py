@@ -182,7 +182,7 @@ def _next_batch(runs: list[RunOutput], settings: MemoryAutoFlushConfig) -> tuple
     lines: list[str] = []
     for run in runs:
         candidate = [*lines, *_run_lines(run)]
-        # A turn with no lines, such as an automation's, never ends a batch, so it never costs a pass of its own.
+        # Turns with no lines, such as an automation's, ride along with the next turn instead of making a batch alone.
         if lines and len(_newest_lines(candidate, **limits)) < len(candidate):
             break
         batch.append(run)
@@ -514,7 +514,6 @@ class MemoryAutoFlushWorker:
                 )
                 # A note written by an attempt whose progress was not saved already covers its turns.
                 skipped = _already_flushed(pending, session_id, memories)
-                # A turn with nothing anyone said, such as an automation's, adds no lines, so it only moves the marker.
                 batch, lines = _next_batch(pending[skipped:], settings)
                 if lines:
                     await self._write_note(config, scope, session_id, batch[-1], lines, memories)
