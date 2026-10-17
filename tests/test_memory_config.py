@@ -164,28 +164,30 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_temperature", "expected_top_p", "legacy_request_builder"),
+        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "legacy_request_builder"),
         [
-            ("gpt-6-astra", None, None, False),
-            (OPENAI_GPT_LUNA, None, None, False),
-            (OPENAI_GPT_SOL, None, None, False),
-            ("gpt-5.6-luna", 0.1, None, False),
-            ("gpt-5.6-terra", 0.1, None, False),
+            ("gpt-6-astra", None, None, False, False),
+            (OPENAI_GPT_LUNA, None, None, False, False),
+            (OPENAI_GPT_SOL, None, None, False, False),
+            ("gpt-5.6-luna", 0.1, None, False, False),
+            ("gpt-5.6-terra", 0.1, None, False, False),
+            ("gpt-5.4-mini", 0.1, 0.8, False, False),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.1, 0.8, False),
-            (OPENAI_GPT_SOL, None, None, True),
+            ("gpt-4", 0.1, 0.8, True, False),
+            (OPENAI_GPT_SOL, None, None, False, True),
         ],
-        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-4", "sol-legacy-mem0"],
+        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.4-mini", "gpt-4", "sol-legacy-mem0"],
     )
-    async def test_mem0_openai_sampling_support_is_model_specific(
+    async def test_mem0_openai_request_parameters_are_model_specific(
         self,
         tmp_path: Path,
         model_id: str,
         expected_temperature: float | None,
         expected_top_p: float | None,
+        sends_max_tokens: bool,
         legacy_request_builder: bool,
     ) -> None:
-        """Memory extraction must omit only sampling controls rejected by its model."""
+        """Memory extraction must omit only the request parameters its model rejects."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="ollama",
@@ -239,6 +241,8 @@ class TestMemoryConfig:
         assert {name: request_params[name] for name in expected_sampling if name in request_params} == {
             name: value for name, value in expected_sampling.items() if value is not None
         }
+        # GPT-5 and later models reject max_tokens on Chat Completions, which Mem0 sends to models it does not know.
+        assert ("max_tokens" in request_params) is sends_max_tokens
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,

@@ -52,6 +52,7 @@ __all__ = (
     "OPENAI_IMAGE",
     "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
     "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
+    "OPENAI_MAX_TOKENS_UNSUPPORTED_PREFIXES",
     "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "OPENAI_REALTIME",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
@@ -152,6 +153,8 @@ OPENAI_UNSUPPORTED_SAMPLING_CONTROLS: Mapping[str, frozenset[str]] = MappingProx
         "gpt-5.6-luna": frozenset({"top_p"}),
     },
 )
+# GPT-5 and later models reject max_tokens on Chat Completions and accept only max_completion_tokens.
+OPENAI_MAX_TOKENS_UNSUPPORTED_PREFIXES = ("gpt-5", "gpt-6")
 OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = tuple(
     model for model, controls in OPENAI_UNSUPPORTED_SAMPLING_CONTROLS.items() if "temperature" in controls
 )

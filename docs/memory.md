@@ -132,7 +132,7 @@ When the embedder rejects its credential, semantic memory search reports the cau
 Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
 With `provider: ollama`, `config.host` points extraction at a different Ollama server, but a configured `OLLAMA_HOST` takes precedence; other providers ignore `host`.
-With `provider: openai`, use `gpt-6-luna`; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 models reject.
+With `provider: openai`, use `gpt-6-luna`; other GPT-5 and later models also work.
 
 ```yaml
 memory:
