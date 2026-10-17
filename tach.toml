@@ -3327,15 +3327,26 @@ visibility = ["mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory.auto_flush"
 depends_on = [
+    "mindroom.automations.steps",
+    "mindroom.constants",
+    "mindroom.durable_write",
     "mindroom.helper_usage",
+    "mindroom.history.session_runs",
     "mindroom.session_storage.agent_storage",
     "mindroom.logging_config",
     "mindroom.memory._prompting",
     "mindroom.memory.functions",
+    "mindroom.memory.legacy_auto_flush",
     "mindroom.providers.model_loading",
+    "mindroom.requester_identity",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
 ]
+
+[[modules]]
+path = "mindroom.memory.legacy_auto_flush"
+depends_on = []
+visibility = ["mindroom.memory.auto_flush"]
 
 [[modules]]
 path = "mindroom.memory.functions"
@@ -8918,6 +8929,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.knowledge_graph.episodes",
     "mindroom.automations.exploration",
+    "mindroom.memory.auto_flush",
 ]
 
 [[modules]]
@@ -9143,6 +9155,7 @@ visibility = [
     "mindroom.automations.exploration",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.ingestion",
+    "mindroom.memory.auto_flush",
 ]
 
 [[modules]]

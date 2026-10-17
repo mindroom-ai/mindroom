@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 # Which of a room's events an agent's journal saw redacted, or None while that agent's bot is not running.
 type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozenset[str] | None]]
 
+# A task another agent delegated runs in a session of its own, named after the delegation.
+DELEGATION_SESSION_PREFIX = "delegate:"
 # Dynamic-workflow participants keep sessions of their own beside the conversation that started them.
 _WORKFLOW_SESSION_MARKER = ":dynamic_workflow:"
 _DAY_SECONDS = 86_400

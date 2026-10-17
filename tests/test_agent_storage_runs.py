@@ -20,20 +20,27 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.session_storage.agent_storage import (
     create_state_storage,
     get_agent_session,
     get_team_session,
+    load_agent_session,
     replace_runs,
     runs_without,
     save_runs,
 )
-from tests.conftest import create_agno_2_sessions_db, seed_session
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, runtime_paths_for, seed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.db.base import BaseDb
+
+    from mindroom.constants import RuntimePaths
 
 
 def _storage(tmp_path: Path) -> BaseDb:
@@ -686,3 +693,99 @@ def test_cache_diagnostics_ignore_read_finishing_after_close(
             resume_report.set()
             read.result(timeout=5)
             storage.close()
+
+
+def _agent_config(tmp_path: Path, agent: AgentConfig) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
+    )
+    return bind_runtime_paths(Config(agents={"mind": agent}), runtime_paths)
+
+
+def test_load_agent_session_passes_execution_identity_for_private_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private agent's session load reopens the requester's scoped session storage explicitly."""
+    config = _agent_config(
+        tmp_path,
+        AgentConfig(
+            display_name="Mind",
+            memory_backend="file",
+            private=AgentPrivateConfig(per="user", root="mind_data"),
+        ),
+    )
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    captured: dict[str, object] = {}
+
+    class _DummyStorage:
+        closed = False
+
+        def get_session(self, session_id: str, _session_type: object) -> None:
+            captured["session_id"] = session_id
+
+        def close(self) -> None:
+            self.closed = True
+
+    def _fake_create_session_storage(
+        agent_name: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> _DummyStorage:
+        del config, runtime_paths
+        captured["agent_name"] = agent_name
+        captured["execution_identity"] = execution_identity
+        storage = _DummyStorage()
+        captured["storage"] = storage
+        return storage
+
+    monkeypatch.setattr("mindroom.session_storage.agent_storage.create_session_storage", _fake_create_session_storage)
+
+    assert (
+        load_agent_session(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            "session-alice",
+            execution_identity=alice_identity,
+        )
+        is None
+    )
+    assert captured["execution_identity"] == alice_identity
+    assert captured["agent_name"] == "mind"
+    assert captured["session_id"] == "session-alice"
+    assert isinstance(captured["storage"], _DummyStorage)
+    assert captured["storage"].closed is True
+
+
+def test_load_agent_session_uses_canonical_session_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Loading a session goes through the canonical session helper instead of coercing raw Agno payloads."""
+    config = _agent_config(tmp_path, AgentConfig(display_name="Mind"))
+    storage = MagicMock()
+    sentinel = object()
+
+    monkeypatch.setattr(
+        "mindroom.session_storage.agent_storage.create_session_storage",
+        lambda *_args, **_kwargs: storage,
+    )
+    monkeypatch.setattr(
+        "mindroom.session_storage.agent_storage.get_agent_session",
+        lambda actual_storage, session_id: (
+            sentinel if actual_storage is storage and session_id == "session-1" else None
+        ),
+    )
+
+    assert load_agent_session("mind", config, runtime_paths_for(config), "session-1") is sentinel
+    storage.close.assert_called_once_with()

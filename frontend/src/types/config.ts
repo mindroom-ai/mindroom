@@ -63,9 +63,7 @@ export interface MemoryConfig {
     enabled?: boolean;
     flush_interval_seconds?: number;
     idle_seconds?: number;
-    max_dirty_age_seconds?: number;
     stale_ttl_seconds?: number;
-    max_cross_session_reprioritize?: number;
     retry_cooldown_seconds?: number;
     max_retry_cooldown_seconds?: number;
     batch?: {
