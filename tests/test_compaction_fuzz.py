@@ -90,6 +90,10 @@ class _Runner:
         self._moved: set[str] = set()
         # The turn that is running now, which folds mid-turn and has no stored row unless it paused before.
         self._running: str | None = None
+        # A running turn whose fold was refused compacts no more until it ends, as the mid-turn hook stops.
+        self._fold_stopped: set[str] = set()
+        # Redacted sources of a running turn that had stored nothing yet; the next reply's cleanup removes its writes.
+        self._redacted_while_running: set[str] = set()
         # Runs whose stored part a retirement may remove in the current step, because they folded mid-turn.
         self._retirable: set[str] = set()
         seeding = self._open()
@@ -127,6 +131,10 @@ class _Runner:
             self._moved = set()
             self._retirable = set()
             operations[action.kind](action)
+            # Redaction cleanup runs again before every reply, so what a running turn stores after its source
+            # was redacted, while nothing of it was stored yet, goes before anything replays it.
+            for event_id in sorted(self._redacted_while_running):
+                self._apply_redaction(event_id)
             self._check()
 
     def close(self) -> None:
@@ -276,6 +284,8 @@ class _Runner:
                 self._running = f"r{len(self._created)}"
                 self._created.append(self._running)
         run_id = self._running
+        if run_id in self._fold_stopped:
+            return
         session = AgentSession(session_id=_SESSION, agent_id="code")
         basis = read_fold_basis(self._storage, session, _SCOPE)
         assert basis is not None
@@ -301,6 +311,8 @@ class _Runner:
             ),
         )
         assert appended == (not racing and run_id not in self._removed)
+        if not appended:
+            self._fold_stopped.add(run_id)
         if appended and run_id in self._stored:
             self._moved.add(run_id)
 
@@ -309,6 +321,7 @@ class _Runner:
         if self._running is None:
             return
         run_id, self._running = self._running, None
+        self._fold_stopped.discard(run_id)
         outcome = action.index % 4
         if outcome == 3:
             return
@@ -366,6 +379,12 @@ class _Runner:
     def _redact(self, action: Action) -> None:
         events = [_event(run_id) for run_id in (*_LEGACY_RUNS, *self._created)]
         event_id = events[action.index % len(events)]
+        owners = {owner for _index, owner in self._segment_rows().values()}
+        if event_id[1:] == self._running and event_id[1:] not in self._stored | owners:
+            self._redacted_while_running.add(event_id)
+        self._apply_redaction(event_id)
+
+    def _apply_redaction(self, event_id: str) -> None:
         run_id = event_id[1:]
         before = set(stored_run_ids(self._storage, _SESSION))
         # The cut starts at the earliest element holding the event: the legacy row before every run while
@@ -602,6 +621,16 @@ _ACTIONS = st.builds(
     # A legacy redaction retires the summaries while a turn that folded is running.
     actions=[Action("add"), Action("fold", index=0), Action("redact", index=2), Action("fold"), Action("end")],
     legacy=True,
+)
+@example(
+    # The running turn's source is redacted before any fold of it is stored, after a refused fold.
+    actions=[Action("add"), Action("add"), Action("fold", count=3), Action("redact", index=4), Action("fold")],
+    legacy=False,
+)
+@example(
+    # The running turn's source is redacted while nothing of it is stored, and the turn then saves.
+    actions=[Action("add"), Action("fold", count=3), Action("redact", index=3), Action("end", index=0)],
+    legacy=False,
 )
 @example(
     # A pre-reply compaction commits during a fold's summary call.
