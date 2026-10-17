@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         ApprovalContinuation,
         ApprovalDeliveryView,
         MatrixDelivery,
+        PrincipalStore,
     )
 logger = get_logger(__name__)
 
@@ -63,6 +64,8 @@ class _ApprovalTransportBot(Protocol):
     ) -> str | None: ...
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None: ...
+
+    def journal_principal(self) -> PrincipalStore: ...
 
 
 async def _offload_oversized_full_arguments(
@@ -124,6 +127,11 @@ class ApprovalMatrixTransport:
         bot = self.bot_provider(entity_name)
         if bot is not None and bot.running:
             bot.retry_approval_sources(room_id, source_event_ids)
+
+    def responder_principal_id(self, entity_name: str) -> str | None:
+        """Name the journal principal of one entity's Matrix account, as its paused replies record it."""
+        bot = self.bot_provider(entity_name)
+        return None if bot is None else bot.journal_principal().principal_id
 
     async def deliver_unavailable_notice(
         self,

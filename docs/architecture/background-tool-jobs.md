@@ -15,6 +15,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   A cancellation needs no acknowledgement and gets no follow-up, since the person who cancelled already knows, and a silent schedule's jobs get none, so the schedule stays silent.
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
+  They bind timed approvals to the same scope as a paused reply's cards, so one grant covers a conversation's gated calls whether they run as jobs or pause the reply.
 - Jobs are the only way long work runs in the background, so the shell stops a command at its `timeout` instead of handing back a handle of its own.
   A job's command has no default limit and any other command has 120 seconds, so a command outside a job always stops by its timeout; Desktop shell keeps its handles because each request crosses the Desktop bridge under its own deadline, and script runs keep the engine to host processes that outlive replies and restarts.
 - A worker `/execute` call streams its progress and a keep-alive every 5 seconds before its result line, so a job's call can run past every request timeout, a silent connection means the runner is gone, and a primary that stops reading stops the call.
@@ -61,9 +62,8 @@ A notice reaches only a model step after a tool batch; a reply that ends without
 A follow-up in a session switched to minimal mode runs and reports results it cannot acknowledge, so a later standard reply may report them again.
 A follow-up whose turn ends without collecting its jobs is not admitted again in the same process; they wait for the next reply's note.
 A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
-When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
+When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline; answering one runs nothing, though a timed approval chosen on it still covers later calls.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
-Job cards offer no timed automatic approvals, and automatic approvals granted on paused-run cards do not apply to them.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
 A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.

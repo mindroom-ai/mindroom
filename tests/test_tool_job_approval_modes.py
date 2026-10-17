@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Literal
@@ -11,22 +12,24 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
-from agno.models.response import ModelResponse
+from agno.models.response import ModelResponse, ToolExecution
 from agno.run.base import RunStatus
 from agno.team import Team
 from agno.tools import Toolkit
 
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.event_journal import ApprovalCall, BackgroundApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
+from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.approvals import end_tool_call_approval
+from mindroom.tool_jobs.approvals import ask_job_approvals, end_tool_call_approval
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import JobControl, job_control_context, pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -220,6 +223,8 @@ class _Cards:
     decision: asyncio.Future[BackgroundApprovalDecision]
     posted: asyncio.Event = field(default_factory=asyncio.Event)
     requested: list[tuple[str, str, dict[str, object]]] = field(default_factory=list)
+    # The entity and operation each card binds its timed approvals to.
+    grants: list[tuple[str | None, ApprovalOperation | None]] = field(default_factory=list)
     settled: list[str] = field(default_factory=list)
     cards: object = field(default_factory=object)
     send_delivery: object = field(default_factory=object)
@@ -230,9 +235,12 @@ class _Cards:
         origin: BackgroundScriptToolOrigin,
         tool_name: str,
         arguments: dict[str, object],
+        entity_name: str | None = None,
+        grant_operation: ApprovalOperation | None = None,
         **_kwargs: object,
     ) -> BackgroundApprovalDecision:
         self.requested.append((origin.run_id, tool_name, arguments))
+        self.grants.append((entity_name, grant_operation))
         self.posted.set()
         return await asyncio.shield(self.decision)
 
@@ -323,6 +331,8 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
                 # The card shows the exact arguments, and nothing ran before the decision.
                 [(_, tool_name, arguments)] = run.cards.requested
                 assert (tool_name, arguments, run.effects) == ("write_report", {"title": "q3"}, [])
+                # Its timed approvals cover this conversation's operation, as a paused reply's card would.
+                assert run.cards.grants == [("leader", grant_operation(run.config, "write_report", {"title": "q3"}))]
                 run.decide(decision)
                 response = await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
         assert response.status is RunStatus.completed
@@ -569,3 +579,60 @@ async def test_a_job_that_asks_late_still_gets_the_whole_approval_wait(tmp_path:
     finally:
         decided.set()
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_cards_offer_timed_approval_only_for_calls_the_policy_gated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As on a paused reply, a background child's call that asked for confirmation itself is approved only once."""
+    config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
+    cards = _Cards(asyncio.get_running_loop().create_future())
+    cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+    tools = [
+        ToolExecution(
+            tool_call_id=call_id,
+            tool_name="write_report",
+            tool_args={"title": call_id},
+            requires_confirmation=True,
+            approval_type=approval_type,
+        )
+        for call_id, approval_type in (("policy", POLICY_CONFIRMATION_APPROVAL_TYPE), ("authored", None))
+    ]
+    calls = [
+        ApprovalCall(
+            tool_call_id=str(tool.tool_call_id),
+            tool_name="write_report",
+            invoking_agent="child",
+            toolkit_name="reports",
+            expires_at_ns=time.time_ns() + 60_000_000_000,
+        )
+        for tool in tools
+    ]
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    decided: list[tuple[bool, str | None]] = []
+
+    async def operation() -> BackgroundOutcome:
+        decided.extend(
+            await ask_job_approvals(
+                runtime,
+                "job-1",
+                tools,
+                calls,
+                owner=owner,
+                config=config,
+                runtime_paths=_runtime_paths(tmp_path),
+            ),
+        )
+        return BackgroundOutcome("completed", "ok")
+
+    try:
+        _, claim = await runtime.start("job-1", tool_name="t", depth=0, adapter={}, owner=owner, operation=operation)
+        await runtime.wait("job-1", owner=owner, depth=0, claim=claim)
+    finally:
+        await runtime.shutdown()
+    assert decided == [(True, None), (True, None)]
+    assert cards.grants == [("parent", grant_operation(config, "write_report", {"title": "policy"})), ("parent", None)]

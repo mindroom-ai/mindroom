@@ -300,7 +300,7 @@ Calls that must finish inside the run keep pausing it for their approval: tools 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 Cancelling the job denies its open cards.
 A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job.
-Cards a job posts offer no automatic approval option, and automatic approvals granted on other cards do not apply to them.
+Cards a job posts offer the same [auto-approval for a few minutes](https://docs.mindroom.chat/tool-approval/#auto-approval-for-a-few-minutes) as other approval cards, and an active auto-approval also approves matching job calls without a card.
 A message never counts as an approval, and current permissions are rechecked before a job's call runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
 Tools the model provider runs itself never become jobs.

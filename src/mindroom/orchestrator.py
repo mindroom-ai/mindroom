@@ -783,6 +783,7 @@ class _MultiAgentOrchestrator:
             sending_device=transport.transport_device_id,
             continuation_ready=transport.wake_continuation_sources,
             recovery=self._approval_recovery,
+            responder_principal=transport.responder_principal_id,
         )
 
     async def _ensure_user_account(self, config: Config) -> None:

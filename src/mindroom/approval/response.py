@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import MatrixDelivery, PrincipalStore
     from mindroom.response_turn import PausedAttempt
+    from mindroom.tool_approval_grants import ApprovalOperation
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -258,6 +259,13 @@ async def plan_approval_calls(
     )
 
 
+def timed_grant_operation(config: Config, tool: ToolExecution, call: ApprovalCall) -> ApprovalOperation | None:
+    """Return the operation a timed approval of this call covers; a tool's own confirmation is approved only once."""
+    if tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE:
+        return None
+    return grant_operation(config, call.tool_name, dict(tool.tool_args or {}))
+
+
 @dataclass
 class ApprovalResponseCoordinator:
     """Own approval policy, card publication, and visible terminal settlement."""
@@ -305,11 +313,7 @@ class ApprovalResponseCoordinator:
                 expires_at_ns=call.expires_at_ns,
                 agent_name=call.invoking_agent,
                 thread_id=target.resolved_thread_id,
-                grant_operation=(
-                    grant_operation(config, call.tool_name, dict(tool.tool_args or {}))
-                    if tool.approval_type == POLICY_CONFIRMATION_APPROVAL_TYPE
-                    else None
-                ),
+                grant_operation=timed_grant_operation(config, tool, call),
             )
             if card is None:
                 raise RuntimeError(failure_reason)

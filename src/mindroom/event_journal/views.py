@@ -26,7 +26,7 @@ if TYPE_CHECKING:
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )
-    from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation
+    from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation, ApprovalGrantScope
 
     from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
     from .approvals import (
@@ -473,6 +473,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         call_id: str,
         expires_at_ns: int,
         card: ApprovalCardReservation,
+        grant_scope: ApprovalGrantScope | None = None,
     ) -> bool: ...
 
     async def background_approval_decision(  # noqa: D102

@@ -36,6 +36,7 @@ from mindroom.tool_approval_grants import (
     AUTO_APPROVE_OPTIONS,
     EXACT_ARGUMENTS,
     SCHEDULED_SCOPE_OPTIONS,
+    ApprovalGrantScope,
     ApprovalOperation,
     approval_timestamp,
     valid_auto_approve_seconds,
@@ -60,6 +61,7 @@ _ApprovalActionDeliveryResolver = Callable[[str, str], Awaitable[str | None]]
 _TransportSenderProvider = Callable[[], str | None]
 _SendingDeviceProvider = Callable[[], str | None]
 _ContinuationReadyHandler = Callable[[str, str, tuple[str, ...]], Awaitable[None] | None]
+_ResponderPrincipalProvider = Callable[[str], str | None]
 
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
@@ -233,6 +235,8 @@ class ApprovalManager:
     sending_device: _SendingDeviceProvider | None = None
     continuation_ready: _ContinuationReadyHandler | None = None
     recovery: ApprovalRecovery | None = None
+    # Names the journal principal of an entity's Matrix account, which timed approvals on detached cards bind to.
+    responder_principal: _ResponderPrincipalProvider | None = None
     _resolving_card_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _live_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _deadline_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -243,7 +247,7 @@ class ApprovalManager:
         if self.recovery is not None:
             self.recovery.bind(self)
 
-    def _configure_transport(
+    def _configure_transport(  # noqa: C901 - each collaborator rebinds independently
         self,
         *,
         prepare_event: _MatrixEventPreparer | None = None,
@@ -255,6 +259,7 @@ class ApprovalManager:
         sending_device: _SendingDeviceProvider | None = None,
         continuation_ready: _ContinuationReadyHandler | None = None,
         recovery: ApprovalRecovery | None = None,
+        responder_principal: _ResponderPrincipalProvider | None = None,
     ) -> None:
         """Rebind transport collaborators after runtime reload."""
         if prepare_event is not None:
@@ -276,6 +281,8 @@ class ApprovalManager:
         if recovery is not None:
             self.recovery = recovery
             recovery.bind(self)
+        if responder_principal is not None:
+            self.responder_principal = responder_principal
 
     async def prepare_detached_approval(
         self,
@@ -334,13 +341,32 @@ class ApprovalManager:
         tool_name: str,
         arguments: dict[str, object],
         timeout_seconds: float,
+        entity_name: str | None = None,
+        grant_operation: ApprovalOperation | None = None,
     ) -> BackgroundApprovalDecision:
-        """Publish and await one durable exact-call background approval."""
+        """Publish and await one durable exact-call background approval.
+
+        With a grant operation, the card offers timed approvals scoped like a paused reply's to the conversation
+        of ``entity_name``, and an active grant of that scope approves the call without a card.
+        """
         cards = self.cards
         if self.prepare_event is None or cards is None or self.send_delivery is None:
             return BackgroundApprovalDecision(status="denied", reason="Tool approval runtime is not ready.")
         delivery_id = f"script-approval:{origin.run_id}:{origin.call_id}"
         expires_at_ns = time.time_ns() + max(0, round(timeout_seconds * 1_000_000_000))
+        grant_scope = (
+            None
+            if grant_operation is None or entity_name is None
+            else self._grant_scope(
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                entity_name=entity_name,
+                invoking_agent=agent_name,
+            )
+        )
+        if grant_scope is None:
+            grant_operation = None
         reservation = await self._prepare_approval_card(
             approval_id=delivery_id,
             tool_call_id=origin.call_id,
@@ -352,10 +378,16 @@ class ApprovalManager:
             requester_id=requester_id,
             approver_user_id=approver_user_id,
             expires_at_ns=expires_at_ns,
+            grant_operation=grant_operation,
             target_fields={
                 "approval_target": "background_script",
                 "background_run_id": origin.run_id,
                 "background_call_id": origin.call_id,
+                **(
+                    {}
+                    if grant_operation is None or grant_scope is None
+                    else {"approval_scope": grant_operation.scope_wire("0" * 64, grant_scope.entity_name, agent_name)}
+                ),
             },
         )
         if reservation is None:
@@ -367,6 +399,7 @@ class ApprovalManager:
             call_id=origin.call_id,
             expires_at_ns=expires_at_ns,
             card=reservation,
+            grant_scope=grant_scope,
         )
         if not reserved:
             return BackgroundApprovalDecision(
@@ -387,6 +420,28 @@ class ApprovalManager:
                     return decision
                 return BackgroundApprovalDecision(status="denied", reason=_DEFAULT_TIMEOUT_REASON)
             await asyncio.sleep(min(1.0, remaining))
+
+    def _grant_scope(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        requester_id: str,
+        entity_name: str,
+        invoking_agent: str,
+    ) -> ApprovalGrantScope | None:
+        """Bind a detached call's timed approvals to its conversation's responder, or None while that is unknown."""
+        responder_principal_id = None if self.responder_principal is None else self.responder_principal(entity_name)
+        if responder_principal_id is None:
+            return None
+        return ApprovalGrantScope(
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            entity_name=entity_name,
+            responder_principal_id=responder_principal_id,
+            invoking_agent=invoking_agent,
+        )
 
     async def request_scheduled_call_approval(
         self,
@@ -1242,6 +1297,7 @@ def initialize_approval_store(
     sending_device: _SendingDeviceProvider | None = None,
     continuation_ready: _ContinuationReadyHandler | None = None,
     recovery: ApprovalRecovery | None = None,
+    responder_principal: _ResponderPrincipalProvider | None = None,
 ) -> ApprovalManager:
     """Initialize the module-level approval domain for one runtime context."""
     global _MANAGER
@@ -1256,6 +1312,7 @@ def initialize_approval_store(
             sending_device=sending_device,
             continuation_ready=continuation_ready,
             recovery=recovery,
+            responder_principal=responder_principal,
         )
         return _MANAGER
     if _MANAGER is not None and _MANAGER._has_live_work():
@@ -1272,6 +1329,7 @@ def initialize_approval_store(
         sending_device=sending_device,
         continuation_ready=continuation_ready,
         recovery=recovery,
+        responder_principal=responder_principal,
     )
     return _MANAGER
 
