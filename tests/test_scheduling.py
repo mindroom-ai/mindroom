@@ -52,6 +52,7 @@ from tests.bot_helpers import _visible_message
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     serve_conversation_reader,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -1629,7 +1630,7 @@ async def test_cancel_scheduled_task_persists_via_admin_when_active_agent_lacks_
 @pytest.mark.asyncio
 async def test_cancel_scheduled_task_returns_error_when_state_write_fails(tmp_path: Path) -> None:
     """Failed Matrix state writes must not claim a task was cancelled."""
-    client = AsyncMock()
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     workflow = ScheduledWorkflow(
@@ -2658,7 +2659,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 @pytest.mark.asyncio
 async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
     """Schedule persistence must fail when Matrix rejects the state write."""
-    client = AsyncMock()
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
 
     workflow = ScheduledWorkflow(
@@ -2677,6 +2678,38 @@ async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
             workflow=workflow,
             timezone="UTC",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("writer_level", "hint"),
+    [
+        (
+            0,
+            f"Ask a room admin to raise the power level of {SCHEDULE_WRITER_ID} in this room from 0 to 50, then retry.",
+        ),
+        (50, f"Ensure {SCHEDULE_WRITER_ID} is joined with permission to write room state, then retry."),
+    ],
+    ids=["under-powered", "powered"],
+)
+async def test_state_write_error_names_the_power_grant_the_writer_lacks(writer_level: int, hint: str) -> None:
+    """A refused state write names the exact grant only when the writing account lacks the power."""
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
+    room = _matrix_room("!test:server")
+    room.power_levels.defaults.state_default = 50
+    room.power_levels.users[SCHEDULE_WRITER_ID] = writer_level
+    client.rooms["!test:server"] = room
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+
+    with pytest.raises(ValueError, match="Failed to persist scheduled task state") as exc_info:
+        await scheduling._put_scheduled_task_state_content(
+            client=client,
+            room_id="!test:server",
+            task_id="taskfail",
+            content={},
+        )
+
+    assert str(exc_info.value).endswith(hint)
 
 
 @pytest.mark.asyncio
@@ -2956,7 +2989,7 @@ async def test_schedule_task_rejects_invalid_history_limit_before_parsing(
 @pytest.mark.asyncio
 async def test_schedule_task_returns_error_when_state_write_fails_without_admin_fallback(tmp_path: Path) -> None:
     """Scheduling must not return a task ID when Matrix state persistence fails."""
-    client = AsyncMock()
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     room = _matrix_room("!test:server")
     runtime_paths = _test_runtime_paths(tmp_path)
@@ -3001,14 +3034,14 @@ async def test_schedule_task_returns_error_when_state_write_fails_without_admin_
     assert task_id is None
     assert "Failed to schedule" in message
     assert "Failed to persist scheduled task state" in message
-    assert "Ensure the room router is joined" in message
+    assert message.endswith(f"Ensure {SCHEDULE_WRITER_ID} is joined with permission to write room state, then retry.")
     start_task.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_state_write_error_includes_hint_when_admin_fallback_raises() -> None:
-    """A raised privileged fallback must report the router recovery action."""
-    client = AsyncMock()
+    """A raised privileged fallback must still tell the room admin how to recover."""
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     matrix_admin = AsyncMock()
     matrix_admin.put_room_state = AsyncMock(side_effect=RuntimeError("admin unavailable"))
@@ -3024,13 +3057,13 @@ async def test_state_write_error_includes_hint_when_admin_fallback_raises() -> N
 
     message = str(exc_info.value)
     assert "privileged fallback raised RuntimeError: admin unavailable" in message
-    assert "Ensure the room router is joined" in message
+    assert message.endswith(f"Ensure {SCHEDULE_WRITER_ID} is joined with permission to write room state, then retry.")
 
 
 @pytest.mark.asyncio
 async def test_schedule_task_returns_error_when_active_write_returns_unexpected_response(tmp_path: Path) -> None:
     """Scheduling must require a positive Matrix state-write response before returning success."""
-    client = AsyncMock()
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client.room_put_state = AsyncMock(return_value=None)
     room = _matrix_room("!test:server")
     runtime_paths = _test_runtime_paths(tmp_path)
