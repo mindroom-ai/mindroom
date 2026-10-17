@@ -134,6 +134,30 @@ async def test_search_facts_returns_validity_and_sources(store: GraphitiStore) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "who leads Project Atlas _ now",
+        "\x1b[31mwho leads Project Atlas\x1b[0m",
+        "who leads \x07 Project \x7f Atlas",
+    ],
+)
+async def test_search_survives_text_redisearch_cannot_parse(store: GraphitiStore, query: str) -> None:
+    """A lone underscore or a control character, as in a tool's colored output, reaches no fulltext query."""
+    await _seed_fact(
+        store,
+        ALPHA,
+        fact="Alice leads Project Atlas",
+        source_description="tool_results: room !r:x thread $t",
+        valid_at=JAN,
+    )
+
+    facts = await store.search_facts(ALPHA, query, limit=5)
+
+    assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]
+
+
+@pytest.mark.asyncio
 async def test_a_fact_seen_many_times_returns_only_its_newest_sources(store: GraphitiStore) -> None:
     """A fact re-seen on every exploration keeps every source, but a lookup loads and returns only the newest few."""
     await _seed_fact(
