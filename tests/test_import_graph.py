@@ -418,6 +418,7 @@ print(json.dumps({
         ],
         "background_resolve_owner": "mindroom.event_journal.background_approvals",
         "card_state_exports": [
+            "DETACHED_GENERATION",
             "TIMEOUT_REASON",
             "ApprovalCardReservation",
             "ApprovalDecisionMetadata",
