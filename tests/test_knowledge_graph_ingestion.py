@@ -598,6 +598,41 @@ async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_conversation_whose_redactions_cannot_be_checked_does_not_block_the_agents_others(
+    tmp_path: Path,
+) -> None:
+    """A failing redaction lookup is reported for its conversation, and the agent's later conversations are added."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["b1"], at=T0 - 5)
+    _seed(config, paths, "!room:x:$t2", ["g1"])
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, room_id
+        if "$event-b1" in event_ids:
+            msg = "event journal unavailable"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$t2"]
+    assert knowledge_graph_failure() is not None
+
+
+@pytest.mark.asyncio
+async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_path: Path) -> None:
+    """A conversation with nothing to ingest, such as one through the OpenAI-compatible API, leaves the pass to others."""
+    config, paths, store = _config(max_sessions_per_cycle=1), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "api-1", ["x1"], at=T0 - 5)
+    _edit_runs(config, paths, "api-1", lambda runs: [(run.metadata or {}).pop("room_id") for run in runs])
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$t1"]
+
+
+@pytest.mark.asyncio
 async def test_a_busy_agent_does_not_take_every_pass(tmp_path: Path) -> None:
     """Passes take turns starting with each agent, so one with a long backlog cannot starve the others."""
     config = _config(max_sessions_per_cycle=1)
