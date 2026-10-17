@@ -1,6 +1,6 @@
 # MindRoom Memory Consolidation and Auto-Flush Plan
 
-This record explains why file memory is the primary backend and why auto-flush extracts memories in the background, and it lists the parts of the plan that are not built.
+This record explains why file memory is the primary backend and why auto-flush extracts memories in the background from stored conversations, and it lists the parts of the plan that are not built.
 
 ## Goals
 
@@ -13,18 +13,24 @@ This record explains why file memory is the primary backend and why auto-flush e
 ## Decisions
 
 - Files are canonical because they keep memory portable and auditable; any semantic index over them is a secondary cache that can be discarded and rebuilt.
-- When a new prompt arrives for an agent, that agent's other dirty sessions move up the flush queue, so a fact from a parallel conversation that just happened is saved sooner; a simple priority queue is enough for this.
+- Auto-flush reads stored conversations, the same source and reader knowledge-graph ingestion uses, and keeps a per-conversation marker of the last turn it flushed, so stored history decides what is pending and no reply-path state can drift from it.
+- Each daily note names the last turn it covers, so a retry after the note was written but its progress was not saved finds the note and skips those turns instead of writing it again.
+- A new conversation starts at the time auto-flush first ran, so an upgrade or first enablement never re-extracts history.
+- Freshness across threads comes from a short pass interval (five minutes by default) rather than from replies waking the worker.
 
 ## Rejected alternatives
 
 - A pre-reply waiting window for pending flushes, and synchronous extraction while handling a request: both would put latency and timeout handling into the response path, so all flush work runs in the background and the reply never waits for it.
+- A dirty-session queue written by every reply, with revisions, priority boosts for an agent's other sessions, in-flight marks, idle and age timers, and a stale-entry TTL: it duplicated what stored sessions already record and produced repeated bugs, including a storage error ending the worker, a stop lost to a wake-up, double flushes after a failed reread, and cooldowns counted from the wrong time.
+- Converting the old queue's entries into markers on upgrade: it needs configuration-time scope resolution and a timestamp-to-turn mapping for a one-time window of minutes, so the turns still queued at the upgrade are dropped instead.
 
 ## Accepted limitations
 
-- Cross-thread memory is eventually consistent: a fact is often available by the next turn, and sometimes within the same turn if the flush finishes quickly.
-- A session's change is detected only by its last-update time, with no per-message cursor, so a backlog larger than one extraction window is not processed incrementally across cycles; each changed session re-extracts only its newest bounded window.
+- Cross-thread memory is eventually consistent: a fact reaches other threads once its conversation has been quiet for `idle_seconds` and the next pass runs.
+- Each extraction sees only new turns plus a few existing memories, not the already-flushed turns before them, so a reply that only makes sense with earlier context can be extracted with less of it.
+- Turns are ordered by creation time and run ID, so two turns of one conversation created in the same second can be ordered wrongly, and a turn regenerated in place under the same ID is not flushed again.
+- Flushing waits while the agent's bot is not running, because only its event journal can say which messages were redacted.
 
 ## Not implemented
 
-- Cursor-based backlog chunking, which would remove the extraction-window limitation above.
 - The optional curation pass that would have promoted durable facts from daily notes into `MEMORY.md` was superseded: the `dreaming` automation promotes them into `memory/` topic files and never edits `MEMORY.md`.
