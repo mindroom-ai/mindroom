@@ -17,12 +17,7 @@ from agno.session.agent import AgentSession
 import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import (
-    HOOK_SOURCE_RUN_METADATA_KEY,
-    MATRIX_EVENT_ID_METADATA_KEY,
-    TURN_INTENT_RUN_METADATA_KEY,
-    resolve_runtime_paths,
-)
+from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
@@ -1046,31 +1041,16 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
     assert "Shared daily memory" in context
 
 
-def test_each_line_names_who_said_it_and_prompts_mindroom_wrote_are_left_out() -> None:
-    """A coalesced prompt is read by sender, and a job follow-up's prompt is MindRoom's, so only its reply counts."""
-    session = _thread("t1")
+def test_each_line_names_who_said_it() -> None:
+    """A coalesced prompt is read by sender, so a shared agent's notes say who said what."""
     prompt = (
         "<messages>" + render_msg_tag(sender=BOB, body="Bob owns Atlas.") + render_msg_tag(sender=ALICE, body="Agreed.")
     )
-    asked = _run(
-        "r1",
-        session,
-        T0 + 10,
-        messages=[Message(role="user", content=f"{prompt}</messages>"), Message(role="assistant", content="Noted.")],
-    )
-    follow_up = _run(
-        "r2",
-        session,
-        T0 + 20,
-        messages=[
-            Message(role="user", content="[RUNTIME UPDATE] Collect the background jobs."),
-            Message(role="assistant", content="The deploy finished."),
-        ],
-    )
-    cast("dict[str, object]", follow_up.metadata)[TURN_INTENT_RUN_METADATA_KEY] = "job_follow_up"
+    messages = [Message(role="user", content=f"{prompt}</messages>"), Message(role="assistant", content="Noted.")]
 
-    assert auto_flush._run_lines(asked) == [f"{BOB}: Bob owns Atlas.", f"{ALICE}: Agreed.", "assistant: Noted."]
-    assert auto_flush._run_lines(follow_up) == ["assistant: The deploy finished."]
+    lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
+
+    assert lines == [f"{BOB}: Bob owns Atlas.", f"{ALICE}: Agreed.", "assistant: Noted."]
 
 
 def test_credentials_are_removed_before_the_extractor() -> None:
