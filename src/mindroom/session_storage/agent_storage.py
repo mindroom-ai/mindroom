@@ -35,7 +35,7 @@ from mindroom.session_storage import (
 from mindroom.session_storage.legacy_session_storage import drop_run_tool_schemas
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
-from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
+from mindroom.usage.storage import project_usage, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -432,16 +432,8 @@ class _ConversationSqliteDb(SqliteDb):
 
     def delete_runs(self, run_ids: list[str]) -> None:
         """Delete run subtrees atomically."""
-        if not run_ids:
-            return
-        with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table):
-            if runs_table is not None:
-                agno_compat_sqlite.delete_run_subtrees(
-                    sess.connection(),
-                    quote_identifier(runs_table.name),
-                    run_ids,
-                    session_id=None,
-                )
+        if run_ids:
+            agno_compat_sqlite.delete_runs(self, run_ids)
 
 
 def runs_without(

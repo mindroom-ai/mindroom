@@ -8002,7 +8002,7 @@ expose = [
     "remove_default_pragmas",
     "owned_table",
     "upsert_run_at_end",
-    "run_deletion_transaction",
+    "delete_runs",
     "delete_run_subtrees",
     "read_session",
     "cached_run_counts",
