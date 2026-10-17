@@ -157,6 +157,11 @@ class _Layout:
     prompt: Message | None
     previous_run_local_summary: str | None
 
+    @property
+    def folded(self) -> list[Message]:
+        """Return the turn's folded messages, oldest first."""
+        return [message for exchange in self.exchanges for message in exchange]
+
 
 def install_mid_turn_compaction(
     target: Agent | Team,
@@ -297,7 +302,7 @@ def _finish(
     run_response: RunOutput | TeamRunOutput,
 ) -> None:
     _rewrite(messages, layout, summary_message)
-    _carry_request_usage(run_response, [message for exchange in layout.exchanges for message in exchange])
+    _carry_request_usage(run_response, layout.folded)
 
 
 def _scoped_session(
@@ -356,7 +361,7 @@ async def _compact_scope(
         basis=basis,
         segment=segment,
         snapshots=_snapshots(run_response, layout, policy.inputs),
-        folded_messages=[message for exchange in layout.exchanges for message in exchange],
+        folded_messages=layout.folded,
         # The size that triggered this compaction, so the history budget sees what the request needs.
         before_tokens=request_tokens,
         config=binding.config,
@@ -377,7 +382,7 @@ def _segment(
     Agno writes the run's messages and member rows only when the run ends, so the request's folded exchanges
     and the member responses attached so far are the fold's part of the turn.
     """
-    folded = [message for exchange in layout.exchanges for message in exchange]
+    folded = layout.folded
     call_ids = {
         call["id"] for message in folded for call in message.tool_calls or [] if isinstance(call.get("id"), str)
     }
@@ -618,7 +623,7 @@ def _snapshots(
     """
     snapshots: list[RunOutput | TeamRunOutput] = []
     budget_tokens = inputs.execution_plan.summary_input_budget_tokens or 0
-    folded = [message for exchange in layout.exchanges for message in exchange]
+    folded = layout.folded
     for index, message in enumerate(folded):
         lead = (_prompt_context(layout.prompt, budget_tokens),) if index == 0 and layout.prompt is not None else ()
         # The run's metadata is the same for every message, so only the first snapshot shows it to the summarizer.
