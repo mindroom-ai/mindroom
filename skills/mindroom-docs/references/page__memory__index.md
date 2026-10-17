@@ -36,7 +36,7 @@ agents:
 
 With `none`, the agent gets no memories in its prompt, stores none after its turns, and does not receive the `memory` tool.
 `none` does not turn off [Agno Learning](#agno-learning); set `learning: false` as well to disable all built-in memory and learning.
-Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript.
+Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
 What an agent writes with the `memory` tool is stored as written, and [Agno Learning](#agno-learning) reads conversations without this removal.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
 OpenClaw-compatible agents use this same backend selection.
