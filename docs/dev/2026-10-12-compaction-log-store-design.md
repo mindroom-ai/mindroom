@@ -15,7 +15,7 @@ The user's direction: store each scope's history as one ordered, append-only log
 
 ## Decision
 
-- Agno's runs table, unchanged in schema, is the log of turns, and compaction never deletes or moves a run.
+- Agno's runs table, unchanged in schema, is the log of turns, and compaction never deletes a run or moves one out of it; a mid-turn fold only moves its own stored run after its row.
 - A MindRoom table beside it holds summary rows, each positioned right after the newest run it covers; replay is the latest summary plus every run after it.
 - A mid-turn compaction (the rework) stores what it folded out of the running turn on its summary row, because the two are written together and a cut must delete them together.
 - Every lifecycle event is an append, a load, or a cut (delete one element and everything after it); one insertion rule moves a run that becomes visible to the end.

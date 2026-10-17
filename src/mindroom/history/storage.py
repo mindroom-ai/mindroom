@@ -18,7 +18,8 @@ history represents are derived from them when seen ids are read. Metadata seen i
 have no summary-row counterpart, so a stale whole-row write can restore ids a
 redaction dropped; that only withholds those messages from unseen thread context.
 
-Compaction appends summary rows and never moves or deletes a run; edits and
+Compaction appends summary rows and never deletes a run (a mid-turn fold moves
+only its own stored run after its row); edits and
 redactions cut the log, deleting one element and everything after it, which
 returns the runs a deleted summary covered to replay (see
 ``tests/test_compaction_fuzz.py`` for the invariants).

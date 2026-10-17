@@ -1378,7 +1378,7 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
     assert summaries[0].from_history is True
     assert compacted.contents[-1] == "Do the task"
     assert not {"q1", "a1", "q2", "a2"} & set(compacted.contents)
-    # Nothing moved: the fold's rows sort after the stored runs they cover, and the run after them.
+    # The fold's rows sort after the stored runs they cover, and the run after them.
     rows = summary_rows_of(storage, _SCOPE.key)
     assert log_of(storage, _SCOPE.key) == [
         "run:run-1",

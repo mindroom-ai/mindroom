@@ -4,7 +4,8 @@ A scope's history is Agno's runs table in ``run_index`` order with summary rows
 between its runs. A row's key is ``(after_run_index, id)``; a top-level run's key
 is ``(run_index, 0)``, and member runs follow their parent. Loading replays the
 scope's latest summary row and the runs after it, so compaction only appends
-rows and never moves or deletes a run. Edits and redactions cut: they delete
+rows and never deletes a run; a mid-turn fold moves only its own stored run, a
+paused or checkpointed copy, after its row. Edits and redactions cut: they delete
 one element and everything after it, which also returns the runs a deleted
 summary covered to replay.
 
