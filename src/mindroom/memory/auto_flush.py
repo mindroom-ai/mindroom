@@ -86,17 +86,12 @@ class _ConversationState(TypedDict):
     recheck_at: float
 
 
-class _ScopeState(TypedDict):
-    # Turns created before this second, its agent's start, are never flushed.
-    started_at: int
-    conversations: dict[str, _ConversationState]
-
-
 class _FlushState(TypedDict):
     started_at: int
-    # Each file-memory agent's start, which every scope of the agent shares.
+    # Each file-memory agent's start; turns created before it are never flushed, in any of the agent's scopes.
     agents: dict[str, int]
-    scopes: dict[str, _ScopeState]
+    # Each scope's conversations by session ID.
+    scopes: dict[str, dict[str, _ConversationState]]
 
 
 @dataclass(frozen=True)
@@ -425,11 +420,6 @@ class MemoryAutoFlushWorker:
         if new_agents:
             await self._persist(state)
         scopes = await asyncio.to_thread(_flush_scopes, config, self.runtime_paths, agent_names)
-        for scope in scopes:
-            state["scopes"].setdefault(
-                scope.key,
-                {"started_at": state["agents"][scope.agent_name], "conversations": {}},
-            )
         budget = settings.batch.max_sessions_per_cycle
         # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
         start = self._passes % len(scopes) if scopes else 0
@@ -439,13 +429,12 @@ class MemoryAutoFlushWorker:
                 break
             # One agent or private instance whose conversations cannot be listed must not stop the others.
             try:
-                scope_state = state["scopes"][scope.key]
                 limit = min(budget, settings.batch.max_sessions_per_agent_per_cycle)
-                due, changed = await asyncio.to_thread(self._due, config, scope, scope_state, now, limit)
+                due, changed = await asyncio.to_thread(self._due, config, scope, state, now, limit)
                 if changed:
                     await self._persist(state)
                 for conversation in due:
-                    budget -= await self._flush(config, scope, state, scope_state, conversation, now)
+                    budget -= await self._flush(config, scope, state, conversation, now)
             except Exception:
                 logger.exception("Memory auto-flush failed for an agent", agent=scope.agent_name)
 
@@ -453,7 +442,7 @@ class MemoryAutoFlushWorker:
         self,
         config: Config,
         scope: _FlushScope,
-        scope_state: _ScopeState,
+        state: _FlushState,
         now: float,
         limit: int,
     ) -> tuple[list[_DueConversation], bool]:
@@ -467,7 +456,7 @@ class MemoryAutoFlushWorker:
             self.runtime_paths,
             execution_identity=scope.execution_identity,
         )
-        conversations = scope_state["conversations"]
+        conversations = state["scopes"].setdefault(scope.key, {})
         try:
             due: list[_DueConversation] = []
             changed = False
@@ -475,7 +464,7 @@ class MemoryAutoFlushWorker:
                 storage,
                 scope.agent_name,
                 # Update times are whole seconds, so one in the start's own second is listed too.
-                since=scope_state["started_at"] - 1,
+                since=state["agents"][scope.agent_name] - 1,
             ):
                 if len(due) >= limit:
                     break
@@ -517,14 +506,13 @@ class MemoryAutoFlushWorker:
         config: Config,
         scope: _FlushScope,
         state: _FlushState,
-        scope_state: _ScopeState,
         conversation: _DueConversation,
         now: float,
     ) -> int:
         """Flush the oldest new turns of one conversation and return how much of the pass budget that spent."""
         settings = config.memory.auto_flush
         session_id = conversation.session_id
-        conversations = scope_state["conversations"]
+        conversations = state["scopes"][scope.key]
         finished, blocked_until = finished_runs(conversation.runs, config, now=now)
         try:
             runs = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
@@ -547,7 +535,7 @@ class MemoryAutoFlushWorker:
             # Its agent cannot say yet what was redacted, so the conversation waits for a later pass.
             return 0
         entry = conversations.setdefault(session_id, _new_conversation())
-        start = _start(entry, runs, scope_state["started_at"])
+        start = _start(entry, runs, state["agents"][scope.agent_name])
         pending = [run for run in runs if start is None or run_key(run) > start]
         flushable = [run for run in pending if not _is_automation_turn(run)]
         skipped = 0

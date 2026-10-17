@@ -208,9 +208,7 @@ def _general_notes(tmp_path: Path) -> list[str]:
 
 def _entry(tmp_path: Path, session_id: str) -> dict[str, object]:
     state = json.loads((tmp_path / "tracking" / "memory_auto_flush.json").read_text(encoding="utf-8"))
-    return next(
-        scope["conversations"][session_id] for scope in state["scopes"].values() if session_id in scope["conversations"]
-    )
+    return next(conversations[session_id] for conversations in state["scopes"].values() if session_id in conversations)
 
 
 @pytest.fixture
