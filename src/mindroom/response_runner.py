@@ -75,12 +75,7 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
-from mindroom.memory import (
-    mark_auto_flush_dirty_session,
-    reprioritize_auto_flush_sessions,
-    store_conversation_memory,
-    strip_user_turn_time_prefix,
-)
+from mindroom.memory import store_conversation_memory, strip_user_turn_time_prefix
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
@@ -2574,28 +2569,17 @@ class ResponseRunner:
         hook_source: str | None,
         origin: TurnOrigin,
     ) -> Callable[[], None] | None:
-        """Build the completed-turn memory handoff for an agent or a team's members, or None for a non-memory turn."""
-        if is_automation_hook_source(hook_source):
-            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
+        """Build the completed-turn Mem0 or team memory handoff, or None for a turn whose prompt is not memory."""
+        # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory, and a job follow-up's
+        # prompt is MindRoom's instruction to collect the results, not conversation to extract.
+        if is_automation_hook_source(hook_source) or origin.intent is TurnIntent.JOB_FOLLOW_UP:
             return None
-        # A job follow-up's prompt is MindRoom's instruction to collect the results, not conversation to extract;
-        # auto-flush, which reads the reply that reports them, still saves it.
-        extracts_prompt = origin.intent is not TurnIntent.JOB_FOLLOW_UP
-        if not extracts_prompt and not isinstance(agent_name, str):
+        # A file-memory agent's conversation is saved by auto-flush from stored sessions; a team's goes to its shared
+        # memory.
+        if isinstance(agent_name, str) and self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
             return None
 
         def queue() -> None:
-            if isinstance(agent_name, str):
-                mark_auto_flush_dirty_session(
-                    self.deps.storage_path,
-                    self.deps.runtime.config,
-                    agent_name=agent_name,
-                    session_id=session_id,
-                    execution_identity=execution_identity,
-                )
-                # A file-memory agent's conversation is saved by auto-flush; a team's goes to its shared memory.
-                if not extracts_prompt or self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
-                    return
             create_background_task(
                 store_conversation_memory(
                     prompt,
@@ -5990,14 +5974,6 @@ class ResponseRunner:
         )
 
         session_id = resolved_target.session_id
-        reprioritize_auto_flush_sessions(
-            self.deps.storage_path,
-            self.deps.runtime.config,
-            agent_name=self.deps.agent_name,
-            active_session_id=session_id,
-            execution_identity=execution_identity,
-        )
-
         active_model_name = await self._cold_cache_model(
             request,
             runtime_model=runtime_model,

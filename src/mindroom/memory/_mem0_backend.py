@@ -505,11 +505,9 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         limit: int,
-        preserve_resolved_storage_path: bool = False,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> list[MemoryResult]:
         """List mem0 memories stored for an agent."""
-        del preserve_resolved_storage_path  # Only meaningful for file-backed storage roots.
         resolved_storage_path = _primary_mem0_storage_path(
             agent_name,
             storage_path,

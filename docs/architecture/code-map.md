@@ -171,6 +171,7 @@ Matrix sync callback
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
+| `memory/auto_flush.py` | Background passes that turn file-memory agents' new finished turns into daily notes, with per-conversation progress below `tracking/` |
 | `knowledge/file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `history/conversation_text.py` | What stored turns said, for background model calls: which turns and messages count and who said each |
@@ -186,8 +187,7 @@ Matrix sync callback
 | `knowledge_graph/clients.py` | Graphiti's LLM, embedder, and reranker clients backed by MindRoom's model and embedder construction |
 | `knowledge_graph/usage.py` | Which conversation an extraction call's tokens are charged to |
 | `knowledge_graph/embedded_server.py` | The embedded FalkorDB server MindRoom starts, stops, and recovers after a crash |
-| `knowledge_graph/episodes.py` | Stored runs grouped into `conversation` and `tool_results` episodes, thread classification, and which tool results are evidence |
-| `knowledge_graph/session_runs.py` | Finished and approval-waiting Matrix turns of a conversation, live and compacted |
+| `knowledge_graph/episodes.py` | Stored runs rendered as `conversation` and `tool_results` episodes, and thread classification |
 | `knowledge_graph/ingestion.py` | Background ingestion passes with per-kind markers, backoff, and dropped episodes |
 | `knowledge_graph/runtime.py` | Starts and stops the store and ingestion worker as agents enable the graph |
 | `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model and ingestion settings |
@@ -219,6 +219,7 @@ Matrix sync callback
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `session_storage/agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |

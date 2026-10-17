@@ -20,15 +20,21 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.session_storage.agent_storage import (
+    create_session_storage,
     create_state_storage,
     get_agent_session,
     get_team_session,
+    load_agent_session,
     replace_runs,
     runs_without,
     save_runs,
 )
-from tests.conftest import create_agno_2_sessions_db, seed_session
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
+from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, runtime_paths_for, seed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -686,3 +692,36 @@ def test_cache_diagnostics_ignore_read_finishing_after_close(
             resume_report.set()
             read.result(timeout=5)
             storage.close()
+
+
+def _agent_config(tmp_path: Path, agent: AgentConfig) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
+    )
+    return bind_runtime_paths(Config(agents={"mind": agent}), runtime_paths)
+
+
+def test_load_agent_session_reads_only_the_requesters_private_storage(tmp_path: Path) -> None:
+    """A private agent's session load reads only the requester's scoped storage."""
+    config = _agent_config(
+        tmp_path,
+        AgentConfig(display_name="Mind", private=AgentPrivateConfig(per="user", root="mind_data")),
+    )
+    runtime_paths = runtime_paths_for(config)
+    alice, bob = (
+        build_requester_execution_identity(agent_name="mind", runtime_paths=runtime_paths, requester_id=requester)
+        for requester in ("@alice:example.org", "@bob:example.org")
+    )
+    storage = create_session_storage("mind", config, runtime_paths, execution_identity=alice)
+    try:
+        seed_session(storage, AgentSession(session_id="session-alice", agent_id="mind"))
+    finally:
+        storage.close()
+
+    loaded = load_agent_session("mind", config, runtime_paths, "session-alice", execution_identity=alice)
+
+    assert loaded is not None
+    assert loaded.session_id == "session-alice"
+    assert load_agent_session("mind", config, runtime_paths, "session-alice", execution_identity=bob) is None

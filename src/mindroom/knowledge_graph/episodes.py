@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.history.conversation_text import one_line, run_requester, utterances
+from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX, run_key
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -49,8 +50,6 @@ _PROSE_FUNCTIONS = (
     "job",
 )
 _MAX_LISTED_CALLS = 20
-# A task delegated by another agent runs in a session of its own, named after the delegation.
-_DELEGATION_SESSION_PREFIX = "delegate:"
 
 
 @dataclass(frozen=True)
@@ -73,17 +72,12 @@ def is_evidence(execution: ToolExecution) -> bool:
     return not any(name in arguments for name in _GRAPH_FUNCTIONS)
 
 
-def run_key(run: RunOutput) -> tuple[int, str]:
-    """Return a run's position in its session."""
-    return (run.created_at or 0, run.run_id or "")
-
-
 def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) -> _ThreadKind:
     """Return what a thread is, from its session, its root run's trusted hook source, or the threads automations recorded."""
     if not runs:
         return "conversation"
     root = min(runs, key=run_key)
-    if (root.session_id or "").startswith(_DELEGATION_SESSION_PREFIX):
+    if (root.session_id or "").startswith(DELEGATION_SESSION_PREFIX):
         return "delegation"
     metadata = root.metadata or {}
     hook_source = metadata.get(HOOK_SOURCE_RUN_METADATA_KEY)

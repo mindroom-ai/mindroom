@@ -21,9 +21,9 @@ from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
 from mindroom.config.automations import ExplorationAutomation
 from mindroom.durable_write import write_json_file_durable
+from mindroom.history.session_runs import session_runs, updated_sessions
 from mindroom.knowledge_graph.episodes import classify_thread, is_evidence, tool_arguments
 from mindroom.knowledge_graph.ingestion import wake_knowledge_graph_ingestion
-from mindroom.knowledge_graph.session_runs import session_runs, updated_sessions
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_session_storage
 

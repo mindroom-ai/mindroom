@@ -7,6 +7,7 @@ imports them. Each scope's graph is addressed by its ``graph_name``, which Falko
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
 type EpisodeKind = Literal["conversation", "tool_results"]
 
 _DOTENV_DISABLED = "PYTHON_DOTENV_DISABLED"
+# RediSearch rejects a fulltext query holding a word that is only a control character or an underscore, both of which
+# Graphiti's FalkorDB sanitizer keeps (getzep/graphiti#1820); a tool's colored output carries such characters.
+_CONTROL_CHARACTERS = str.maketrans(dict.fromkeys([*range(0x20), *range(0x7F, 0xA0)], " "))
 # Facts listed for one entity, current ones first.
 _MAX_ENTITY_FACTS = 30
 
@@ -133,13 +137,29 @@ def _import_graphiti() -> None:
         with optional_dependency_environment():
             # Importing any part of Graphiti runs its package import, which loads `graphiti_core.graphiti` too.
             import graphiti_core.driver.falkordb_driver  # noqa: F401, PLC0415
+            from graphiti_core.driver.falkordb import fulltext  # noqa: PLC0415
 
             import mindroom.knowledge_graph.clients  # noqa: F401, PLC0415
+
+            if not hasattr(fulltext.sanitize_falkor_fulltext_query, "__wrapped__"):
+                sanitize = _keep_parseable_words(fulltext.sanitize_falkor_fulltext_query)
+                fulltext.sanitize_falkor_fulltext_query = sanitize  # ty: ignore[invalid-assignment]
     finally:
         if previous is None:
             os.environ.pop(_DOTENV_DISABLED, None)
         else:
             os.environ[_DOTENV_DISABLED] = previous
+
+
+def _keep_parseable_words(sanitize: Callable[[str], str]) -> Callable[[str], str]:
+    """Wrap Graphiti's fulltext sanitizer so it also drops control characters and words without a letter or digit."""
+
+    @functools.wraps(sanitize)
+    def sanitize_query(query: str) -> str:
+        words = sanitize(query.translate(_CONTROL_CHARACTERS)).split()
+        return " ".join(word for word in words if any(character.isalnum() for character in word))
+
+    return sanitize_query
 
 
 async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[GraphFact]:
@@ -201,10 +221,10 @@ class GraphitiStore:
         # why-lazy: Graphiti, FalkorDB, and the embedded server are optional and load only for graph-enabled runtimes.
         from falkordb.asyncio import FalkorDB  # noqa: PLC0415
         from graphiti_core import Graphiti  # noqa: PLC0415
-        from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: PLC0415
 
         from mindroom.knowledge_graph.clients import (  # noqa: PLC0415
             MindRoomEmbedder,
+            MindRoomFalkorDriver,
             MindRoomLLMClient,
             UnusedCrossEncoder,
         )
@@ -214,7 +234,7 @@ class GraphitiStore:
         embedder = await asyncio.to_thread(create_configured_embedder, config, self._runtime_paths)
         server = await start_embedded_server(self._runtime_paths.storage_root / "knowledge_graph")
         self._embedded_server = server
-        driver = FalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
+        driver = MindRoomFalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
         return Graphiti(
             graph_driver=driver,
             llm_client=MindRoomLLMClient(self._config_provider, self._runtime_paths),

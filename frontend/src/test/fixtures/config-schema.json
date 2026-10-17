@@ -3127,43 +3127,29 @@
           "type": "boolean"
         },
         "flush_interval_seconds": {
-          "default": 1800,
-          "description": "Background auto-flush loop interval",
+          "default": 300,
+          "description": "Time between auto-flush passes",
           "minimum": 5,
           "title": "Flush Interval Seconds",
           "type": "integer"
         },
         "idle_seconds": {
           "default": 120,
-          "description": "Session idle time before dirty session becomes flush-eligible",
+          "description": "How long a conversation must be quiet before its new turns are flushed",
           "minimum": 0,
           "title": "Idle Seconds",
           "type": "integer"
         },
-        "max_dirty_age_seconds": {
-          "default": 600,
-          "description": "Force flush eligibility once a session remains dirty for this long",
-          "minimum": 1,
-          "title": "Max Dirty Age Seconds",
-          "type": "integer"
-        },
         "stale_ttl_seconds": {
           "default": 86400,
-          "description": "Drop stale flush-state entries older than this TTL",
+          "description": "Give up on turns whose flush has kept failing for this long",
           "minimum": 60,
           "title": "Stale Ttl Seconds",
           "type": "integer"
         },
-        "max_cross_session_reprioritize": {
-          "default": 5,
-          "description": "Maximum same-agent dirty sessions reprioritized per incoming prompt",
-          "minimum": 0,
-          "title": "Max Cross Session Reprioritize",
-          "type": "integer"
-        },
         "retry_cooldown_seconds": {
           "default": 30,
-          "description": "Cooldown before retrying a failed extraction attempt",
+          "description": "Cooldown before retrying a failed flush",
           "minimum": 1,
           "title": "Retry Cooldown Seconds",
           "type": "integer"
@@ -3271,11 +3257,9 @@
           "$ref": "#/$defs/MemoryAutoFlushConfig",
           "default": {
             "enabled": false,
-            "flush_interval_seconds": 1800,
+            "flush_interval_seconds": 300,
             "idle_seconds": 120,
-            "max_dirty_age_seconds": 600,
             "stale_ttl_seconds": 86400,
-            "max_cross_session_reprioritize": 5,
             "retry_cooldown_seconds": 30,
             "max_retry_cooldown_seconds": 300,
             "batch": {
@@ -4884,14 +4868,14 @@
       "properties": {
         "max_sessions_per_cycle": {
           "default": 10,
-          "description": "Maximum sessions processed in one auto-flush loop iteration",
+          "description": "Maximum conversations flushed in one auto-flush pass, across all agents",
           "minimum": 1,
           "title": "Max Sessions Per Cycle",
           "type": "integer"
         },
         "max_sessions_per_agent_per_cycle": {
           "default": 3,
-          "description": "Maximum sessions per agent processed in one auto-flush loop iteration",
+          "description": "Maximum conversations of one agent or private instance flushed in one auto-flush pass",
           "minimum": 1,
           "title": "Max Sessions Per Agent Per Cycle",
           "type": "integer"
@@ -4932,21 +4916,21 @@
         },
         "max_messages_per_flush": {
           "default": 20,
-          "description": "Maximum session chat messages considered by one extraction job",
+          "description": "Maximum new messages read by one extraction job; a longer backlog is read over later passes",
           "minimum": 1,
           "title": "Max Messages Per Flush",
           "type": "integer"
         },
         "max_chars_per_flush": {
           "default": 12000,
-          "description": "Maximum message characters considered by one extraction job",
+          "description": "Maximum message characters read by one extraction job",
           "minimum": 1,
           "title": "Max Chars Per Flush",
           "type": "integer"
         },
         "max_extraction_seconds": {
           "default": 30,
-          "description": "Timeout for one extraction job before retrying in a later cycle",
+          "description": "Timeout for one extraction job before retrying in a later pass",
           "minimum": 1,
           "title": "Max Extraction Seconds",
           "type": "integer"
@@ -5274,10 +5258,8 @@
             "max_messages_per_flush": 20,
             "no_reply_token": "NO_REPLY"
           },
-          "flush_interval_seconds": 1800,
+          "flush_interval_seconds": 300,
           "idle_seconds": 120,
-          "max_cross_session_reprioritize": 5,
-          "max_dirty_age_seconds": 600,
           "max_retry_cooldown_seconds": 300,
           "retry_cooldown_seconds": 30,
           "stale_ttl_seconds": 86400

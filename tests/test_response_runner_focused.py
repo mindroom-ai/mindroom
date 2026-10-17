@@ -9312,23 +9312,19 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
     ],
 )
 def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
-    """A maintenance turn, such as an unreviewed memory proposal, never reaches auto-flush; other turns do."""
+    """A maintenance turn, such as an unreviewed memory proposal, never reaches Mem0; other turns do."""
     runner = ResponseRunner(deps=MagicMock())
-    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "file"
+    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "mem0"
 
-    with patch("mindroom.response_runner.mark_auto_flush_dirty_session") as mark_dirty:
-        queue = runner._memory_persistence(
-            agent_name="mind",
-            session_id="session",
-            execution_identity=MagicMock(),
-            prompt="Consolidate memory",
-            thread_history=(),
-            user_id=None,
-            hook_source=hook_source,
-            origin=message_origin(),
-        )
-        if queue is not None:
-            queue()
+    queue = runner._memory_persistence(
+        agent_name="mind",
+        session_id="session",
+        execution_identity=MagicMock(),
+        prompt="Consolidate memory",
+        thread_history=(),
+        user_id=None,
+        hook_source=hook_source,
+        origin=message_origin(),
+    )
 
     assert (queue is not None) is flushed
-    assert mark_dirty.called is flushed

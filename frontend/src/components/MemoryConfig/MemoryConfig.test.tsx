@@ -472,6 +472,26 @@ describe("MemoryConfig", () => {
     expect(saveButton).not.toBeDisabled();
   });
 
+  it("shows auto-flush settings without the retired dirty-queue fields", () => {
+    (useConfigStore as any).mockReturnValue({
+      config: { memory: { ...mockConfig.memory, backend: "file" } },
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+
+    render(<MemoryConfig />);
+
+    expect(screen.getByLabelText("Flush Interval (seconds)")).toHaveValue(300);
+    expect(screen.getByLabelText("Stale TTL (seconds)")).toHaveValue(86400);
+    expect(
+      screen.queryByLabelText("Max Dirty Age (seconds)"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Cross-Session Reprioritize"),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows provider description for openai", () => {
     render(<MemoryConfig />);
 
