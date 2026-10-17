@@ -40,6 +40,7 @@ from mindroom.delegation.personas import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
+from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
@@ -2011,6 +2012,26 @@ def _install_background_jobs(
             install_job_notice_hook(model, entity_name=agent_name)
 
 
+def _install_request_hooks(
+    agent: Agent,
+    model: Model,
+    *,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    agent_name: str,
+    model_name: str,
+) -> None:
+    """Install mid-turn compaction, then the call cap around it, so a refused request never spends a summary call."""
+    install_mid_turn_compaction(
+        agent,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=agent_name,
+        model_name=model_name,
+    )
+    install_model_call_cap(model, entity_name=agent_name)
+
+
 @timed("system_prompt_assembly.agent_create")
 def create_agent(  # noqa: PLR0915
     agent_name: str,
@@ -2204,7 +2225,6 @@ def create_agent(  # noqa: PLR0915
         role_context.model_name,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
     )
-    install_model_call_cap(model, entity_name=agent_name)
     if tool_assembly.deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
@@ -2319,7 +2339,8 @@ def create_agent(  # noqa: PLR0915
         tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
-        add_session_summary_to_context=persist_runtime_state,
+        # The summary replays as the first history message instead (history/agno_compat_message_builder.py).
+        add_session_summary_to_context=False,
         num_history_runs=history_policy.num_history_runs,
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
@@ -2328,6 +2349,14 @@ def create_agent(  # noqa: PLR0915
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,
+    )
+    _install_request_hooks(
+        agent,
+        model,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+        model_name=role_context.model_name,
     )
     if isinstance(agent, MinimalAgent):
         agent.configure_minimal(

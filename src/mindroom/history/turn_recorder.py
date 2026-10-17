@@ -10,7 +10,7 @@ from agno.run.base import RunStatus
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -30,10 +30,16 @@ class TurnRecorder:
     outcome: str = "pending"
     original_status: RunStatus | None = None
     interrupted_persisted: bool = False
+    # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves their previews out.
+    folded_tool_call_ids: set[str] = field(default_factory=set)
 
     def set_run_metadata(self, metadata: dict[str, Any] | None) -> None:
         """Replace the current Matrix run metadata snapshot."""
         self.run_metadata = dict(metadata) if metadata is not None else None
+
+    def record_folded_tool_calls(self, tool_call_ids: Iterable[str]) -> None:
+        """Remember tool calls a mid-turn compaction folded, so an interrupted record keeps only the work after it."""
+        self.folded_tool_call_ids.update(tool_call_ids)
 
     def set_run_id(self, run_id: str | None) -> None:
         """Replace the current top-level Agno run identifier."""
@@ -134,6 +140,7 @@ class TurnRecorder:
             run_metadata=self.run_metadata,
             response_event_id=self.response_event_id,
             original_status=self.original_status or RunStatus.cancelled,
+            folded_tool_call_ids=self.folded_tool_call_ids,
         )
 
     def claim_interrupted_persistence(self) -> bool:

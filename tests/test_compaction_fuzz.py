@@ -2,10 +2,11 @@
 
 Each example drives one conversation through appends, compaction chunks, chunks
 whose summary call races another writer, approvals that pause and later
-complete, stale whole-row session writes, late saves of old runs, redactions,
+complete, mid-turn folds of a running turn that then completes, stops, pauses,
+or crashes, stale whole-row session writes, late saves of old runs, redactions,
 and reopens, starting from an empty or a pre-archive database. Summaries name
-the runs they cover, so after every step the test checks exactly what replay
-represents.
+the runs they cover, and ``<run>~`` for the part of a running turn a fold took,
+so after every step the test checks exactly what replay represents.
 """
 
 from __future__ import annotations
@@ -31,9 +32,13 @@ from mindroom.history.replay import current_summary_text
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
     append_compaction_chunk,
+    append_fold,
+    ensure_scope_session_row,
     read_chunk_basis,
+    read_fold_basis,
     read_scope_seen_event_ids,
 )
+from mindroom.history.summary_rows import Segment
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from tests.conftest import seed_session
@@ -62,8 +67,12 @@ def _summary_of(run_ids: set[str]) -> str:
 
 
 def _covered(session: AgentSession) -> set[str]:
-    """Return the run ids the replayed summary covers."""
+    """Return the run ids the replayed summary covers, and ``<run>~`` for each running turn part it folded."""
     return set(session.summary.summary.split("|")) if session.summary is not None else set()
+
+
+def _segment_owners(covered: set[str]) -> set[str]:
+    return {token[:-1] for token in covered if token.endswith("~")}
 
 
 class _Runner:
@@ -79,6 +88,10 @@ class _Runner:
         # The lowest index a redaction in the current step may delete from; ``None`` when it may delete nothing.
         self._cut_floor: int | None = None
         self._moved: set[str] = set()
+        # The turn that is running now, which folds mid-turn and has no stored row unless it paused before.
+        self._running: str | None = None
+        # Runs whose stored part a retirement may remove in the current step, because they folded mid-turn.
+        self._retirable: set[str] = set()
         seeding = self._open()
         if legacy:
             seed_session(seeding, self._legacy_session())
@@ -106,10 +119,13 @@ class _Runner:
             "resurrect": self._resurrect,
             "redact": self._redact,
             "reopen": self._reopen,
+            "fold": self._fold,
+            "end": self._end,
         }
         for action in actions:
             self._cut_floor = None
             self._moved = set()
+            self._retirable = set()
             operations[action.kind](action)
             self._check()
 
@@ -246,6 +262,91 @@ class _Runner:
                 # A redaction that left the chunk and its summary alone, committed before the basis read.
                 assert appended
 
+    def _fold(self, action: Action) -> None:
+        """Fold the running turn mid-turn, starting a new turn or resuming a waiting approval when none runs.
+
+        With ``count == 3`` another compaction commits during the fold's summary call, which voids the fold.
+        """
+        if self._running is None:
+            waiting = [run_id for run_id in self._paused if run_id in self._stored]
+            if action.index % 2 and waiting:
+                self._running = waiting[action.index % len(waiting)]
+                self._paused.remove(self._running)
+            else:
+                self._running = f"r{len(self._created)}"
+                self._created.append(self._running)
+        run_id = self._running
+        session = AgentSession(session_id=_SESSION, agent_id="code")
+        basis = read_fold_basis(self._storage, session, _SCOPE)
+        assert basis is not None
+        previous = set(basis.summary.split("|")) if basis.summary is not None else set()
+        summary = _summary_of(previous | {run.run_id for run in basis.runs if run.run_id} | {f"{run_id}~"})
+        racing = action.count == 3 and self._chunk(1) is not None
+        if racing:
+            self._compact(Action("compact", count=1))
+        ensure_scope_session_row(self._storage, session, _SCOPE)
+        appended = append_fold(
+            self._storage,
+            session=session,
+            scope=_SCOPE,
+            basis=basis,
+            summary=summary,
+            summary_model="fuzz-model",
+            segment=Segment(
+                run_id=run_id,
+                metadata=self._new_run(run_id, RunStatus.running).metadata or {},
+                messages=[],
+                tools=[],
+                member_responses=[],
+            ),
+        )
+        assert appended == (not racing and run_id not in self._removed)
+        if appended and run_id in self._stored:
+            self._moved.add(run_id)
+
+    def _end(self, action: Action) -> None:
+        """End the running turn: it completes, stops, pauses for approval, or crashes without a save."""
+        if self._running is None:
+            return
+        run_id, self._running = self._running, None
+        outcome = action.index % 4
+        if outcome == 3:
+            return
+        status = (RunStatus.completed, RunStatus.cancelled, RunStatus.paused)[outcome]
+        stored_paused = run_id in self._stored and run_id not in self._stored_visible()
+        self._storage.upsert_run(run=self._new_run(run_id, status), session_id=_SESSION, user_id=None)
+        if status == RunStatus.paused:
+            self._paused.append(run_id)
+        elif status == RunStatus.completed and stored_paused:
+            self._moved.add(run_id)
+
+    def _stored_visible(self) -> set[str]:
+        """Return the stored runs whose stored status is visible; saving one again keeps its place."""
+        with sqlite3.connect(self._root / "sessions" / "code.db") as connection:
+            return {
+                run_id
+                for (run_id,) in connection.execute(
+                    "SELECT run_id FROM code_sessions_runs WHERE status NOT IN ('PAUSED', 'CANCELLED', 'ERROR')",
+                )
+            }
+
+    def _segment_rows(self) -> dict[int, tuple[int, str]]:
+        with sqlite3.connect(self._root / "sessions" / "code.db") as connection:
+            return {
+                row_id: (after_run_index, run_id)
+                for row_id, after_run_index, run_id in connection.execute(
+                    "SELECT id, after_run_index, segment_run_id FROM code_sessions_summaries "
+                    "WHERE segment_run_id IS NOT NULL",
+                )
+            }
+
+    def _latest_barrier(self) -> int | None:
+        with sqlite3.connect(self._root / "sessions" / "code.db") as connection:
+            (barrier,) = connection.execute(
+                "SELECT MAX(id) FROM code_sessions_summaries WHERE summary IS NULL",
+            ).fetchone()
+        return barrier
+
     def _snapshot(self, _action: Action) -> None:
         self._snapshots.append(self._load())
 
@@ -276,9 +377,22 @@ class _Runner:
             floor = self._run_indexes()[run_id]
         else:
             floor = None
+        segment_rows = self._segment_rows()
+        barrier = self._latest_barrier()
+        _remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
+        # A run goes whole, so a cut that removed one of its fold rows starts right after that row.
+        remaining = self._segment_rows()
+        for row_id, (after_run_index, owner) in segment_rows.items():
+            if row_id not in remaining:
+                floor = after_run_index + 1 if floor is None else min(floor, after_run_index + 1)
+                self._removed.add(owner)
+        if self._latest_barrier() != barrier:
+            # Retirement removes every run that folded mid-turn, wherever it sorts.
+            owners = {owner for _index, owner in segment_rows.values()}
+            self._retirable |= owners
+            self._removed |= owners
         if floor is not None:
             self._cut_floor = floor if self._cut_floor is None else min(self._cut_floor, floor)
-        _remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
         self._removed |= before - set(stored_run_ids(self._storage, _SESSION))
         self._redacted.add(event_id)
 
@@ -314,7 +428,10 @@ class _Runner:
             assert folded - retired <= covered
         # The summary covers only runs that are stored and not retired, and the legacy runs while their
         # summary is in force, so a retired or cut run never comes back through a chunk's input.
-        assert covered - set(_LEGACY_RUNS) <= stored - retired
+        owners = _segment_owners(covered)
+        assert covered - set(_LEGACY_RUNS) - {f"{owner}~" for owner in owners} <= stored - retired
+        # A running turn's folded part replays only while no cut or retirement removed that turn.
+        assert not owners & self._removed
         if covered & set(_LEGACY_RUNS):
             assert summary_rows.legacy_event_ids(self._storage, session_id=_SESSION, scope_key=_SCOPE.key)
         # Compaction moves no run row; only a completed approval moves, to the end.
@@ -328,11 +445,12 @@ class _Runner:
         for event_id in self._redacted:
             assert event_id[1:] not in loaded
             assert event_id[1:] not in covered
+            assert f"{event_id[1:]}~" not in covered
             assert event_id[1:] not in stored - retired
         # A run a cut removed never returns, whatever late save arrives.
         assert not stored & self._removed
         # Nothing stored is lost except by a redaction, which loses only the runs at or after its cut.
-        lost = self._stored - stored
+        lost = self._stored - stored - self._retirable
         if self._cut_floor is None:
             assert not lost
         else:
@@ -340,7 +458,7 @@ class _Runner:
         self._stored = stored
         self._indexes = indexes
         # Seen ids are exactly the events replay represents, so nothing is repeated or dropped.
-        expected_seen = {_event(run_id) for run_id in visible | covered}
+        expected_seen = {_event(run_id) for run_id in visible | (covered - {f"{owner}~" for owner in owners}) | owners}
         assert read_scope_seen_event_ids(self._storage, session, _SCOPE) == expected_seen
 
 
@@ -360,6 +478,9 @@ _ACTIONS = st.builds(
             "resurrect",
             "redact",
             "reopen",
+            "fold",
+            "fold",
+            "end",
         ),
     ),
     count=st.integers(1, 3),
@@ -457,6 +578,35 @@ _ACTIONS = st.builds(
     # A redaction retires the legacy summary the chunk loaded before the chunk reads its basis.
     actions=[Action("add"), Action("add"), Action("add"), Action("race", count=1, index=9)],
     legacy=True,
+)
+@example(
+    # A turn folds, pauses, waits for newer turns, folds them on resume, and one of them is redacted.
+    actions=[
+        Action("add"),
+        Action("fold", index=0),
+        Action("end", index=2),
+        Action("add"),
+        Action("add"),
+        Action("fold", index=1),
+        Action("redact", index=5),
+        Action("end", index=0),
+    ],
+    legacy=False,
+)
+@example(
+    # A turn folds and crashes; a redaction of what it read removes the fold and fences the turn.
+    actions=[Action("add"), Action("fold", index=0), Action("end", index=3), Action("redact", index=3)],
+    legacy=False,
+)
+@example(
+    # A legacy redaction retires the summaries while a turn that folded is running.
+    actions=[Action("add"), Action("fold", index=0), Action("redact", index=2), Action("fold"), Action("end")],
+    legacy=True,
+)
+@example(
+    # A pre-reply compaction commits during a fold's summary call.
+    actions=[Action("add"), Action("add"), Action("fold", count=3), Action("end")],
+    legacy=False,
 )
 def test_generated_compaction_histories_keep_the_log_invariants(actions: list[Action], *, legacy: bool) -> None:
     """Interleaved compaction, races, approvals, stale writes, and redaction never lose, repeat, or leak history."""

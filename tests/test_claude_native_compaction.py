@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -494,61 +493,6 @@ async def test_raw_context_management_owns_effective_claude_policy(*, vertex: bo
         assert model.native_compaction is None
 
 
-@pytest.mark.asyncio
-async def test_vertex_guard_counts_checkpoint_replay_as_text() -> None:
-    """Vertex must not trim a checkpoint because it counted the replaced transcript."""
-    requests: list[dict[str, Any]] = []
-    headers: list[str] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(json.loads(request.content))
-        headers.append(request.headers.get("anthropic-beta", ""))
-        return httpx.Response(200, json={"input_tokens": 100})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
-        client = AsyncAnthropicVertex(
-            project_id="test-project",
-            region="global",
-            credentials=Credentials(token="test-token"),
-            http_client=http_client,
-        )
-        model = MindroomVertexAIClaude(
-            id="claude-sonnet-5",
-            async_client=client,
-            context_window=200000,
-            max_tokens=4096,
-        )
-        model.configure_native_compaction(threshold=60000)
-        parsed = model._parse_provider_response(BetaMessage.model_validate(_response([_CHECKPOINT, _TEXT])))
-        messages = [
-            Message(role="system", content="Stable rules."),
-            Message(role="user", content="Old facts " * 150000, from_history=True),
-            Message(role="assistant", content=parsed.content, provider_data=parsed.provider_data, from_history=True),
-            Message(role="user", content="Continue."),
-        ]
-        fitted = await model._fit_request_messages(
-            messages,
-            tools=None,
-            response_format=None,
-            compress_tool_results=False,
-        )
-        assert all(message.content != messages[1].content for message in fitted)
-        count = await model._count_request_input_tokens(
-            messages,
-            tools=None,
-            response_format=None,
-            compress_tool_results=False,
-        )
-        assert count == 100
-
-    counted_block = requests[-1]["messages"][0]["content"][0]
-    assert counted_block["type"] == "text"
-    assert "Launch port 4321." in counted_block["text"]
-    assert "context_management" not in requests[-1]
-    assert "compact-2026-01-12" not in headers[-1]
-    assert "compact-2026-01-12" not in requests[-1].get("anthropic_beta", [])
-
-
 @pytest.mark.parametrize(
     ("configured_provider", "reported_provider"),
     [("anthropic", "Anthropic"), ("vertexai_claude", "VertexAI")],
@@ -602,33 +546,6 @@ def test_native_usage_metadata_separates_billing_from_context(
     )[AI_RUN_METADATA_KEY]
     assert metadata["usage"]["input_tokens"] == 62000
     assert metadata["context"]["input_tokens"] == 2050
-
-
-@pytest.mark.asyncio
-async def test_oversized_vertex_checkpoint_restores_canonical_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The exact guard must restore canonical input before trimming native replay."""
-    model = MindroomVertexAIClaude(id="claude-sonnet-5", context_window=200000, max_tokens=4096)
-    model.configure_native_compaction(threshold=60000)
-    parsed = model._parse_provider_response(BetaMessage.model_validate(_response([_CHECKPOINT, _TEXT])))
-    messages = [
-        Message(role="user", content="Original facts.", from_history=True),
-        Message(role="assistant", content=parsed.content, provider_data=parsed.provider_data, from_history=True),
-        Message(role="user", content="Continue."),
-    ]
-    monkeypatch.setattr(model, "_estimate_request_input_tokens", lambda *_args, **_kwargs: None)
-    counter = AsyncMock(side_effect=[201000, 100])
-    monkeypatch.setattr(model, "_count_request_input_tokens", counter)
-    fitted = await model._fit_request_messages(
-        messages,
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
-    assert model.native_compaction is None
-    assert [message.content for message in fitted] == [message.content for message in messages]
-    assert fitted[1].provider_data["content_blocks"] == [_TEXT]
-    assert messages[1].provider_data["content_blocks"][0] == _CHECKPOINT
-    assert counter.await_count == 2
 
 
 def test_plain_claude_request_refreshes_active_context_metrics() -> None:

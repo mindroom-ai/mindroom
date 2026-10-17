@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from agno.db.sqlite import SqliteDb
 from agno.run import RunContext
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
@@ -23,6 +25,7 @@ from mindroom.history.interrupted_replay import (
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
 )
+from mindroom.history.summary_rows import segment_tool_call_ids
 from mindroom.hooks import EnrichmentItem
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import (
@@ -329,6 +332,18 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     for entry in presentation.tool_trace:
         if entry.tool_call_id not in known_ids:
             (completed_trace if entry.type == "tool_call_completed" else interrupted_trace).append(entry)
+    storage = agent.db
+    # The run's summary rows know what its mid-turn folds summarized, across a restart too.
+    folded = (
+        await asyncio.to_thread(
+            segment_tool_call_ids,
+            storage,
+            session_id=continuation.session_id,
+            run_id=continuation.run_id,
+        )
+        if isinstance(storage, SqliteDb)
+        else set()
+    )
     snapshot = build_interrupted_replay_snapshot(
         user_message=continuation.request_body,
         user_message_is_structured=False,
@@ -337,6 +352,8 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         interrupted_tools=interrupted_trace,
         run_metadata=persisted.metadata,
         response_event_id=continuation.response_event_id,
+        # Calls the fold summarized stay out, including ones the paused presentation trace restored above.
+        folded_tool_call_ids=folded,
     )
     await save_cli_session(
         agent,

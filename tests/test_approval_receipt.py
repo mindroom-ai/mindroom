@@ -14,6 +14,7 @@ from agno.models.response import ModelResponse
 from mindroom.approval import receipt as approval_receipt
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
+from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.providers.google_gemini import MindRoomGoogleGemini
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from tests.history_helpers import RecordingModel
@@ -279,3 +280,26 @@ async def test_approval_receipt_reaches_each_concurrent_model_once() -> None:
 
     assert first.seen_messages[0].content == "first rules\n\ntrusted approval receipt"
     assert second.seen_messages[0].content == "second rules\n\ntrusted approval receipt"
+
+
+def test_publishing_keeps_a_legacy_summary_strip_made_on_the_outbound_copy() -> None:
+    """A mid-turn compaction that strips Agno's old summary block from the projected copy also strips the caller's."""
+    legacy_system = Message(
+        role="system",
+        content=(
+            "Be precise.\n\nHere is a brief summary of your previous interactions:\n\n"
+            "<summary_of_previous_interactions>\nOLD\n</summary_of_previous_interactions>\n\n"
+            "Current date: Monday"
+        ),
+    )
+    caller = [legacy_system, Message(role="user", content="Do the task")]
+    with approval_receipt.approval_receipt_context("Approved."):
+        projection = approval_receipt._messages_with_approval_receipt(caller, model_id=1)
+    assert projection is not None
+    strip_embedded_summary(projection.receipt_message)
+
+    projection.publish_model_mutations()
+
+    assert caller[0] is legacy_system
+    assert "summary_of_previous_interactions" not in str(legacy_system.content)
+    assert str(legacy_system.content).startswith("Be precise.")

@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Literal, cast, get_args
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# Run metadata key holding the projected usage of requests mid-turn compaction folded out of the run's messages.
+COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
+
 type IndependentUsageKind = Literal[
     "claude_agent",
     "compaction_summary",
@@ -110,13 +113,44 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
         # An invalid details sentinel lets the reporter retain totals while reporting missing attribution.
         selected["details"] = _project_model_details(details)
     result["metrics"] = selected
-    requests = _project_requests(run.get("messages"))
+    requests = project_requests(run.get("messages"))
+    carried = _carried_requests(run, metadata)
+    if carried:
+        # Mid-turn compaction folded these earlier requests out of the run's messages.
+        requests = [*carried, *(requests or [])]
     if requests is not None:
         result["requests"] = requests
     return result
 
 
-def _project_requests(messages: object) -> list[dict[str, object]] | None:
+def _carried_requests(run: Mapping[str, object], metadata: object) -> list[dict[str, object]]:
+    """Return the usage mid-turn compaction carried out of the run's messages, minus any message it still saves.
+
+    A reply that failed after a compaction can still hold some folded messages, which already count.
+    """
+    carried = (
+        cast("dict[str, object]", metadata).get(COMPACTED_REQUESTS_METADATA_KEY) if isinstance(metadata, dict) else None
+    )
+    if not isinstance(carried, list):
+        return []
+    saved = _message_ids(run.get("messages"))
+    requests: list[dict[str, object]] = []
+    for item in carried:
+        if not isinstance(item, dict):
+            continue
+        entry = cast("dict[str, object]", item)
+        if entry.get("message_id") not in saved:
+            requests.append({key: value for key, value in entry.items() if key != "message_id"})
+    return requests
+
+
+def _message_ids(messages: object) -> set[object]:
+    if not isinstance(messages, list):
+        return set()
+    return {cast("dict[str, object]", message).get("id") for message in messages if isinstance(message, dict)} - {None}
+
+
+def project_requests(messages: object) -> list[dict[str, object]] | None:
     """Project current assistant counters, timestamps and recorded model attribution."""
     if not isinstance(messages, list):
         return None
