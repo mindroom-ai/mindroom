@@ -431,14 +431,15 @@ async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unb
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         del room_id, event_ids
-        return None if agent_name == "general" else frozenset({"$event-gone"})
+        return None if agent_name == "other" else frozenset({"$event-gone"})
 
     worker = _worker(config, clock, redacted)
     await _started(worker, config, clock)
+    # The second pass starts with the second agent, whose bot cannot tell, so its waiting must leave budget.
     waiting = _thread("w")
-    _seed(config, waiting, [_run("w1", waiting, T0 + 5)])
+    _seed(config, waiting, [_run("w1", waiting, T0 + 5)], agent="other")
     session = _thread("t1")
-    _seed(config, session, [_run("gone", session, T0 + 10), _run("kept", session, T0 + 20)], agent="other")
+    _seed(config, session, [_run("gone", session, T0 + 10), _run("kept", session, T0 + 20)])
 
     await worker._run_cycle(config)
 
@@ -728,6 +729,7 @@ async def test_an_unreadable_conversation_backs_off_without_blocking_the_others(
 async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
     tmp_path: Path,
     extractor: _Extractor,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pass flushes at most its budget, at most the per-agent cap per agent, and starts with the next agent."""
     agents = {
@@ -754,9 +756,19 @@ async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
 
     config.memory.auto_flush.batch.max_sessions_per_cycle = 1
     config.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 3
+    listed: list[str] = []
+    real_updated_sessions = auto_flush.updated_sessions
+
+    def updated_sessions(storage: object, agent_name: str, *, since: int) -> list[tuple[str, int]]:
+        listed.append(agent_name)
+        return real_updated_sessions(storage, agent_name, since=since)
+
+    monkeypatch.setattr(auto_flush, "updated_sessions", updated_sessions)
     await worker._run_cycle(config)
     await worker._run_cycle(config)
     assert [call["agent_name"] for call in extractor.calls[2:]] == ["general", "other"]
+    # Once a pass has spent its budget, the agents after it are not even listed.
+    assert listed == ["general", "other"]
 
 
 @pytest.mark.asyncio
@@ -883,6 +895,8 @@ async def test_only_agents_whose_effective_backend_is_file_are_flushed(tmp_path:
     await worker._run_cycle(config)
 
     assert [call["agent_name"] for call in extractor.calls] == ["general"]
+    with pytest.raises(StopIteration):
+        _entry(tmp_path, _thread("o"))
 
 
 @pytest.mark.asyncio
