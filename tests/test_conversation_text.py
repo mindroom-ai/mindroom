@@ -57,6 +57,12 @@ def _kinds(run: RunOutput, *, agent_work: bool = False) -> list[tuple[str, str |
         pytest.param("Authorization: Bearer\nabc123def456", "Authorization: Bearer\n***redacted***", id="split-label"),
         # Redacting the whole text refuses a key whose value is on the next line; only that value line goes.
         pytest.param("password:\nhunter2 is it\nok bye", "password:\nok bye", id="value-after-a-bare-key"),
+        # A dropped value line still labels the line after it.
+        pytest.param(
+            "password:\nAuthorization: Bearer\nabc123def456",
+            "password:\n***redacted***",
+            id="label-as-value",
+        ),
         # An unclosed quote hides its line and the rest of the quoted value, through the line that closes it.
         pytest.param('token: "abc\ndef\nghi"\nThe launch is Friday.', "The launch is Friday.", id="open-quote"),
         # A quote no later line closes holds nothing beyond its own line.
