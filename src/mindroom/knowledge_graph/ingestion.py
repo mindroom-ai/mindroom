@@ -181,9 +181,11 @@ class KnowledgeGraphIngestionWorker:
             # One agent or private instance whose conversations cannot be read must not stop the others.
             try:
                 state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
-                due, readable = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
+                due, readable, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
                 if not readable:
                     outcomes.append(False)
+                if changed:
+                    await self._persist(scope.graph_name, state)
                 results = [
                     await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
                     for session in due
@@ -209,8 +211,8 @@ class KnowledgeGraphIngestionWorker:
         state: _GraphState,
         now: float,
         limit: int,
-    ) -> tuple[list[_DueSession], bool]:
-        """Return up to ``limit`` idle conversations with new turns, and whether every conversation could be read."""
+    ) -> tuple[list[_DueSession], bool, bool]:
+        """Return up to ``limit`` idle conversations with new turns, whether all could be read, and whether state changed."""
         settings = config.knowledge_graph.ingest
         storage = create_session_storage(
             scope.agent_name,
@@ -222,6 +224,7 @@ class KnowledgeGraphIngestionWorker:
             since = int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS
             due: list[_DueSession] = []
             readable = True
+            changed = False
             for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=since):
                 if len(due) >= limit:
                     break
@@ -244,8 +247,14 @@ class KnowledgeGraphIngestionWorker:
                     )
                     readable = False
                     continue
+                if not runs:
+                    # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
+                    # ingest, so it does not take a place in the pass.
+                    state["sessions"].setdefault(session_id, _new_session_state())["updated_at"] = updated_at
+                    changed = True
+                    continue
                 due.append(_DueSession(session_id, updated_at, runs))
-            return due, readable
+            return due, readable, changed
         finally:
             storage.close()
 
@@ -265,7 +274,16 @@ class KnowledgeGraphIngestionWorker:
         """
         settings = config.knowledge_graph.ingest
         finished, blocked_until = finished_runs(session.runs, config, now=now)
-        finished = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+        try:
+            finished = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+        except Exception as exc:
+            # One conversation whose redactions cannot be checked must not stop the agent's others.
+            _report_failure(
+                "Knowledge graph ingestion could not check a conversation for redactions",
+                exc,
+                agent=scope.agent_name,
+            )
+            return False
         if finished is None:
             return None
         entry = state["sessions"].get(session.session_id)
