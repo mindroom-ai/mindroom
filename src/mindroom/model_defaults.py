@@ -52,7 +52,7 @@ __all__ = (
     "OPENAI_IMAGE",
     "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
     "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
-    "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
+    "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES",
     "OPENAI_REALTIME",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
@@ -139,9 +139,10 @@ OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
 # The Decisions API serves only this model, so it does not follow the Luna default.
 OPENAI_DECISIONS_MODEL = "gpt-6-luna"
-# GPT-6 Astra always rejects Chat Completions sampling controls, and GPT-6.1 Sol and GPT-6 Luna
-# reject them at their default (non-`none`) reasoning effort.
-OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (_OPENAI_GPT, OPENAI_GPT_SOL, OPENAI_GPT_LUNA)
+# Most GPT-5 and GPT-6 models reject sampling values other than their defaults, such as gpt-5-mini, gpt-5.5, and
+# gpt-6-luna for temperature 0.1, and all of them reject max_tokens on Chat Completions; MindRoom's helper requests
+# leave these out for every model whose ID, after any provider prefix, starts with one of these.
+OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
 # Original detail preserves patch coverage on these models; the provider's
 # separate rejection limit and maximum pixel dimension still apply.
 OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES = ("gpt-6", "gpt-5.6")
