@@ -10,7 +10,7 @@ from mindroom.logging_config import get_logger
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
 
-from ._backend import resolve_memory_backend
+from ._backend import resolve_memory_backend, resolve_memory_mutation_backend
 from ._file_backend import append_agent_daily_file_memory
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
@@ -157,12 +157,22 @@ async def update_agent_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Update a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    if (
+        target := await resolve_memory_mutation_backend(
+            memory_id,
+            caller_context,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity,
+        )
+    ) is None:
         return
+    backend, mutation_context = target
     await backend.update(
         memory_id,
         content,
-        caller_context,
+        mutation_context,
         storage_path,
         config,
         execution_identity=execution_identity,
@@ -178,11 +188,21 @@ async def delete_agent_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Delete a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    if (
+        target := await resolve_memory_mutation_backend(
+            memory_id,
+            caller_context,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity,
+        )
+    ) is None:
         return
+    backend, mutation_context = target
     await backend.delete(
         memory_id,
-        caller_context,
+        mutation_context,
         storage_path,
         config,
         execution_identity=execution_identity,

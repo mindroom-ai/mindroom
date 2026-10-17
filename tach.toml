@@ -3319,10 +3319,19 @@ path = "mindroom.memory._backend"
 depends_on = [
     "mindroom.memory._file_backend",
     "mindroom.memory._mem0_backend",
+    "mindroom.memory._partitioned_team_backend",
     "mindroom.memory._policy",
     "mindroom.memory.config",
 ]
 visibility = ["mindroom.memory.functions"]
+
+[[modules]]
+path = "mindroom.memory._partitioned_team_backend"
+depends_on = [
+    "mindroom.memory._mem0_backend",
+    "mindroom.memory._shared",
+]
+visibility = ["mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory.auto_flush"
@@ -3357,6 +3366,7 @@ visibility = [
     "mindroom.memory",
     "mindroom.memory._file_backend",
     "mindroom.memory._mem0_backend",
+    "mindroom.memory._partitioned_team_backend",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._semantic_file_search",
@@ -3437,7 +3447,7 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.timing",
 ]
-visibility = ["mindroom.memory._backend"]
+visibility = ["mindroom.memory._backend", "mindroom.memory._partitioned_team_backend"]
 
 [[modules]]
 path = "mindroom.memory._prompting"
@@ -5946,6 +5956,7 @@ depends_on = [
 expose = [
     "ResolvedMemoryBackend",
     "resolve_memory_backend",
+    "resolve_memory_mutation_backend",
 ]
 from = ["mindroom.memory._backend"]
 

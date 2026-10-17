@@ -14,6 +14,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.memory._backend import resolve_memory_backend
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
+from mindroom.memory._partitioned_team_backend import PartitionedTeamMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
@@ -166,10 +167,10 @@ def test_resolve_memory_backend_maps_scopes_to_adapters(tmp_path: Path) -> None:
     assert isinstance(resolve_memory_backend("alpha", config, runtime_paths), FileMemoryBackend)
     assert isinstance(resolve_memory_backend("beta", config, runtime_paths), Mem0MemoryBackend)
     assert isinstance(resolve_memory_backend(["alpha", "alpha"], config, runtime_paths), FileMemoryBackend)
-    # Mixed teams currently resolve to mem0; PR #798's partitioned-team fix
-    # slots in here as a new ResolvedMemoryBackend implementation.
-    assert isinstance(resolve_memory_backend(["alpha", "beta"], config, runtime_paths), Mem0MemoryBackend)
+    assert isinstance(resolve_memory_backend(["beta", "beta"], config, runtime_paths), Mem0MemoryBackend)
+    assert isinstance(resolve_memory_backend(["alpha", "beta"], config, runtime_paths), PartitionedTeamMemoryBackend)
 
     config.agents["alpha"].memory_backend = "none"
     assert resolve_memory_backend("alpha", config, runtime_paths) is None
     assert resolve_memory_backend(["alpha", "alpha"], config, runtime_paths) is None
+    assert isinstance(resolve_memory_backend(["alpha", "beta"], config, runtime_paths), PartitionedTeamMemoryBackend)

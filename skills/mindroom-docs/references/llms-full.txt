@@ -3104,14 +3104,9 @@ OpenClaw-compatible agents use this same backend selection.
 An agent's memory reads cover its own scope and the scopes of the configured teams it belongs to, searched through the agent's own backend.
 A team reads its own team scope; set `memory.team_reads_member_memory: true` (default `false`) to let it also read its members' agent scopes.
 
-Team memory picks one backend from the members' effective backends:
-
-- All members use `file`: the team uses file memory.
-- All members use `none`: team memory is disabled.
-- Any other combination, including `file` plus `none`, uses Mem0 with the configured `memory.embedder` and `memory.llm`.
-
-A member's `none` setting disables only its own memory, so team conversations it takes part in can still be remembered in the team scope.
-A `file` member of a team that uses Mem0 does not see that team's memory in its own conversations.
+Each team member keeps the team's memory in its own effective backend: `file` members in file memory, `mem0` members in Mem0 with the configured `memory.embedder` and `memory.llm`, and `none` members not at all.
+Every member with memory therefore sees team memory in its own conversations, even when the team mixes backends.
+Editing or deleting a team memory with the [`memory` tool](#memory) changes every member's copy.
 
 ## Backend: `mem0`
 
@@ -3231,7 +3226,7 @@ memory:
 ```
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
-A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
+A team appends each message it answers to the team `MEMORY.md` of its `file` members, even without auto-flush.
 Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
 Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
@@ -3245,7 +3240,7 @@ Agent file memory lives in the agent workspace, `agents/<agent>/workspace/` in t
 - `MEMORY.md`, where `add_memory` writes
 - `memory/YYYY-MM-DD.md`, where auto-flush writes
 
-Team file memory is mirrored under each member's storage directory:
+Team file memory is mirrored under the storage directory of each member that uses `file`:
 
 - `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
 - `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`

@@ -20,12 +20,13 @@ from mindroom.timing import timed
 
 from ._mem0_usage import counted_mem0_usage, mem0_usage_run
 from ._policy import (
-    allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     storage_paths_for_scope_user_id,
+    team_members_by_memory_backend,
+    team_members_from_scope_user_id,
 )
 from ._prompting import build_memory_messages
 from ._shared import (
@@ -171,6 +172,44 @@ async def _search_mem0_team_scope(
     return _mem0_results(await memory.search(query, filters=_scope_filter(team_id), top_k=limit))
 
 
+def _mem0_team_storage_agent_names(scope_user_id: str, config: Config) -> list[str] | None:
+    team_members = team_members_from_scope_user_id(scope_user_id, config)
+    if team_members is None:
+        return None
+    return team_members_by_memory_backend(config, team_members).mem0
+
+
+def _mem0_storage_paths_for_scope_user_id(
+    scope_user_id: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    *,
+    target_agent_names: list[str] | None = None,
+) -> list[Path]:
+    """Return the storage roots holding Mem0 copies of one scope.
+
+    A team scope defaults to its Mem0-backed members, because file-backed members keep team memory in files.
+    A lookup targeted at team members skips single-agent scopes.
+    """
+    if target_agent_names is not None and team_members_from_scope_user_id(scope_user_id, config) is None:
+        return []
+    storage_target_agent_names = target_agent_names
+    if storage_target_agent_names is None:
+        storage_target_agent_names = _mem0_team_storage_agent_names(scope_user_id, config)
+        if storage_target_agent_names == []:
+            return []
+    return storage_paths_for_scope_user_id(
+        scope_user_id,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        target_agent_names=storage_target_agent_names,
+    )
+
+
 async def _get_scoped_memory_by_id(
     memory: ScopedMemoryCrud,
     memory_id: str,
@@ -205,7 +244,8 @@ async def _get_scoped_memory_by_id(
     return cast("MemoryResult", result)
 
 
-def _mem0_replica_key(result: MemoryResult) -> str | None:
+def mem0_replica_key(result: MemoryResult) -> str | None:
+    """Return the replica key shared by every copy of one team memory, if any."""
     metadata = result.get("metadata")
     if not isinstance(metadata, dict):
         return None
@@ -219,7 +259,7 @@ async def _find_mem0_replica_memory_ids(
     scope_user_id: str,
     anchor_result: MemoryResult,
 ) -> list[str]:
-    replica_key = _mem0_replica_key(anchor_result)
+    replica_key = mem0_replica_key(anchor_result)
 
     matches: list[str] = []
     for entry in _mem0_results(await memory.get_all(filters=_scope_filter(scope_user_id), top_k=1000)):
@@ -256,17 +296,20 @@ async def _find_mem0_anchor_memory_result(
     *,
     create_memory: _MemoryFactory,
     execution_identity: ToolExecutionIdentity | None = None,
+    target_agent_names: list[str] | None = None,
 ) -> MemoryResult | None:
-    for _scope_user_id, target_storage_path in allowed_scope_storage_paths(
-        caller_context,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    ):
-        memory = await create_memory(target_storage_path, config)
-        if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
-            return result
+    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+        for target_storage_path in _mem0_storage_paths_for_scope_user_id(
+            scope_user_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            target_agent_names=target_agent_names,
+        ):
+            memory = await create_memory(target_storage_path, config)
+            if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
+                return result
     return None
 
 
@@ -300,15 +343,17 @@ async def _mutate_mem0_memory_targets(
     anchor_result: MemoryResult,
     create_memory: _MemoryFactory,
     execution_identity: ToolExecutionIdentity | None = None,
+    target_agent_names: list[str] | None = None,
 ) -> int:
     mutated_targets = 0
     scope_user_id = anchor_result["user_id"]
-    for target_storage_path in storage_paths_for_scope_user_id(
+    for target_storage_path in _mem0_storage_paths_for_scope_user_id(
         scope_user_id,
         storage_path,
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        target_agent_names=target_agent_names,
     ):
         memory = await create_memory(target_storage_path, config)
         target_ids = await _mem0_mutation_target_ids(
@@ -528,6 +573,7 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
     ) -> MemoryResult | None:
         """Return one mem0 memory visible to the caller."""
         return await _find_mem0_anchor_memory_result(
@@ -538,6 +584,7 @@ class Mem0MemoryBackend:
             self.runtime_paths,
             create_memory=self.create_memory,
             execution_identity=execution_identity,
+            target_agent_names=target_agent_names,
         )
 
     async def update(
@@ -549,6 +596,7 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
     ) -> None:
         """Update one mem0 memory across its replica targets."""
         health_recorder = capture_embedder_health_recorder()
@@ -563,6 +611,7 @@ class Mem0MemoryBackend:
                     self.runtime_paths,
                     create_memory=self.create_memory,
                     execution_identity=execution_identity,
+                    target_agent_names=target_agent_names,
                 )
             ) is None:
                 raise MemoryNotFoundError(memory_id)
@@ -577,6 +626,7 @@ class Mem0MemoryBackend:
                 anchor_result=anchor_result,
                 create_memory=self.create_memory,
                 execution_identity=execution_identity,
+                target_agent_names=target_agent_names,
             )
 
         updated_targets = await _run_mem0_embedder_mutation(update_targets, health_recorder)
@@ -593,6 +643,7 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
     ) -> None:
         """Delete one mem0 memory across its replica targets."""
         if (
@@ -604,6 +655,7 @@ class Mem0MemoryBackend:
                 self.runtime_paths,
                 create_memory=self.create_memory,
                 execution_identity=execution_identity,
+                target_agent_names=target_agent_names,
             )
         ) is None:
             raise MemoryNotFoundError(memory_id)
@@ -619,6 +671,7 @@ class Mem0MemoryBackend:
             anchor_result=anchor_result,
             create_memory=self.create_memory,
             execution_identity=execution_identity,
+            target_agent_names=target_agent_names,
         )
         if deleted_targets > 0:
             logger.info("Memory deleted", memory_id=memory_id, storage_targets=deleted_targets)
@@ -636,15 +689,21 @@ class Mem0MemoryBackend:
         thread_history: Sequence[ResolvedVisibleMessage] | None = None,
         user_id: str | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
+        replica_key: str | None = None,
     ) -> None:
-        """Persist conversation messages to mem0-backed memory scopes."""
+        """Persist conversation messages to mem0-backed memory scopes.
+
+        ``target_agent_names`` limits a team write to those members' storage roots, and
+        ``replica_key`` sets the team replica key shared with copies in other backends.
+        """
         messages = build_memory_messages(prompt, thread_history, user_id)
         if not messages:
             return
-        replica_key = new_memory_id() if isinstance(agent_name, list) else None
+        replica_key = (replica_key or new_memory_id()) if isinstance(agent_name, list) else None
 
         target_storage_paths = effective_storage_paths_for_context(
-            agent_name,
+            agent_name if target_agent_names is None else target_agent_names,
             storage_path,
             config,
             self.runtime_paths,

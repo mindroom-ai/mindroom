@@ -23,12 +23,14 @@ from mindroom.timing import timed
 from mindroom.token_budget import estimate_char_tokens
 
 from ._policy import (
-    allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
+    get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
+    team_members_by_memory_backend,
+    team_members_from_scope_user_id,
 )
 from ._prompting import redact_memory_text
 from ._semantic_file_search import (
@@ -935,24 +937,27 @@ def _find_file_anchor_memory_result(
     runtime_paths: RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
+    target_agent_names: list[str] | None = None,
 ) -> MemoryResult | None:
-    for scope_user_id, target_storage_path in allowed_scope_storage_paths(
-        caller_context,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    ):
-        resolution = resolve_file_memory_resolution(
-            target_storage_path,
+    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+        for target_storage_path in _file_storage_paths_for_scope_user_id(
+            scope_user_id,
+            storage_path,
             config,
             runtime_paths,
-            agent_name=agent_name_from_scope_user_id(scope_user_id),
-            original_storage_path=storage_path,
             execution_identity=execution_identity,
-        )
-        if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
-            return result
+            target_agent_names=target_agent_names,
+        ):
+            resolution = resolve_file_memory_resolution(
+                target_storage_path,
+                config,
+                runtime_paths,
+                agent_name=agent_name_from_scope_user_id(scope_user_id),
+                original_storage_path=storage_path,
+                execution_identity=execution_identity,
+            )
+            if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
+                return result
     return None
 
 
@@ -982,16 +987,18 @@ def _mutate_file_memory_targets(
     runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
     execution_identity: ToolExecutionIdentity | None = None,
+    target_agent_names: list[str] | None = None,
 ) -> tuple[str, int, list[FileMemoryResolution]]:
     updated_targets = 0
     updated_resolutions: list[FileMemoryResolution] = []
     scope_user_id = anchor_result["user_id"]
-    for target_storage_path in storage_paths_for_scope_user_id(
+    for target_storage_path in _file_storage_paths_for_scope_user_id(
         scope_user_id,
         storage_path,
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        target_agent_names=target_agent_names,
     ):
         resolution = resolve_file_memory_resolution(
             target_storage_path,
@@ -1008,6 +1015,41 @@ def _mutate_file_memory_targets(
                 updated_targets += 1
                 updated_resolutions.append(resolution)
     return scope_user_id, updated_targets, updated_resolutions
+
+
+def _file_team_storage_agent_names(scope_user_id: str, config: Config) -> list[str] | None:
+    team_members = team_members_from_scope_user_id(scope_user_id, config)
+    if team_members is None:
+        return None
+    return team_members_by_memory_backend(config, team_members).file
+
+
+def _file_storage_paths_for_scope_user_id(
+    scope_user_id: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    *,
+    target_agent_names: list[str] | None = None,
+) -> list[Path]:
+    """Return the storage roots holding file copies of one scope.
+
+    A team scope defaults to its file-backed members, because Mem0-backed members keep team memory in Mem0.
+    """
+    storage_target_agent_names = target_agent_names
+    if storage_target_agent_names is None:
+        storage_target_agent_names = _file_team_storage_agent_names(scope_user_id, config)
+        if storage_target_agent_names == []:
+            return []
+    return storage_paths_for_scope_user_id(
+        scope_user_id,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        target_agent_names=storage_target_agent_names,
+    )
 
 
 def append_agent_daily_file_memory(
@@ -1099,7 +1141,7 @@ def _merge_team_scope_results(
     """Merge keyword team-scope matches into one ranked result list (filesystem-bound)."""
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
-        for target_storage_path in storage_paths_for_scope_user_id(
+        for target_storage_path in _file_storage_paths_for_scope_user_id(
             team_id,
             storage_path,
             config,
@@ -1307,6 +1349,7 @@ class FileMemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
     ) -> MemoryResult | None:
         """Return one file-backed memory visible to the caller."""
         return await asyncio.to_thread(
@@ -1317,6 +1360,7 @@ class FileMemoryBackend:
             config,
             self.runtime_paths,
             execution_identity=execution_identity,
+            target_agent_names=target_agent_names,
         )
 
     async def update(
@@ -1328,6 +1372,7 @@ class FileMemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
     ) -> None:
         """Update one file-backed memory across its replica targets."""
         if (
@@ -1339,6 +1384,7 @@ class FileMemoryBackend:
                 config,
                 self.runtime_paths,
                 execution_identity=execution_identity,
+                target_agent_names=target_agent_names,
             )
         ) is None:
             raise MemoryNotFoundError(memory_id)
@@ -1352,6 +1398,7 @@ class FileMemoryBackend:
             runtime_paths=self.runtime_paths,
             anchor_result=anchor_result,
             execution_identity=execution_identity,
+            target_agent_names=target_agent_names,
         )
         if updated_targets > 0:
             for resolution in updated_resolutions:
@@ -1379,6 +1426,7 @@ class FileMemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
     ) -> None:
         """Delete one file-backed memory across its replica targets."""
         if (
@@ -1390,6 +1438,7 @@ class FileMemoryBackend:
                 config,
                 self.runtime_paths,
                 execution_identity=execution_identity,
+                target_agent_names=target_agent_names,
             )
         ) is None:
             raise MemoryNotFoundError(memory_id)
@@ -1403,6 +1452,7 @@ class FileMemoryBackend:
             runtime_paths=self.runtime_paths,
             anchor_result=anchor_result,
             execution_identity=execution_identity,
+            target_agent_names=target_agent_names,
         )
         if deleted_targets > 0:
             for resolution in deleted_resolutions:
@@ -1433,8 +1483,14 @@ class FileMemoryBackend:
         thread_history: Sequence[ResolvedVisibleMessage] | None = None,
         user_id: str | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
+        target_agent_names: list[str] | None = None,
+        replica_key: str | None = None,
     ) -> None:
-        """Persist condensed conversation text to file-backed memory scopes."""
+        """Persist condensed conversation text to file-backed memory scopes.
+
+        ``target_agent_names`` limits a team write to those members' storage roots, and
+        ``replica_key`` sets the team entry ID shared with copies in other backends.
+        """
         del session_id, thread_history, user_id  # File conversation memory stores condensed text only.
         condensed_prompt = " ".join(redact_memory_text(prompt).split())
         if not condensed_prompt:
@@ -1442,7 +1498,7 @@ class FileMemoryBackend:
 
         target_storage_paths = await asyncio.to_thread(
             effective_storage_paths_for_context,
-            agent_name,
+            agent_name if target_agent_names is None else target_agent_names,
             storage_path,
             config,
             self.runtime_paths,
@@ -1451,7 +1507,7 @@ class FileMemoryBackend:
         scope_user_id = (
             agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
         )
-        team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
+        team_memory_id = (replica_key or new_memory_id()) if isinstance(agent_name, list) else None
 
         def _persist_to_targets() -> list[FileMemoryResolution]:
             resolutions: list[FileMemoryResolution] = []
