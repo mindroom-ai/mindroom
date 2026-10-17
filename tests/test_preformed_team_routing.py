@@ -46,7 +46,7 @@ from tests.identity_helpers import entity_ids
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
     from contextvars import Context
     from pathlib import Path
 
@@ -274,6 +274,7 @@ async def _team_memory_saves(
     request = ResponseRequest(
         sources=ResponseSources(pending_event_ids=("$evt1",), logical_source_event_ids=("$evt1",)),
         prompt="@team remember this",
+        model_prompt="@team remember this\n\nAvailable attachment IDs: att_1",
         thread_history=[make_visible_message(sender="@bob:localhost", body="Earlier note", event_id="$bob1")],
         user_id="@user:localhost",
         response_envelope=request_envelope(
@@ -623,14 +624,14 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
     mark_dirty.assert_called_once()
 
 
-@pytest.mark.parametrize("agent_name", ["a1", ["a1", "a2"]], ids=["agent", "team"])
-def test_job_follow_up_saves_no_memory(
+@pytest.mark.asyncio
+async def test_job_follow_up_extracts_nothing_but_still_marks_auto_flush(
     config_with_team: Config,
     tmp_path: Path,
-    agent_name: str | list[str],
 ) -> None:
-    """A job follow-up's prompt is MindRoom's instruction to collect results, not part of the conversation."""
+    """A job follow-up's prompt is MindRoom's instruction, but auto-flush still saves the reply reporting the results."""
     config = _bind_runtime_paths(config_with_team, tmp_path)
+    config.agents["a1"].memory_backend = "mem0"
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
     bot = make_test_team_bot(
@@ -651,8 +652,8 @@ def test_job_follow_up_saves_no_memory(
         session_id="session-1",
     )
 
-    assert (
-        bot._response_runner._memory_persistence(
+    def memory_persistence(agent_name: str | list[str]) -> Callable[[], None] | None:
+        return bot._response_runner._memory_persistence(
             agent_name=agent_name,
             session_id="session-1",
             execution_identity=identity,
@@ -662,8 +663,18 @@ def test_job_follow_up_saves_no_memory(
             hook_source=None,
             origin=follow_up,
         )
-        is None
-    )
+
+    queue = memory_persistence("a1")
+    assert queue is not None
+    store = AsyncMock()
+    mark_dirty = MagicMock()
+    with patch_response_runner_module(store_conversation_memory=store, mark_auto_flush_dirty_session=mark_dirty):
+        queue()
+        await asyncio.sleep(0)
+    store.assert_not_awaited()
+    mark_dirty.assert_called_once()
+
+    assert memory_persistence(["a1", "a2"]) is None
     continuation = approval_continuation(
         entity_kind="team",
         entity_name="t1",

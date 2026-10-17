@@ -2578,9 +2578,13 @@ class ResponseRunner:
         origin: TurnOrigin,
     ) -> Callable[[], None] | None:
         """Build the completed-turn memory handoff for an agent or a team's members, or None for a non-memory turn."""
-        if is_automation_hook_source(hook_source) or origin.intent is TurnIntent.JOB_FOLLOW_UP:
-            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory, and neither is a
-            # job follow-up, whose prompt is MindRoom's instruction to collect the results.
+        if is_automation_hook_source(hook_source):
+            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
+            return None
+        # A job follow-up's prompt is MindRoom's instruction to collect the results, not conversation to extract;
+        # auto-flush, which reads the reply that reports them, still saves it.
+        extracts_prompt = origin.intent is not TurnIntent.JOB_FOLLOW_UP
+        if not extracts_prompt and not isinstance(agent_name, str):
             return None
 
         def queue() -> None:
@@ -2593,7 +2597,7 @@ class ResponseRunner:
                     execution_identity=execution_identity,
                 )
                 # A file-memory agent's conversation is saved by auto-flush; a team's goes to its shared memory.
-                if self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
+                if not extracts_prompt or self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
                     return
             create_background_task(
                 store_conversation_memory(
