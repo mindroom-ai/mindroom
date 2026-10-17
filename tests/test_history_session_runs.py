@@ -1,4 +1,4 @@
-"""The graph reads every finished Matrix turn of a session, live or compacted, once."""
+"""Background workers read every finished Matrix turn of a session, live or compacted, once."""
 
 from __future__ import annotations
 

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
-from mindroom.history.session_runs import run_key
+from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX, run_key
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.prompt_message_tags import cdata_body_text
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -57,8 +57,6 @@ _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
 _LINE_BREAK = re.compile(r"\s*\n\s*")
 _CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
 _MAX_LISTED_CALLS = 20
-# A task delegated by another agent runs in a session of its own, named after the delegation.
-_DELEGATION_SESSION_PREFIX = "delegate:"
 
 
 @dataclass(frozen=True)
@@ -86,7 +84,7 @@ def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) 
     if not runs:
         return "conversation"
     root = min(runs, key=run_key)
-    if (root.session_id or "").startswith(_DELEGATION_SESSION_PREFIX):
+    if (root.session_id or "").startswith(DELEGATION_SESSION_PREFIX):
         return "delegation"
     metadata = root.metadata or {}
     hook_source = metadata.get(HOOK_SOURCE_RUN_METADATA_KEY)
