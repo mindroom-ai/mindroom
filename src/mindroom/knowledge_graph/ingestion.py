@@ -198,6 +198,8 @@ class KnowledgeGraphIngestionWorker:
                 if not readable:
                     outcomes.append(False)
                 if changed:
+                    # A conversation finished while listing is a clean outcome, as one ingested would be.
+                    outcomes.append(True)
                     await self._persist(scope.graph_name, state)
                 results = [
                     await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
@@ -299,9 +301,9 @@ class KnowledgeGraphIngestionWorker:
             return False
         if finished is None:
             return None
-        entry = state["sessions"].get(session.session_id)
-        if entry is None:
-            entry = state["sessions"][session.session_id] = _new_session_state()
+        entry = state["sessions"].setdefault(session.session_id, _new_session_state())
+        # A conversation nothing was ingested from yet starts after the backfill window, however it was first recorded.
+        if not entry["markers"]:
             _start_after_backfill_window(
                 entry,
                 finished,

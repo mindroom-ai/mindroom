@@ -640,16 +640,9 @@ async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_pa
     # A pass that only sees such a conversation still records it, so it is not read again until it changes.
     _seed(config, paths, "api-2", ["x2"], at=T0 + 15, matrix=False)
     await worker._run_cycle(config, now=T0 + 20)
-    read: list[str] = []
-    real = ingestion.session_runs
-
-    def runs(storage: object, session_id: str) -> list[RunOutput]:
-        read.append(session_id)
-        return real(storage, session_id)
-
-    with patch.object(ingestion, "session_runs", runs):
+    with patch.object(ingestion, "session_runs", wraps=ingestion.session_runs) as read:
         await worker._run_cycle(config, now=T0 + 30)
-    assert read == []
+    read.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -729,11 +722,26 @@ async def test_a_failing_conversation_left_without_matrix_turns_stops_keeping_he
     assert knowledge_graph_failure() is not None
 
     _seed(config, paths, "!room:x:$t1", ["r1"], updated_at=T0 + 4000, matrix=False)
-    _seed(config, paths, "!room:x:$t2", ["g1"], at=T0 + 4000)
     await worker._run_cycle(config, now=T0 + 5000)
 
-    assert store.sessions() == ["!room:x:$t2"]
+    assert store.episodes == []
     assert knowledge_graph_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_first_recorded_empty_still_starts_after_the_backfill_window(tmp_path: Path) -> None:
+    """Turns from before a new graph's backfill window stay out, even when their conversation was first seen empty."""
+    config, paths, store = _config(backfill_days=0), _paths(tmp_path), _FakeStore()
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    # A turn still running when the graph started is stored, but not finished, so the conversation looks empty.
+    _seed(config, paths, "!room:x:$t1", ["old"], at=T0 + 5, updated_at=T0 + 20, matrix=False)
+    await worker._run_cycle(config, now=T0 + 30)
+
+    _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 + 5, spacing=35)
+    await worker._run_cycle(config, now=T0 + 60)
+
+    assert _answers(store) == ["agent mind: answer new"]
 
 
 @pytest.mark.asyncio
