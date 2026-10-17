@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import subprocess
 import sys
@@ -76,40 +77,45 @@ async def _seed_fact(
     seen: int = 1,
 ) -> None:
     """Store a fact supported by ``seen`` episodes, one day apart from ``valid_at``, numbered in their descriptions."""
-    graphiti = await graph_store._graphiti_client()
-    driver = graphiti.driver.clone(database=scope.graph_name)
-    embedder = graphiti.embedder
-    episodes = [
-        EpisodicNode(
-            name="episode",
+
+    # Graphiti's objects belong to the store's graph loop, so the seeding runs there.
+    async def seed() -> None:
+        graphiti = await graph_store._graphiti_client()
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        embedder = graphiti.embedder
+        episodes = [
+            EpisodicNode(
+                name="episode",
+                group_id=scope.graph_name,
+                source=EpisodeType.text,
+                source_description=source_description if seen == 1 else f"{source_description} #{index}",
+                content=fact,
+                valid_at=valid_at + timedelta(days=index),
+            )
+            for index in range(seen)
+        ]
+        for episode in episodes:
+            await episode.save(driver)
+        alice = EntityNode(name="Alice", group_id=scope.graph_name, summary="Alice leads Project Atlas.")
+        atlas = EntityNode(name="Project Atlas", group_id=scope.graph_name, summary="A data platform project.")
+        for node in (alice, atlas):
+            await node.generate_name_embedding(embedder)
+            await node.save(driver)
+        edge = EntityEdge(
+            source_node_uuid=alice.uuid,
+            target_node_uuid=atlas.uuid,
+            name="LEADS",
+            fact=fact,
             group_id=scope.graph_name,
-            source=EpisodeType.text,
-            source_description=source_description if seen == 1 else f"{source_description} #{index}",
-            content=fact,
-            valid_at=valid_at + timedelta(days=index),
+            episodes=[episode.uuid for episode in episodes],
+            created_at=valid_at,
+            valid_at=valid_at,
+            invalid_at=invalid_at,
         )
-        for index in range(seen)
-    ]
-    for episode in episodes:
-        await episode.save(driver)
-    alice = EntityNode(name="Alice", group_id=scope.graph_name, summary="Alice leads Project Atlas.")
-    atlas = EntityNode(name="Project Atlas", group_id=scope.graph_name, summary="A data platform project.")
-    for node in (alice, atlas):
-        await node.generate_name_embedding(embedder)
-        await node.save(driver)
-    edge = EntityEdge(
-        source_node_uuid=alice.uuid,
-        target_node_uuid=atlas.uuid,
-        name="LEADS",
-        fact=fact,
-        group_id=scope.graph_name,
-        episodes=[episode.uuid for episode in episodes],
-        created_at=valid_at,
-        valid_at=valid_at,
-        invalid_at=invalid_at,
-    )
-    await edge.generate_embedding(embedder)
-    await edge.save(driver)
+        await edge.generate_embedding(embedder)
+        await edge.save(driver)
+
+    await graph_store._run(seed())
 
 
 @pytest.mark.asyncio
@@ -234,6 +240,73 @@ async def test_lookups_do_not_read_embeddings_back(store: GraphitiStore) -> None
     assert not any(rows)
 
 
+@pytest.mark.asyncio
+async def test_graph_work_does_not_hold_the_event_loop(store: GraphitiStore) -> None:
+    """A query waits for a task on the caller's loop, which can only run if Graphiti works on another loop."""
+    await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
+    querying = threading.Event()
+    released = threading.Event()
+    ran_on: list[threading.Thread] = []
+    query = AsyncGraph.query
+
+    async def waiting_query(graph: AsyncGraph, *args: object, **kwargs: object) -> QueryResult:
+        ran_on.append(threading.current_thread())
+        querying.set()
+        assert released.wait(timeout=10), "the caller's loop never ran while Graphiti queried"
+        return await query(graph, *args, **kwargs)
+
+    async def release() -> None:
+        # Waiting in a worker thread keeps this loop free, so only a query on this loop could block the release.
+        assert await asyncio.to_thread(querying.wait, 10)
+        released.set()
+
+    with patch.object(AsyncGraph, "query", waiting_query):
+        facts, _ = await asyncio.gather(store.search_facts(ALPHA, "who leads Project Atlas", limit=5), release())
+
+    assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]
+    assert ran_on
+    assert threading.main_thread() not in ran_on
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_lookup_still_lets_the_store_close(store: GraphitiStore) -> None:
+    """Cancelling a caller cancels its graph work, and closing afterwards stops the graph thread."""
+    await _seed_fact(store, ALPHA, fact="Alice leads Project Atlas", source_description="conversation: a", valid_at=JAN)
+    started = threading.Event()
+    query = AsyncGraph.query
+
+    async def slow_query(graph: AsyncGraph, *args: object, **kwargs: object) -> QueryResult:
+        started.set()
+        await asyncio.sleep(30)
+        return await query(graph, *args, **kwargs)
+
+    with patch.object(AsyncGraph, "query", slow_query):
+        lookup = asyncio.create_task(store.search_facts(ALPHA, "Alice", limit=5))
+        assert await asyncio.to_thread(started.wait, 10)
+        lookup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lookup
+    await store.close()
+
+    assert not any(thread.name == "mindroom-knowledge-graph" for thread in threading.enumerate())
+
+
+@pytest.mark.asyncio
+async def test_closing_an_unused_store_starts_no_thread(tmp_path: Path) -> None:
+    """A runtime whose store never ran anything does not start the graph thread to close it."""
+    config = Config(
+        agents={"mind": AgentConfig(display_name="Mind", knowledge_graph=True)},
+        models={"luna": ModelConfig(provider="openai", id="gpt-6-luna")},
+        knowledge_graph={"model": "luna"},
+    )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    graph_store = GraphitiStore(lambda: config, paths)
+
+    await graph_store.close()
+
+    assert not any(thread.name == "mindroom-knowledge-graph" for thread in threading.enumerate())
+
+
 def test_importing_graphiti_leaves_the_environment_alone(tmp_path: Path) -> None:
     """Graphiti loads a .env at import; MindRoom keeps that from changing its process environment."""
     dotenv_file = tmp_path / ".env"
@@ -267,7 +340,7 @@ async def client(self):
     raise ClientReached
 
 GraphitiStore._graphiti_client = client
-store = GraphitiStore.__new__(GraphitiStore)
+store = GraphitiStore(None, None)
 for call in (store.search_facts(None, "q", 1), store.entity(None, "n"), store.add_episode(None, None, None)):
     try:
         asyncio.run(call)
@@ -296,7 +369,7 @@ async def test_a_crashed_database_server_is_started_again(store: GraphitiStore) 
     finally:
         await client.aclose()
     server.process.kill()
-    await server.process.wait()
+    await store._run(server.process.wait())
 
     facts = await store.search_facts(ALPHA, "Alice Project Atlas", limit=5)
 
@@ -322,7 +395,7 @@ async def test_the_embedder_is_built_off_the_event_loop(store: GraphitiStore) ->
 @pytest.mark.asyncio
 async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) -> None:
     """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt."""
-    graphiti = await store._graphiti_client()
+    graphiti = await store._run(store._graphiti_client())
     episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
 
     with patch.object(graphiti, "add_episode", AsyncMock()) as add:

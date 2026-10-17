@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_cardinality_mismatch
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
-from mindroom.knowledge_graph.store import UnusableExtractionError
+from mindroom.knowledge_graph.store import UnusableExtractionError, run_on_loop
 from mindroom.knowledge_graph.usage import current_usage_target
 from mindroom.providers import model_loading
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -60,11 +60,17 @@ _WITHOUT_EMBEDDINGS = (
 class MindRoomLLMClient(LLMClient):
     """Run Graphiti's extraction prompts on the ``knowledge_graph.model`` entry with structured output."""
 
-    def __init__(self, config_provider: Callable[[], Config], runtime_paths: RuntimePaths) -> None:
+    def __init__(
+        self,
+        config_provider: Callable[[], Config],
+        runtime_paths: RuntimePaths,
+        runtime_loop: asyncio.AbstractEventLoop,
+    ) -> None:
         # The model is read from config on every call; Graphiti uses its own copy only as a cache key, and caching is off.
         super().__init__(None)
         self._config_provider = config_provider
         self._runtime_paths = runtime_paths
+        self._runtime_loop = runtime_loop
 
     async def _generate_response(
         self,
@@ -77,6 +83,11 @@ class MindRoomLLMClient(LLMClient):
     ) -> dict[str, Any]:
         # The configured model entry decides its output limit, and one model serves every prompt.
         del max_tokens, model_size, model
+        # Graphiti calls from the knowledge graph loop, but model providers share HTTP clients bound to the runtime loop
+        # (the Codex and Kimi providers use Agno's global async client), so the extraction itself runs there.
+        return await run_on_loop(self._runtime_loop, self._extract(messages, response_model))
+
+    async def _extract(self, messages: list[Message], response_model: type[BaseModel] | None) -> dict[str, Any]:
         config = self._config_provider()
         model_name = config.knowledge_graph.model
         if model_name is None:
