@@ -365,17 +365,12 @@ class Mem0MemoryBackend:
         owner: HelperUsageOwner | None,
         requester_id: str | None,
     ) -> None:
-        """Count Mem0's extraction tokens toward the conversation, or as internal work when there is none."""
+        """Count Mem0's extraction tokens toward the conversation, or as internal work, which names no requester."""
         if (run := mem0_usage_run(calls)) is None:
             return
         try:
             if owner is None:
-                await record_system_usage(
-                    run,
-                    runtime_paths=self.runtime_paths,
-                    kind="memory_extraction",
-                    requester_id=requester_id,
-                )
+                await record_system_usage(run, runtime_paths=self.runtime_paths, kind="memory_extraction")
             else:
                 await record_helper_usage(
                     run,

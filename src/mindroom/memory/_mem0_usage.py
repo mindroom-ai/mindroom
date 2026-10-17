@@ -31,6 +31,7 @@ def _metrics(
     output_tokens: int,
     *,
     cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
     reasoning_tokens: int = 0,
 ) -> MessageMetrics:
     return MessageMetrics(
@@ -38,6 +39,7 @@ def _metrics(
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
         reasoning_tokens=reasoning_tokens,
     )
 
@@ -62,6 +64,7 @@ def _anthropic_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Anth
         usage.input_tokens or 0,
         usage.output_tokens or 0,
         cache_read_tokens=usage.cache_read_input_tokens or 0,
+        cache_write_tokens=usage.cache_creation_input_tokens or 0,
     )
 
 
@@ -129,6 +132,7 @@ def mem0_usage_run(calls: list[Message]) -> RunOutput | None:
             output_tokens=model.output_tokens,
             total_tokens=model.total_tokens,
             cache_read_tokens=model.cache_read_tokens,
+            cache_write_tokens=model.cache_write_tokens,
             reasoning_tokens=model.reasoning_tokens,
             details={"model": [model]},
         ),

@@ -56,7 +56,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
-`system:internal` usage appears only in organization reports, names a requester only for memory extraction, and transcription is counted only when the provider reports tokens.
+`system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.
 Embedding calls and calls to separately configured judgment backends, such as participation or mid-turn judges, are not counted.
 
 **Requesters.** Usage is grouped by canonical Matrix user ID, with known aliases combined; `user_id: null` holds unattributed usage.

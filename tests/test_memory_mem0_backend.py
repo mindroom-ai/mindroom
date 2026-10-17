@@ -823,7 +823,8 @@ async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Pat
         )
 
     [(run, kwargs)] = recorded
-    assert (kwargs["kind"], kwargs["requester_id"]) == ("memory_extraction", "@alice:example.org")
+    # Internal work names no requester, like the team's routing and mode decisions.
+    assert kwargs == {"runtime_paths": runtime_paths_for(config), "kind": "memory_extraction"}
     assert run.metrics is not None
     # Team memory is extracted once into each store it is kept in.
     assert run.metrics.total_tokens == 150 * fake_stores.call_count
@@ -978,7 +979,7 @@ async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(storag
                     ),
                 ),
             ),
-            (100, 20, 40, 8),
+            (100, 20, 40, 0, 8),
             id="openai",
         ),
         pytest.param(
@@ -994,12 +995,17 @@ async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(storag
                             "model": "extractor",
                             "stop_reason": None,
                             "stop_sequence": None,
-                            "usage": {"input_tokens": 90, "output_tokens": 10, "cache_read_input_tokens": 30},
+                            "usage": {
+                                "input_tokens": 90,
+                                "output_tokens": 10,
+                                "cache_read_input_tokens": 30,
+                                "cache_creation_input_tokens": 20,
+                            },
                         },
                     ),
                 ),
             ),
-            (90, 10, 30, 0),
+            (90, 10, 30, 20, 0),
             id="anthropic",
         ),
         pytest.param(
@@ -1012,7 +1018,7 @@ async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(storag
                     eval_count=5,
                 ),
             ),
-            (70, 5, 0, 0),
+            (70, 5, 0, 0, 0),
             id="ollama",
         ),
     ],
@@ -1020,7 +1026,7 @@ async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(storag
 def test_each_provider_reports_its_extraction_tokens(
     provider: str,
     client: SimpleNamespace,
-    expected: tuple[int, int, int, int],
+    expected: tuple[int, int, int, int, int],
 ) -> None:
     """Each provider SDK reports usage in its own shape."""
     llm = SimpleNamespace(config=SimpleNamespace(model="extractor"), client=client)
@@ -1043,6 +1049,7 @@ def test_each_provider_reports_its_extraction_tokens(
         metrics.input_tokens,
         metrics.output_tokens,
         metrics.cache_read_tokens,
+        metrics.cache_write_tokens,
         metrics.reasoning_tokens,
     ) == expected
 
