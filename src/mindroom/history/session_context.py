@@ -78,7 +78,7 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
 def resolve_target_history_scope(target: Agent | Team) -> HistoryScope | None:
     """Return the persisted history scope a live agent or team replays."""
     if isinstance(target, Team):
-        return HistoryScope(kind="team", scope_id=target.id or "")
+        return HistoryScope(kind="team", scope_id=target.id) if target.id else None
     return resolve_history_scope(target)
 
 
