@@ -1,8 +1,9 @@
 """What Graphiti is told when it extracts an episode: the entity types and the extraction instructions.
 
-Graphiti reads each type model's docstring as the type's description and extracts only nodes it can place in one of
-the types; a node that fits none falls back to its generic ``Entity`` type, which MindRoom excludes. This module
-imports only pydantic, so it loads without the optional Graphiti dependency.
+Graphiti reads each type model's docstring as the type's description. With its generic ``Entity`` type excluded, the
+extractor must pick one of these types for a node or leave the node out, so what stays out of the graph rests on the
+docstrings and the instructions, not on a filter. This module imports only pydantic, so it loads without the optional
+Graphiti dependency.
 """
 
 from __future__ import annotations
@@ -15,27 +16,27 @@ class Person(BaseModel):
 
 
 class Agent(BaseModel):
-    """An AI assistant or bot that takes part in conversations."""
+    """An AI assistant or bot that takes part in conversations, named by its name, never by its Matrix ID."""
 
 
 class Organization(BaseModel):
-    """A company, team, institution, or other group of people."""
+    """A company, institution, or other group of people, never a single person or a web address."""
 
 
 class Location(BaseModel):
-    """A place, such as a city, a country, a building, or a room."""
+    """A physical place, such as a city, a country, or a building, never a file path, URL, or chat room."""
 
 
 class Event(BaseModel):
-    """Something that happens at a time, such as a meeting, a release, a trip, or an incident."""
+    """Something that happens at a time, such as a meeting, a trip, or an incident, never a commit, release tag, or branch."""
 
 
 class Project(BaseModel):
-    """A piece of work with a goal that people or agents carry out together."""
+    """A piece of work with a goal that people or agents carry out together, never a repository path or URL."""
 
 
 class Product(BaseModel):
-    """Software, a service, a device, or a vehicle."""
+    """Software, a service, a device, or a vehicle, never a file, URL, command, or configuration key."""
 
 
 class Document(BaseModel):
@@ -43,7 +44,7 @@ class Document(BaseModel):
 
 
 class Account(BaseModel):
-    """A financial or online account."""
+    """A financial or online account, never a person's handle, Matrix ID, or email address, which name a Person."""
 
 
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
@@ -58,7 +59,8 @@ ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Account": Account,
 }
 
-# Graphiti's generic type for a node that fits none of ENTITY_TYPES; dropping it keeps paths, URLs, and the like out.
+# Graphiti's generic type; excluding it removes it from the types the extractor chooses from, so a node is one of
+# ENTITY_TYPES or left out.
 EXCLUDED_ENTITY_TYPES = ["Entity"]
 
 _INSTRUCTIONS = """\

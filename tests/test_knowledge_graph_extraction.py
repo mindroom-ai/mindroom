@@ -24,9 +24,21 @@ def test_every_entity_type_has_a_description_and_no_fields() -> None:
         assert model.model_fields == {}
 
 
-def test_generic_entity_type_is_excluded() -> None:
-    """A node the model cannot place in one of the types falls back to Graphiti's generic type and is dropped."""
-    assert EXCLUDED_ENTITY_TYPES == ["Entity"]
+def test_every_entity_type_says_what_does_not_belong() -> None:
+    """Without a generic type to fall back on, a type's description is what keeps paths, URLs, and handles out of it."""
+    for name, model in ENTITY_TYPES.items():
+        assert model.__doc__
+        description = model.__doc__.lower()
+        assert "never" in description or "not" in description, name
+
+
+def test_graphiti_accepts_the_types_and_the_exclusion() -> None:
+    """Graphiti's own checks in ``add_episode`` reject field names that clash with its nodes and unknown exclusions."""
+    from graphiti_core.helpers import validate_excluded_entity_types  # noqa: PLC0415
+    from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types  # noqa: PLC0415
+
+    assert validate_entity_types(ENTITY_TYPES)
+    assert validate_excluded_entity_types(EXCLUDED_ENTITY_TYPES, ENTITY_TYPES)
 
 
 def test_instructions_keep_paths_and_urls_out_and_date_by_occurrence() -> None:

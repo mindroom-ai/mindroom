@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
-from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.scope import GraphScope
 from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
 from mindroom.knowledge_graph.usage import UsageTarget
@@ -436,20 +436,10 @@ async def test_the_embedder_is_built_off_the_event_loop(store: GraphitiStore) ->
 
 @pytest.mark.asyncio
 async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) -> None:
-    """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt."""
-    graphiti = await store._run(store._graphiti_client())
-    episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
+    """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt.
 
-    with patch.object(graphiti, "add_episode", AsyncMock()) as add:
-        await store.add_episode(ALPHA, episode, UsageTarget("mind", "!r:$t", None))
-
-    assert add.await_args is not None
-    assert add.await_args.kwargs["previous_episode_uuids"] == []
-
-
-@pytest.mark.asyncio
-async def test_add_episode_passes_types_exclusions_and_instructions(store: GraphitiStore) -> None:
-    """Extraction is told the entity types, drops what fits none of them, and keeps paths and URLs inside facts."""
+    The episode is extracted into the entity types, with the generic type excluded and the instructions added.
+    """
     graphiti = await store._run(store._graphiti_client())
     episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
 
@@ -458,6 +448,7 @@ async def test_add_episode_passes_types_exclusions_and_instructions(store: Graph
 
     assert add.await_args is not None
     kwargs = add.await_args.kwargs
+    assert kwargs["previous_episode_uuids"] == []
     assert kwargs["entity_types"] is ENTITY_TYPES
-    assert kwargs["excluded_entity_types"] == EXCLUDED_ENTITY_TYPES == ["Entity"]
+    assert kwargs["excluded_entity_types"] == ["Entity"]
     assert kwargs["custom_extraction_instructions"] == extraction_instructions()
