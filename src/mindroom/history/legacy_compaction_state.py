@@ -121,7 +121,7 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
 # captured ``legacy_event_ids``) and ``<session_table>_compacted_runs`` rows holding each folded run's JSON
 # and event ids, or a content-free tombstone without ``run_data``; ``session.summary`` cached the newest
 # generation's text, and a generation without text ended the summaries before it.
-# Last legacy release: v2026.10.340; replacement: the next release keeps every run in the runs table with
+# Last legacy release: v2026.10.340; replacement: v2026.10.341 keeps every run in the runs table with
 # summary rows beside it.
 # Handling: ``migrate_to_summary_rows`` runs once per conversation database when storage opens, before any
 # response uses it. It drops stored copies of every archived or tombstoned run with their member runs,
