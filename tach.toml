@@ -9116,6 +9116,11 @@ path = "mindroom.knowledge_graph.usage"
 depends_on = []
 
 [[modules]]
+path = "mindroom.knowledge_graph.extraction"
+depends_on = []
+visibility = ["mindroom.knowledge_graph.store"]
+
+[[modules]]
 path = "mindroom.knowledge_graph.embedded_server"
 depends_on = ["mindroom.logging_config"]
 visibility = ["mindroom.knowledge_graph.store"]
@@ -9147,6 +9152,7 @@ depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.embedded_server",
+    "mindroom.knowledge_graph.extraction",
     "mindroom.knowledge_graph.usage",
     "mindroom.tool_system.dependencies",
 ]

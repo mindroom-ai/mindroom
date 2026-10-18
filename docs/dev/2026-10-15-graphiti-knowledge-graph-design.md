@@ -96,6 +96,20 @@ Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI ke
 
 Graphiti needs structured output; small local models may fail extraction, which the ingestion worker reports and retries rather than hides.
 
+### Entity types tell extraction what an entity is
+
+Graphiti's default extraction creates an entity for anything noun-like, and the real openclaw graph shows the result: 2,097 of its 8,627 entities have no facts, and file paths (`/home/basnijholt/.mindroom-chat/config.yaml`), source files (`compaction.py`), memory notes (`memory/2026-04-05.md`), URLs, and a `capacitor://` link became entities.
+`knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and fixed extraction instructions.
+Graphiti reads a type model's docstring as the type's description, so the docstrings are what the extractor sees: handles and email addresses belong to a person, and a `Document` is never a file path.
+An extracted node that fits none of the types falls back to Graphiti's generic `Entity` type, which the exclusion drops, so a path or URL that no type claims never becomes a node.
+The instructions ask for one full name per entity, keep paths, source files, URLs, environment variables, configuration keys, commit hashes, branch names, command lines, and log files inside the facts that use them, and date each fact by when it happened or held rather than when it was discussed.
+They reach only the node and edge extraction prompts, not entity deduplication or summaries.
+Existing graphs keep their old nodes; only new episodes follow the types, at the cost of a longer prompt.
+
+Rejected: fields on the type models.
+Graphiti makes an extra model call to fill the fields of every node whose type has any, which would raise the cost of each episode, and a field named like one of `EntityNode`'s own (`name`, `summary`, `attributes`, and others) raises `EntityTypeValidationError`.
+Types are labels here, not a schema.
+
 ## Ingestion invariants
 
 - Only finished turns are ingested, and a turn waiting for approval holds back every later turn of its conversation, because it finishes in place with its original, earlier creation time and a marker past it would skip it.
@@ -136,7 +150,7 @@ Graphiti needs structured output; small local models may fail extraction, which 
 - Injecting graph facts into every prompt automatically; the agent queries when it needs to.
 - External FalkorDB, Neo4j, and Neptune backends; see the rejected external server above.
 - A monthly USD cap for exploration; the agent's `max_tool_calls_per_turn`, cron, and model choice bound spend, and `knowledge_graph` usage shows extraction cost.
-- Custom entity and edge types; Graphiti's default extraction first, a prescribed ontology only if evaluation shows it is needed.
+- Custom edge types and typed entity fields; entity types are labels only, see above.
 - Cognee, which the user did not ask for and was not evaluated.
 
 ## Limitations
@@ -146,5 +160,5 @@ Graphiti needs structured output; small local models may fail extraction, which 
 
 ## Open questions
 
-- Whether default Graphiti extraction on a cheap model is accurate enough on real transcripts; a labeled evaluation decides the default `knowledge_graph.model` and whether custom entity types are needed.
+- Whether default Graphiti extraction on a cheap model is accurate enough on real transcripts; a labeled evaluation decides the default `knowledge_graph.model`.
   A live run on 2026-10-16 with GPT-6 Luna, Gemini 3.8 Flash, and GPT-6 Luna through Codex extracted release, pull request, and author facts that matched their GitHub sources and superseded a changed owner, but missed a moved deadline and stored an agent's restatement of graph lookups as new conversation facts; extraction made about 15 model calls per episode.

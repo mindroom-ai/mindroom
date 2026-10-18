@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.usage import usage_target
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
@@ -343,6 +344,9 @@ class GraphitiStore:
                 # Graphiti otherwise adds the graph's ten newest episodes, from any conversation, to every prompt,
                 # which multiplies extraction cost and overflows smaller context windows; an episode carries its own context.
                 previous_episode_uuids=[],
+                entity_types=ENTITY_TYPES,
+                excluded_entity_types=EXCLUDED_ENTITY_TYPES,
+                custom_extraction_instructions=extraction_instructions(),
             )
 
     async def _search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:
