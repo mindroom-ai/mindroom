@@ -53,6 +53,13 @@ class KnowledgeGraphConfig(BaseModel):
         default=None,
         description="Model alias that extracts entities and facts; required when any agent enables the graph",
     )
+    extraction_instructions: str | None = Field(
+        default=None,
+        description=(
+            "Instructions added to the built-in ones when extracting entities and facts, such as which topics, systems, "
+            "or kinds of facts matter most"
+        ),
+    )
     ingest: KnowledgeGraphIngestConfig = Field(
         default_factory=KnowledgeGraphIngestConfig,
         description="Conversation ingestion settings",

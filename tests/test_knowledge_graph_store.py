@@ -24,7 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
-from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXTRACTION_INSTRUCTIONS
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.scope import GraphScope
 from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
 from mindroom.knowledge_graph.usage import UsageTarget
@@ -584,4 +584,21 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
     assert kwargs["previous_episode_uuids"] == []
     assert kwargs["entity_types"] is ENTITY_TYPES
     assert kwargs["excluded_entity_types"] == ["Entity"]
-    assert kwargs["custom_extraction_instructions"] == EXTRACTION_INSTRUCTIONS
+    assert kwargs["custom_extraction_instructions"] == extraction_instructions(None)
+
+
+@pytest.mark.asyncio
+async def test_configured_extraction_instructions_reach_graphiti(store: GraphitiStore) -> None:
+    """Instructions set in the config are added to the built-in ones for every extraction."""
+    store._config_provider().knowledge_graph.extraction_instructions = "Focus on lab equipment."
+    graphiti = await store._run(store._graphiti_client())
+    episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
+
+    with patch.object(graphiti, "add_episode", AsyncMock()) as add:
+        await store.add_episode(ALPHA, episode, UsageTarget("mind", "!r:$t", None))
+
+    assert add.await_args is not None
+    assert (
+        add.await_args.kwargs["custom_extraction_instructions"]
+        == f"{extraction_instructions(None)}\nFocus on lab equipment."
+    )
