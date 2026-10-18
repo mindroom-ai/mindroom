@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import takewhile
 from typing import TYPE_CHECKING, cast
 
 from agno.db.base import SessionType
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 
-# Which of a room's events an agent's journal saw redacted, or None while that agent's bot is not running.
+# Which of a room's events an agent saw redacted, or None while that agent's bot is not running.
 type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozenset[str] | None]]
 
 # A task another agent delegated runs in a session of its own, named after the delegation.
@@ -111,9 +112,10 @@ async def unredacted_runs(
     agent_name: str,
     redacted_event_ids: RedactedEventIds,
 ) -> list[RunOutput] | None:
-    """Return the runs that derive from no redacted event, or None while the agent cannot tell what was redacted.
+    """Return the runs before the first that derives from a redacted event, or None while the agent cannot tell.
 
-    A redaction removes a turn from stored history only when the agent next replies there, so readers skip it here.
+    ``runs`` are one conversation's, oldest first. A redaction removes that turn and every later one, which may build
+    on it, from stored history only when the agent next replies there, so readers skip them here.
     """
     by_room: dict[str, set[str]] = {}
     for run in runs:
@@ -126,4 +128,4 @@ async def unredacted_runs(
         if found is None:
             return None
         redacted |= found
-    return [run for run in runs if not run_event_ids(run) & redacted]
+    return list(takewhile(lambda run: not run_event_ids(run) & redacted, runs))

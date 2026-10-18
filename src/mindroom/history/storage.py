@@ -338,15 +338,12 @@ def remove_runs_answering(storage: BaseDb, session_id: str, scope: HistoryScope,
     compacted run answered the event, so does the summary that folded it.
     Returns True if anything was removed.
     """
-    return (
-        summary_rows.cut_at_event(
-            storage,
-            session_id=session_id,
-            scope_key=scope.key,
-            event_id=event_id,
-            match="answered",
-        )
-        is not None
+    return summary_rows.cut_at_event(
+        storage,
+        session_id=session_id,
+        scope_key=scope.key,
+        event_id=event_id,
+        match="answered",
     )
 
 
@@ -369,18 +366,16 @@ def _remove_redacted_event_from_history(
     legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
     if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
         summary_rows.cut_at_legacy_row(storage, session_id=session.session_id, scope_key=scope.key)
-    else:
-        result = summary_rows.cut_at_event(
-            storage,
-            session_id=session.session_id,
-            scope_key=scope.key,
-            event_id=event_id,
-            match="any",
-        )
-        if result is None:
-            return False
-        if legacy_event_ids is not None and result == "loaded":
-            summary_rows.retire(storage, session_id=session.session_id, scope_key=scope.key)
+    elif not summary_rows.cut_at_event(
+        storage,
+        session_id=session.session_id,
+        scope_key=scope.key,
+        event_id=event_id,
+        match="any",
+    ):
+        return False
+    elif legacy_event_ids is not None:
+        summary_rows.retire(storage, session_id=session.session_id, scope_key=scope.key)
     target_session = _latest_persisted_session(storage, session)
     _replace_scope_seen_event_ids(target_session, scope, set())
     storage.upsert_session(target_session)
@@ -430,13 +425,13 @@ async def remove_history_of_redacted_events(
 # Last legacy release: v2026.9.314; replacement: v2026.9.315 recorded exact per-run provenance.
 # Handling: That summary cannot be split by run, and every later summary includes it. An event it
 # may contain (its captured seen ids or retained source ownership) cuts at it, removing every run and
-# later summary of the scope. A loaded run removed for any other event retires the summaries, because
-# provenance from before per-scope seen ids may be incomplete; runs stay, and folded runs stay stored
-# without counting as compacted history. This matches how redaction treated such a summary before.
+# later summary of the scope. A cut for any other event, of loaded or folded runs, retires the summaries,
+# because provenance from before per-scope seen ids may be incomplete; runs stay, and folded runs stay
+# stored without counting as compacted history. This matches how redaction treated such a summary before.
 # Coverage: tests/test_compaction_redaction.py::test_redacting_legacy_provenance_clears_summary_and_folded_runs,
 # tests/test_compaction_redaction.py::test_legacy_provenance_wins_over_a_later_folded_hit,
 # tests/test_compaction_redaction.py::test_removing_a_loaded_run_retires_a_legacy_summary, and
-# tests/test_compaction_redaction.py::test_no_retirement_when_only_folded_runs_hold_the_event.
+# tests/test_compaction_redaction.py::test_removing_only_folded_runs_retires_a_legacy_summary.
 def _legacy_summary_may_contain(
     event_id: str,
     legacy_source_event_id: str | None,

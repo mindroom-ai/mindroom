@@ -533,9 +533,8 @@ def test_redacting_a_compacted_run_restores_the_runs_before_it(storage: SqliteDb
     _fold(storage, ["r0", "r1"], "S1")
     _fold(storage, ["r2", "r3"], "S2")
 
-    result = summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r3", match="any")
+    assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r3", match="any")
 
-    assert result is not None
     session = _loaded(storage)
     assert [run.run_id for run in session.runs or []] == ["r2"]
     assert session.summary.summary == "S1"  # type: ignore[union-attr]
@@ -576,9 +575,12 @@ def test_edit_of_a_message_a_range_only_read_cuts_nothing_there(storage: SqliteD
     _seed_events(storage, [_event_run("r0", seen=("$context",)), _event_run("r1")])
     _fold(storage, ["r0"], "S1")
 
-    assert (
-        summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$context", match="answered")
-        is None
+    assert not summary_rows.cut_at_event(
+        storage,
+        session_id="s1",
+        scope_key=_SCOPE.key,
+        event_id="$context",
+        match="answered",
     )
     assert _loaded(storage).summary.summary == "S1"  # type: ignore[union-attr]
     assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$context", match="any")

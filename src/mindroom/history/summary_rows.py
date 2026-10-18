@@ -306,12 +306,11 @@ def cut_at_event(
     scope_key: str,
     event_id: str,
     match: Literal["answered", "any"],
-) -> Literal["loaded", "folded"] | None:
+) -> bool:
     """Delete the earliest element of the scope's log that holds ``event_id`` and everything after it.
 
     An edit matches what a run answered; a redaction (``"any"``) also what it read or wrote. Returns
-    ``"loaded"`` when a run the scope loads holds the event, ``"folded"`` when only folded runs do,
-    and ``None`` when no element holds the event.
+    whether any element held the event.
     """
     with _transaction(storage, write=True) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
@@ -336,10 +335,10 @@ def cut_at_event(
         if folded is not None:
             candidates.append(folded)
         if not candidates:
-            return None
+            return False
         # The cut never starts after the first loaded holder, so that run always goes.
         _cut(connection, tables, session_id, scope_key, rows, min(candidates))
-    return "folded" if loaded_holder is None else "loaded"
+    return True
 
 
 # LEGACY_COMPAT: Content-free summaries of history compacted before the archive existed.
