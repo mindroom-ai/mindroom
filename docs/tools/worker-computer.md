@@ -109,6 +109,11 @@ Each entry must be a scheme and host with an optional port, and no wildcard.
 An optional single trailing `/` is accepted, and any other path is invalid.
 HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
+The Connections portal's [Matrix sign-in](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules, and Chat uses the same runtime origin for both.
+
+Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
+Audience binding, its `MINDROOM_PUBLIC_URL` requirement, and the rollout order are described under [Matrix sign-in from MindRoom Chat](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat).
+Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](../authorization.md#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.

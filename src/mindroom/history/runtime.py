@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.compaction import (
+    ConversationChangedError,
     Summarizer,
     SummaryModel,
     compact_running_turn,
@@ -591,6 +592,9 @@ async def _compact_before_reply(
             complete=complete,
             replay_model=replay_model,
         )
+    except ConversationChangedError:
+        # A request the conversation outran stays, so the next reply compacts what the conversation holds then.
+        raise
     except Exception:
         # A failing manual compaction must not retry on every reply.
         _clear_forced_compaction_after_failure(storage=storage, session=session, scope=scope, state=state)

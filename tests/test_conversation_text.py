@@ -11,6 +11,7 @@ from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_MET
 from mindroom.history.conversation_text import utterances
 from mindroom.history.replay import compaction_summary_message
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.prompt_message_tags import render_msg_tag
 
 
@@ -167,3 +168,34 @@ def test_user_messages_mindroom_stores_in_a_turn_are_nobodys_words(stored: Messa
         ("reply", None, "Paused."),
     ]
     assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == ["said", "reply", "runtime", "reply"]
+
+
+def test_utterances_leave_out_hook_context() -> None:
+    """Context a hook attached to a message is MindRoom's, not the sender's words."""
+    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+    run = _run(
+        Message(
+            role="user",
+            content=render_msg_tag(sender="@alice:example.test", body=f"When does Atlas ship?\n\n{block}"),
+        ),
+    )
+
+    said = [u for u in utterances(run) if u.kind == "said"]
+
+    assert [u.unredacted for u in said] == ["When does Atlas ship?"]
+
+
+def test_a_message_holding_only_hook_context_is_not_an_utterance() -> None:
+    """A message with nothing the person typed adds no empty line to the conversation."""
+    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+    run = _run(Message(role="user", content=render_msg_tag(sender="@alice:example.test", body=block)))
+
+    assert [u for u in utterances(run) if u.kind == "said"] == []
+
+
+def test_a_message_without_hook_context_keeps_its_whitespace() -> None:
+    """Pasted code keeps its leading indentation and trailing newline."""
+    body = "    return 1\n"
+    run = _run(Message(role="user", content=render_msg_tag(sender="@alice:example.test", body=body)))
+
+    assert [u.unredacted for u in utterances(run) if u.kind == "said"] == [body]

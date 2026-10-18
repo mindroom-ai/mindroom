@@ -1579,10 +1579,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections_session_cookie"
+depends_on = []
+
+[[modules]]
 path = "mindroom.api.auth"
 depends_on = [
     "mindroom.authorization",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.connections_session_cookie",
     "mindroom.api.open_access",
     "mindroom.constants",
     "mindroom.origins",
@@ -1782,6 +1787,19 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections_session"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.api.connections_session_cookie",
+    "mindroom.constants",
+    "mindroom.matrix_openid",
+    "mindroom.runtime_env_policy",
+    "mindroom.origins",
+]
+
+[[modules]]
 path = "mindroom.api.connection_agents"
 depends_on = [
     "mindroom.access_policy",
@@ -1855,9 +1873,9 @@ depends_on = [
     "mindroom.credentials.legacy_tool_credentials",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.api.computers",
-    "mindroom.worker_computer.auth",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
+    "mindroom.api.connections_session",
     "mindroom.api.thread_exports",
     "mindroom.agent_policy",
     "mindroom.api.auth",
@@ -5180,6 +5198,7 @@ depends_on = [
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.browser_proxy",
+    "mindroom.origins",
 ]
 # The broker's wiring points: every module outside the feature that may import it.
 visibility = [
@@ -7549,6 +7568,7 @@ depends_on = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.replay",
     "mindroom.history.run_visibility",
+    "mindroom.hooks.enrichment",
     "mindroom.prompt_message_tags",
     "mindroom.turn_origin",
 ]
@@ -7727,14 +7747,12 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.worker_computer.auth"
+path = "mindroom.matrix_openid"
 depends_on = [
     "mindroom.bounded_bytes",
-    "mindroom.runtime_env_policy",
     "mindroom.constants",
     "mindroom.origins",
     "mindroom.requester_identity",
-    "mindroom.worker_computer.sessions",
 ]
 
 [[modules]]
@@ -7750,11 +7768,12 @@ path = "mindroom.api.computers"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.worker_computer.auth",
+    "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend",
     "mindroom.workers.runtime",
+    "mindroom.origins",
 ]
 
 [[modules]]
@@ -9133,6 +9152,11 @@ path = "mindroom.knowledge_graph.usage"
 depends_on = []
 
 [[modules]]
+path = "mindroom.knowledge_graph.extraction"
+depends_on = []
+visibility = ["mindroom.knowledge_graph.store"]
+
+[[modules]]
 path = "mindroom.knowledge_graph.embedded_server"
 depends_on = ["mindroom.logging_config"]
 visibility = ["mindroom.knowledge_graph.store"]
@@ -9164,6 +9188,7 @@ depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.embedded_server",
+    "mindroom.knowledge_graph.extraction",
     "mindroom.knowledge_graph.usage",
     "mindroom.tool_system.dependencies",
 ]

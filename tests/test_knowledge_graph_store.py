@@ -16,6 +16,7 @@ import pytest_asyncio
 from falkordb.asyncio.graph import AsyncGraph
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
+from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 from redis.asyncio import Redis
 
 from mindroom.config.agent import AgentConfig
@@ -23,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXTRACTION_INSTRUCTIONS
 from mindroom.knowledge_graph.scope import GraphScope
 from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
 from mindroom.knowledge_graph.usage import UsageTarget
@@ -205,6 +207,132 @@ async def test_entity_returns_summary_and_facts(store: GraphitiStore) -> None:
     assert await store.entity(BETA, "Alice") is None
 
 
+async def _seed_entity(
+    graph_store: GraphitiStore,
+    scope: GraphScope,
+    name: str,
+    *,
+    summary: str = "",
+    facts: int = 0,
+    name_embedding: list[float] | None = None,
+    created_at: datetime | None = None,
+) -> None:
+    """Store an entity with ``facts`` edges to other new entities, and optionally a chosen name embedding and age."""
+
+    async def seed() -> None:
+        graphiti = await graph_store._graphiti_client()
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        node = EntityNode(name=name, group_id=scope.graph_name, summary=summary)
+        if created_at is not None:
+            node.created_at = created_at
+        if name_embedding is None:
+            await node.generate_name_embedding(graphiti.embedder)
+        else:
+            node.name_embedding = name_embedding
+        await node.save(driver)
+        for index in range(facts):
+            other = EntityNode(name=f"Counterpart {index}", group_id=scope.graph_name)
+            await other.generate_name_embedding(graphiti.embedder)
+            await other.save(driver)
+            edge = EntityEdge(
+                source_node_uuid=node.uuid,
+                target_node_uuid=other.uuid,
+                name="RELATES",
+                fact=f"{name} fact {index}",
+                group_id=scope.graph_name,
+                episodes=[],
+                created_at=JAN,
+                valid_at=JAN,
+            )
+            await edge.generate_embedding(graphiti.embedder)
+            await edge.save(driver)
+
+    await graph_store._run(seed())
+
+
+async def _search_ranking(graph_store: GraphitiStore, scope: GraphScope, query: str) -> list[str]:
+    """The names Graphiti's hybrid search ranks for ``query``, best first, as a lookup without an exact name sees them."""
+
+    async def search() -> list[str]:
+        graphiti = await graph_store._graphiti_client()
+        results = await graphiti.search_(
+            query,
+            config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": 5}),
+            group_ids=[scope.graph_name],
+        )
+        return [node.name for node in results.nodes]
+
+    return await graph_store._run(search())
+
+
+@pytest.mark.asyncio
+async def test_entity_prefers_an_exact_name_over_a_better_search_hit(store: GraphitiStore) -> None:
+    """A name that matches an entity exactly finds it, even where search ranks a longer name higher."""
+    await _seed_entity(
+        store,
+        ALPHA,
+        "Dana - Brokerage",
+        summary="Dana dana dana brokerage account",
+    )
+    # The exact entity's name embedding points away from the query, as a real embedding can for a bare first name.
+    await _seed_entity(store, ALPHA, "Dana", summary="A person.", facts=3, name_embedding=[1.0] * 32)
+    assert (await _search_ranking(store, ALPHA, "dana"))[0] == "Dana - Brokerage"
+
+    entity = await store.entity(ALPHA, "dana")
+
+    assert entity is not None
+    assert entity.name == "Dana"
+    assert entity.summary == "A person."
+    assert len(entity.facts) == 3
+    assert entity.others == []
+
+
+@pytest.mark.asyncio
+async def test_entity_with_several_exact_names_picks_the_one_with_most_facts(store: GraphitiStore) -> None:
+    """Names that differ only in case are all exact matches, and the entity with the most facts wins."""
+    await _seed_entity(store, ALPHA, "dana", summary="A stray duplicate.", facts=1)
+    await _seed_entity(store, ALPHA, "Dana", summary="A person.", facts=3)
+    await _seed_entity(store, ALPHA, "DANA", summary="Another duplicate.")
+
+    entity = await store.entity(ALPHA, "Dana")
+
+    assert entity is not None
+    assert entity.summary == "A person."
+    assert entity.others == []
+
+
+@pytest.mark.asyncio
+async def test_entity_with_equally_many_facts_picks_the_oldest(store: GraphitiStore) -> None:
+    """Exact names with the same number of facts resolve to the oldest entity, whatever order they were stored in."""
+    await _seed_entity(store, ALPHA, "DANA", summary="Stored first, created later.", facts=2, created_at=MAR)
+    await _seed_entity(store, ALPHA, "dana", summary="Stored second, created earlier.", facts=2, created_at=JAN)
+    await _seed_entity(store, BETA, "DANA", summary="Stored first, created earlier.", facts=2, created_at=JAN)
+    await _seed_entity(store, BETA, "dana", summary="Stored second, created later.", facts=2, created_at=MAR)
+
+    stored_second = await store.entity(ALPHA, "Dana")
+    stored_first = await store.entity(BETA, "Dana")
+
+    assert stored_second is not None
+    assert stored_second.summary == "Stored second, created earlier."
+    assert stored_first is not None
+    assert stored_first.summary == "Stored first, created earlier."
+
+
+@pytest.mark.asyncio
+async def test_entity_without_exact_match_lists_other_close_matches(store: GraphitiStore) -> None:
+    """With no exact name, the best search hit is the entity and the next hits are listed as other close matches."""
+    for name in ("Atlas dashboard v2", "Atlas Labs", "Project dashboard"):
+        await _seed_entity(store, ALPHA, name, summary=f"{name} summary.")
+
+    entity = await store.entity(ALPHA, "Atlas dashboard")
+
+    assert entity is not None
+    ranking = await _search_ranking(store, ALPHA, "Atlas dashboard")
+    assert ranking[0] == "Atlas dashboard v2"
+    assert sorted(ranking) == ["Atlas Labs", "Atlas dashboard v2", "Project dashboard"]
+    assert [entity.name, *entity.others] == ranking
+
+
 def _holds_embedding(value: object) -> bool:
     """Whether a FalkorDB reply value is, or contains, one of the test embedder's 32-number vectors."""
     if isinstance(value, dict):
@@ -231,12 +359,18 @@ async def test_lookups_do_not_read_embeddings_back(store: GraphitiStore) -> None
 
     with patch.object(AsyncGraph, "query", recording_query):
         facts = await store.search_facts(ALPHA, "who leads Project Atlas", limit=5)
-        entity = await store.entity(ALPHA, "Alice")
+        # An exact name loads the entity by its uuid; any other text goes through Graphiti's node search.
+        exact = await store.entity(ALPHA, "Alice")
+        before_fuzzy = len(rows)
+        fuzzy = await store.entity(ALPHA, "Atlas")
 
     assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]
-    assert entity is not None
-    assert [fact.fact for fact in entity.facts] == ["Alice leads Project Atlas"]
-    assert rows
+    assert exact is not None
+    assert [fact.fact for fact in exact.facts] == ["Alice leads Project Atlas"]
+    assert fuzzy is not None
+    assert fuzzy.name == "Project Atlas"
+    assert before_fuzzy
+    assert len(rows) > before_fuzzy
     assert not any(rows)
 
 
@@ -435,7 +569,10 @@ async def test_the_embedder_is_built_off_the_event_loop(store: GraphitiStore) ->
 
 @pytest.mark.asyncio
 async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) -> None:
-    """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt."""
+    """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt.
+
+    The episode is extracted into the entity types, with the generic type excluded and the instructions added.
+    """
     graphiti = await store._run(store._graphiti_client())
     episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
 
@@ -443,4 +580,8 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
         await store.add_episode(ALPHA, episode, UsageTarget("mind", "!r:$t", None))
 
     assert add.await_args is not None
-    assert add.await_args.kwargs["previous_episode_uuids"] == []
+    kwargs = add.await_args.kwargs
+    assert kwargs["previous_episode_uuids"] == []
+    assert kwargs["entity_types"] is ENTITY_TYPES
+    assert kwargs["excluded_entity_types"] == ["Entity"]
+    assert kwargs["custom_extraction_instructions"] == EXTRACTION_INSTRUCTIONS

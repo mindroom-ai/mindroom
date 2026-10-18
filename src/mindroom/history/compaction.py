@@ -24,6 +24,7 @@ from mindroom.history.storage import (
     ensure_scope_session_row,
     read_chunk_basis,
     record_summary_usage,
+    reload_session,
     save_working_run_changes,
     update_scope_state_on_latest,
 )
@@ -276,16 +277,21 @@ async def compact_scope_history(
             ),
         )
 
-    rewrite_result = await _rewrite_working_session_for_compaction(
-        storage=storage,
-        persisted_session=session,
-        working_session=working_session,
-        scope=scope,
-        summarizer=summarizer,
-        runs=runs,
-        before_persist=before_persist,
-        after_persist=after_persist,
-    )
+    try:
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=session,
+            working_session=working_session,
+            scope=scope,
+            summarizer=summarizer,
+            runs=runs,
+            before_persist=before_persist,
+            after_persist=after_persist,
+        )
+    except ConversationChangedError:
+        # The reply replays what the conversation holds now; a manual request stays for the next reply.
+        await run_blocking_until_complete(reload_session, storage, session)
+        raise
     if rewrite_result is None:
         await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
         return None
@@ -360,7 +366,7 @@ async def _rewrite_working_session_for_compaction(
             ),
         )
         if basis is None:
-            _log_conversation_changed(persisted_session.session_id, scope, compacted_run_count)
+            _stop_for_changed_conversation(persisted_session.session_id, scope, compacted_run_count)
             break
         chunk = await _summarize_chunk(summarizer, previous_summary, remaining)
         if chunk is None:
@@ -388,7 +394,7 @@ async def _rewrite_working_session_for_compaction(
             ),
         )
         if not appended:
-            _log_conversation_changed(persisted_session.session_id, scope, compacted_run_count)
+            _stop_for_changed_conversation(persisted_session.session_id, scope, compacted_run_count)
             break
         summarizer = chunk.summarizer
         summary_text = chunk_summary.summary
@@ -410,8 +416,18 @@ async def _rewrite_working_session_for_compaction(
     )
 
 
-def _log_conversation_changed(session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
-    # Another writer changed this scope's history since the session loaded; earlier chunks stand.
+class ConversationChangedError(RuntimeError):
+    """Another writer changed a scope's history after compaction read it, so compaction stored nothing."""
+
+    def __init__(self) -> None:
+        super().__init__("The conversation changed during compaction.")
+
+
+def _stop_for_changed_conversation(session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
+    """Stop compacting after another writer changed the scope's history; with nothing stored yet, compaction failed."""
+    if compacted_run_count == 0:
+        raise ConversationChangedError
+    # Earlier chunks stand.
     logger.warning(
         "Compaction stopped because the conversation changed",
         session_id=session_id,
@@ -500,8 +516,7 @@ async def compact_running_turn(
             segment=segment,
         )
         if not appended:
-            msg = "The conversation changed during compaction."
-            raise RuntimeError(msg)
+            raise ConversationChangedError
         on_commit(summary)
         outcome = CompactionOutcome(
             mode="auto",

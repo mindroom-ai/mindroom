@@ -7,12 +7,13 @@ from urllib.parse import quote, unquote, urlsplit
 
 import pytest
 
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.egress_broker.env import (
     BROKER_CA_PEM_ENV,
     apply_runner_ca_bundle,
     broker_execution_env,
     egress_broker_enabled,
+    personal_page_served,
     primary_callback_hosts,
 )
 
@@ -228,3 +229,33 @@ def test_egress_broker_enabled_follows_the_port_setting(
     )
 
     assert egress_broker_enabled(runtime_paths) is enabled
+
+
+_UPSTREAM_JWT = {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true", "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true"}
+_CHAT_ORIGINS = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://chat.example.org"]'}
+
+
+@pytest.mark.parametrize(
+    ("process_env", "served"),
+    [
+        pytest.param({}, False, id="no-sign-in"),
+        pytest.param({"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}, False, id="upstream-without-jwt"),
+        pytest.param(_UPSTREAM_JWT, True, id="upstream-jwt"),
+        pytest.param({"MINDROOM_CONNECTIONS_AGENT": "personal", **_CHAT_ORIGINS}, True, id="matrix-sign-in"),
+        pytest.param({"MINDROOM_CONNECTIONS_AGENT": "personal"}, False, id="portal-without-chat-origins"),
+        pytest.param(_CHAT_ORIGINS, False, id="chat-origins-without-portal"),
+    ],
+)
+def test_personal_page_served_needs_a_sign_in(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    *,
+    served: bool,
+) -> None:
+    """Users reach the personal page through trusted upstream JWT or Matrix sign-in, and only while the broker is on."""
+
+    def paths(env: dict[str, str]) -> RuntimePaths:
+        return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+
+    assert personal_page_served(paths({"MINDROOM_EGRESS_BROKER_PORT": "8768", **process_env})) is served
+    assert personal_page_served(paths(process_env)) is False

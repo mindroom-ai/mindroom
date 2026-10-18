@@ -35,6 +35,7 @@ from mindroom.history.session_context import (
     resolve_history_scope,
 )
 from mindroom.history.storage import (
+    read_chunk_basis,
     read_scope_state,
     set_force_compaction_state,
 )
@@ -1071,9 +1072,12 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_chunk", ["fails", "outrun"])
 async def test_prepare_history_for_run_persists_successful_compaction_chunks_before_later_failure(
     tmp_path: Path,
+    second_chunk: str,
 ) -> None:
+    """A later chunk's failure, or a writer outrunning it, keeps the chunks already stored."""
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -1162,12 +1166,17 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         summary_input_budget_tokens=summary_input_budget,
         compaction_timeout_seconds=600.0,
     )
-    summary_mock = AsyncMock(
-        side_effect=[
-            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
-            RuntimeError("summary failed"),
-        ],
-    )
+
+    async def summarize(**_kwargs: object) -> SessionSummary:
+        if summary_mock.await_count == 1:
+            return SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC))
+        if second_chunk == "fails":
+            msg = "summary failed"
+            raise RuntimeError(msg)
+        storage.delete_runs(["run-3"])
+        return SessionSummary(summary="stale second summary", updated_at=datetime.now(UTC))
+
+    summary_mock = AsyncMock(side_effect=summarize)
 
     with (
         patch(
@@ -1179,6 +1188,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
             new=summary_mock,
         ),
     ):
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
             agent_name="test_agent",
@@ -1189,6 +1199,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
             execution_identity=None,
             storage=storage,
             session=session,
+            compaction_lifecycle=lifecycle,
             history_settings=history_settings,
             execution_plan=execution_plan,
         )
@@ -1197,10 +1208,16 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == first_summary_text
-    assert [run.run_id for run in persisted.runs or []] == ["run-3"]
+    assert [run.run_id for run in persisted.runs or []] == (["run-3"] if second_chunk == "fails" else [])
     assert summary_mock.await_count == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_reply_outcome == "failed"
+    if second_chunk == "fails":
+        assert prepared.compaction_reply_outcome == "failed"
+    else:
+        assert prepared.compaction_reply_outcome == "success"
+        outcome = completed_outcome(lifecycle)
+        assert outcome.summary == first_summary_text
+        assert outcome.compacted_run_count == 2
 
 
 @pytest.mark.asyncio
@@ -1686,6 +1703,67 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
 
     assert prepared.compaction_reply_outcome == "failed"
     assert prepared.replays_persisted_history is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race", ["before_summary", "during_summary"])
+async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_requested(
+    tmp_path: Path,
+    race: str,
+) -> None:
+    """A redaction landing before or during the summary call voids the chunk; the notice names it and the request stays."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    seed_session(storage, session)
+    lifecycle = RecordingCompactionLifecycle()
+
+    def basis_after_a_redaction_cuts_a_run(*args: object, **kwargs: object) -> object:
+        if race == "before_summary":
+            storage.delete_runs(["run-1"])
+        return read_chunk_basis(*args, **kwargs)
+
+    async def summary_while_a_redaction_cuts_a_run(**_kwargs: object) -> SessionSummary:
+        if race == "during_summary":
+            storage.delete_runs(["run-1"])
+        return SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch("mindroom.history.compaction.read_chunk_basis", new=basis_after_a_redaction_cuts_a_run),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_while_a_redaction_cuts_a_run),
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            compaction_lifecycle=lifecycle,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is True
+    # The reply plans with what the conversation holds now, not the run the redaction removed.
+    assert [run.run_id for run in session.runs or []] == ["run-2"]
+    assert prepared.compaction_reply_outcome == "failed"
+    assert isinstance(lifecycle.events[-1], CompactionLifecycleFailure)
+    assert lifecycle.events[-1].failure_reason == "The conversation changed during compaction."
 
 
 @pytest.mark.asyncio

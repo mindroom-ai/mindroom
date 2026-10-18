@@ -1,8 +1,15 @@
 """Browser origin normalization and strict allowlist validation."""
 
+from __future__ import annotations
+
 import ipaddress
+import json
 from contextlib import suppress
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -47,3 +54,18 @@ def parse_browser_origin(value: str) -> str:
         msg = f"Browser origin must be explicit HTTPS or loopback HTTP: {value!r}"
         raise ValueError(msg)
     return origin
+
+
+def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...]:
+    """Read a JSON list of exact web and bundled iOS app origins from `env_name`; invalid configuration fails closed."""
+    try:
+        origins = json.loads(paths.env_value(env_name, default="[]") or "[]")
+        if not isinstance(origins, list) or not all(isinstance(origin, str) for origin in origins):
+            return ()
+        # The bundled iOS app has a fixed custom-scheme origin. Accept only
+        # this literal, never arbitrary capacitor origins or opaque "null".
+        return tuple(
+            origin if origin == "capacitor://localhost" else parse_browser_origin(origin) for origin in origins
+        )
+    except ValueError:
+        return ()
