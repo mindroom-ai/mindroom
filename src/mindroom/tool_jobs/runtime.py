@@ -662,6 +662,10 @@ class ToolJobRuntime:
         retained = False
         async with self._lock:
             entry, readable = self._waited_entry(job_id, owner, depth)
+            if not readable and claim is not None and entry.claim == claim:
+                # A wait that cannot read its job returns no claim, so it gives back the one it was handed.
+                entry.claim = None
+                self.changed.set()
             claim = entry.claim_for(claim) if readable else None
             if claim is None:
                 return _JobWait(await self._snapshot(entry))

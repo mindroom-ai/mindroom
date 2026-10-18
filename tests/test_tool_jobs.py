@@ -99,6 +99,34 @@ async def test_a_wait_whose_access_is_still_resolving_is_released_not_refused(
 
 
 @pytest.mark.asyncio
+async def test_a_wait_that_starts_while_access_resolves_gives_back_its_claim(tmp_path: Path) -> None:
+    """A wait that cannot read its job yet returns the handle and releases the claim it was handed, so the outcome stays retrievable."""
+    grant = {"access": "allowed"}
+    runtime = await tool_job_runtime(
+        tmp_path,
+        authorize=lambda _job: grant["access"] == "allowed",
+        denied=lambda _job: False,
+    )
+    owner = job_owner()
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "paid")
+
+    try:
+        _, claim = await runtime.start("job-1", tool_name="pay", depth=0, adapter={}, owner=owner, operation=operation)
+        grant["access"] = "pending"
+        waited = await runtime.wait("job-1", owner=owner, depth=0, claim=claim)
+        assert waited.claim is None
+        await wait_for_status(runtime, "job-1", "completed")
+        grant["access"] = "allowed"
+        retrieved = await runtime.wait("job-1", owner=owner, depth=0, timeout=0)
+        assert retrieved.claim is not None
+        await runtime.release_wait("job-1", retrieved.claim)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_final_shutdown_waits_for_receipt_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A replacement owner must never recover before the old owner's last receipt lands."""
     runtime = await tool_job_runtime(tmp_path)
