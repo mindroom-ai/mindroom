@@ -38,7 +38,6 @@ from mindroom.history.session_context import (
     resolve_history_scope,
 )
 from mindroom.history.storage import (
-    clear_force_compaction_state,
     consume_pending_force_compaction_scope,
     read_scope_state,
     set_force_compaction_state,
@@ -1037,7 +1036,7 @@ def _prepare_scope_state_for_run(
         state = set_force_compaction_state(session, scope, state, force=True)
         storage.upsert_session(session)
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = clear_force_compaction_state(session, scope, state)
+        state = set_force_compaction_state(session, scope, state, force=False)
         storage.upsert_session(session)
         description = describe_compaction_unavailability(execution_plan)
         logger.warning(

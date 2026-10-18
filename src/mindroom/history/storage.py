@@ -118,8 +118,8 @@ def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> Agent
 
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
     """Return the scoped compaction state for one session and scope."""
-    raw_state = _read_raw_scope_states(session).get(scope.key)
-    return _parse_state(raw_state) if raw_state is not None else HistoryScopeState()
+    raw_state = _read_raw_scope_states(session).get(scope.key, {})
+    return HistoryScopeState(force_compact_before_next_run=bool(raw_state.get("force_compact_before_next_run")))
 
 
 def _read_raw_scope_states(session: AgentSession | TeamSession) -> dict[str, dict[str, Any]]:
@@ -148,10 +148,10 @@ def _write_scope_state(
     Other scopes' stored mappings are kept verbatim.
     """
     raw_states = _read_raw_scope_states(session)
-    if _state_is_empty(state):
-        raw_states.pop(scope.key, None)
+    if state.force_compact_before_next_run:
+        raw_states[scope.key] = {"force_compact_before_next_run": True}
     else:
-        raw_states[scope.key] = _state_to_metadata(state)
+        raw_states.pop(scope.key, None)
 
     session_metadata = dict(session.metadata or {})
     if not raw_states:
@@ -162,15 +162,6 @@ def _write_scope_state(
             "states": raw_states,
         }
     session.metadata = session_metadata
-
-
-def clear_force_compaction_state(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> HistoryScopeState:
-    """Clear the next-run force flag in one session scope."""
-    return set_force_compaction_state(session, scope, state, force=False)
 
 
 def set_force_compaction_state(
@@ -192,12 +183,7 @@ def add_pending_force_compaction_scope(
 ) -> dict[str, object]:
     """Record a next-run compaction request inside Agno session_state."""
     next_session_state = session_state if session_state is not None else {}
-    raw_scope_keys = next_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
-    scope_keys = (
-        [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
-        if isinstance(raw_scope_keys, list)
-        else []
-    )
+    scope_keys = _pending_scope_keys(next_session_state)
     if scope.key not in scope_keys:
         scope_keys.append(scope.key)
     next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
@@ -209,28 +195,18 @@ def consume_pending_force_compaction_scope(
     scope: HistoryScope,
 ) -> bool:
     """Consume one pending next-run compaction request from Agno session_state."""
-    session_data = session.session_data
-    if not isinstance(session_data, dict):
-        return False
-    raw_session_state = session_data.get("session_state")
-    if not isinstance(raw_session_state, dict):
-        return False
-    raw_scope_keys = raw_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
-    if not isinstance(raw_scope_keys, list):
-        return False
-
-    scope_keys = [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
-    if scope.key not in scope_keys:
+    session_state = _session_state(session)
+    if session_state is None or scope.key not in (scope_keys := _pending_scope_keys(session_state)):
         return False
 
     remaining_scope_keys = [scope_key for scope_key in scope_keys if scope_key != scope.key]
-    next_session_state = dict(raw_session_state)
+    next_session_state = dict(session_state)
     if remaining_scope_keys:
         next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = remaining_scope_keys
     else:
         next_session_state.pop(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY, None)
 
-    next_session_data = dict(session_data)
+    next_session_data = dict(session.session_data or {})
     if next_session_state:
         next_session_data["session_state"] = next_session_state
     else:
@@ -271,27 +247,24 @@ def has_queued_force_compaction(storage: BaseDb, session_id: str, scope: History
         metadata=fields["metadata"],
         session_data=fields["session_data"],
     )
-    return read_scope_state(session, scope).force_compact_before_next_run or _has_pending_force_compaction_scope(
-        session,
-        scope,
+    return read_scope_state(session, scope).force_compact_before_next_run or scope.key in _pending_scope_keys(
+        _session_state(session),
     )
 
 
-def _has_pending_force_compaction_scope(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> bool:
-    """Return whether Agno session_state has an unconsumed compaction request."""
+def _session_state(session: AgentSession | TeamSession) -> dict[str, object] | None:
+    """Return Agno's session_state mapping, where the tool queues next-run compaction requests."""
     session_data = session.session_data
-    if not isinstance(session_data, dict):
-        return False
-    raw_session_state = session_data.get("session_state")
-    if not isinstance(raw_session_state, dict):
-        return False
-    raw_scope_keys = raw_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
+    session_state = session_data.get("session_state") if isinstance(session_data, dict) else None
+    return session_state if isinstance(session_state, dict) else None
+
+
+def _pending_scope_keys(session_state: dict[str, object] | None) -> list[str]:
+    """Return the scopes with a queued next-run compaction request."""
+    raw_scope_keys = session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY) if session_state else None
     if not isinstance(raw_scope_keys, list):
-        return False
-    return scope.key in {scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key}
+        return []
+    return [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
 
 
 def run_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
@@ -476,18 +449,6 @@ def _legacy_summary_may_contain(
         has_summary=True,
         seen_event_ids=set(legacy_event_ids),
     )
-
-
-def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
-    return HistoryScopeState(force_compact_before_next_run=bool(raw_state.get("force_compact_before_next_run")))
-
-
-def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
-    return {"force_compact_before_next_run": state.force_compact_before_next_run}
-
-
-def _state_is_empty(state: HistoryScopeState) -> bool:
-    return not state.force_compact_before_next_run
 
 
 def _latest_persisted_session(
