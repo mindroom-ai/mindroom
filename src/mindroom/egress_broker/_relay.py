@@ -9,6 +9,7 @@ import json
 import re
 import sqlite3
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -63,6 +64,8 @@ _GIT_DISCOVERY_SERVICES = frozenset({"git-upload-pack", "git-receive-pack"})
 _ECHO_METHODS = frozenset({"TRACE", "TRACK"})
 # Names a broker refusal's code; h11 lowercases header names, so upstream copies compare equal.
 _ERROR_HEADER = b"x-mindroom-error"
+# One requester cannot hold more of the broker's destination lookups than this, even when its names never resolve.
+_MAX_CONCURRENT_LOOKUPS = 4
 
 logger = get_logger(__name__)
 
@@ -421,6 +424,11 @@ class Relay:
     scope_info: Callable[[WorkerClaims], ScopeInfo]
     dial_policy: DialPolicy
     max_body_bytes: int
+    # Keyed by requester, or by worker when the worker serves no single requester.
+    _lookup_slots: defaultdict[str, asyncio.Semaphore] = field(
+        default_factory=lambda: defaultdict(lambda: asyncio.Semaphore(_MAX_CONCURRENT_LOOKUPS)),
+        init=False,
+    )
 
     async def read_rules(self, client: Peer, entry: AuditEntry) -> EgressRules | None:
         """Return the rules for the entry's requester; when the provider fails, answer 502, audit, and return None.
@@ -493,9 +501,10 @@ class Relay:
     ) -> Peer | None:
         """Dial `entry.host` through the guard and the rules' private networks; on failure answer, audit, return None."""
         policy = replace(self.dial_policy, private_networks=rules.private_networks)
+        lookup_slots = self._lookup_slots[entry.claims.requester_id or entry.claims.worker_key]
         try:
             reader, writer = await _from_upstream(
-                open_upstream(entry.host, port, policy=policy, ssl_context=ssl_context),
+                open_upstream(entry.host, port, policy=policy, ssl_context=ssl_context, lookup_slots=lookup_slots),
             )
         except DestinationBlockedError:
             await self.deny(client, entry, refusal_body("destination_blocked", host=entry.host))

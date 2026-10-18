@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
+from mindroom.egress_broker import dial
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA, materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
@@ -673,6 +674,23 @@ def connect_request(target: str, *, authorization: str | None = None) -> bytes:
     if authorization is not None:
         lines.append(f"Proxy-Authorization: {authorization}")
     return ("\r\n".join(lines) + "\r\n\r\n").encode()
+
+
+async def open_upstream(
+    host: str,
+    port: int,
+    *,
+    policy: DialPolicy,
+    ssl_context: ssl.SSLContext | None,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Dial `host` through the guard as a requester with no other lookup running."""
+    return await dial.open_upstream(
+        host,
+        port,
+        policy=policy,
+        ssl_context=ssl_context,
+        lookup_slots=asyncio.Semaphore(),
+    )
 
 
 async def audit_records(audit: AuditLog, count: int) -> list[AuditRecord]:

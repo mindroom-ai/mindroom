@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, partial
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -28,6 +29,11 @@ __all__ = [
 
 
 logger = get_logger(__name__)
+
+# Worker code can open many connections to names whose nameservers never answer. Lookups therefore run on their own
+# threads, so they cannot exhaust the default executor that rule reads, audit writes, and leaf certificates share, and
+# each requester holds at most a few of them at once.
+_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="mindroom-egress-dns")
 
 _TUNNEL_REQUIREMENT = (
     "The egress broker tunnels to the IP address it validated, so the operator proxy must allow CONNECT to IP "
@@ -98,16 +104,25 @@ async def _dial(
     return reader, writer
 
 
+def _lookup_finished(lookup_slots: asyncio.Semaphore, lookup: asyncio.Future[list[_IPAddress]]) -> None:
+    lookup_slots.release()
+    if not lookup.cancelled():
+        # The connection that asked may have stopped waiting for the answer.
+        lookup.exception()
+
+
 async def open_upstream(
     host: str,
     port: int,
     *,
     policy: DialPolicy,
     ssl_context: ssl.SSLContext | None,
+    lookup_slots: asyncio.Semaphore,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a validated TCP connection to an upstream host.
 
-    Resolution runs in a thread to avoid blocking the event loop. The connection
+    Resolution runs on the broker's lookup threads, holding one of
+    `lookup_slots` until its thread returns. The connection
     dials the validated IP address (never the hostname again), trying addresses
     in order with a 1s per-attempt timeout except the last, all within the
     policy's connect_timeout. When the policy names an operator proxy for the
@@ -122,16 +137,22 @@ async def open_upstream(
         ssl.SSLError: TLS handshake failed (when ssl_context is provided).
 
     """
-    # Resolve and validate the destination in a thread
-    try:
-        addresses: list[_IPAddress] = await asyncio.to_thread(
+    await lookup_slots.acquire()
+    lookup = asyncio.get_running_loop().run_in_executor(
+        _LOOKUP_EXECUTOR,
+        partial(
             validated_connect_addresses,
             host,
             port=port,
             allow_private_networks=policy.allow_private_networks,
             allow_loopback=policy.allow_loopback,
             private_networks=policy.private_networks,
-        )
+        ),
+    )
+    lookup.add_done_callback(partial(_lookup_finished, lookup_slots))
+    try:
+        # A resolver can outlive the connection waiting on it; the slot stays taken until the lookup ends.
+        addresses = await asyncio.shield(lookup)
     except ServerFetchUrlError as exc:
         # An unresolvable name is a failed connect, not a policy refusal.
         if exc.reason == "dns_resolution_failed":
