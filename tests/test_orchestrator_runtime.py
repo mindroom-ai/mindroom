@@ -193,24 +193,21 @@ async def test_open_reply_event_id_reads_only_running_bots_replies(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_redacted_event_ids_read_only_running_bots_journals(tmp_path: Path) -> None:
-    """Knowledge graph ingestion learns redactions from the agent's own journal, and waits while it is not running."""
+async def test_redacted_event_ids_read_only_running_bots(tmp_path: Path) -> None:
+    """Background readers learn redactions from the agent's own bot, and wait while it is not running."""
     config = _runtime_bound_config(Config(), tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
 
     def bot(*, running: bool) -> AgentBot:
         managed_bot = MagicMock(spec=AgentBot)
         managed_bot.running = running
-        managed_bot.journal_principal.return_value.redacted_event_ids = AsyncMock(return_value=frozenset({"$a"}))
+        managed_bot.redacted_event_ids = AsyncMock(return_value=frozenset({"$a"}))
         return managed_bot
 
     orchestrator.agent_bots = {"running": bot(running=True), "stopped": bot(running=False)}
 
     assert await orchestrator.redacted_event_ids("running", "!room", ("$a", "$b")) == frozenset({"$a"})
-    orchestrator.agent_bots["running"].journal_principal.return_value.redacted_event_ids.assert_awaited_once_with(
-        "!room",
-        ("$a", "$b"),
-    )
+    orchestrator.agent_bots["running"].redacted_event_ids.assert_awaited_once_with("!room", ("$a", "$b"))
     assert await orchestrator.redacted_event_ids("stopped", "!room", ("$a",)) is None
     assert await orchestrator.redacted_event_ids("unknown", "!room", ("$a",)) is None
 

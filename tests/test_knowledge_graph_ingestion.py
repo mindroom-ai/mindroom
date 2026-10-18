@@ -781,19 +781,19 @@ async def test_a_busy_agent_does_not_take_every_pass(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_redacted_message_is_never_added(tmp_path: Path) -> None:
-    """A turn whose message was redacted before ingestion reached it stays out of the graph, also after a rebuild."""
+    """A turn whose message was redacted before ingestion reached it stays out of the graph with every later turn."""
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2", "r3"])
     asked: list[tuple[str, str, tuple[str, ...]]] = []
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         asked.append((agent_name, room_id, event_ids))
-        return frozenset({"$event-r1"})
+        return frozenset({"$event-r2"})
 
     await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
 
-    assert _answers(store) == ["Mind: answer r2"]
-    assert asked == [("mind", "!room:x", ("$event-r1", "$event-r2"))]
+    assert _answers(store) == ["Mind: answer r1"]
+    assert asked == [("mind", "!room:x", ("$event-r1", "$event-r2", "$event-r3"))]
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""Tests for canonical human participation in thread history."""
+"""Tests for canonical human participation in thread history and mention checks."""
 
 from __future__ import annotations
 
@@ -10,11 +10,19 @@ import mindroom.thread_utils
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.thread_utils import has_multiple_non_agent_users_in_thread
-from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
+from mindroom.thread_utils import check_agent_mentioned, has_multiple_non_agent_users_in_thread
+from tests.conftest import (
+    bind_runtime_paths,
+    create_mock_room,
+    make_visible_message,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.entity_resolution import EntityIdentityRegistry
 
 
 @pytest.fixture
@@ -140,3 +148,39 @@ def test_long_thread_classifies_each_sender_once(config: Config, monkeypatch: py
         current_sender_id="@alice:localhost",
     )
     assert classified == ["@alice:localhost", "@mindroom_helper:localhost"]
+
+
+@pytest.mark.parametrize("mention_field", ["m.mentions", "formatted_body"])
+def test_mention_check_builds_registry_once_and_caps_mentioned_ids(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    mention_field: str,
+) -> None:
+    """One registry classifies every mentioned ID, and IDs past the cap are not considered."""
+    builds = 0
+    build_registry = mindroom.thread_utils.entity_identity_registry
+
+    def counting_build_registry(*args: object) -> EntityIdentityRegistry:
+        nonlocal builds
+        builds += 1
+        return build_registry(*args)
+
+    monkeypatch.setattr(mindroom.thread_utils, "entity_identity_registry", counting_build_registry)
+    user_ids = [f"@user{i}:localhost" for i in range(mindroom.thread_utils._MAX_MENTIONED_USER_IDS)]
+    user_ids.append("@mindroom_helper:localhost")
+    content: dict[str, object] = {"body": "hi"}
+    if mention_field == "m.mentions":
+        content["m.mentions"] = {"user_ids": user_ids}
+    else:
+        content["formatted_body"] = "".join(f'<a href="https://matrix.to/#/{uid}">x</a>' for uid in user_ids)
+
+    mentioned_agents, _, _ = check_agent_mentioned(
+        {"content": content},
+        None,
+        config,
+        runtime_paths_for(config),
+        room=create_mock_room(config=config),
+    )
+
+    assert builds == 1
+    assert mentioned_agents == []

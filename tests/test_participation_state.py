@@ -59,6 +59,23 @@ async def test_late_approval_cannot_reopen_failed_turn() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("approve", [True, False])
+async def test_wait_for_approval_returns_the_settled_decision(*, approve: bool) -> None:
+    """Visible progress waits for the decision and starts only when it approves a reply."""
+    gate = ParticipationGate()
+    waiter = asyncio.create_task(gate.wait_for_approval())
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    if approve:
+        gate.approve_existing_response()
+    else:
+        gate.decline("preparation_failed")
+
+    assert await waiter is approve
+
+
+@pytest.mark.asyncio
 async def test_settled_approval_cannot_be_overwritten() -> None:
     """Late errors must not revoke a turn that already owns visible output."""
 

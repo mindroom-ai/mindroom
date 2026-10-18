@@ -5,6 +5,7 @@ import asyncio
 import html
 import importlib
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field, replace
@@ -68,7 +69,10 @@ _CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback
 _CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
-_TRUSTED_UPSTREAM_JWT_MAX_BYTES = 16 * 1024
+_JWT_MAX_BYTES = 16 * 1024
+_SUPABASE_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+# Each Supabase token check is a blocking network call in a worker thread; cap how many run at once.
+_supabase_token_checks = asyncio.Semaphore(4)
 _REDIRECT_TARGET_DECODE_PASSES = 5
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
@@ -382,7 +386,7 @@ async def _verified_trusted_upstream_jwt_claims(
     token = _get_configured_header(request, header)
     if token is None:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
-    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
+    if len(token.encode("utf-8")) > _JWT_MAX_BYTES:
         raise HTTPException(status_code=401, detail=invalid_detail)
 
     try:
@@ -589,13 +593,17 @@ def _supabase_auth_error_class() -> type[Exception]:
     return cast("type[Exception]", importlib.import_module("supabase_auth.errors").AuthError)
 
 
-def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
+async def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
     """Validate a Supabase access token and return the authenticated user."""
     if auth_state.supabase_auth is None:
         return None
+    # Supabase access tokens are JWTs, so any other bearer value is rejected without a network call.
+    if len(token) > _JWT_MAX_BYTES or _SUPABASE_TOKEN_SHAPE.fullmatch(token) is None:
+        return None
 
     try:
-        response = auth_state.supabase_auth.auth.get_user(token)
+        async with _supabase_token_checks:
+            response = await asyncio.to_thread(auth_state.supabase_auth.auth.get_user, token)
     except _supabase_auth_error_class():
         return None
 
@@ -645,7 +653,7 @@ def _verified_platform_sso_claims(
     return claims
 
 
-def _platform_user_identity(
+async def _platform_user_identity(
     request: Request,
     authorization: str | None,
     auth_state: ApiAuthState,
@@ -653,7 +661,7 @@ def _platform_user_identity(
     """Return the user from a Supabase bearer token or this instance's platform session cookie."""
     bearer_token = _extract_bearer_token(authorization)
     if bearer_token is not None:
-        user = _validate_supabase_token(bearer_token, auth_state)
+        user = await _validate_supabase_token(bearer_token, auth_state)
         if user is None:
             raise HTTPException(status_code=401, detail="Invalid token")
         return user.id, user.email
@@ -1228,7 +1236,7 @@ async def authenticate_user(
         request.scope["auth_user"] = auth_user
         return auth_user
 
-    user_id, email = _platform_user_identity(request, authorization, auth_state)
+    user_id, email = await _platform_user_identity(request, authorization, auth_state)
     if auth_state.settings.account_id and user_id != auth_state.settings.account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 

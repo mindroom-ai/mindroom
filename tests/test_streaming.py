@@ -67,7 +67,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.final_delivery import StreamTransportOutcome
@@ -154,6 +154,7 @@ async def _run_stream(
     response_stream: AsyncIterator[object],
     *,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
+    placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -162,6 +163,7 @@ async def _run_stream(
         runtime_paths=runtime_paths_for(config),
         response_stream=response_stream,
         visible_progress_callback=visible_progress_callback,
+        placeholder_ready=placeholder_ready,
     )
 
 
@@ -311,6 +313,47 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     assert outcome.visible_body_state == "visible_body"
     assert outcome.visible_event_id == "$stream_1"
     assert outcome.visible_body_text == final.display_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+@pytest.mark.parametrize("approved", [True, False])
+async def test_deferred_placeholder_appears_once_approved(config: Config, *, approved: bool) -> None:
+    """A gated reply shows the progress placeholder when approved, before any text, and nothing when declined."""
+    gateway = _FakeGateway()
+    decided = asyncio.Event()
+    checked = asyncio.Event()
+
+    async def placeholder_ready() -> bool:
+        await decided.wait()
+        checked.set()
+        return approved
+
+    async def gated_stream() -> AsyncIterator[object]:
+        decided.set()
+        await checked.wait()
+        if approved:
+            await gateway.wait_for_ops(1)
+            yield "Hello"
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        outcome = await _run_stream(config, gated_stream(), placeholder_ready=placeholder_ready)
+
+    if not approved:
+        assert gateway.ops == []
+        assert outcome.visible_event_id is None
+        return
+    placeholder, *edits = gateway.ops
+    assert placeholder.kind == "send"
+    assert placeholder.content["body"] == _PROGRESS_PLACEHOLDER
+    assert placeholder.content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+    assert [op.kind for op in edits] == ["edit"] * len(edits)
+    assert edits[-1].display_text == "Hello"
+    assert edits[-1].content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert outcome.visible_event_id == "$stream_1"
 
 
 @pytest.mark.asyncio
@@ -592,6 +635,7 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         )
         assert placeholder_sent is True
         assert delivered_bodies == [_PROGRESS_PLACEHOLDER]
+        assert timing.metadata["first_visible_kind"] == "placeholder"
         assert "first_substantive_reply" not in timing.marks
         assert "first_substantive_kind" not in timing.metadata
 
@@ -605,6 +649,7 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         "Answer buffered while the placeholder is in flight",
     ]
     assert "first_substantive_reply" in timing.marks
+    assert timing.metadata["first_visible_kind"] == "placeholder"
     assert timing.metadata["first_substantive_kind"] == "stream_update"
 
 

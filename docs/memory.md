@@ -251,7 +251,7 @@ It applies only to agents whose effective backend is `file`, including each requ
 
 Compacted turns and voice-call turns are included.
 Not auto-flushed: turns that [automations](scheduling.md#automations) start, tasks another agent delegated, team conversations, conversations through the OpenAI-compatible API, and context that hooks attach to messages, such as location.
-A message redacted before its turn is flushed stays out of memory, and so does the turn that read it.
+A message redacted before its turn is flushed stays out of memory, and so do the turn that read it and every later turn its redaction removes from [history](configuration/history.md#compacted-history-and-redaction).
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
 An agent switched to `file` memory later starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it, and its private instances, including new ones, keep all their turns since then.

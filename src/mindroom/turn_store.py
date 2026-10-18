@@ -656,6 +656,15 @@ class TurnStore:
         """Return exact durable physical-event invalidation."""
         return self._any_source_redacted((revision_id,))
 
+    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        """Return which of a room's events are redacted, for readers of stored conversations outside a reply.
+
+        The journal knows every redaction in the room; the ledger's tombstones also outlive a departure
+        that drops the room's journal tombstones.
+        """
+        redacted = await self.deps.redacted_event_ids(room_id, event_ids)
+        return redacted.union(event_id for event_id in event_ids if self._any_source_redacted((event_id,)))
+
     async def redacted_history_events(
         self,
         target: MessageTarget,

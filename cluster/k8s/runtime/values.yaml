@@ -380,7 +380,7 @@ workers:
   cleanupIntervalSeconds: 30
   sandbox:
     executionMode: selective
-    proxyTools: shell,file,python
+    proxyTools: shell,file,python,coding
     proxyToken:
       # Prefer existingSecret in production. value creates a chart-managed Secret.
       existingSecret: ""

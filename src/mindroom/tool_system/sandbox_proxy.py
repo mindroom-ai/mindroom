@@ -11,7 +11,6 @@ import inspect
 import json
 import os
 import secrets
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -26,6 +25,7 @@ from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
+from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -77,8 +77,6 @@ INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
-# Process-lifetime pool: threads start lazily and ThreadPoolExecutor joins them at interpreter shutdown.
-_WORKER_PROXY_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="mindroom-worker-proxy")
 
 
 class _AttachmentSavePayloadFields(TypedDict):
@@ -1060,7 +1058,7 @@ async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
     from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call  # noqa: PLC0415
 
-    return await run_async_entrypoint_blocking_call(call, executor=_WORKER_PROXY_EXECUTOR)
+    return await run_async_entrypoint_blocking_call(call, executor=WORKER_PROXY_CALL_EXECUTOR)
 
 
 def _wrap_sync_function(

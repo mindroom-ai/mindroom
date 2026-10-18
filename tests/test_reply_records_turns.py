@@ -16,6 +16,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.participation import ParticipationConfig
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
@@ -700,6 +701,14 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
     assert [(span.span_id, span.outcome) for span in spans] == [(span_id, rl.SpanOutcome.COMPLETED)]
     assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response...", "Selected answer."]
     assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
+
+
+async def test_a_selection_acknowledgement_wakes_no_agent_it_mentions(tmp_path: Path) -> None:
+    """The acknowledgement echoes the member's selected value, so agents ignore any mention in it."""
+    bot = await _streaming_bot(tmp_path)
+    await _acknowledge_selection(bot)
+
+    assert bot.client.room_send.await_args.kwargs["content"][SKIP_MENTIONS_KEY] is True
 
 
 async def test_a_retried_acknowledgement_finds_the_reply_its_first_attempt_created(tmp_path: Path) -> None:

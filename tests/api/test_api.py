@@ -351,7 +351,11 @@ def test_init_supabase_auth_retries_import_after_auto_install(
     assert install_calls == ["supabase"]
 
 
-def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_validate_supabase_token_catches_supabase_auth_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Invalid Supabase tokens should fail auth instead of surfacing optional-package internals."""
 
     class _FakeAuthError(Exception):
@@ -385,8 +389,66 @@ def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytes
         supabase_auth=_FakeClient(),
     )
 
-    assert auth._validate_supabase_token("bad-token", auth_state) is None
+    assert await auth._validate_supabase_token("header.payload.signature", auth_state) is None
     assert imported_modules == ["supabase_auth.errors"]
+
+
+@pytest.mark.asyncio
+async def test_supabase_bearer_check_skips_malformed_tokens_and_leaves_event_loop_free(tmp_path: Path) -> None:
+    """Malformed bearer values never reach Supabase, and a slow Supabase check does not stall other coroutines."""
+    checked_tokens: list[str] = []
+    loop_stayed_free: list[bool] = []
+    other_coroutine_ran = threading.Event()
+
+    class _FakeUser:
+        id = "user-123"
+        email = "user@example.com"
+
+    class _FakeResponse:
+        user = _FakeUser()
+
+    class _FakeAuth:
+        @staticmethod
+        def get_user(token: str) -> _FakeResponse:
+            checked_tokens.append(token)
+            loop_stayed_free.append(other_coroutine_ran.wait(timeout=5))
+            return _FakeResponse()
+
+    class _FakeClient:
+        auth = _FakeAuth()
+
+    runtime_paths = _runtime_paths(tmp_path)
+    auth_state = auth.ApiAuthState(
+        runtime_paths=runtime_paths,
+        settings=auth._ApiAuthSettings(
+            supabase_url="https://supabase.example.com",
+            supabase_anon_key="anon-key",
+            account_id=None,
+            mindroom_api_key=None,
+        ),
+        supabase_auth=_FakeClient(),
+    )
+    request = Request({"type": "http", "method": "GET", "path": "/api/config/agents", "headers": []})
+    config_lifecycle.store_request_snapshot(
+        request,
+        config_lifecycle.ApiSnapshot(generation=1, runtime_paths=runtime_paths, config_data={}, auth_state=auth_state),
+    )
+
+    for malformed in ("x", "header.payload", "a.b.c.d", "a.b." + "c" * 16 * 1024):
+        with pytest.raises(HTTPException) as rejected:
+            await auth.authenticate_user(request, f"Bearer {malformed}")
+        assert rejected.value.status_code == 401
+    assert checked_tokens == []
+
+    async def mark_loop_free() -> None:
+        other_coroutine_ran.set()
+
+    token = "header.payload.signature"  # noqa: S105
+    auth_user, _ = await asyncio.gather(auth.authenticate_user(request, f"Bearer {token}"), mark_loop_free())
+
+    assert auth_user == {"user_id": "user-123", "email": "user@example.com"}
+    assert checked_tokens == [token]
+    assert loop_stayed_free == [True]
 
 
 def test_ensure_frontend_dist_dir_builds_repo_checkout(
