@@ -33,7 +33,17 @@ def test_parse_msg_tags_reads_back_each_sender_and_body() -> None:
         + "<msg><![CDATA[No sender]]></msg></messages>"
     )
     assert parse_msg_tags(tagged, default_sender="@alice:x") == [
-        ("@o&brien:x", "Use a[b[0]]> c"),
-        ("@alice:x", "No sender"),
+        ("@o&brien:x", "O'Brien", "Use a[b[0]]> c"),
+        ("@alice:x", None, "No sender"),
     ]
-    assert parse_msg_tags("<conversation>plain</conversation>", default_sender="@alice:x") == [("@alice:x", "plain")]
+    assert parse_msg_tags("<conversation>plain</conversation>", default_sender="@alice:x") == [
+        ("@alice:x", None, "plain"),
+    ]
+
+
+def test_parse_msg_tags_reads_back_the_display_name_as_written() -> None:
+    """Emoji, quotes, and ampersands in a display name come back unchanged; untagged text carries none."""
+    for display_name in ("Alice Example \U0001f495", 'Banana "Man" & Co'):
+        rendered = render_msg_tag(sender="@alice:x", display_name=display_name, body="hi")
+        assert parse_msg_tags(rendered, default_sender="@r:x") == [("@alice:x", display_name, "hi")]
+    assert parse_msg_tags("hi", default_sender="@r:x") == [("@r:x", None, "hi")]

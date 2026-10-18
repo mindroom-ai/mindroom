@@ -199,3 +199,20 @@ def test_a_message_without_hook_context_keeps_its_whitespace() -> None:
     run = _run(Message(role="user", content=render_msg_tag(sender="@alice:example.test", body=body)))
 
     assert [u.unredacted for u in utterances(run) if u.kind == "said"] == [body]
+
+
+def test_a_said_message_keeps_its_senders_display_name() -> None:
+    """The display name a message carried stays with it; a message without one, or a reply, has none."""
+    prompt = (
+        "<messages>"
+        + render_msg_tag(sender="@alice:example.test", display_name="Alice Example", body="When does Atlas ship?")
+        + render_msg_tag(sender="@bob:example.test", body="Friday.")
+        + "</messages>"
+    )
+    run = _run(Message(role="user", content=prompt), Message(role="assistant", content="Noted."))
+
+    assert [(u.kind, u.sender, u.display_name) for u in utterances(run)] == [
+        ("said", "@alice:example.test", "Alice Example"),
+        ("said", "@bob:example.test", None),
+        ("reply", None, None),
+    ]
