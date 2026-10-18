@@ -183,9 +183,9 @@ def _episode_items(
 ) -> list[tuple[str, str | None, KnownEntity]]:
     """Return a run's lines of one kind with who said each or called its tool, and the call each tool result lists."""
     if episode_kind == "conversation":
-        said = [(speaker(said.sender), said.unredacted) for said in utterances(run)]
+        spoken = [(speaker(said.sender), said.unredacted) for said in utterances(run)]
         # A speaker's name holds no colon, since Graphiti reads a speaker up to the first colon.
-        return [(f"{by.name}: {one_line(_clean(text, settings.max_episode_chars))}", None, by) for by, text in said]
+        return [(f"{by.name}: {one_line(_clean(text, settings.max_episode_chars))}", None, by) for by, text in spoken]
     executions = [execution for execution in run.tools or [] if is_evidence(execution)]
     return [
         (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}", speaker(None))
