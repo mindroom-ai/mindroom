@@ -164,5 +164,5 @@ Types are labels here, not a schema.
 
 ## Open questions
 
-- Whether default Graphiti extraction on a cheap model is accurate enough on real transcripts; a labeled evaluation decides the default `knowledge_graph.model`.
+- Whether extraction on a cheap model is accurate enough on real transcripts; a labeled evaluation decides the default `knowledge_graph.model`.
   A live run on 2026-10-16 with GPT-6 Luna, Gemini 3.8 Flash, and GPT-6 Luna through Codex extracted release, pull request, and author facts that matched their GitHub sources and superseded a changed owner, but missed a moved deadline and stored an agent's restatement of graph lookups as new conversation facts; extraction made about 15 model calls per episode.

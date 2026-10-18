@@ -52,12 +52,12 @@ Changing the embedder starts a new, empty graph that fills again from conversati
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](scheduling.md#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, and to leave out what fits none of them, so pets, foods, hobbies, and topics get no entity of their own, and to keep file paths, URLs, and the like inside the facts that mention them.
-This steers the model rather than filtering its output, so an occasional untyped entity, such as a file that only a fact names, can still appear.
-
 Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+
+Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, to leave out what fits none of them, and to keep file paths, URLs, and the like inside the facts that mention them, so pets, foods, hobbies, and topics get no entity of their own.
+This steers the model rather than filtering its output, so an occasional untyped entity, such as a file that only a fact names, can still appear.
 
 Each fact keeps its sources: `conversation` means someone said it, `tool_results` means it came from a tool call, its arguments or what it returned.
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
