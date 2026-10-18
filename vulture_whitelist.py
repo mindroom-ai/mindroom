@@ -16,6 +16,7 @@ _.canonical_site_url  # Pydantic field validator (src/mindroom/tool_system/atlas
 _.canonical_cloud_id  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
 _.unique_products  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
 _.pinned_site  # Pydantic model validator (src/mindroom/tool_system/atlassian_connections.py)
+_.give_each_name_one_entry  # Pydantic field validator (src/mindroom/config/knowledge_graph.py)
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 _.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)
 _._save_file_to_disk  # FileGenerationTools save step overridden to write inside the workspace (src/mindroom/tools/agno_compat_file_generation.py)
