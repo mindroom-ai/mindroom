@@ -9,7 +9,14 @@ pydantic, so it loads without the optional Graphiti dependency.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mindroom.knowledge_graph.names import KnownEntity
 
 
 class Person(BaseModel):
@@ -65,7 +72,18 @@ ENTITY_TYPES: dict[str, type[BaseModel]] = {
 EXCLUDED_ENTITY_TYPES = ["Entity"]
 
 # Appended to Graphiti's node and edge extraction prompts.
-EXTRACTION_INSTRUCTIONS = """\
+_EXTRACTION_INSTRUCTIONS = """\
 Name each person, agent, organization, and project by its full name when the text gives one, and use that same name every time.
 Never create entities for file paths, source files, URLs, environment variables, configuration keys, commit hashes, branch names, command lines, or log files; mention them inside the facts that use them.
 Date each fact by when it happened or held, as the text states or implies, never by when it was discussed. When a document states dates, use them."""
+
+
+def extraction_instructions(known: Sequence[KnownEntity]) -> str:
+    """Return the static instructions with the one name to use for each of the ``known`` entities."""
+    if not known:
+        return _EXTRACTION_INSTRUCTIONS
+    lines = [_EXTRACTION_INSTRUCTIONS, "When the text mentions one of these, use exactly this name:"]
+    for entity in known:
+        details = [entity.kind, *([f"also called {', '.join(entity.aliases)}"] if entity.aliases else [])]
+        lines.append(f"- {entity.name} ({'; '.join(details)})")
+    return "\n".join(lines)

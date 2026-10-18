@@ -9141,6 +9141,11 @@ depends_on = []
 visibility = ["mindroom.knowledge_graph.store"]
 
 [[modules]]
+path = "mindroom.knowledge_graph.names"
+depends_on = ["mindroom.constants"]
+visibility = ["mindroom.knowledge_graph.ingestion"]
+
+[[modules]]
 path = "mindroom.knowledge_graph.embedded_server"
 depends_on = ["mindroom.logging_config"]
 visibility = ["mindroom.knowledge_graph.store"]
@@ -9208,6 +9213,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
+    "mindroom.knowledge_graph.names",
     "mindroom.knowledge_graph.scope",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",

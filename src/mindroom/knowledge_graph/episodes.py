@@ -2,7 +2,8 @@
 
 Episodes come only from what was said and what tools returned, never from text the model writes for the graph.
 Each episode has one kind, because Graphiti records provenance per episode: ``conversation`` holds what people and the
-agent said, labeled by speaker, and ``tool_results`` holds what the tools the model chose returned.
+agent said, each line labeled with its speaker's one name, and ``tool_results`` holds what the tools the model chose
+returned. Each episode carries the agents and people it knows, whose names the extraction instructions list.
 """
 
 from __future__ import annotations
@@ -27,9 +28,12 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
 
     from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
+    from mindroom.knowledge_graph.names import EntityNames, KnownEntity
 
 type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
 type Progress = tuple[int, str, int]
+# A line of an episode, the tool call its description lists, and who said it or called the tool.
+type _Item = tuple[str, str | None, KnownEntity]
 
 # The progress of a run that is fully covered, larger than any count of lines a split covers.
 RUN_DONE = 1 << 30
@@ -102,11 +106,11 @@ def render_episodes(
     episode_kind: EpisodeKind,
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
-    agent_for_sender: Callable[[str], str | None],
+    names: EntityNames,
 ) -> list[RenderedEpisode]:
     """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries.
 
-    ``agent_for_sender`` names the configured agent behind a Matrix ID, so agents' messages are not labeled as people's.
+    ``names`` names each agent and person, so each speaks under one name and agents never as people.
     """
     # Exploration and delegated prompts come from an agent, and their answers restate the tool results.
     if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind in ("exploration", "delegation")):
@@ -114,19 +118,24 @@ def render_episodes(
     rendered: list[RenderedEpisode] = []
     lines: list[str] = []
     calls: list[str] = []
+    speakers: list[KnownEntity] = []
     newest: RunOutput | None = None
     progress: Progress | None = None
 
     def flush() -> None:
         if lines and newest is not None and progress is not None:
-            episode = _episode(episode_kind, lines, newest, settings, calls)
+            known = names.known_entities(agent_name, speakers)
+            episode = _episode(episode_kind, lines, newest, settings, calls, known)
             rendered.append(RenderedEpisode(episode, progress, run_requester(newest)))
         lines.clear()
         calls.clear()
+        speakers.clear()
 
+    ordered = sorted(runs, key=run_key)
+    speaker = _speakers(ordered, episode_kind, names, agent_name)
     cap = settings.max_episode_chars
-    for run in sorted(runs, key=run_key):
-        items = _episode_items(run, episode_kind, agent_name, settings, agent_for_sender)
+    for run in ordered:
+        items = _episode_items(run, episode_kind, settings, speaker)
         if not items:
             continue
         # Runs stay whole where they fit and share an episode only with the same day and requester, so relative dates
@@ -135,13 +144,13 @@ def render_episodes(
             lines
             and newest is not None
             and (
-                _size(lines) + _size([line for line, _ in items]) > cap
+                _size(lines) + _size([line for line, _, _ in items]) > cap
                 or _day(run) != _day(newest)
                 or run_requester(run) != run_requester(newest)
             )
         ):
             flush()
-        for covered, (line, call) in enumerate(items):
+        for covered, (line, call, said_by) in enumerate(items):
             # Only a run larger than the cap is split; each piece records how many of the run's lines it reaches, so
             # pieces cut at another size after a settings change resume where the old ones stopped.
             if lines and _size(lines) + len(line) + 1 > cap:
@@ -150,10 +159,32 @@ def render_episodes(
             lines.append(line)
             if call is not None:
                 calls.append(call)
+            speakers.append(said_by)
             newest = run
         progress = (*run_key(run), RUN_DONE)
     flush()
     return rendered
+
+
+def _speakers(
+    runs: Sequence[RunOutput],
+    episode_kind: EpisodeKind,
+    names: EntityNames,
+    agent_name: str,
+) -> Callable[[str | None], KnownEntity]:
+    """Return who sent a message, naming a person by the newest display name their messages in ``runs`` carry.
+
+    A person so keeps one label in every episode the runs render.
+    """
+    display_names: dict[str | None, str] = {}
+    if episode_kind == "conversation":
+        display_names = {
+            said.sender: said.display_name
+            for run in runs
+            for said in utterances(run)
+            if said.sender and said.display_name
+        }
+    return lambda sender: names.speaker(sender, display_names.get(sender), agent_name)
 
 
 def _day(run: RunOutput) -> str:
@@ -163,31 +194,23 @@ def _day(run: RunOutput) -> str:
 def _episode_items(
     run: RunOutput,
     episode_kind: EpisodeKind,
-    agent_name: str,
     settings: KnowledgeGraphIngestConfig,
-    agent_for_sender: Callable[[str], str | None],
-) -> list[tuple[str, str | None]]:
-    """Return a run's lines of one kind, each tool result with the call it lists in the episode description."""
+    speaker: Callable[[str | None], KnownEntity],
+) -> list[_Item]:
+    """Return a run's lines of one kind, each message with its speaker and each tool result with the call it lists."""
     if episode_kind == "conversation":
-        cap = settings.max_episode_chars
-        return [
-            (f"{_speaker(said.sender, agent_name, agent_for_sender)}: {one_line(_clean(said.unredacted, cap))}", None)
-            for said in utterances(run)
-        ]
+        items: list[_Item] = []
+        for said in utterances(run):
+            # The speaker's name holds no colon, since Graphiti reads a speaker up to the first colon.
+            said_by = speaker(said.sender)
+            text = one_line(_clean(said.unredacted, settings.max_episode_chars))
+            items.append((f"{said_by.name}: {text}", None, said_by))
+        return items
     executions = [execution for execution in run.tools or [] if is_evidence(execution)]
     return [
-        (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}") for execution in executions
+        (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}", speaker(None))
+        for execution in executions
     ]
-
-
-def _speaker(sender: str | None, agent_name: str, agent_for_sender: Callable[[str], str | None]) -> str:
-    """Label a sender as an agent or a person with no colon, since Graphiti reads a speaker up to the first colon."""
-    if sender is None:
-        return f"agent {agent_name}"
-    if (agent := agent_for_sender(sender)) is not None:
-        return f"agent {agent}"
-    user, separator, server = sender.partition(":")
-    return f"person {user} ({server})" if separator else f"person {sender}"
 
 
 def _episode(
@@ -196,6 +219,7 @@ def _episode(
     last_run: RunOutput,
     settings: KnowledgeGraphIngestConfig,
     calls: Sequence[str],
+    known_entities: tuple[KnownEntity, ...],
 ) -> EpisodeInput:
     metadata = last_run.metadata or {}
     description = f"{kind}: room {metadata.get('room_id')} thread {metadata.get('thread_id')}"
@@ -209,6 +233,7 @@ def _episode(
         body="\n".join(lines)[: settings.max_episode_chars],
         source_description=description,
         reference_time=datetime.fromtimestamp(last_run.created_at or 0, UTC),
+        known_entities=known_entities,
     )
 
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 
-from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, EXTRACTION_INSTRUCTIONS
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
+from mindroom.knowledge_graph.names import KnownEntity
 
 
 def test_every_entity_type_has_a_description_and_no_fields() -> None:
@@ -49,7 +50,22 @@ def test_graphiti_prompt_lists_exactly_the_types_with_their_docstrings_and_no_en
 
 def test_instructions_keep_paths_and_urls_out_and_date_by_occurrence() -> None:
     """Paths and URLs belong inside facts, and a fact is dated by when it held, not when it was discussed."""
-    text = EXTRACTION_INSTRUCTIONS
+    text = extraction_instructions(())
     for word in ("file paths", "URLs", "environment variables", "commit hashes", "branch names"):
         assert word in text
     assert "when it happened" in text
+
+
+def test_instructions_give_each_known_entity_one_name() -> None:
+    """Each known agent and person is listed under the one name to use, with its kind and the other names it goes by."""
+    known = (KnownEntity("Mind", "agent", ("mind", "@mindroom_mind:x")), KnownEntity("alice", "person", ()))
+
+    static = extraction_instructions(())
+    text = extraction_instructions(known)
+
+    assert text.startswith(static)
+    assert text.removeprefix(static).splitlines()[1:] == [
+        "When the text mentions one of these, use exactly this name:",
+        "- Mind (agent; also called mind, @mindroom_mind:x)",
+        "- alice (person)",
+    ]

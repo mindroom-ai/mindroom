@@ -28,7 +28,7 @@ from mindroom.attachments.storage import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
+from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME, tracking_dir
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
@@ -1134,7 +1134,7 @@ class _MultiAgentOrchestrator:
     def _entity_display_name(config: Config, entity_name: str) -> str:
         """Return the Matrix display name for one configured managed entity."""
         if entity_name == ROUTER_AGENT_NAME:
-            return "RouterAgent"
+            return ROUTER_DISPLAY_NAME
         if entity_name in config.agents:
             return config.agents[entity_name].display_name
         if entity_name in config.teams:

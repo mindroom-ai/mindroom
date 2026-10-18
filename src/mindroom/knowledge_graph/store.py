@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
-from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, EXTRACTION_INSTRUCTIONS
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.usage import usage_target
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge_graph.embedded_server import EmbeddedServer
+    from mindroom.knowledge_graph.names import KnownEntity
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.usage import UsageTarget
 
@@ -65,6 +66,8 @@ class EpisodeInput:
     body: str
     source_description: str
     reference_time: datetime
+    # The agents and people the episode knows, whose names the extraction instructions list.
+    known_entities: tuple[KnownEntity, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -358,7 +361,7 @@ class GraphitiStore:
                 previous_episode_uuids=[],
                 entity_types=ENTITY_TYPES,
                 excluded_entity_types=EXCLUDED_ENTITY_TYPES,
-                custom_extraction_instructions=EXTRACTION_INSTRUCTIONS,
+                custom_extraction_instructions=extraction_instructions(episode.known_entities),
             )
 
     async def _search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:
