@@ -80,8 +80,6 @@ Date each fact by when it happened or held, as the text states or implies, never
 
 def extraction_instructions(known: Sequence[KnownEntity]) -> str:
     """Return the static instructions with the one name to use for each of the ``known`` entities."""
-    if not known:
-        return _EXTRACTION_INSTRUCTIONS
     lines = [_EXTRACTION_INSTRUCTIONS, "When the text mentions one of these, use exactly this name:"]
     for entity in known:
         details: list[str] = [entity.kind] if entity.kind else []
