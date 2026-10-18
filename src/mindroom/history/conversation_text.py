@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.replay import is_compaction_summary
 from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
@@ -52,9 +53,9 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
     """Return what was said in one stored turn, oldest first.
 
     Only turns the agent's own history shows count, never copies of earlier turns. A prompt MindRoom wrote is nobody's
-    words: an automation's turn is left out entirely, and a background job follow-up keeps only its reply. A stopped
-    turn's answer is a rendered summary that can quote tool previews, so it is left out too. ``agent_work`` keeps all of
-    these, plus tool calls and results, for a reviewer of how the agent worked.
+    words: an automation's turn is left out entirely, a background job follow-up keeps only its reply, and a run's own
+    compaction summary is left out. A stopped turn's answer is a rendered summary that can quote tool previews, so it is
+    left out too. ``agent_work`` keeps all of these, plus tool calls and results, for a reviewer of how the agent worked.
     """
     if not is_model_history_visible_run(run):
         return []
@@ -70,7 +71,7 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
         content = message.content if isinstance(message.content, str) else ""
         if message.from_history:
             continue
-        mindroom_wrote = runtime_prompt or is_queued_notice_message(message)
+        mindroom_wrote = runtime_prompt or is_queued_notice_message(message) or is_compaction_summary(message)
         if message.role == "user" and (agent_work or not mindroom_wrote):
             said.extend(
                 Utterance("runtime", None, body, message)

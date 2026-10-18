@@ -9,6 +9,7 @@ from agno.run.base import RunStatus
 
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import utterances
+from mindroom.history.replay import compaction_summary_message
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
 from mindroom.prompt_message_tags import render_msg_tag
 
@@ -136,17 +137,27 @@ def test_runtime_prompts_and_stopped_summaries_are_nobodys_words(
     assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == agent_work
 
 
-def test_a_queued_message_notice_is_nobodys_words() -> None:
-    """The pause notice MindRoom stores as a user message when someone writes mid-turn is not the requester's."""
-    notice = Message(
-        role="user",
-        content="[SYSTEM NOTICE] A newer message arrived; pause here.",
-        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER},
-    )
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(
+            Message(
+                role="user",
+                content="[SYSTEM NOTICE] A newer message arrived; pause here.",
+                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER},
+            ),
+            id="queued-message-notice",
+        ),
+        # A turn without stored history keeps its own compaction summary among its messages.
+        pytest.param(compaction_summary_message("Deployment started.", run_local=True), id="run-local-summary"),
+    ],
+)
+def test_user_messages_mindroom_stores_in_a_turn_are_nobodys_words(stored: Message) -> None:
+    """A pause notice or a run's own compaction summary, stored as a user message mid-turn, is not the requester's."""
     run = _run(
         Message(role="user", content="Deploy it."),
         Message(role="assistant", content="Deploying."),
-        notice,
+        stored,
         Message(role="assistant", content="Paused."),
     )
 

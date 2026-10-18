@@ -7511,6 +7511,7 @@ visibility = [
     "mindroom.history.agno_compat_message_builder",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
+    "mindroom.history.conversation_text",
 ]
 
 [[modules]]
@@ -7548,6 +7549,7 @@ depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.replay",
     "mindroom.history.run_visibility",
     "mindroom.prompt_message_tags",
     "mindroom.turn_origin",
