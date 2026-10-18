@@ -122,3 +122,16 @@ def test_no_name_in_an_episode_means_two_entities() -> None:
         KnownEntity("Robin Vale", "person", ("@robin:example.test",)),
         KnownEntity("Atlas", None, ()),
     )
+
+
+def test_a_name_wins_over_an_alias_in_a_lookup() -> None:
+    """An alias that another entity is named finds that entity, as the instructions leave the alias out of the entry."""
+    config = Config(
+        agents={"mind": MIND, "assistant": AgentConfig(display_name="Robin")},
+        knowledge_graph={"aliases": {"Robin Vale": ["@robin:example.test", "Robin"]}},
+    )
+    names = entity_names(config, {})
+
+    assert names.known_entities("assistant", [])[1] == KnownEntity("Robin Vale", "person", ("@robin:example.test",))
+    assert names.canonical("robin") == "Robin"
+    assert names.canonical("@robin:example.test") == "Robin Vale"

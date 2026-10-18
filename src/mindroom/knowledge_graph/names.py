@@ -96,11 +96,15 @@ class EntityNames:
         )
 
     def canonical(self, name: str) -> str:
-        """Return the one name of the entry or agent that is named or also called ``name``, in any letter case."""
-        for entity in (*self.entries.values(), *self.agents.values()):
-            if name.casefold() in {other.casefold() for other in (entity.name, *entity.aliases)}:
-                return entity.name
-        return name
+        """Return the one name of the entry or agent named ``name``, else of one also called it, in any letter case.
+
+        A name wins over an alias, so an alias that another entity is named never finds the entry, as in the instructions.
+        """
+        wanted = name.casefold()
+        entities = (*self.entries.values(), *self.agents.values())
+        named = (entity.name for entity in entities if entity.name.casefold() == wanted)
+        called = (entity.name for entity in entities if wanted in {alias.casefold() for alias in entity.aliases})
+        return next(named, None) or next(called, name)
 
 
 def entity_names(config: Config, agent_keys: Mapping[str, str]) -> EntityNames:

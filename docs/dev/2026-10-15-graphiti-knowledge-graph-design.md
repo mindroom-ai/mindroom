@@ -131,6 +131,7 @@ A name keeps letters, digits, spaces, `.'-`, and a combining mark on a letter, b
 A `knowledge_graph.aliases` entry gives an agent or person its name only through a stable ID it lists, a Matrix ID or an agent or team key; its other aliases are plain names that the instructions list and `graph_entity` resolves.
 Each episode's instructions list the graph's own agent, the episode's speakers, and every entry, so people and things MindRoom has no account for get one name too.
 Entities that share a name are listed once, and an alias that another listed entity is named, or that two of them go by, is left out, so no listed name means two entities.
+`graph_entity` follows the same rule: an entry's or agent's own name wins over another entry's alias, so an entry that keeps a person apart from an agent with their display name never turns a lookup of the agent's name into the person.
 `custom_extraction_instructions` reach only Graphiti's node and edge extraction prompts, which is where names are chosen.
 `graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay.
 
