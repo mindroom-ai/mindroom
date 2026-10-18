@@ -1,8 +1,8 @@
-"""Knowledge graph settings: the extraction model, extraction instructions, and conversation ingestion."""
+"""Knowledge graph settings: the extraction model, extraction instructions, conversation ingestion, and known names."""
 
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
 
@@ -71,3 +71,28 @@ class KnowledgeGraphConfig(BaseModel):
         default_factory=KnowledgeGraphIngestConfig,
         description="Conversation ingestion settings",
     )
+    aliases: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="One name per person, agent, or thing, mapped to its other names, Matrix IDs, and agent keys",
+    )
+
+    @field_validator("aliases")
+    @classmethod
+    def give_each_name_one_entry(cls, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Keep each name and alias on one line and each alias, in any letter case, with one entry."""
+        taken = {name.casefold() for name in aliases}
+        for name, others in aliases.items():
+            for word in (name, *others):
+                if not word or word != " ".join(word.split()):
+                    msg = f"knowledge_graph.aliases {word!r} must be non-empty, with single spaces"
+                    raise ValueError(msg)
+            # A name labels a speaker in conversation episodes, and Graphiti reads a speaker up to the first colon.
+            if ":" in name:
+                msg = f"knowledge_graph.aliases name {name!r} must not contain a colon"
+                raise ValueError(msg)
+            for alias in {alias.casefold() for alias in others} - {name.casefold()}:
+                if alias in taken:
+                    msg = f"knowledge_graph.aliases {alias!r} is another entry's name or alias"
+                    raise ValueError(msg)
+                taken.add(alias)
+        return aliases

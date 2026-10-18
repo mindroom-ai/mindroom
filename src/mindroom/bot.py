@@ -538,6 +538,10 @@ class AgentBot:
         """Return this bot's principal-bound projection view, once the journal is open."""
         return self._journal_store.principal(self._journal_principal_id)
 
+    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        """Return which of a room's events this bot saw redacted, for readers of its stored conversations."""
+        return await self._turn_store.redacted_event_ids(room_id, event_ids)
+
     def _open_own_journal(self) -> OpenEventJournal:
         """Open the durable store this bot's journal, projection, and outbox share.
 

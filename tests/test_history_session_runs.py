@@ -100,10 +100,14 @@ def test_updated_sessions_lists_sessions_changed_after_the_cursor(storage: Sqlit
 
 @pytest.mark.asyncio
 async def test_unredacted_runs_drop_redacted_turns_or_wait_while_the_agent_cannot_tell() -> None:
-    """A turn that answered a redacted event is dropped, and nothing is returned while a room's redactions are unknown."""
-    kept, redacted = _run("kept", 100), _run("gone", 200)
+    """A turn that answered a redacted event goes with every later turn, as history cleanup removes them.
+
+    Nothing is returned while a room's redactions are unknown.
+    """
+    kept, redacted, later = _run("kept", 100), _run("gone", 200), _run("later", 300)
     kept.metadata = {**(kept.metadata or {}), MATRIX_EVENT_ID_METADATA_KEY: "$kept"}
     redacted.metadata = {**(redacted.metadata or {}), MATRIX_EVENT_ID_METADATA_KEY: "$gone"}
+    later.metadata = {**(later.metadata or {}), MATRIX_EVENT_ID_METADATA_KEY: "$later"}
     asked: list[tuple[str, str, tuple[str, ...]]] = []
 
     async def journal(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
@@ -114,6 +118,6 @@ async def test_unredacted_runs_drop_redacted_turns_or_wait_while_the_agent_canno
         del agent_name, room_id, event_ids
         return None
 
-    assert await unredacted_runs([kept, redacted], "mind", journal) == [kept]
-    assert asked == [("mind", ROOM, ("$gone", "$kept"))]
-    assert await unredacted_runs([kept, redacted], "mind", not_running) is None
+    assert await unredacted_runs([kept, redacted, later], "mind", journal) == [kept]
+    assert asked == [("mind", ROOM, ("$gone", "$kept", "$later"))]
+    assert await unredacted_runs([kept, redacted, later], "mind", not_running) is None

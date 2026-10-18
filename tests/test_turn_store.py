@@ -435,6 +435,24 @@ async def test_redaction_delivered_in_another_room_leaves_the_recorded_conversat
 
 
 @pytest.mark.asyncio
+async def test_redacted_event_ids_include_ledger_tombstones_the_journal_no_longer_holds(
+    journal_store: EventJournalStore,
+) -> None:
+    """Leaving a room drops its journal tombstones, so the ledger's tombstones still report what was redacted."""
+    # The journal holds no tombstone for the redacted turn, as after the agent left the room.
+    journal = AsyncMock(return_value=frozenset({"$journal-only"}))
+    store = TurnStore(replace((await _store(journal_store)).deps, redacted_event_ids=journal))
+    await store.warm()
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+    assert await store.mark_source_redacted("$user_msg", room_id=target.room_id) is not None
+
+    requested = ("$journal-only", "$other", "$user_msg")
+    assert await store.redacted_event_ids(target.room_id, requested) == frozenset({"$journal-only", "$user_msg"})
+    journal.assert_awaited_with(target.room_id, requested)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("known_before_redaction", ["unseen", "admitted", "pending_without_room"])
 async def test_redaction_in_another_room_cannot_tombstone_an_event_without_a_recorded_room(
     journal_store: EventJournalStore,

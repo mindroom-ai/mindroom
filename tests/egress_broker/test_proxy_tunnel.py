@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import shutil
+import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -360,6 +364,84 @@ async def test_unresolvable_connect_target_gets_502(broker: BrokerFactory, raw_p
 
     assert response.status == 502
     assert response.json() == {"error": "upstream_unreachable", "message": "nonexistent.invalid could not be reached."}
+
+
+_SHARED_WORKER = replace(DEFAULT_CLAIMS, worker_key="worker-shared-code", worker_scope="shared")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stalling", "other"),
+    [
+        (replace(_SHARED_WORKER, requester_id="@bob:example.org"), _SHARED_WORKER),
+        (
+            replace(_SHARED_WORKER, requester_id=None),
+            replace(_SHARED_WORKER, worker_key="worker-other-code", requester_id=None),
+        ),
+    ],
+    ids=["requesters-of-one-worker", "workers-without-requester"],
+)
+async def test_stalled_lookups_do_not_delay_another_requester(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    raw_proxy: RawProxy,
+    stalling: WorkerClaims,
+    other: WorkerClaims,
+) -> None:
+    """One requester's connections to names whose nameservers never answer leave other requesters connecting.
+
+    Lookups are limited per requester, or per worker when it serves no single requester. A four-thread default
+    executor stands in for one these lookups could otherwise fill.
+    """
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=4))
+    rule_reads: list[str | None] = []
+    stalled: list[str] = []
+    answer = threading.Event()
+
+    def rules_provider(claims: WorkerClaims) -> EgressBrokerConfig:
+        rule_reads.append(claims.requester_id)
+        return EgressBrokerConfig()
+
+    def lookup(host: str, **_policy: object) -> list[ipaddress.IPv4Address]:
+        if host == "localhost":
+            return [ipaddress.IPv4Address("127.0.0.1")]
+        stalled.append(host)
+        answer.wait()
+        raise ServerFetchUrlError(reason="dns_resolution_failed")
+
+    started = await broker(rules_provider=rules_provider)
+    # More connections than the broker has lookup threads.
+    connections = 20
+    clients: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+    authorization = proxy_authorization(broker.token(stalling))
+    with patch("mindroom.egress_broker.dial.validated_connect_addresses", side_effect=lookup):
+        try:
+            for index in range(connections):
+                reader, writer = await asyncio.open_connection("127.0.0.1", started.port)
+                writer.write(connect_request(f"{index}.stalled.example:443", authorization=authorization))
+                clients.append((reader, writer))
+            async with asyncio.timeout(10):
+                while len(rule_reads) < connections or len(stalled) < 4:  # noqa: ASYNC110 - the broker exposes no event for this
+                    await asyncio.sleep(0.01)
+                response = await raw_proxy(
+                    started.port,
+                    connect_request(
+                        f"localhost:{tls_upstream.port}",
+                        authorization=proxy_authorization(broker.token(other)),
+                    ),
+                )
+            # The requester's other connections wait for one of its own lookups to end.
+            assert len(stalled) == 4
+            answer.set()
+            async with asyncio.timeout(10):
+                for reader, _writer in clients:
+                    assert (await read_raw_response(reader)).status == 502
+        finally:
+            answer.set()
+            for _reader, writer in clients:
+                writer.transport.abort()
+
+    assert response.status == 200
 
 
 @pytest.mark.asyncio

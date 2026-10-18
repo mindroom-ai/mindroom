@@ -94,7 +94,8 @@ Rejected: mapping MindRoom providers onto Graphiti's own provider clients.
 It duplicates key precedence and base-URL rules per provider, covers fewer providers, and gives no usage accounting.
 Search uses Graphiti's hybrid search with reciprocal-rank fusion and no cross-encoder, so a query costs no LLM call.
 Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI key, so MindRoom passes a reranker that is never called by the search recipes it uses.
-An entity lookup tries a case-insensitive exact name first (the entity with the most facts when several match) and falls back to the hybrid search, because the search can rank an entity that merely mentions a name above the entity named exactly that: a live lookup of a person's first name returned their brokerage account although an entity named exactly that, with 293 facts, existed.
+An entity lookup first replaces a `knowledge_graph.aliases` alias, or an agent's key or Matrix ID, with the one name ingestion gives that entity (see below).
+It then tries a case-insensitive exact name (the entity with the most facts when several match) and falls back to the hybrid search, because the search can rank an entity that merely mentions a name above the entity named exactly that: a live lookup of a person's first name returned their brokerage account although an entity named exactly that, with 293 facts, existed.
 A fuzzy match returns the best hit and names the next four, so the agent can look up the one it meant.
 
 Graphiti needs structured output; small local models may fail extraction, which the ingestion worker reports and retries rather than hides.
@@ -126,6 +127,42 @@ The wording was chosen on synthetic episodes about a fictional lab, extracted th
 Against the previous instructions, noise fell from 27% to 4% of facts on `gpt-6-luna` and from 36% to 5% on `gpt-6.1-sol`, with as many other facts as before.
 Rejected: forbidding every assistant action (it also dropped facts like a filed issue), adding "plans" and an `Account` description that excludes an assistant's own account (more lost facts, no less noise), and asking the model to connect single-subject facts to an event or document (it did not recover them); the last two were measured on an earlier version of the episodes, whose agent shared the project's name and which had no episode with an action that changed things for others.
 Graphiti's separate node and edge extraction, the path `add_episode` uses, links two distinct entities, so a status the assistant reports about a single subject with no other entity named can be dropped where the previous instructions kept it by linking it to the agent, or attached to another named entity instead, such as the person who asked; drops showed on both models and the misattribution on `gpt-6-luna`, and target coverage fell from 85% to 83% on `gpt-6-luna` and from 81% to 75% on `gpt-6.1-sol`.
+
+### Known people and agents get one name
+
+On the real openclaw graph one person had four entities, named by their full name (1,669 facts), first name (1,452), email address (622), and Matrix ID (405), and the agent had four, named by its config key (1,358), `agent openclaw` (1,158), its Matrix ID (285), and its Matrix localpart (204).
+Graphiti merges an extracted entity into an existing one for certain only when their names are equal after normalizing; otherwise it needs an embedding candidate and a yes from the model, which a first name against a full name, or a Matrix ID against a name, does not get.
+The speaker labels added entities of their own: Graphiti's message prompt always extracts the speaker, the text before the first colon, and the labels were `agent <key>` and `person @<user> (<server>)`.
+
+So each known agent and person has one name, which is both its speaker label and the name the extraction instructions give for its other names.
+An agent or team is named by its `display_name`, with its config key, Matrix ID, and localpart as its other names.
+A person is named by the newest display name their messages carry in all of the conversation's finished turns, not only the ones being added, else by their localpart, with their Matrix ID and localpart as their other names.
+Display names are stored only in each message's `<msg>` envelope, and a stopped turn's envelope has none, so reading only the new turns would rename a person in a later pass.
+A name keeps letters, digits, spaces, `.'-`, and a combining mark on a letter, because display names carry emoji and colons and Graphiti ends a speaker at the first colon.
+A `knowledge_graph.aliases` entry gives an agent or person its name only through a stable ID it lists, a Matrix user ID, which has a server part, or an agent or team key, in any letter case as validation compares aliases; its other aliases are plain names that the instructions list and `graph_entity` resolves.
+A linked person or agent keeps the other names it had without the entry (a listed Matrix ID's localpart, an agent's display name), so adding an entry never loses a name.
+Someone whose display name is the name of an entry that links someone (it lists a Matrix ID or stands for an agent), without their Matrix ID in it, goes by their localpart, so they never merge into the entry's person or agent.
+An entry that links nobody gets no such guard: a speaker named like it merges with it by name, as Graphiti would anyway, which is what someone who names an entry after their own display name wants.
+Localparts repeat across federated homeservers, so a localpart that a linking entry or an agent is named gets the server added, without a colon (`alice work.example`).
+Each episode's instructions list the graph's own agent, the episode's speakers, and every entry, so people and things MindRoom has no account for get one name too.
+Entities that share a name are listed once, and an alias that another listed entity is named, or that two of them go by, is left out, so no listed name means two entities.
+`graph_entity` follows the same rule: an entry's or agent's own name wins over another entry's alias, so an entry that keeps a person apart from an agent with their display name never turns a lookup of the agent's name into the person.
+`custom_extraction_instructions` reach only Graphiti's node and edge extraction prompts, which is where names are chosen.
+They are joined as the built-in rules, then the operator's `knowledge_graph.extraction_instructions`, then the episode's names, so the operator's text reads as a continuation of the rules and everything before the names is the same for every episode.
+The built-in rule that keeps an assistant's own activity out named the old `agent <name>` label; it now points at the speakers the list marks as agents, a wording change made after that rule's measurements and not measured again.
+`graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay.
+
+Rejected: matching entries against display names.
+An earlier attempt matched an entry on every name a speaker went by, so an entry fixing a first-name duplicate could list the first name, which was also the speaker's display name.
+Display names change and anyone can take one, so such an entry could reach the wrong person or two people, and two entries could reach one agent through names config validation cannot see.
+Keeping labels, instructions, and lookups in agreement then took conflict rules (the first entry wins, names dropped per episode, conflicts detectable only while ingesting) that grew through four review rounds.
+Linking only by Matrix ID and agent key lets config validation check every link, and a display name then labels only the person who has it.
+Rejected: labeling speakers by Matrix ID, which makes the Matrix ID the entity, against the `Person` type's description.
+Rejected: remembering each person's display name in the ingestion state, since the conversation's stored turns already hold it.
+
+Limitations: a person whose display name changes gets the new name in later episodes, and a message without a display name names its sender by localpart unless another of their messages in the conversation carried one.
+Two people with one display name, a person named like an agent, or anyone named like an entry that links nobody share an entity unless an entry names one of them through their Matrix ID.
+Every entry is in every episode's instructions, so a long list lengthens every extraction prompt.
 
 ### Graphs are filled side by side, each one episode at a time, without waiting while a backlog remains
 

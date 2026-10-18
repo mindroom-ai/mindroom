@@ -12,9 +12,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.egress_broker import dial
-from mindroom.egress_broker.dial import DestinationBlockedError, DialPolicy, open_upstream
+from mindroom.egress_broker.dial import DestinationBlockedError, DialPolicy
 from mindroom.worker_computer.browser_proxy import BrowserEgress, UpstreamTunnelRefusedError, _UpstreamProxy
-from tests.egress_broker.conftest import connect_request, proxy_authorization, serving, single_rule_config
+from tests.egress_broker.conftest import (
+    connect_request,
+    open_upstream,
+    proxy_authorization,
+    serving,
+    single_rule_config,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

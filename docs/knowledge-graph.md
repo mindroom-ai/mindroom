@@ -42,6 +42,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once; a single longer message is cut to this length |
 | `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
+| `knowledge_graph.aliases` | `{}` | The one name the graph uses for a person, agent, or thing, mapped to its other names; see [Names](#names) |
 
 With the defaults, new turns reach the graph 2 to 12 minutes after a conversation goes quiet, plus extraction time, and later when many conversations are waiting.
 Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once.
@@ -65,8 +66,33 @@ This steers the model rather than filtering its output, so an occasional untyped
 Each fact keeps its sources: `conversation` means someone said it, `tool_results` means it came from a tool call, its arguments or what it returned.
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
-A message redacted before its conversation is added stays out of the graph, and so does the turn that read it.
+A message redacted before its conversation is added stays out of the graph, and so do the turn that read it and every later turn its redaction removes from [history](configuration/history.md#compacted-history-and-redaction).
 Redacting a message later does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`, without redacted messages.
+
+## Names
+
+Each agent and person gets one name in the graph, so their facts collect on one entity instead of one per spelling.
+An agent or team goes by its `display_name`, and a person by the newest display name their messages in the conversation carried, without emoji and other symbols, or else by their Matrix username.
+Extraction is told the other names each one goes by, such as their Matrix ID, username, or agent key, and uses the one name for those too.
+`knowledge_graph.aliases` gives one name to the other names of a person, agent, or thing:
+
+```yaml
+knowledge_graph:
+  aliases:
+    Alice Smith: ["@alice:example.org", Ali, alice@example.org]   # her Matrix account, nickname, and email
+    Scout: [research]                                             # the agent whose key is research
+    Project Atlas: [Atlas, Atlas v2]                              # something without an account
+```
+
+A Matrix ID or agent key in an entry gives that person or agent the entry's name everywhere, whatever display name they use; a display name never links an entry.
+Someone else whose display name is the name of an entry with a Matrix ID or agent key goes by their username, so the two stay apart.
+A speaker whose display name is the name of an entry without one shares that entry's entity and its other names, so an entry named after your own display name needs no Matrix ID.
+A username that an entry with a Matrix ID or agent key, or an agent, is already named gets its homeserver added, such as `alice work.example`.
+Every other alias is a plain name that extraction maps to the entry's name and that `graph_entity` finds the entity by.
+Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
+Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
+Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
+Entities extracted earlier under other names, such as a Matrix ID, stay separate.
 
 ## The `knowledge_graph` Tool
 
@@ -78,6 +104,7 @@ graph_entity("Project Atlas")
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
+A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
 An agent reads only its own graph; a [private agent](configuration/agents.md#private-instances) has one graph per requester.
 

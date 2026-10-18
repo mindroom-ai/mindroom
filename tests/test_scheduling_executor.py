@@ -17,6 +17,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
+    SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
 )
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
@@ -519,7 +520,7 @@ async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
-    """Runner failure notices follow the workflow thread and reply to its latest event."""
+    """Runner failure notices follow the workflow thread, reply to its latest event, and wake no agent they name."""
     workflow = _workflow("Recurring job")
     target = MessageTarget.for_scheduled_task(workflow)
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
@@ -541,3 +542,4 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     assert content["body"].startswith("❌ Recurring task failed: executor test task")
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
+    assert content[SKIP_MENTIONS_KEY] is True

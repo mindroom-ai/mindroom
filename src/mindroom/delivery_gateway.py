@@ -572,6 +572,7 @@ class StreamingDeliveryRequest:
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     allow_new_terminal_message: Callable[[], bool] | None = None
+    placeholder_ready: Callable[[], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -2137,6 +2138,7 @@ class DeliveryGateway:
             interactive_creator_agent=self.deps.agent_name,
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
+            placeholder_ready=request.placeholder_ready,
             # What a stopped attempt at the reply showed; the stream continues below it.
             resumed=handle.resumed,
             **reply_hooks,

@@ -10,6 +10,7 @@ _CDATA_END = "]]>"
 _CDATA_END_ESCAPED = "]]]]><![CDATA[>"
 _MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
 _FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
+_DISPLAY_NAME_ATTR = re.compile(r"""\bdisplay_name=(["'])(.*?)\1""")
 _CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
 
 
@@ -43,13 +44,17 @@ def render_msg_tag(
     return f"<msg {' '.join(attrs)}><![CDATA[{_cdata_body(body)}]]></msg>"
 
 
-def parse_msg_tags(content: str, *, default_sender: str) -> list[tuple[str, str]]:
-    """Return each ``<msg>`` tag's sender and body, or the whole content as ``default_sender``'s when it holds none."""
+def parse_msg_tags(content: str, *, default_sender: str) -> list[tuple[str, str | None, str]]:
+    """Return each ``<msg>`` tag's sender, display name, and body.
+
+    Content holding no tag is one body from ``default_sender``, without a display name.
+    """
     tagged = [
         (
             html.unescape(sender.group(2)) if (sender := _FROM_ATTR.search(attrs)) else default_sender,
+            html.unescape(name.group(2)) if (name := _DISPLAY_NAME_ATTR.search(attrs)) else None,
             _cdata_body_text(body),
         )
         for attrs, body in _MSG_TAG.findall(content)
     ]
-    return tagged or [(default_sender, _CONTAINER_TAG.sub("", content))]
+    return tagged or [(default_sender, None, _CONTAINER_TAG.sub("", content))]

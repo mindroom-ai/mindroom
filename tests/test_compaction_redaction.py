@@ -319,8 +319,8 @@ def test_retirement_survives_a_later_cut(open_legacy: Callable[[AgentSession], S
     assert "r1" in stored_run_ids(storage, "session")
 
 
-def test_no_retirement_when_only_folded_runs_hold_the_event(open_legacy: Callable[[AgentSession], SqliteDb]) -> None:
-    """A cut that removes no loaded run holding the event leaves a legacy summary in force, as before."""
+def test_removing_only_folded_runs_retires_a_legacy_summary(open_legacy: Callable[[AgentSession], SqliteDb]) -> None:
+    """A legacy summary may hold the event without listing it, so a cut of folded runs alone retires it too."""
     storage = open_legacy(_legacy_session(["r1", "r2", "r3"], "legacy summary", ["$legacy"]))
     session = _stored(storage)
     _compact(storage, session, ["r1", "r2"], "legacy summary and r1 to r2")
@@ -328,7 +328,7 @@ def test_no_retirement_when_only_folded_runs_hold_the_event(open_legacy: Callabl
     assert _redact(storage, session, "$r2")
 
     stored = _stored(storage)
-    assert _summary(stored) == "legacy summary"
+    assert stored.summary is None
     assert [run.run_id for run in stored.runs or []] == ["r1"]
 
 

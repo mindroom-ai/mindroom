@@ -2542,6 +2542,38 @@ def test_only_an_unknown_provider_gets_the_fixed_text_not_every_404(tmp_path: Pa
     assert "no_such_provider" not in unknown.text
 
 
+@pytest.mark.parametrize("scenario", ["reset_unknown_provider", "unknown_agent", "unauthorized_agent"])
+def test_oauth_pages_never_repeat_provider_or_agent_text_from_the_url(tmp_path: Path, scenario: str) -> None:
+    """A browser page refusing a provider or agent named in the URL shows a fixed text; the JSON API keeps the name."""
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider(requester_scoped_credentials=scenario == "unauthorized_agent")
+    url_text = "call-555-0100-to-restore-access"
+    agent_refused = "This agent is unknown or you cannot connect accounts for it."
+    requests = {
+        "reset_unknown_provider": (f"/api/oauth/{url_text}/reset?reset_token=any", 404, "Unknown OAuth provider."),
+        "unknown_agent": (f"/api/oauth/{provider.id}/authorize?agent_name={url_text}", 404, agent_refused),
+        "unauthorized_agent": (f"/api/oauth/{provider.id}/authorize?agent_name={url_text}", 403, agent_refused),
+    }
+    url, status, message = requests[scenario]
+    api_url = (
+        f"/api/oauth/{url_text}/connect"
+        if scenario == "reset_unknown_provider"
+        else f"/api/oauth/{provider.id}/connect?agent_name={url_text}"
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            page = client.get(url, follow_redirects=False)
+            api = client.post(api_url)
+
+    _expect_styled_oauth_page(page, status=status, message=message)
+    assert url_text not in page.text
+    assert api.status_code == status
+    assert url_text in api.json()["detail"]
+
+
 def test_cancelled_authorization_page_says_so(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     api_app = _make_test_app(runtime_paths, _config_payload())

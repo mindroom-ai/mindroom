@@ -53,6 +53,7 @@ from mindroom.streaming import (
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
@@ -1027,18 +1028,20 @@ async def prepare_agent_execution_context(
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
+        prompt_tokens = estimate_text_tokens(prepared_prompt)
         resolved_inputs = resolve_agent_preparation_inputs(
             agent=agent,
             agent_name=agent_name,
             config=config,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
-            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
+            static_prompt_tokens=prompt_tokens + static_token_estimator.non_prompt_tokens(),
         )
         return await prepare_scope_history(
             agent=agent,
             agent_name=agent_name,
             resolved_inputs=resolved_inputs,
+            current_prompt_tokens=prompt_tokens,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -1110,6 +1113,7 @@ async def _prepare_bound_team_execution_context(
     async def _prepare_team_scope_history(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
+        prompt_tokens = estimate_text_tokens(prepared_prompt)
         return await prepare_bound_scope_history(
             agents=agents,
             team=team,
@@ -1119,7 +1123,8 @@ async def _prepare_bound_team_execution_context(
             team_name=team_name,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
-            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
+            static_prompt_tokens=prompt_tokens + static_token_estimator.non_prompt_tokens(),
+            current_prompt_tokens=prompt_tokens,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,

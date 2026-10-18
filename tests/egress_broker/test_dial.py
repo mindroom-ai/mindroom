@@ -16,10 +16,15 @@ from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.egress_broker.dial import (
     DestinationBlockedError,
     DialPolicy,
-    open_upstream,
 )
 from mindroom.server_fetch_url import ServerFetchUrlError
-from tests.egress_broker.conftest import connect_request, plain_request, proxy_authorization, single_rule_config
+from tests.egress_broker.conftest import (
+    connect_request,
+    open_upstream,
+    plain_request,
+    proxy_authorization,
+    single_rule_config,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

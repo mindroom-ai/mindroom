@@ -26,6 +26,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.extraction import ENTITY_TYPES, extraction_instructions
+from mindroom.knowledge_graph.names import KnownEntity
 from mindroom.knowledge_graph.scope import GraphScope
 from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
 from mindroom.knowledge_graph.usage import UsageTarget, current_usage_target
@@ -56,11 +57,11 @@ class _HashEmbedder:
 
 @pytest_asyncio.fixture
 async def store(tmp_path: Path) -> AsyncIterator[GraphitiStore]:
-    """A store over a fresh embedded database."""
+    """A store over a fresh embedded database, with one alias entry."""
     config = Config(
         agents={"mind": AgentConfig(display_name="Mind", knowledge_graph=True)},
         models={"luna": ModelConfig(provider="openai", id="gpt-6-luna")},
-        knowledge_graph={"model": "luna"},
+        knowledge_graph={"model": "luna", "aliases": {"Robin Vale": ["@robin:example.test", "Robin"]}},
     )
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     with patch.object(store_module, "create_configured_embedder", return_value=_HashEmbedder()):
@@ -336,6 +337,34 @@ async def test_entity_without_exact_match_lists_other_close_matches(store: Graph
     assert [entity.name, *entity.others] == ranking
 
 
+@pytest.mark.asyncio
+async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: GraphitiStore) -> None:
+    """A configured alias, Matrix ID, or agent key finds the entity under its one name, ahead of one named the alias."""
+    await _seed_entity(store, ALPHA, "Robin", summary="A stray duplicate.")
+    await _seed_entity(store, ALPHA, "Robin Vale", summary="A person.", facts=2)
+    await _seed_entity(store, ALPHA, "Mind", summary="The agent.")
+
+    for name in ("robin", "@robin:example.test", "ROBIN VALE"):
+        entity = await store.entity(ALPHA, name)
+        assert entity is not None
+        assert entity.name == "Robin Vale"
+    mind = await store.entity(ALPHA, "mind")
+    assert mind is not None
+    assert mind.summary == "The agent."
+
+
+@pytest.mark.asyncio
+async def test_entity_falls_back_to_the_name_asked_for(store: GraphitiStore) -> None:
+    """A graph extracted before an alias entry existed can hold only the alias, which is then found as asked."""
+    await _seed_entity(store, ALPHA, "Robin Vale Consulting", summary="A company.")
+    await _seed_entity(store, ALPHA, "Robin", summary="A person.", name_embedding=[1.0] * 32)
+
+    entity = await store.entity(ALPHA, "Robin")
+
+    assert entity is not None
+    assert entity.summary == "A person."
+
+
 def _holds_embedding(value: object) -> bool:
     """Whether a FalkorDB reply value is, or contains, one of the test embedder's 32-number vectors."""
     if isinstance(value, dict):
@@ -574,12 +603,13 @@ async def test_the_embedder_is_built_off_the_event_loop(store: GraphitiStore) ->
 async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) -> None:
     """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt.
 
-    The episode is extracted into the entity types, with the generic type excluded and the configured instructions
-    following the built-in ones.
+    The episode is extracted into the entity types, with the generic type excluded and the instructions added: the
+    built-in ones, the configured ones, and the names of the agents and people the episode knows.
     """
     store._config_provider().knowledge_graph.extraction_instructions = "Focus on lab equipment."
     graphiti = await store._run(store._graphiti_client())
-    episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
+    known = (KnownEntity("alice", "person", ("@alice:x",)),)
+    episode = EpisodeInput("conversation", "conversation", "alice: hi", "conversation: room !r", JAN, known)
 
     with patch.object(graphiti, "add_episode", AsyncMock()) as add:
         await store.add_episode(ALPHA, episode, UsageTarget("mind", "!r:$t", None))
@@ -589,7 +619,7 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
     assert kwargs["previous_episode_uuids"] == []
     assert kwargs["entity_types"] is ENTITY_TYPES
     assert kwargs["excluded_entity_types"] == ["Entity"]
-    assert kwargs["custom_extraction_instructions"] == extraction_instructions("Focus on lab equipment.")
+    assert kwargs["custom_extraction_instructions"] == extraction_instructions("Focus on lab equipment.", known)
 
 
 @pytest.mark.asyncio
@@ -610,7 +640,7 @@ async def test_episodes_of_two_graphs_extracted_at_once_stay_apart(store: Graphi
         return {name: [] for name in response_model.model_fields} if response_model is not None else {}
 
     episodes = {
-        scope: EpisodeInput("conversation", name, f"person @alice (x): {name}-only news", "conversation: room !r", JAN)
+        scope: EpisodeInput("conversation", name, f"alice: {name}-only news", "conversation: room !r", JAN, ())
         for scope, name in ((ALPHA, "alpha"), (BETA, "beta"))
     }
     with patch.object(MindRoomLLMClient, "_extract", extract):

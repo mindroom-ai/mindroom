@@ -147,6 +147,7 @@ from mindroom.response_runner import PostLockRequestPreparationError, ResponseRe
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.thread_utils import decide_agent_response
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
@@ -513,8 +514,9 @@ async def prepare_history_for_run_for_test(
 ) -> PreparedHistoryState:
     """Compose the production history-preparation seams for one test run."""
     resolved_scope = scope or resolve_history_scope(agent)
+    current_prompt_tokens = estimate_text_tokens(full_prompt)
     if static_prompt_tokens is None:
-        static_prompt_tokens = agent_static_token_estimator(agent).estimate(full_prompt)
+        static_prompt_tokens = current_prompt_tokens + agent_static_token_estimator(agent).non_prompt_tokens()
     resolved_inputs = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name=agent_name,
@@ -542,6 +544,7 @@ async def prepare_history_for_run_for_test(
         "agent": agent,
         "agent_name": agent_name,
         "resolved_inputs": resolved_inputs,
+        "current_prompt_tokens": current_prompt_tokens,
         "runtime_paths": runtime_paths,
         "config": config,
         "scope": resolved_scope,

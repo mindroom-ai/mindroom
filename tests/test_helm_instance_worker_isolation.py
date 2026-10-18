@@ -3866,7 +3866,7 @@ def test_runtime_chart_uses_default_worker_auth_secret() -> None:
 
 @pytest.mark.parametrize(
     ("proxy_tools_args", "proxy_tools"),
-    [((), "shell,file,python"), (("workers.sandbox.proxyTools=*",), "*")],
+    [((), "shell,file,python,coding"), (("workers.sandbox.proxyTools=*",), "*")],
 )
 def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
     proxy_tools_args: tuple[str, ...],

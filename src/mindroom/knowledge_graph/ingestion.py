@@ -22,8 +22,10 @@ from mindroom.knowledge_graph.episodes import (
     Progress,
     RenderedEpisode,
     classify_thread,
+    newest_display_names,
     render_episodes,
 )
+from mindroom.knowledge_graph.names import entity_names
 from mindroom.knowledge_graph.scope import graph_scopes
 from mindroom.knowledge_graph.store import UnusableExtractionError, record_knowledge_graph_failure
 from mindroom.knowledge_graph.usage import UsageTarget
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_runs import RedactedEventIds
+    from mindroom.knowledge_graph.names import EntityNames
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import GraphStore
 
@@ -191,7 +194,8 @@ class KnowledgeGraphIngestionWorker:
         """
         # These read files, including every private instance's records, so they stay off the event loop.
         automation_thread_ids = await asyncio.to_thread(automation_threads, self.runtime_paths)
-        entity_names = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
+        agent_keys = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
+        names = entity_names(config, agent_keys)
         scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
         budget = config.knowledge_graph.ingest.max_sessions_per_cycle
         outcomes: list[bool] = []
@@ -209,7 +213,7 @@ class KnowledgeGraphIngestionWorker:
                         # A conversation finished while listing is a clean outcome; one it could not read saved its failure.
                         outcomes.append(True)
                     results = [
-                        await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
+                        await self._ingest(config, scope, state, session, automation_thread_ids, names, now)
                         for session in due
                     ]
                     # A conversation that added nothing, such as one whose agent is not running or whose first episode
@@ -294,7 +298,7 @@ class KnowledgeGraphIngestionWorker:
         state: _GraphState,
         session: _DueSession,
         automation_thread_ids: set[str],
-        agent_for_sender: Callable[[str], str | None],
+        names: EntityNames,
         now: float,
     ) -> bool | None:
         """Ingest a bounded number of one conversation's new episodes and return whether none failed or was dropped.
@@ -327,6 +331,8 @@ class KnowledgeGraphIngestionWorker:
                 cutoff=state["started_at"] - settings.backfill_days * _DAY_SECONDS,
             )
         thread_kind = classify_thread(session.runs, automation_thread_ids)
+        # From every finished turn, not only the new ones, so a person keeps their name in a turn stored without it.
+        display_names = await asyncio.to_thread(newest_display_names, finished)
         clean = True
         added = 0
         for kind in _EPISODE_KINDS:
@@ -341,7 +347,8 @@ class KnowledgeGraphIngestionWorker:
                 episode_kind=kind,
                 agent_name=scope.agent_name,
                 settings=settings,
-                agent_for_sender=agent_for_sender,
+                names=names,
+                display_names=display_names,
             )
             for rendered in episodes:
                 if marker is not None and rendered.progress <= marker:

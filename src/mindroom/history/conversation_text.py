@@ -33,6 +33,8 @@ class Utterance:
     kind: Literal["said", "reply", "runtime", "tool_result"]
     # The Matrix ID behind a `said` message; None for the agent, MindRoom, or a tool.
     sender: str | None
+    # The display name a `said` message carried, as the sender had it then; None when it carried none.
+    display_name: str | None
     # Send this only through redaction.
     unredacted: str
     # The stored message, for its tool calls and tool name.
@@ -53,12 +55,12 @@ def run_requester(run: RunOutput | TeamRunOutput) -> str | None:
 def _prompt_utterances(message: Message, content: str, requester: str, *, mindroom_wrote: bool) -> list[Utterance]:
     """Split a user message into its tagged messages, leaving out empty ones."""
     found: list[Utterance] = []
-    for sender, body in parse_msg_tags(content, default_sender=requester):
+    for sender, display_name, body in parse_msg_tags(content, default_sender=requester):
         if mindroom_wrote:
-            utterance = Utterance("runtime", None, body, message)
+            utterance = Utterance("runtime", None, None, body, message)
         else:
             # Context a hook attached to the message is MindRoom's, not the sender's words.
-            utterance = Utterance("said", sender, strip_enrichment_blocks(body), message)
+            utterance = Utterance("said", sender, display_name, strip_enrichment_blocks(body), message)
         if utterance.unredacted.strip():
             found.append(utterance)
     return found
@@ -90,7 +92,7 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
         if message.role == "user" and (agent_work or not mindroom_wrote):
             said.extend(_prompt_utterances(message, content, requester, mindroom_wrote=mindroom_wrote))
         elif message.role == "assistant" and keeps_reply and (content.strip() or (agent_work and message.tool_calls)):
-            said.append(Utterance("reply", None, content, message))
+            said.append(Utterance("reply", None, None, content, message))
         elif message.role == "tool" and agent_work:
-            said.append(Utterance("tool_result", None, message.get_content_string(), message))
+            said.append(Utterance("tool_result", None, None, message.get_content_string(), message))
     return said

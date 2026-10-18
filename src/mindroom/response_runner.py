@@ -851,8 +851,7 @@ async def _response_typing_indicator(
     finished = asyncio.Event()
 
     async def approved_typing() -> None:
-        await participation.decided.wait()
-        if participation.approved:
+        if await participation.wait_for_approval():
             async with show_typing():
                 await finished.wait()
 
@@ -5434,6 +5433,9 @@ class ResponseRunner:
                         ),
                         allow_new_terminal_message=lambda: (
                             runtime.participation is None or runtime.participation.approved
+                        ),
+                        placeholder_ready=(
+                            None if runtime.participation is None else runtime.participation.wait_for_approval
                         ),
                     ),
                 )

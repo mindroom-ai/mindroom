@@ -33,6 +33,7 @@ from mindroom.api.credentials_target import (
     worker_target_for_credentials_target,
 )
 from mindroom.api.dashboard_credential_scope import (
+    AgentNotConnectableError,
     build_dashboard_execution_identity,
     require_agent_oauth_connection_authorized,
 )
@@ -731,14 +732,22 @@ def _opener_notice(request: Request, provider_id: str, *, from_state: bool = Fal
     return _OpenerNotice(provider.id, _validated_opener_origin(origin, provider, runtime_paths))
 
 
+def _oauth_browser_error_message(exc: HTTPException) -> str:
+    """Return a browser page's text for `exc`, a fixed one when its detail repeats a provider or agent from the URL."""
+    if isinstance(exc, _UnknownOAuthProviderError):
+        return "Unknown OAuth provider."
+    if isinstance(exc, AgentNotConnectableError):
+        return "This agent is unknown or you cannot connect accounts for it."
+    return str(exc.detail)
+
+
 def _oauth_flow_error_response(exc: HTTPException, *, notice: _OpenerNotice | None) -> HTMLResponse:
     """Show a refusal of the browser's own OAuth step (authorize or callback) as a page for the popup.
 
-    An unknown provider in the URL gets a fixed text, so the page never repeats text from the URL. `notice` says whose
-    opener hears of the error, if anyone's.
+    `notice` says whose opener hears of the error, if anyone's.
     """
     title = "OAuth connection changed" if exc.status_code == 409 else "Account connection failed"
-    message = "Unknown OAuth provider." if isinstance(exc, _UnknownOAuthProviderError) else str(exc.detail)
+    message = _oauth_browser_error_message(exc)
     return _oauth_browser_error_response(message, status_code=exc.status_code, title=title, notice=notice)
 
 
@@ -864,7 +873,7 @@ async def confirm_reset(
             execution_scope=execution_scope,
         )
     except HTTPException as exc:
-        return _oauth_browser_error_response(str(exc.detail), status_code=exc.status_code)
+        return _oauth_browser_error_response(_oauth_browser_error_message(exc), status_code=exc.status_code)
     display_name = escape(provider.display_name)
     target_agent = escape(intent.binding.requested_agent_name or "unknown")
     target_scope = escape(intent.binding.worker_scope)

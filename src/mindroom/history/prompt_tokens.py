@@ -69,11 +69,15 @@ class _StaticTokenEstimator:
     non_prompt_tokens_fn: Callable[[], int]
     _non_prompt_tokens: int | None = field(default=None, init=False)
 
-    def estimate(self, full_prompt: str) -> int:
-        """Estimate static prompt tokens while reusing Agno-prepared tools."""
+    def non_prompt_tokens(self) -> int:
+        """Estimate the system message and tool tokens, which do not depend on the prompt text."""
         if self._non_prompt_tokens is None:
             self._non_prompt_tokens = self.non_prompt_tokens_fn()
-        return estimate_text_tokens(full_prompt) + self._non_prompt_tokens
+        return self._non_prompt_tokens
+
+    def estimate(self, full_prompt: str) -> int:
+        """Estimate static prompt tokens while reusing Agno-prepared tools."""
+        return estimate_text_tokens(full_prompt) + self.non_prompt_tokens()
 
 
 def agent_static_token_estimator(agent: Agent) -> _StaticTokenEstimator:

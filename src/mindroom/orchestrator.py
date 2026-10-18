@@ -28,7 +28,7 @@ from mindroom.attachments.storage import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
+from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME, tracking_dir
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
@@ -1134,7 +1134,7 @@ class _MultiAgentOrchestrator:
     def _entity_display_name(config: Config, entity_name: str) -> str:
         """Return the Matrix display name for one configured managed entity."""
         if entity_name == ROUTER_AGENT_NAME:
-            return "RouterAgent"
+            return ROUTER_DISPLAY_NAME
         if entity_name in config.agents:
             return config.agents[entity_name].display_name
         if entity_name in config.teams:
@@ -1534,11 +1534,11 @@ class _MultiAgentOrchestrator:
         room_id: str,
         event_ids: tuple[str, ...],
     ) -> frozenset[str] | None:
-        """Return which of a room's events one running managed entity's journal saw redacted, or None when not running."""
+        """Return which of a room's events one running managed entity saw redacted, or None when not running."""
         bot = self.agent_bots.get(entity_name)
         if bot is None or not bot.running:
             return None
-        return await bot.journal_principal().redacted_event_ids(room_id, event_ids)
+        return await bot.redacted_event_ids(room_id, event_ids)
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""

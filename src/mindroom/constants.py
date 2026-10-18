@@ -20,6 +20,7 @@ from mindroom.atomic_file import atomic_write_bytes_at
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
+ROUTER_DISPLAY_NAME = "RouterAgent"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"

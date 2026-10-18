@@ -461,7 +461,10 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
             assert agent is live_agent
 
         def estimate(self, full_prompt: str) -> int:
-            return estimate_text_tokens(full_prompt)
+            return estimate_text_tokens(full_prompt) + self.non_prompt_tokens()
+
+        def non_prompt_tokens(self) -> int:
+            return 0
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),

@@ -823,6 +823,7 @@ visibility = [
     "mindroom.llm_request_logging",
     "mindroom.skill_learning.reviewer",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
 ]
 
 [[modules]]
@@ -2045,6 +2046,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]
@@ -2517,6 +2519,7 @@ depends_on = [
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
+    "mindroom.token_budget",
     "mindroom.tool_system.events",
 ]
 
@@ -2715,6 +2718,7 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.logging_config",
+    "mindroom.model_usage",
     "mindroom.providers.model_loading",
     "mindroom.history.team_scope",
     "mindroom.timing",
@@ -5280,6 +5284,7 @@ depends_on = [
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
@@ -9157,6 +9162,11 @@ depends_on = []
 visibility = ["mindroom.knowledge_graph.store"]
 
 [[modules]]
+path = "mindroom.knowledge_graph.names"
+depends_on = ["mindroom.constants"]
+visibility = ["mindroom.knowledge_graph.ingestion", "mindroom.knowledge_graph.store"]
+
+[[modules]]
 path = "mindroom.knowledge_graph.embedded_server"
 depends_on = ["mindroom.logging_config"]
 visibility = ["mindroom.knowledge_graph.store"]
@@ -9186,9 +9196,11 @@ depends_on = [
 path = "mindroom.knowledge_graph.store"
 depends_on = [
     "mindroom.embeddings.factory",
+    "mindroom.entity_resolution",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.embedded_server",
     "mindroom.knowledge_graph.extraction",
+    "mindroom.knowledge_graph.names",
     "mindroom.knowledge_graph.usage",
     "mindroom.tool_system.dependencies",
 ]
@@ -9224,6 +9236,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
+    "mindroom.knowledge_graph.names",
     "mindroom.knowledge_graph.scope",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",

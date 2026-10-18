@@ -494,6 +494,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
@@ -650,6 +651,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -667,6 +669,62 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     assert final.replays_persisted_history
     assert len(session.runs or []) == 1
     assert len(session.runs[0].messages[0].content) > 900000
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_native_route_ignores_the_latest_reported_request_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint response is billed for the transcript it replaced, so the native estimate decides before a reply."""
+    config, paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+    )
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    run = _completed_run(
+        "old",
+        messages=[
+            Message(role="user", content="Question"),
+            # Over the 183,516-token hard budget once the 100 static tokens are taken off.
+            Message(role="assistant", content="Ready", metrics=MessageMetrics(input_tokens=190000)),
+        ],
+    )
+    run.model = model.id
+    run.model_provider = model.provider
+    session = _session("session", runs=[run])
+    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    seed_session(db, session)
+    agent = _agent(model=model, db=db)
+    text_compact = AsyncMock(side_effect=AssertionError("Native history must not compact as text"))
+    monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
+    resolved = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name="test_agent",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    prepared = await prepare_scope_history(
+        agent=agent,
+        agent_name="test_agent",
+        resolved_inputs=resolved,
+        current_prompt_tokens=0,
+        runtime_paths=paths,
+        config=config,
+        scope_context=ScopeSessionContext(
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            storage=db,
+            session=session,
+        ),
+    )
+
+    assert model.native_compaction is not None
+    assert prepared.compaction_decision.reason == "under_trigger"
+    current_history_tokens = prepared.compaction_decision.current_history_tokens
+    assert current_history_tokens is not None
+    assert current_history_tokens < 100
     db.close()
 
 
@@ -723,6 +781,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -804,6 +863,7 @@ async def test_native_activation_respects_history_policy(
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -843,6 +903,7 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
@@ -884,6 +945,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -930,6 +992,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         active_model_name="default",
         active_context_window=200000,
         static_prompt_tokens=100,
+        current_prompt_tokens=0,
     )
     assert model.native_compaction is not None
     assert model.native_compaction.threshold == 120000

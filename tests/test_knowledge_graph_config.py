@@ -87,3 +87,33 @@ def test_one_tool_result_fits_in_an_episode() -> None:
     """A tool result is never cut further by the episode limit, so the episode must hold one twice over."""
     with pytest.raises(ValidationError, match="max_tool_result_chars"):
         _config(knowledge_graph={"model": "luna", "ingest": {"max_episode_chars": 2000, "max_tool_result_chars": 1500}})
+
+
+def test_aliases_map_one_name_to_the_other_names_it_goes_by() -> None:
+    """An entry can link a Matrix ID or an agent key and list plain names; it needs no enabled graph."""
+    aliases = {"Robin Vale": ["@robin:example.test", "Robin", "robin@example.test"], "Mind": ["mind"], "Atlas": []}
+
+    assert _config(knowledge_graph={"model": "luna", "aliases": aliases}).knowledge_graph.aliases == aliases
+    assert Config(knowledge_graph={"aliases": aliases}).knowledge_graph.aliases == aliases
+
+
+@pytest.mark.parametrize(
+    ("aliases", "error"),
+    [
+        pytest.param(
+            {"Robin Vale": ["@robin:example.test"], "Robin": ["@robin:example.test"]},
+            "@robin",
+            id="identity",
+        ),
+        pytest.param({"Robin Vale": ["Robin"], "Robin Ash": ["robin"]}, "'robin'", id="alias-in-any-case"),
+        pytest.param({"Robin Vale": ["Robin Ash"], "Robin Ash": []}, "'robin ash'", id="alias-is-another-name"),
+        pytest.param({"Robin  Vale": []}, "single spaces", id="double-space"),
+        pytest.param({"Robin Vale": [" Robin"]}, "single spaces", id="padded-alias"),
+        pytest.param({"Robin Vale": [""]}, "non-empty", id="empty-alias"),
+        pytest.param({"Robin: Vale": []}, "colon", id="colon-in-name"),
+    ],
+)
+def test_aliases_give_each_name_one_entry(aliases: dict[str, list[str]], error: str) -> None:
+    """No identity or alias belongs to two entries or is another entry's name, and names are written on one line."""
+    with pytest.raises(ValidationError, match=error):
+        Config(knowledge_graph={"aliases": aliases})

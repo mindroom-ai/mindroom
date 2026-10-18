@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
+from mindroom.knowledge_graph.names import KnownEntity
 
 
 def test_every_entity_type_has_a_description_and_no_fields() -> None:
@@ -49,16 +50,42 @@ def test_graphiti_prompt_lists_exactly_the_types_with_their_docstrings_and_no_en
 
 def test_instructions_keep_paths_and_an_assistants_own_activity_out() -> None:
     """Paths and URLs belong inside facts, dated by when they held; an assistant's lookups stay out, its effects stay in."""
-    text = extraction_instructions("")
+    text = extraction_instructions("", (KnownEntity("Mind", "agent", ()),))
     for phrase in ("file paths", "URLs", "environment variables", "commit hashes", "branch names", "when it happened"):
         assert phrase in text
-    assert "`agent <name>`" in text
+    assert "speaker listed below as an agent" in text
     for phrase in ("lookups", "access", "configuration", "counts", "listing returned", "changed things for others"):
         assert phrase in text
 
 
-def test_configured_instructions_follow_the_built_in_ones() -> None:
-    """An operator's instructions add to the built-in ones, and blank text adds nothing."""
-    built_in = extraction_instructions("")
-    assert extraction_instructions("  \n") == built_in
-    assert extraction_instructions("  Focus on lab equipment.\n") == f"{built_in}\nFocus on lab equipment."
+def test_configured_instructions_follow_the_built_in_ones_and_precede_the_known_names() -> None:
+    """An operator's instructions add to the built-in ones, blank text adds nothing, and the episode's names come last."""
+    known = (KnownEntity("Mind", "agent", ()),)
+    names = "When the text mentions one of these, use exactly this name:\n- Mind (agent)"
+    built_in = extraction_instructions("", known).removesuffix(f"\n{names}")
+
+    assert extraction_instructions("  \n", known) == f"{built_in}\n{names}"
+    assert (
+        extraction_instructions("  Focus on lab equipment.\n", known) == f"{built_in}\nFocus on lab equipment.\n{names}"
+    )
+
+
+def test_instructions_give_each_known_entity_one_name() -> None:
+    """Each known agent, person, or configured name is listed under the one name to use, with the names it also has."""
+    known = (
+        KnownEntity("Mind", "agent", ("mind", "@mindroom_mind:x")),
+        KnownEntity("alice", "person", ()),
+        KnownEntity("Project Atlas", None, ("Atlas",)),
+        KnownEntity("Beacon", None, ()),
+    )
+
+    static = extraction_instructions("", ())
+    text = extraction_instructions("", known)
+
+    assert text.startswith(static)
+    assert text.removeprefix(static).splitlines()[1:] == [
+        "- Mind (agent; also called mind, @mindroom_mind:x)",
+        "- alice (person)",
+        "- Project Atlas (also called Atlas)",
+        "- Beacon",
+    ]

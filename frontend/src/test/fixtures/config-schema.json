@@ -2502,6 +2502,18 @@
             "backfill_days": 7
           },
           "description": "Conversation ingestion settings"
+        },
+        "aliases": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "One name per person, agent, or thing, mapped to its other names, Matrix IDs, and agent keys",
+          "title": "Aliases",
+          "type": "object"
         }
       },
       "title": "KnowledgeGraphConfig",
@@ -5288,7 +5300,8 @@
           "max_episode_chars": 24000,
           "max_sessions_per_cycle": 10,
           "max_tool_result_chars": 4000
-        }
+        },
+        "aliases": {}
       },
       "description": "Knowledge graph built from graph-enabled agents' conversations"
     },

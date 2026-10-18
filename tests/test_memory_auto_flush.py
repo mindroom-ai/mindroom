@@ -457,7 +457,7 @@ async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unb
     tmp_path: Path,
     extractor: _Extractor,
 ) -> None:
-    """A turn derived from a redacted event is never flushed; an agent whose bot is not running waits, unbudgeted."""
+    """A turn derived from a redacted event is never flushed, nor are later ones; an agent that cannot tell waits."""
     agents = {
         "general": AgentConfig(display_name="General", rooms=[]),
         "other": AgentConfig(display_name="Other", rooms=[]),
@@ -473,12 +473,16 @@ async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unb
     waiting = _thread("w")
     _seed(config, waiting, [_run("w1", waiting, T0 + 5)], agent="other")
     session = _thread("t1")
-    _seed(config, session, [_run("gone", session, T0 + 10), _run("kept", session, T0 + 20)])
+    _seed(
+        config,
+        session,
+        [_run("kept", session, T0 + 10), _run("gone", session, T0 + 20), _run("later", session, T0 + 30)],
+    )
 
     await worker._run_cycle(config)
 
     assert extractor.lines() == [_lines("kept")]
-    assert _entry(tmp_path, session)["marker"] == [T0 + 20, "kept"]
+    assert _entry(tmp_path, session)["marker"] == [T0 + 10, "kept"]
     with pytest.raises(StopIteration):
         _entry(tmp_path, waiting)
 

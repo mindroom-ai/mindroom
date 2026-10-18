@@ -29,6 +29,7 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
     {
         "browser",
         "script",
+        "claude_agent",
         "compact_context",
         "delegate",
         "dynamic_tools",

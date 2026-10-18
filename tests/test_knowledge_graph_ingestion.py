@@ -30,6 +30,7 @@ from mindroom.knowledge_graph.store import (
     knowledge_graph_failure,
     record_knowledge_graph_failure,
 )
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import seed_session
 
@@ -215,7 +216,7 @@ def _worker(
 
 
 def _answers(store: _FakeStore) -> list[str]:
-    return [line for _, episode, _ in store.episodes for line in episode.body.splitlines() if line.startswith("agent")]
+    return [line for _, episode, _ in store.episodes for line in episode.body.splitlines() if line.startswith("Mind:")]
 
 
 @pytest.mark.asyncio
@@ -229,7 +230,7 @@ async def test_cycle_ingests_new_runs_and_advances_its_marker(tmp_path: Path) ->
     _seed(config, paths, "!room:x:$t1", ["r1", "r2", "r3"])
     await worker._run_cycle(config, now=T0 + 20)
 
-    assert _answers(store) == ["agent mind: answer r1", "agent mind: answer r2", "agent mind: answer r3"]
+    assert _answers(store) == ["Mind: answer r1", "Mind: answer r2", "Mind: answer r3"]
     assert {graph for graph, _, _ in store.episodes} == {graph_scope("mind", config, paths, None).graph_name}
     assert store.episodes[0][2].session_id == "!room:x:$t1"
     # A shared agent's extraction cost belongs to the person whose conversation it came from.
@@ -389,7 +390,7 @@ async def test_a_paused_turn_holds_back_later_turns_until_it_finishes(tmp_path: 
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 15)
     await worker._run_cycle(config, now=T0 + 20)
 
-    assert _answers(store) == ["agent mind: answer r1", "agent mind: answer r2"]
+    assert _answers(store) == ["Mind: answer r1", "Mind: answer r2"]
 
 
 @pytest.mark.asyncio
@@ -466,7 +467,34 @@ async def test_a_new_graph_skips_turns_older_than_the_backfill_window(tmp_path: 
 
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
 
-    assert _answers(store) == ["agent mind: answer new"]
+    assert _answers(store) == ["Mind: answer new"]
+
+
+@pytest.mark.asyncio
+async def test_a_later_pass_names_a_person_as_their_earlier_turns_did(tmp_path: Path) -> None:
+    """A turn stored without a display name, such as a stopped one, names its sender as the conversation did before."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+
+    def tagged(runs: list[RunOutput]) -> None:
+        for run in runs:
+            display_name = "Alice Example" if run.run_id == "r1" else None
+            body = f"question {run.run_id}"
+            run.messages[0].content = render_msg_tag(sender="@alice:x", display_name=display_name, body=body)
+
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    _edit_runs(config, paths, "!room:x:$t1", tagged)
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
+    _edit_runs(config, paths, "!room:x:$t1", tagged)
+    await worker._run_cycle(config, now=T0 + 20)
+
+    conversations = [episode for _, episode, _ in store.episodes if episode.kind == "conversation"]
+    assert [episode.body.splitlines()[0] for episode in conversations] == [
+        "Alice Example: question r1",
+        "Alice Example: question r2",
+    ]
+    assert [entity.name for entity in conversations[-1].known_entities] == ["Mind", "Alice Example"]
 
 
 @pytest.mark.asyncio
@@ -516,7 +544,7 @@ async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
     await worker._run_cycle(config, now=T0 + 10 + 4 * DAY)
 
-    assert _answers(store) == ["agent mind: answer r2"]
+    assert _answers(store) == ["Mind: answer r2"]
 
 
 @pytest.mark.asyncio
@@ -530,7 +558,7 @@ async def test_a_conversation_held_back_by_an_approval_is_ingested_once_it_expir
     assert store.episodes == []
     await worker._run_cycle(config, now=T0 + 8 * DAY)
 
-    assert _answers(store) == ["agent mind: answer r2"]
+    assert _answers(store) == ["Mind: answer r2"]
 
 
 @pytest.mark.asyncio
@@ -834,19 +862,19 @@ async def test_a_pass_whose_every_attempt_failed_added_nothing(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_a_redacted_message_is_never_added(tmp_path: Path) -> None:
-    """A turn whose message was redacted before ingestion reached it stays out of the graph, also after a rebuild."""
+    """A turn whose message was redacted before ingestion reached it stays out of the graph with every later turn."""
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2", "r3"])
     asked: list[tuple[str, str, tuple[str, ...]]] = []
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         asked.append((agent_name, room_id, event_ids))
-        return frozenset({"$event-r1"})
+        return frozenset({"$event-r2"})
 
     await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
 
-    assert _answers(store) == ["agent mind: answer r2"]
-    assert asked == [("mind", "!room:x", ("$event-r1", "$event-r2"))]
+    assert _answers(store) == ["Mind: answer r1"]
+    assert asked == [("mind", "!room:x", ("$event-r1", "$event-r2", "$event-r3"))]
 
 
 @pytest.mark.asyncio
@@ -862,7 +890,7 @@ async def test_a_conversation_waits_while_its_agent_cannot_say_what_was_redacted
     await _worker(config, paths, store, not_running)._run_cycle(config, now=T0 + 10)
     assert store.episodes == []
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 20)
-    assert _answers(store) == ["agent mind: answer r1"]
+    assert _answers(store) == ["Mind: answer r1"]
 
 
 @pytest.mark.asyncio
@@ -911,7 +939,7 @@ async def test_a_conversation_first_recorded_empty_still_starts_after_the_backfi
     _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 + 5, spacing=35)
     await worker._run_cycle(config, now=T0 + 60)
 
-    assert _answers(store) == ["agent mind: answer new"]
+    assert _answers(store) == ["Mind: answer new"]
 
 
 @pytest.mark.asyncio
