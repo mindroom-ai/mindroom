@@ -68,6 +68,62 @@ async def test_projection_change_requires_a_new_membership_lookup() -> None:
     assert set(room.users) == {ACCOUNT, "@new:example.org"}
 
 
+def _member_record(user_id: str, membership: str, display_name: str | None) -> SyncRecord:
+    content: dict[str, object] = {"membership": membership}
+    if display_name is not None:
+        content["displayname"] = display_name
+    return SyncRecord(RecordKind.STATE, ROOM, {"type": "m.room.member", "state_key": user_id, "content": content})
+
+
+async def _looked_up_room() -> tuple[nio.MatrixRoom, AsyncMock]:
+    """A room whose partial projection knows only the bot, after one lookup found the bot and a peer."""
+    room = nio.MatrixRoom(ROOM, ACCOUNT)
+    room.add_member(ACCOUNT, "Bot", None)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        [nio.RoomMember(ACCOUNT, "Bot", None), nio.RoomMember(PEER, "Peer", None)],
+        ROOM,
+    )
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    return room, client
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_member_event_keeps_the_lookup() -> None:
+    """Sliding sync resends a sender's unchanged member event with each message, which changes nothing."""
+    room, client = await _looked_up_room()
+
+    invalidate_membership_lookups([_member_record(PEER, "join", "Peer")], account_id=ACCOUNT)
+
+    assert room_membership_is_complete(room)
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert client.joined_members.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_projection_learning_a_known_member_keeps_the_lookup() -> None:
+    """Nio adding a member the lookup already holds, as a lazily loaded sender, needs no new lookup."""
+    room, client = await _looked_up_room()
+
+    room.add_member(PEER, "Peer", None)
+
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert client.joined_members.await_count == 1
+    assert cached_joined_member_ids(room) == {ACCOUNT, PEER}
+
+
+@pytest.mark.asyncio
+async def test_a_member_event_with_a_new_display_name_drops_the_lookup() -> None:
+    """A changed display name is new information, so mentions are resolved from a fresh lookup."""
+    room, client = await _looked_up_room()
+
+    invalidate_membership_lookups([_member_record(PEER, "join", "Renamed")], account_id=ACCOUNT)
+
+    assert not room_membership_is_complete(room)
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert client.joined_members.await_count == 2
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [RecordKind.STATE, RecordKind.TIMELINE])
 async def test_membership_record_invalidates_peer_absent_from_projection(tmp_path: Path, kind: RecordKind) -> None:

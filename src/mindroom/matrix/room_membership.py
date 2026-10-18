@@ -30,6 +30,35 @@ class _RoomMembershipSnapshot:
     joined_user_ids: frozenset[str]
     display_names: tuple[tuple[str, str], ...]
 
+    def agrees_with(self, room: nio.MatrixRoom) -> bool:
+        """Whether nio's partial projection only gained members this lookup already holds.
+
+        Sliding sync loads members lazily, so the projection keeps learning senders the lookup already found; a
+        removed or changed entry, or a member the lookup did not find, means membership moved on.
+        """
+        current = _projected_members(room)
+        if current == self.projected_members:
+            return True
+        before, after = set(self.projected_members), set(current)
+        names = dict(self.display_names)
+        return before <= after and all(
+            user_id in self.joined_user_ids and not invited and names.get(user_id) == display_name
+            for user_id, display_name, _avatar_url, invited in after - before
+        )
+
+    def repeats(self, record: SyncRecord) -> bool:
+        """Whether a member event only restates a join this lookup already holds.
+
+        Tuwunel resends a sender's member event with every sliding sync response that carries their messages.
+        """
+        user_id = record.source.get("state_key")
+        content = record.source.get("content") or {}
+        return (
+            user_id in self.joined_user_ids
+            and content.get("membership") == "join"
+            and content.get("displayname") == dict(self.display_names).get(user_id)
+        )
+
 
 @dataclass(slots=True)
 class _MembershipLookup:
@@ -53,7 +82,7 @@ def room_membership_snapshot(room: nio.MatrixRoom) -> _RoomMembershipSnapshot | 
     if room.members_synced or lookup is None or lookup.snapshot is None:
         return None
     snapshot = lookup.snapshot
-    return snapshot if snapshot.projected_members == _projected_members(room) else None
+    return snapshot if snapshot.agrees_with(room) else None
 
 
 def room_membership_is_complete(room: nio.MatrixRoom) -> bool:
@@ -76,19 +105,29 @@ def cached_member_ids(room: nio.MatrixRoom) -> frozenset[str]:
 
 def invalidate_membership_lookups(records: Iterable[SyncRecord], *, account_id: str) -> None:
     """Drop lookup results before admitting membership changes or unknown history gaps."""
-    room_ids = {
-        record.room_id
-        for record in records
-        if record.membership is not None
-        or record.kind is RecordKind.LOSS
-        or record.source.get("type") == "m.room.member"
-    }
-    if not room_ids:
+    records_by_room: dict[str | None, list[SyncRecord]] = {}
+    for record in records:
+        if (
+            record.membership is not None
+            or record.kind is RecordKind.LOSS
+            or record.source.get("type") == "m.room.member"
+        ):
+            records_by_room.setdefault(record.room_id, []).append(record)
+    if not records_by_room:
         return
     for room, lookup in tuple(_lookups.items()):
-        if room.own_user_id == account_id and room.room_id in room_ids:
-            lookup.snapshot = None
-            lookup.revision += 1
+        room_records = records_by_room.get(room.room_id)
+        if room.own_user_id != account_id or room_records is None:
+            continue
+        snapshot = lookup.snapshot
+        # An in-flight lookup has nothing to compare against, so any member record rejects its result.
+        if snapshot is not None and all(
+            record.membership is None and record.kind is not RecordKind.LOSS and snapshot.repeats(record)
+            for record in room_records
+        ):
+            continue
+        lookup.snapshot = None
+        lookup.revision += 1
 
 
 async def ensure_room_membership_synced(
