@@ -42,7 +42,7 @@ class _RoomMembershipSnapshot:
         before, after = set(self.projected_members), set(current)
         names = dict(self.display_names)
         return before <= after and all(
-            user_id in self.joined_user_ids and not invited and names.get(user_id) == display_name
+            user_id in self.joined_user_ids and not invited and names.get(user_id) == (display_name or None)
             for user_id, display_name, _avatar_url, invited in after - before
         )
 
@@ -52,11 +52,14 @@ class _RoomMembershipSnapshot:
         Tuwunel resends a sender's member event with every sliding sync response that carries their messages.
         """
         user_id = record.source.get("state_key")
-        content = record.source.get("content") or {}
+        content = record.source.get("content")
+        # Malformed payloads reach here unvalidated and must settle, so anything unreadable is not a repeat.
         return (
-            user_id in self.joined_user_ids
+            isinstance(user_id, str)
+            and isinstance(content, dict)
+            and user_id in self.joined_user_ids
             and content.get("membership") == "join"
-            and content.get("displayname") == dict(self.display_names).get(user_id)
+            and (content.get("displayname") or None) == dict(self.display_names).get(user_id)
         )
 
 
@@ -77,7 +80,7 @@ def _projected_members(room: nio.MatrixRoom) -> _ProjectedMembers:
 
 
 def room_membership_snapshot(room: nio.MatrixRoom) -> _RoomMembershipSnapshot | None:
-    """Return an application lookup only while its source projection is unchanged."""
+    """Return an application lookup only while nio's projection agrees with it."""
     lookup = _lookups.get(room)
     if room.members_synced or lookup is None or lookup.snapshot is None:
         return None
@@ -120,7 +123,9 @@ def invalidate_membership_lookups(records: Iterable[SyncRecord], *, account_id: 
         if room.own_user_id != account_id or room_records is None:
             continue
         snapshot = lookup.snapshot
-        # An in-flight lookup has nothing to compare against, so any member record rejects its result.
+        # Without a snapshot nothing can be compared, so any member record rejects an in-flight result. A stale
+        # snapshot keeps records that repeat it; a real change still bumps the revision or drops the installed
+        # result when it is consumed, and the install check compares the projection.
         if snapshot is not None and all(
             record.membership is None and record.kind is not RecordKind.LOSS and snapshot.repeats(record)
             for record in room_records

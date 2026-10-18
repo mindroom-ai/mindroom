@@ -125,6 +125,61 @@ async def test_a_member_event_with_a_new_display_name_drops_the_lookup() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "records",
+    [
+        pytest.param(
+            [_member_record(PEER, "join", "Peer"), _member_record("@other:example.org", "leave", None)],
+            id="repeat-then-leave",
+        ),
+        pytest.param(
+            [_member_record("@other:example.org", "leave", None), _member_record(PEER, "join", "Peer")],
+            id="leave-then-repeat",
+        ),
+        pytest.param([_member_record("@stranger:example.org", "join", "Stranger")], id="unknown-member"),
+        pytest.param(
+            [_member_record(PEER, "join", "Peer"), SyncRecord(RecordKind.LOSS, ROOM, {})],
+            id="repeat-and-gap",
+        ),
+        pytest.param(
+            [SyncRecord(RecordKind.STATE, ROOM, {"type": "m.room.member", "state_key": PEER, "content": "join"})],
+            id="malformed-content",
+        ),
+        pytest.param(
+            [SyncRecord(RecordKind.STATE, ROOM, {"type": "m.room.member", "state_key": [PEER], "content": {}})],
+            id="malformed-state-key",
+        ),
+    ],
+)
+async def test_a_batch_that_is_not_only_repeats_drops_the_lookup(records: list[SyncRecord]) -> None:
+    """One real change, or a record that cannot be read, anywhere in a batch drops the whole room's lookup."""
+    room, _client = await _looked_up_room()
+
+    invalidate_membership_lookups(records, account_id=ACCOUNT)
+
+    assert not room_membership_is_complete(room)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_display_name_still_counts_as_a_repeat() -> None:
+    """The lookup leaves out empty names, so a member event carrying an empty name restates no name."""
+    room = nio.MatrixRoom(ROOM, ACCOUNT)
+    room.add_member(ACCOUNT, "Bot", None)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        [nio.RoomMember(ACCOUNT, "Bot", None), nio.RoomMember(PEER, "", None)],
+        ROOM,
+    )
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+
+    invalidate_membership_lookups([_member_record(PEER, "join", "")], account_id=ACCOUNT)
+    room.add_member(PEER, "", None)
+
+    assert await ensure_room_membership_synced(client, room, sender_id=PEER)
+    assert client.joined_members.await_count == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [RecordKind.STATE, RecordKind.TIMELINE])
 async def test_membership_record_invalidates_peer_absent_from_projection(tmp_path: Path, kind: RecordKind) -> None:
     """A partial projection may never have held the departed member being invalidated."""
