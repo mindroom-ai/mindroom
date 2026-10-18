@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 
 
+class AgentNotConnectableError(HTTPException):
+    """The request names an agent that is unknown or the requester may not connect accounts for.
+
+    Its detail repeats that name from the request, which browser pages never show.
+    """
+
+
 @dataclass(frozen=True)
 class _DashboardAgentExecutionScopeResolution:
     """Resolved dashboard scope request for one agent selection."""
@@ -168,7 +175,7 @@ def resolve_dashboard_agent_execution_scope_request(
 
     if agent_name not in config.agents:
         if not allow_draft_override:
-            raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+            raise AgentNotConnectableError(status_code=404, detail=f"Unknown agent: {agent_name}")
         # A draft agent exists only in the dashboard's unsaved config, so resolve it
         # as an agent-less scope preview: no persisted policy, no per-agent
         # authorization, and never an authoritative credential status.
@@ -267,7 +274,7 @@ def require_agent_oauth_connection_authorized(
         config_lifecycle.app_state(request.app).agent_reply_memberships,
         requester_owned=requester_owned,
     ):
-        raise HTTPException(
+        raise AgentNotConnectableError(
             status_code=403,
             detail=f"Not authorized to manage OAuth connections for agent '{agent_name}'",
         )
