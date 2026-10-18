@@ -2045,6 +2045,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]
@@ -5280,6 +5281,7 @@ depends_on = [
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",

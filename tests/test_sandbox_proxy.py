@@ -172,6 +172,26 @@ async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_co
         replacement_executor.shutdown(wait=True)
 
 
+@pytest.mark.asyncio
+async def test_long_worker_proxy_calls_do_not_delay_another_call() -> None:
+    """Shell calls waiting on long commands must not make other worker proxy calls queue."""
+    release = threading.Event()
+    # As many as the largest default-sized thread pool holds.
+    long_calls = [
+        asyncio.ensure_future(sandbox_proxy_module._run_in_worker_proxy_executor(functools.partial(release.wait, 5)))
+        for _ in range(32)
+    ]
+    await asyncio.sleep(0)
+
+    try:
+        result = await asyncio.wait_for(sandbox_proxy_module._run_in_worker_proxy_executor(lambda: "done"), timeout=1)
+
+        assert result == "done"
+    finally:
+        release.set()
+        await asyncio.gather(*long_calls)
+
+
 def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path: Path) -> None:
     """Policy API grants must be requested from the primary runtime, not a worker."""
     runtime_paths = resolve_runtime_paths(

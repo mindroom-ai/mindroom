@@ -37,3 +37,5 @@ class _ThreadPerCallExecutor(Executor):
 
 # Runs the blocking calls of background jobs, in the primary and in sandbox runners.
 JOB_CALL_EXECUTOR: Executor = _ThreadPerCallExecutor("mindroom-job-call")
+# Runs worker proxy calls, which wait as long as their worker's command, such as a shell command with a long timeout.
+WORKER_PROXY_CALL_EXECUTOR: Executor = _ThreadPerCallExecutor("mindroom-worker-proxy")
