@@ -142,6 +142,23 @@ class GatewayAccounts:
 
         return await self.store.read(read)
 
+    async def resolve_active_for_matrix_user(
+        self,
+        matrix_user_id: str,
+        matrix_user_id_for_email: Callable[[str], str | None],
+    ) -> str | None:
+        """Return the one active account whose email maps to this Matrix user; none or several match nothing."""
+
+        def read(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+            return connection.execute("SELECT account_id, user_name FROM gateway_accounts WHERE active = 1").fetchall()
+
+        matches = [
+            row["account_id"]
+            for row in await self.store.read(read)
+            if matrix_user_id_for_email(row["user_name"]) == matrix_user_id
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     async def create(self, value: object) -> dict[str, Any]:
         """Create a fresh immutable identity; recreated users get new identifiers."""
         clean = _validate_account(value)

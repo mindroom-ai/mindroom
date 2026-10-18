@@ -7305,7 +7305,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.mcp_identity"
-depends_on = ["mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types", "mindroom.requester_identity"]
+depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types", "mindroom.requester_identity"]
 
 [[modules]]
 path = "mindroom.api.mcp_selection"

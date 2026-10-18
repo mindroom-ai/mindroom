@@ -1072,6 +1072,19 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
     return auth_user
 
 
+def trusted_upstream_matrix_user_id_for_email(request: Request, email: str) -> str | None:
+    """Return the Matrix user a signed upstream login with this email becomes, or None when logins map no emails."""
+    settings = _request_auth_state(request).settings.trusted_upstream
+    template = settings.email_to_matrix_user_id_template
+    if not settings.enabled or template is None:
+        return None
+    try:
+        validate_email_to_matrix_mapping(template, settings.email_domain)
+        return matrix_user_id_from_email(email, template, settings.email_domain)
+    except ValueError:
+        return None
+
+
 async def require_personal_user(request: Request) -> dict[str, Any]:
     """Authenticate personal read APIs without granting administrator access."""
     return await _require_signed_matrix_user(request, label="Personal APIs")
