@@ -622,8 +622,8 @@ async def test_a_conversation_whose_redactions_cannot_be_checked_does_not_block_
 
     assert store.sessions() == ["!room:x:$t2"]
     assert knowledge_graph_failure() is not None
-    # Once the lookup works again, the conversation is added like any other.
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 20)
+    # Once the lookup works again, the conversation is added after its retry wait.
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 100)
     assert store.sessions() == ["!room:x:$t2", "!room:x:$t1"]
 
 
@@ -646,32 +646,68 @@ async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_a_pass_that_does_not_reach_a_failing_agent_keeps_health_failing(tmp_path: Path) -> None:
-    """Another agent's clean pass does not clear a failure until the failing agent's graph is visited cleanly."""
-    config = _config(max_sessions_per_cycle=1)
-    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
-    paths, store = _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$m1", ["rm1"])
-    _seed(config, paths, "!room:x:$p1", ["rp1"], agent="pal")
+@pytest.mark.parametrize("failure", ["redaction check", "unreadable"])
+async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_path: Path, failure: str) -> None:
+    """A pass that adds others but never reaches a failed conversation, waiting for its retry, keeps health failing."""
+    config, paths, store = _config(max_sessions_per_cycle=1), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["a1"], at=T0 - 5)
+    _seed(config, paths, "!room:x:$t2", ["b1"])
     failing = True
+    real = ingestion.session_runs
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
-        del room_id, event_ids
-        if agent_name == "mind" and failing:
+        del agent_name, room_id
+        if failure == "redaction check" and failing and "$event-a1" in event_ids:
             msg = "event journal unavailable"
             raise RuntimeError(msg)
         return frozenset()
 
-    worker = _worker(config, paths, store, redacted)
-    await worker._run_cycle(config, now=T0 + 10)
-    await worker._run_cycle(config, now=T0 + 11)
-    assert store.sessions() == ["!room:x:$p1"]
-    assert knowledge_graph_failure() is not None
+    def runs(storage: object, session_id: str) -> list[RunOutput]:
+        if failure == "unreadable" and failing and session_id == "!room:x:$t1":
+            msg = "corrupt session row"
+            raise ValueError(msg)
+        return real(storage, session_id)
 
-    failing = False
-    await worker._run_cycle(config, now=T0 + 12)
-    assert store.sessions() == ["!room:x:$p1", "!room:x:$m1"]
+    worker = _worker(config, paths, store, redacted)
+    with patch.object(ingestion, "session_runs", runs):
+        await worker._run_cycle(config, now=T0 + 10)
+        # A new turn sorts the failed conversation last, so the next passes spend their budget before reaching it.
+        _seed(config, paths, "!room:x:$t1", ["a1", "a2"], at=T0 - 5, updated_at=T0 + 25)
+        _seed(config, paths, "!room:x:$t3", ["c1"], at=T0 + 12)
+        for now in (T0 + 30, T0 + 31):
+            await worker._run_cycle(config, now=now)
+        assert store.sessions() == ["!room:x:$t2", "!room:x:$t3"]
+        assert knowledge_graph_failure() is not None
+
+        failing = False
+        await worker._run_cycle(config, now=T0 + 100)
+    assert store.sessions() == ["!room:x:$t2", "!room:x:$t3", "!room:x:$t1"]
     assert knowledge_graph_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_failed_keeps_health_failing_while_passes_do_not_reach_it(tmp_path: Path) -> None:
+    """Another agent's clean passes do not clear the failure of an agent whose conversations could not be listed."""
+    config = _config(max_sessions_per_cycle=1)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    for thread in ("$m1", "$m2", "$m3"):
+        _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"])
+    real = ingestion.updated_sessions
+
+    def listed(storage: object, agent_name: str, *, since: int) -> list[tuple[str, int]]:
+        if agent_name == "pal":
+            msg = "unreadable session store"
+            raise ValueError(msg)
+        return real(storage, agent_name, since=since)
+
+    worker = _worker(config, paths, store)
+    with patch.object(ingestion, "updated_sessions", listed):
+        for now in (T0 + 10, T0 + 11, T0 + 12):
+            await worker._run_cycle(config, now=now)
+
+    assert len(store.sessions()) == 3
+    assert knowledge_graph_failure() is not None
 
 
 @pytest.mark.asyncio

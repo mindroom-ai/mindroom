@@ -149,7 +149,6 @@ _.markers  # TypedDict key read by subscript (src/mindroom/knowledge_graph/inges
 _.bad_outputs  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.failing_since  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.failing_piece  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
-_.recheck_at  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)
 _._normalize_data  # unused method (src/mindroom/thread_tags.py)

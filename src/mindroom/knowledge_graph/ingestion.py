@@ -131,6 +131,11 @@ def _finish(entry: _SessionState, updated_at: int, recheck_at: float) -> None:
     )
 
 
+def _back_off(entry: _SessionState, now: float) -> None:
+    """Wait longer after each consecutive failure before trying the conversation again."""
+    entry["retry_at"] = now + min(_FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1), _MAX_RETRY_SECONDS)
+
+
 def _marker(entry: _SessionState, kind: str) -> Progress | None:
     marker = entry["markers"].get(kind)
     return (int(marker[0]), str(marker[1]), int(marker[2])) if marker is not None else None
@@ -152,7 +157,7 @@ class KnowledgeGraphIngestionWorker:
     redacted_event_ids: RedactedEventIds
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _passes: int = field(default=0, init=False)
-    # Graphs with a conversation waiting to retry a failed episode, which keep health failing until it succeeds.
+    # Graphs with a conversation whose last attempt failed, or whose last pass failed, which keep health failing.
     _failing_graphs: set[str] = field(default_factory=set, init=False)
 
     async def run(self) -> None:
@@ -194,13 +199,11 @@ class KnowledgeGraphIngestionWorker:
             # One agent or private instance whose conversations cannot be read must not stop the others.
             try:
                 state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
-                due, readable, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
-                if not readable:
-                    outcomes.append(False)
+                due, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
                 if changed:
-                    # A conversation finished while listing is a clean outcome, as one ingested would be.
-                    outcomes.append(True)
                     await self._persist(scope.graph_name, state)
+                    # A conversation finished while listing is a clean outcome; one it could not read saved its failure.
+                    outcomes.append(True)
                 results = [
                     await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
                     for session in due
@@ -208,14 +211,15 @@ class KnowledgeGraphIngestionWorker:
                 # A conversation whose agent is not running is looked at again later and spends none of the budget.
                 budget -= sum(result is not None for result in results)
                 outcomes.extend(result for result in results if result is not None)
-                # A failed conversation keeps its graph failing until a later visit, so a pass that spends its budget
-                # before reaching the graph cannot clear health.
-                if False in results or any(entry["failing_piece"] for entry in state["sessions"].values()):
+                # A conversation's failure is saved with it, so health stays failing until it succeeds, even across
+                # passes that do not reach it.
+                if any(entry["failures"] for entry in state["sessions"].values()):
                     self._failing_graphs.add(scope.graph_name)
                 else:
                     self._failing_graphs.discard(scope.graph_name)
             except Exception as exc:
                 _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
+                self._failing_graphs.add(scope.graph_name)
                 outcomes.append(False)
         # Health reports a failure until a pass ingests something, nothing in it fails, and no failed episode waits.
         if outcomes and all(outcomes) and not self._failing_graphs:
@@ -228,8 +232,8 @@ class KnowledgeGraphIngestionWorker:
         state: _GraphState,
         now: float,
         limit: int,
-    ) -> tuple[list[_DueSession], bool, bool]:
-        """Return up to ``limit`` idle conversations with new turns, whether all could be read, and whether state changed."""
+    ) -> tuple[list[_DueSession], bool]:
+        """Return up to ``limit`` idle conversations with new turns, and whether listing changed the state."""
         settings = config.knowledge_graph.ingest
         storage = create_session_storage(
             scope.agent_name,
@@ -240,7 +244,6 @@ class KnowledgeGraphIngestionWorker:
         try:
             since = int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS
             due: list[_DueSession] = []
-            readable = True
             changed = False
             for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=since):
                 if len(due) >= limit:
@@ -262,7 +265,10 @@ class KnowledgeGraphIngestionWorker:
                         exc,
                         agent=scope.agent_name,
                     )
-                    readable = False
+                    entry = state["sessions"].setdefault(session_id, _new_session_state())
+                    entry["failures"] += 1
+                    _back_off(entry, now)
+                    changed = True
                     continue
                 if not runs:
                     # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
@@ -271,7 +277,7 @@ class KnowledgeGraphIngestionWorker:
                     changed = True
                     continue
                 due.append(_DueSession(session_id, updated_at, runs))
-            return due, readable, changed
+            return due, changed
         finally:
             storage.close()
 
@@ -287,7 +293,8 @@ class KnowledgeGraphIngestionWorker:
     ) -> bool | None:
         """Ingest a bounded number of one conversation's new episodes and return whether none failed or was dropped.
 
-        Return None when its agent cannot say yet what was redacted, which leaves the conversation for a later pass.
+        Return None when its agent cannot say yet what was redacted, or the check failed and was saved as a failure,
+        which leaves the conversation for a later pass without spending the pass budget.
         """
         settings = config.knowledge_graph.ingest
         finished, blocked_until = finished_runs(session.runs, config, now=now)
@@ -300,7 +307,11 @@ class KnowledgeGraphIngestionWorker:
                 exc,
                 agent=scope.agent_name,
             )
-            return False
+            entry = state["sessions"].setdefault(session.session_id, _new_session_state())
+            entry["failures"] += 1
+            _back_off(entry, now)
+            await self._persist(scope.graph_name, state)
+            return None
         if finished is None:
             return None
         entry = state["sessions"].setdefault(session.session_id, _new_session_state())
@@ -377,8 +388,7 @@ class KnowledgeGraphIngestionWorker:
             entry["failing_since"] = entry["failing_since"] or now
             _report_failure("Knowledge graph ingestion failed", exc, agent=scope.agent_name)
             if entry["bad_outputs"] < _MAX_BAD_OUTPUTS and now - entry["failing_since"] < _MAX_FAILING_SECONDS:
-                backoff = _FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1)
-                entry["retry_at"] = now + min(backoff, _MAX_RETRY_SECONDS)
+                _back_off(entry, now)
                 await self._persist(scope.graph_name, state)
                 return None
             logger.exception(
