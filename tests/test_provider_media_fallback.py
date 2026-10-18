@@ -1005,10 +1005,8 @@ async def test_one_rejected_file_does_not_strip_later_pdfs_for_the_route(tmp_pat
         "Error code: 400 - {'object': 'error', 'message': 'text-only is not a multimodal model'}",
         "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
         "Error code: 404 - {'error': {'message': 'No endpoints found that support image input', 'code': 404}}",
-        "Error code: 400 - {'object': 'error', 'message': 'At most 0 image(s) may be provided in one prompt. "
-        "(parameter=image)'}",
     ],
-    ids=["anthropic", "openai", "vllm", "llama_cpp", "openrouter", "vllm_modality_limit"],
+    ids=["anthropic", "openai", "vllm", "llama_cpp", "openrouter"],
 )
 async def test_capability_rejection_teaches_route_after_success(tmp_path: Path, message: str) -> None:
     """A rejection naming the missing input capability lets later requests skip the failed call."""

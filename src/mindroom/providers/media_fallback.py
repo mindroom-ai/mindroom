@@ -60,9 +60,7 @@ _CAPABILITY_GAP_ERROR = re.compile(
     r"|(?:image|audio|video|file|pdf|document) inputs? (?:is|are) not supported"
     r"|is not a multimodal model"
     r"|is only supported by certain models"
-    r"|no endpoints found that support (?:image|audio|video|file|pdf|document)"
-    # vLLM's per-prompt modality limit; a limit of zero means the model has no such input.
-    r"|at most 0 (?:image|audio|video)\(s\) may be provided",
+    r"|no endpoints found that support (?:image|audio|video|file|pdf|document)",
 )
 _ACTIVE_MODELS: ContextVar[frozenset[int]] = ContextVar(
     "mindroom_active_provider_media_fallback_models",
