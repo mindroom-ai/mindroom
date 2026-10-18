@@ -151,7 +151,10 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
     assert team_static_token_estimator(team).estimate("Current prompt") == expected_static_prompt_tokens
-    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == expected_static_prompt_tokens
+    assert (
+        mock_prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens
+        == expected_static_prompt_tokens
+    )
 
 
 def test_scope_session_context_closes_its_storage_on_exit_and_on_error(

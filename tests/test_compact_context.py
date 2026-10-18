@@ -656,7 +656,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     assert persisted.summary is None
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "failed"
     summary_mock.assert_not_awaited()
 
 

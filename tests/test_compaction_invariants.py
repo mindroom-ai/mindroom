@@ -1127,7 +1127,7 @@ def test_retry_schedule_halves_deterministically() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_smaller() -> None:
+async def test_summary_chunk_propagates_original_error_when_rebuilt_input_is_not_smaller() -> None:
     """A defensive estimate guard prevents a shrink retry from resending equal-size input."""
     run = _completed_run("run-1")
     initial_input = "original request " * 1_000
@@ -1163,7 +1163,7 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_floor() -> None:
+async def test_summary_chunk_honors_transient_fallthrough_for_shrink_message_at_floor() -> None:
     """A transient policy decision remains same-budget even when its message is shrinkable."""
     run = _completed_run("run-1")
     recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
@@ -1205,7 +1205,7 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
+async def test_summary_chunk_shrinks_around_a_large_durable_summary() -> None:
     """A durable summary above half the failed input still gets a strictly smaller second attempt.
 
     Regression: the halved shrink target used to fall below the previous-summary
@@ -1257,7 +1257,7 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exists() -> None:
+async def test_summary_chunk_propagates_error_when_no_smaller_progress_input_exists() -> None:
     """An input at the progress minimum fails after one call without a run-less request."""
     previous_summary = "s" * 24_000
     runs = [_completed_run("run-1", padding=2_000)]
@@ -1482,7 +1482,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_input() -> None:
+async def test_summary_chunk_switches_to_fallback_once_with_unchanged_prompt_and_input() -> None:
     """A primary refusal resends the unchanged prompt and input bytes once to the fallback model."""
     run = _completed_run("run-1")
     primary = FakeModel(id="summary-model", provider="fake")
@@ -1554,7 +1554,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_logs_requested_and_effective_claude_timeouts() -> None:
+async def test_summary_chunk_logs_requested_and_effective_claude_timeouts() -> None:
     run = _completed_run("run-1")
     model = _RecordingClaude(id="claude-sonnet-5", timeout=300.0)
     generate_summary = AsyncMock(
@@ -1589,7 +1589,7 @@ async def test_retry_helper_logs_requested_and_effective_claude_timeouts() -> No
         pytest.param(ModelProviderError("invalid request", status_code=400), id="fallback-failure"),
     ],
 )
-async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_error: Exception) -> None:
+async def test_summary_chunk_propagates_fallback_refusal_or_failure(fallback_error: Exception) -> None:
     """The fallback call is the one bounded second attempt; its errors propagate."""
     run = _completed_run("run-1")
     primary = FakeModel(id="summary-model", provider="fake")
@@ -1624,7 +1624,7 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_refusal_after_transient_retry_propagates_within_attempt_bound() -> None:
+async def test_summary_chunk_refusal_after_transient_retry_propagates_within_attempt_bound() -> None:
     """A refusal on the bounded second attempt propagates instead of issuing a third fallback call."""
     run = _completed_run("run-1")
     primary = FakeModel(id="summary-model", provider="fake")
@@ -1918,7 +1918,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     runtime_generate_summary.assert_not_awaited()
     assert prepared.compaction_decision.reason == "compaction_unavailable"
     assert prepared.compaction_reply_outcome == "none"
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "none"
     repeated = get_agent_session(storage, "session-1")
     assert repeated is not None
     assert repeated.summary is not None
@@ -1967,7 +1967,6 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     assert len(attempts) == 2
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert prepared.compaction_reply_outcome == "timeout"
-    assert prepared.compaction_reply_outcome != "success"
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is None

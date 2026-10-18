@@ -56,8 +56,6 @@ def request_compaction_before_next_reply(
     ) as scope_context:
         if scope_context is None:
             return _ManualCompactionRequestResult("Error: Current agent has no history scope. Cannot compact context.")
-        if scope_context.session is None:
-            return _ManualCompactionRequestResult("Error: No stored session available. Cannot compact context.")
 
         runtime_model, compaction_config = _resolve_active_compaction_settings(
             agent=agent,
@@ -83,6 +81,8 @@ def request_compaction_before_next_reply(
             )
 
         session = scope_context.session
+        # create_session_if_missing opens a new session when none is stored yet.
+        assert session is not None
         current_state = read_scope_state(session, scope_context.scope)
         set_force_compaction_state(session, scope_context.scope, current_state, force=True)
         scope_context.storage.upsert_session(session)

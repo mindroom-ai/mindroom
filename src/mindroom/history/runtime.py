@@ -205,7 +205,6 @@ class HistoryPreparationInputs:
     has_authored_compaction_config: bool
     active_model_name: str
     active_context_window: int | None
-    static_prompt_tokens: int
     execution_plan: ResolvedHistoryExecutionPlan
 
 
@@ -747,14 +746,9 @@ def finalize_history_preparation(
     prepared_scope_history: PreparedScopeHistory,
     config: Config,
     static_prompt_tokens: int,
-    available_history_budget: int | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
-    """Return the final persisted-replay decision after durable history prep.
-
-    ``available_history_budget`` is an explicit replay-budget override; when
-    None the budget derives from the freshly resolved execution plan.
-    """
+    """Return the final persisted-replay decision after durable history prep, under the freshly resolved budget."""
     if pipeline_timing is not None:
         pipeline_timing.mark("replay_plan_start")
     resolved_inputs = prepared_scope_history.resolved_inputs
@@ -766,22 +760,19 @@ def finalize_history_preparation(
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    history_budget = available_history_budget
-    if history_budget is None:
-        # hard_replay_budget_tokens and replay_budget_tokens are resolved together,
-        # so no further fallback is needed when the hard budget is unset.
-        history_budget = (
-            execution_plan.hard_replay_budget_tokens
-            if execution_plan.authored_compaction_enabled
-            else execution_plan.replay_budget_tokens
+    # hard_replay_budget_tokens and replay_budget_tokens are resolved together,
+    # so no further fallback is needed when the hard budget is unset.
+    history_budget = (
+        execution_plan.hard_replay_budget_tokens
+        if execution_plan.authored_compaction_enabled
+        else execution_plan.replay_budget_tokens
+    )
+    if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason is not None:
+        logger.warning(
+            "Compaction unavailable for this run",
+            compaction_model=execution_plan.compaction_model_name,
+            reason=describe_compaction_unavailability(execution_plan),
         )
-        if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason is not None:
-            description = describe_compaction_unavailability(execution_plan)
-            logger.warning(
-                "Compaction unavailable for this run",
-                compaction_model=execution_plan.compaction_model_name,
-                reason=description,
-            )
 
     history_settings = resolved_inputs.history_settings
     session, scope, native_model = (
@@ -958,7 +949,6 @@ def resolve_entity_preparation_inputs(
         has_authored_compaction_config=resolved_entity.has_authored_compaction_config,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
-        static_prompt_tokens=static_prompt_tokens,
         execution_plan=resolve_history_execution_plan(
             config=config,
             compaction_config=resolved_entity.compaction_config,

@@ -116,7 +116,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
     )
 
     assert prepared.replays_persisted_history is True
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "none"
 
 
 @pytest.mark.asyncio
@@ -285,7 +285,6 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_reply_outcome != "success"
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_reply_outcome == "failed"
     assert len(lifecycle.events) == 2
@@ -435,7 +434,6 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
             compaction_lifecycle=lifecycle,
         )
 
-    assert prepared.compaction_reply_outcome != "success"
     assert prepared.compaction_reply_outcome == "timeout"
     assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
     assert lifecycle.events[1].status == "timeout"
@@ -892,7 +890,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
     if allow_native_compaction:
         assert prepared.compaction_decision.mode == "none"
         assert prepared.compaction_decision.reason == "within_hard_budget"
-        assert prepared.compaction_reply_outcome != "success"
+        assert prepared.compaction_reply_outcome == "none"
         summary_mock.assert_not_awaited()
         assert len(persisted.runs or []) == 3
         return
@@ -1201,7 +1199,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     assert [run.run_id for run in persisted.runs or []] == ["run-3"]
     assert summary_mock.await_count == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "failed"
 
 
 @pytest.mark.asyncio
@@ -1500,7 +1498,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     assert persisted.runs == []
     assert summary_mock.await_count == 1
     assert first_prepared.compaction_reply_outcome == "success"
-    assert second_prepared.compaction_reply_outcome != "success"
+    assert second_prepared.compaction_reply_outcome == "none"
 
 
 @pytest.mark.asyncio
@@ -1553,7 +1551,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "none"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
@@ -1608,7 +1606,8 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
             max_tool_calls_from_history=None,
             system_message_role="developer",
         ),
-        static_prompt_tokens=0,
+        # The 40-token window minus its clamped 20-token reserve leaves 10 tokens of history beside this prompt.
+        static_prompt_tokens=10,
         available_history_budget=10,
     )
 
@@ -1671,7 +1670,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     assert state.force_compact_before_next_run is False
     assert latest_summary_model(storage, scope) is None
 
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "failed"
     assert prepared.replays_persisted_history is True
 
 
@@ -1709,5 +1708,5 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "none"
     assert prepared.replays_persisted_history is True

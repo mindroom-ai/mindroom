@@ -97,7 +97,7 @@ class Summarizer:
     session_id: str
     scope: HistoryScope
     # Receives every summary response, including rejected ones, so its usage is recorded.
-    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None = None
+    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None
 
 
 def scope_usage_recorder(storage: BaseDb, session_id: str) -> Callable[[Model, ModelResponse], Awaitable[None]]:

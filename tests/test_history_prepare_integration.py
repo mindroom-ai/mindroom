@@ -277,7 +277,9 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
         )
 
     assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == agent_static_token_estimator(
+    assert mock_prepare.await_args.kwargs[
+        "resolved_inputs"
+    ].execution_plan.static_prompt_tokens == agent_static_token_estimator(
         live_agent,
     ).estimate("Current prompt")
 
@@ -668,7 +670,7 @@ async def test_prepare_agent_and_prompt_keeps_matrix_current_sender_when_persist
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_outcomes_empty_when_no_compaction_occurred(
+async def test_prepare_agent_and_prompt_reports_no_compaction_when_none_occurred(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -695,7 +697,7 @@ async def test_prepare_agent_and_prompt_keeps_outcomes_empty_when_no_compaction_
         )
 
     prepared = prepared_run.prepared_history
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "none"
 
 
 @pytest.mark.asyncio

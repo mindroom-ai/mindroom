@@ -149,7 +149,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
             has_authored_compaction_config=False,
             active_model_name="test-model",
             active_context_window=10_000,
-            static_prompt_tokens=10,
             execution_plan=execution_plan,
         ),
     )

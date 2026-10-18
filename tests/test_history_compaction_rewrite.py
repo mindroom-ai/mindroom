@@ -888,7 +888,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
             compaction_lifecycle=lifecycle,
         )
 
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "none"
     assert observed == []
     assert lifecycle.events == []
 
@@ -996,7 +996,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     assert persisted.summary is None
     assert len(persisted.runs or []) == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_reply_outcome != "success"
+    assert prepared.compaction_reply_outcome == "failed"
     assert observed == []
 
 
@@ -1709,7 +1709,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("portable", [False, True])
-async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp_path: Path, *, portable: bool) -> None:
+async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_path: Path, *, portable: bool) -> None:
     """Visible compaction should update progress after each durable non-final chunk."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)

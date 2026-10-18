@@ -2691,7 +2691,6 @@ depends_on = [
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",
-    "mindroom.history.prompt_tokens",
     "mindroom.providers.agno_compat_provider_errors",
     "mindroom.history.replay",
     "mindroom.history.session_context",
@@ -2701,7 +2700,6 @@ depends_on = [
     "mindroom.providers.model_loading",
     "mindroom.history.team_scope",
     "mindroom.timing",
-    "mindroom.token_budget",
 ]
 
 [[modules]]
@@ -9246,7 +9244,6 @@ path = "mindroom.history.mid_turn_compaction"
 depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.agno_compat_model_hooks",
-    "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.history.agno_compat_message_builder",

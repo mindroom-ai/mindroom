@@ -576,7 +576,6 @@ async def prepare_history_for_run_for_test(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=static_prompt_tokens,
-        available_history_budget=available_history_budget,
     )
 
 
