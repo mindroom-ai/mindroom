@@ -307,6 +307,7 @@ async def prepare_scope_history(
     agent: Agent,
     agent_name: str,
     resolved_inputs: HistoryPreparationInputs,
+    current_prompt_tokens: int,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None = None,
@@ -315,7 +316,6 @@ async def prepare_scope_history(
     pipeline_timing: DispatchPipelineTiming | None = None,
     active_model: Model | None = None,
     allow_native_compaction: bool = True,
-    current_prompt_tokens: int = 0,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning.
 
@@ -530,8 +530,9 @@ def _reported_history_tokens(
     answer = messages[anchor]
     summary = session.summary
     # A summary written after that request started folded runs it held. Agno creates the answer's message before a
-    # mid-turn fold of that request runs, so such a fold also counts as later and the estimate decides.
-    if summary is not None and (summary.updated_at is None or summary.updated_at.timestamp() > answer.created_at):
+    # mid-turn fold of that request runs, so such a fold also counts as later and the estimate decides. Both stamps
+    # are whole seconds, which cannot order a summary written in the same second, so a tie counts as later too.
+    if summary is not None and (summary.updated_at is None or summary.updated_at.timestamp() >= answer.created_at):
         return None
     configured = config.models.get(resolved_inputs.active_model_name)
     reported = response_context_tokens(
@@ -943,6 +944,7 @@ async def prepare_bound_scope_history(
     runtime_paths: RuntimePaths,
     config: Config,
     static_prompt_tokens: int,
+    current_prompt_tokens: int,
     scope_context: ScopeSessionContext | None = None,
     team_name: str | None = None,
     active_model_name: str | None = None,
@@ -950,7 +952,6 @@ async def prepare_bound_scope_history(
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     allow_native_compaction: bool = True,
-    current_prompt_tokens: int = 0,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
     if scope_context is not None:

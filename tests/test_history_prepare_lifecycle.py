@@ -883,6 +883,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
             agent=agent,
             agent_name="test_agent",
             resolved_inputs=resolved_inputs,
+            current_prompt_tokens=0,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
@@ -1825,18 +1826,21 @@ _REPORTED_USAGE_PLAN = ResolvedHistoryExecutionPlan(
 )
 
 
+_SUMMARY_WRITTEN_AT = 2_000_000_000
+
+
 def _reported_run(
     run_id: str,
     *,
     input_tokens: int = 0,
     model: str = "fake-model",
-    created_at: int = 2_000_000_000,
+    created_at: int = _SUMMARY_WRITTEN_AT + 1,
     provider_data: dict[str, object] | None = None,
     images: list[Image] | None = None,
 ) -> RunOutput:
     """Return a completed run whose answer carries the request size its provider reported.
 
-    The default ``created_at`` (2033) puts the answer after any summary a test writes.
+    By default the answer's request starts the second after any summary a test writes.
     """
     run = _completed_run(
         run_id,
@@ -1864,7 +1868,10 @@ async def _prepare_with_reported_usage(
     folded_run_ids: tuple[str, ...] = (),
     current_prompt_tokens: int = 0,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
-    """Prepare one reply's history; return it, the chars / 4 history estimate, and the compaction notices."""
+    """Prepare one reply's history; return it, the chars / 4 history estimate, and the compaction notices.
+
+    A summary folding ``folded_run_ids`` is stored as written at ``_SUMMARY_WRITTEN_AT``.
+    """
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -1874,7 +1881,8 @@ async def _prepare_with_reported_usage(
     session = seed_session(storage, _session("session-1", runs=list(runs)))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if folded_run_ids:
-        compact_runs(storage, session, scope, list(folded_run_ids), "Earlier summary")
+        with patch("mindroom.history.summary_rows.time.time", return_value=_SUMMARY_WRITTEN_AT):
+            compact_runs(storage, session, scope, list(folded_run_ids), "Earlier summary")
     estimate = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,
@@ -1996,26 +2004,36 @@ async def test_replay_limits_make_the_reported_request_size_stale(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("summary_after_response", [True, False])
+@pytest.mark.parametrize(
+    ("answer_created_at", "stale"),
+    [
+        pytest.param(_SUMMARY_WRITTEN_AT - 1, True, id="summary-after-the-request"),
+        pytest.param(_SUMMARY_WRITTEN_AT, True, id="summary-in-the-same-second"),
+        pytest.param(_SUMMARY_WRITTEN_AT + 1, False, id="summary-before-the-request"),
+    ],
+)
 async def test_a_summary_written_after_the_reported_request_makes_its_size_stale(
     tmp_path: Path,
+    answer_created_at: int,
     *,
-    summary_after_response: bool,
+    stale: bool,
 ) -> None:
-    """A compaction after that request folded runs it held; one before it was part of what the provider counted."""
-    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+    """A compaction after that request folded runs it held; whole-second stamps cannot order a same-second one."""
+    prepared, estimate, lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         [
             _reported_run("run-0"),
             _reported_run("run-1"),
-            _reported_run("run-2", input_tokens=8_000, created_at=1 if summary_after_response else 2_000_000_000),
+            _reported_run("run-2", input_tokens=8_000, created_at=answer_created_at),
         ],
         folded_run_ids=("run-0",),
     )
 
-    if summary_after_response:
+    if stale:
+        assert estimate < 4_000  # The trigger budget.
         assert prepared.compaction_decision.current_history_tokens == estimate
         assert prepared.compaction_decision.reason == "under_trigger"
+        assert lifecycle.events == []
         return
     assert prepared.compaction_decision.current_history_tokens == 7_500
     assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"

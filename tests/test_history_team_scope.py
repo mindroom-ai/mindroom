@@ -136,6 +136,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
             runtime_paths=runtime_paths,
             config=config,
             static_prompt_tokens=team_static_token_estimator(team).estimate("Current prompt"),
+            current_prompt_tokens=estimate_text_tokens("Current prompt"),
             scope_context=scope_context,
         )
         prepared = finalize_history_preparation(

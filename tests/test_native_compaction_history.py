@@ -494,6 +494,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
@@ -650,6 +651,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -708,6 +710,7 @@ async def test_native_route_ignores_the_latest_reported_request_size(
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(
@@ -778,6 +781,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -859,6 +863,7 @@ async def test_native_activation_respects_history_policy(
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -898,6 +903,7 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
@@ -939,6 +945,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         agent=agent,
         agent_name="test_agent",
         resolved_inputs=resolved,
+        current_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
@@ -985,6 +992,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         active_model_name="default",
         active_context_window=200000,
         static_prompt_tokens=100,
+        current_prompt_tokens=0,
     )
     assert model.native_compaction is not None
     assert model.native_compaction.threshold == 120000
