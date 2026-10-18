@@ -94,7 +94,8 @@ Rejected: mapping MindRoom providers onto Graphiti's own provider clients.
 It duplicates key precedence and base-URL rules per provider, covers fewer providers, and gives no usage accounting.
 Search uses Graphiti's hybrid search with reciprocal-rank fusion and no cross-encoder, so a query costs no LLM call.
 Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI key, so MindRoom passes a reranker that is never called by the search recipes it uses.
-An entity lookup tries a case-insensitive exact name first (the entity with the most facts when several match) and falls back to the hybrid search, because the search can rank an entity that merely mentions a name above the entity named exactly that: a live lookup of a person's first name returned their brokerage account although an entity named exactly that, with 293 facts, existed.
+An entity lookup first replaces a `knowledge_graph.aliases` alias, or an agent's key or Matrix ID, with the one name ingestion gives that entity (see below).
+It then tries a case-insensitive exact name (the entity with the most facts when several match) and falls back to the hybrid search, because the search can rank an entity that merely mentions a name above the entity named exactly that: a live lookup of a person's first name returned their brokerage account although an entity named exactly that, with 293 facts, existed.
 A fuzzy match returns the best hit and names the next four, so the agent can look up the one it meant.
 
 Graphiti needs structured output; small local models may fail extraction, which the ingestion worker reports and retries rather than hides.
@@ -102,7 +103,7 @@ Graphiti needs structured output; small local models may fail extraction, which 
 ### Entity types tell extraction what an entity is
 
 Graphiti's default extraction creates an entity for anything noun-like, and the real openclaw graph shows the result: 2,097 of its 8,627 entities have no facts, and file paths (`/home/basnijholt/.mindroom-chat/config.yaml`), source files (`compaction.py`), memory notes (`memory/2026-04-05.md`), URLs, and a `capacitor://` link became entities.
-`knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and fixed extraction instructions.
+`knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and extraction instructions.
 Graphiti reads a type model's docstring as the type's description, so the docstrings are what the extractor sees: a handle, Matrix ID, or email address names whoever it belongs to and is never an entity of its own, and a `Document` is never a file path.
 With `Entity` excluded, Graphiti removes it from the list of types the extractor is asked to choose from, and drops a node whose type id falls outside that list.
 Keeping paths and URLs out is what the docstrings and the instructions aim for, not something the exclusion guarantees, so each docstring says what does not belong to its type.
@@ -116,6 +117,34 @@ The accepted costs are a longer prompt and coverage: anything outside the nine t
 Rejected: fields on the type models.
 Graphiti makes an extra model call to fill the fields of every node whose type has any, which would raise the cost of each episode, and a field named like one of `EntityNode`'s own (`name`, `summary`, `attributes`, and others) raises `EntityTypeValidationError`.
 Types are labels here, not a schema.
+
+### Known people and agents get one name
+
+On the real openclaw graph one person had four entities, named by their full name (1,669 facts), first name (1,452), email address (622), and Matrix ID (405), and the agent had four, named by its config key (1,358), `agent openclaw` (1,158), its Matrix ID (285), and its Matrix localpart (204).
+Graphiti merges an extracted entity into an existing one for certain only when their names are equal after normalizing; otherwise it needs an embedding candidate and a yes from the model, which a first name against a full name, or a Matrix ID against a name, does not get.
+The speaker labels added entities of their own: Graphiti's message prompt always extracts the speaker, the text before the first colon, and the labels were `agent <key>` and `person @<user> (<server>)`.
+
+So each known agent and person has one name, which is both its speaker label and the name the extraction instructions give for its other names.
+An agent or team is named by its `display_name`, with its config key, Matrix ID, and localpart as its other names.
+A person is named by the newest display name their messages carry in the turns rendered together, else by their localpart, with their Matrix ID and localpart as their other names; display names are stored only in each message's `<msg>` envelope.
+A name keeps letters, digits, spaces, `.'-`, and a combining mark on a letter, because display names carry emoji and colons and Graphiti ends a speaker at the first colon.
+A `knowledge_graph.aliases` entry gives an agent or person its name only through a stable ID it lists, a Matrix ID or an agent or team key; its other aliases are plain names that the instructions list and `graph_entity` resolves.
+Each episode's instructions list the graph's own agent, the episode's speakers, and every entry, so people and things MindRoom has no account for get one name too.
+Entities that share a name are listed once, and an alias that another listed entity is named, or that two of them go by, is left out, so no listed name means two entities.
+`custom_extraction_instructions` reach only Graphiti's node and edge extraction prompts, which is where names are chosen.
+`graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay.
+
+Rejected: matching entries against display names.
+An earlier attempt matched an entry on every name a speaker went by, so an entry fixing a first-name duplicate could list the first name, which was also the speaker's display name.
+Display names change and anyone can take one, so such an entry could reach the wrong person or two people, and two entries could reach one agent through names config validation cannot see.
+Keeping labels, instructions, and lookups in agreement then took conflict rules (the first entry wins, names dropped per episode, conflicts detectable only while ingesting) that grew through four review rounds.
+Linking only by Matrix ID and agent key lets config validation check every link, and a display name then labels only the person who has it.
+Rejected: labeling speakers by Matrix ID, which makes the Matrix ID the entity, against the `Person` type's description.
+Rejected: remembering each person's display name across passes in the ingestion state, which adds state for a case one config line covers.
+
+Limitations: a person whose display name changes gets the new name in later episodes, and a message without a display name names its sender by localpart unless another of their messages in the same turns carried one.
+Two people with one display name, or a person named like an agent, share an entity unless an entry names one of them through their Matrix ID.
+Every entry is in every episode's instructions, so a long list lengthens every extraction prompt.
 
 ## Ingestion invariants
 
