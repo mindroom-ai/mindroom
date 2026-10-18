@@ -19855,7 +19855,7 @@ debug:
 - `llm_request_log_dir` (string, default `null`, meaning `<storage>/logs/llm_requests`): directory for the request logs.
 
 Request logs include prompts, messages, the tools sent to the provider, model parameters, and requester and source Matrix event metadata.
-Credentials such as tokens, cookies, passwords, API keys, and authorization headers are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
+Credentials such as tokens, cookies, passwords, API keys, authorization headers, and PEM private keys are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 Export `MINDROOM_TIMING=1` before startup to log timing for tool calls and one INFO-level `Dispatch pipeline timing` summary per turn, including `time_to_model_request_ms` and context, queue, payload, agent-build, and model spans.
 
