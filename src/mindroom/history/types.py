@@ -276,13 +276,12 @@ class CompactionOutcome:
     history_budget_tokens: int | None = None
     lifecycle_notice_event_id: str | None = None
     duration_ms: int | None = None
-    status: _CompactionLifecycleStatus = "success"
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
         meta: dict[str, object] = {
             "version": 3,
-            "status": self.status,
+            "status": "success",
             "mode": self.mode,
             "session_id": self.session_id,
             "scope": self.scope,
