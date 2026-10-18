@@ -1075,29 +1075,23 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
 
 
 def trusted_upstream_email_to_matrix_user_id(request: Request) -> Callable[[str], str | None] | None:
-    """Return how a signed upstream login turns an email into its Matrix user, or None when the email does not decide it.
-
-    A signed Matrix claim, or a Matrix ID header without strict JWT, takes precedence over the email template for
-    upstream logins, so the template alone then names no one.
-    """
+    """Return how a signed upstream login turns an email into its Matrix user, or None when the email does not decide it."""
     settings = _request_auth_state(request).settings.trusted_upstream
-    template = settings.email_to_matrix_user_id_template
-    email_domain = settings.email_domain
+    # In `_verified_trusted_upstream_matrix_user_id`, a signed Matrix claim, or a Matrix header without strict JWT,
+    # wins over the email template, which then names no one.
     if (
         not settings.enabled
-        or template is None
         or settings.jwt.matrix_user_id_claim is not None
         or (settings.matrix_user_id_header is not None and not settings.jwt.require_jwt)
     ):
         return None
-    try:
-        validate_email_to_matrix_mapping(template, email_domain)
-    except ValueError:
+    template = _validated_trusted_upstream_email_to_matrix_template(settings, require_email_header=False)
+    if template is None:
         return None
 
     def matrix_user_id(email: str) -> str | None:
         try:
-            return matrix_user_id_from_email(email, template, email_domain)
+            return matrix_user_id_from_email(email, template, settings.email_domain)
         except ValueError:
             return None
 
