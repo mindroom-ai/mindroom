@@ -73,7 +73,7 @@ if TYPE_CHECKING:
 # Reason: Agno appends session.summary to the system prompt when add_session_summary_to_context is on, so every
 # compaction rewrites the cached prompt prefix, and a string system_message (minimal agents) never shows it.
 # MindRoom turns that flag off and places the summary as a history message in every new and continued request
-# instead: first, or right after the prompt of a turn that compacted mid-turn.
+# instead: first, or right after the first replayed prompt when a mid-turn compaction placed it there.
 # Upstream issue: Tracking gap. Related open issues https://github.com/agno-agi/agno/issues/8790 (rolling
 # compaction, still injected into the system prompt) and https://github.com/agno-agi/agno/issues/9461 (unify
 # history, summary, and compression across agents, members, and workflows) do not propose a history-positioned
@@ -187,17 +187,22 @@ def _record_request_session(target: object, run_id: str | None, session: AgentSe
 
 
 def _insert_session_summary(run_messages: RunMessages, session: AgentSession | TeamSession) -> None:
-    """Place the scope's summary once: after the prompt a mid-turn compaction placed it after, else first in history."""
+    """Place the scope's summary once, first in history.
+
+    When the first message is a prompt a mid-turn compaction placed the summary after, it stays after that prompt; a
+    later turn that replays ahead of that run (an approval completed after it) was built on the summary instead.
+    """
     summary = current_summary_text(session)
-    if summary is None or any(is_scope_summary(m) for m in run_messages.messages):
+    messages = run_messages.messages
+    if summary is None or any(is_scope_summary(m) for m in messages):
         return
-    index = next((i + 1 for i, message in enumerate(run_messages.messages) if summary_follows(message)), None)
-    if index is None:
-        index = next(
-            (i for i, message in enumerate(run_messages.messages) if message.role not in {"system", "developer"}),
-            len(run_messages.messages),
-        )
-    run_messages.messages.insert(index, compaction_summary_message(summary, run_local=False))
+    index = next(
+        (i for i, message in enumerate(messages) if message.role not in {"system", "developer"}),
+        len(messages),
+    )
+    if index < len(messages) and summary_follows(messages[index]):
+        index += 1
+    messages.insert(index, compaction_summary_message(summary, run_local=False))
 
 
 def _prepare_history(

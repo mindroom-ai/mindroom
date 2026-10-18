@@ -6,17 +6,28 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.agent import Agent
+from agno.agent import _messages as agent_messages
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
-from agno.models.response import ToolExecution
+from agno.models.openai import OpenAIChat
+from agno.models.response import ModelResponse, ToolExecution
 from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
+from agno.run.base import RunContext, RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom import constants
 from mindroom.history import summary_rows
+from mindroom.history.agno_compat_message_builder import apply_patch
+from mindroom.history.replay import (
+    compaction_summary_message,
+    estimate_prompt_visible_history_tokens,
+    estimate_request_messages_tokens,
+    is_scope_summary,
+    mark_summary_follows,
+)
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
     append_fold,
@@ -26,7 +37,8 @@ from mindroom.history.storage import (
     remove_runs_answering,
 )
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids, segment_tool_call_ids
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.native_compaction import NativeCompactionModel, record_native_checkpoint
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, log_of
@@ -459,3 +471,66 @@ def test_a_runs_summary_rows_name_every_tool_call_its_folds_summarized(storage: 
     }
     assert segment_tool_call_ids(storage, session_id="session", run_id="other") == set()
     assert folded_tool_call_ids({}) == set()
+
+
+class _NativeChat(NativeCompactionModel, OpenAIChat):
+    def native_compaction_supported(self) -> bool:
+        return True
+
+    def native_compaction_endpoint(self) -> str:
+        return "test"
+
+
+@pytest.mark.asyncio
+async def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: SqliteDb) -> None:
+    """A fold's prompt keeps the summary after it only while its run replays first.
+
+    An approval that completes after a later turn sorts behind that turn, which was built on the summary, so the summary
+    replays first again, ahead of the native checkpoint that turn recorded and that covers it, as replay planning counts.
+    """
+    apply_patch()
+    summary = "Completed work. " * 500
+    model = _NativeChat(id="test", api_key="test")
+    model.configure_native_compaction(
+        threshold=1000,
+        history_generation=str(compaction_summary_message(summary, run_local=False).content),
+    )
+    native = model.native_compaction
+    assert native is not None
+    checkpoint = ModelResponse()
+    record_native_checkpoint(checkpoint, [{"type": "compaction", "encrypted_content": "checkpoint"}], native)
+    _seed(storage, [])
+    prompt = Message(role="user", content="Task A")
+    mark_summary_follows(prompt)
+    paused = _run("a", status=RunStatus.paused, messages=[prompt, Message(role="assistant", content="A done")])
+    assert _fold(storage, paused, summary)
+    _save(storage, paused)
+    later = Message(role="assistant", content="B done", provider_data=checkpoint.provider_data)
+    _save(storage, _run("b", messages=[Message(role="user", content="Task B"), later]))
+    paused.status = RunStatus.completed
+    _save(storage, paused)
+    session = _loaded(storage)
+    assert [run.run_id for run in session.runs or []] == ["b", "a"]
+    agent = Agent(id="code", model=model, add_history_to_context=True, add_session_summary_to_context=False)
+
+    built = await agent_messages.aget_run_messages(
+        agent,
+        run_response=RunOutput(run_id="c", session_id="session"),
+        run_context=RunContext(run_id="c", session_id="session"),
+        input="Task C",
+        session=session,
+        add_history_to_context=True,
+    )
+
+    history = [message for message in built.messages if message.role != "system"]
+    assert is_scope_summary(history[0])
+    assert history[1].content == "Task B"
+    replayed = [message for message in built.messages if message.from_history]
+    planned = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=_SCOPE,
+        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        replay_model=model,
+        native_route=native.route,
+    )
+    assert estimate_request_messages_tokens(replayed, replay_model=model, native_route=native.route) == planned

@@ -82,7 +82,7 @@ With the default `reserve_tokens`, a summary model with a context window of roug
 
 A long reply, for example a tool loop that keeps reading files, can outgrow the context window before it finishes.
 Before each model request, MindRoom checks whether the request would exceed the replay window minus `reserve_tokens`; if it would, it compacts first and the reply continues.
-After that compaction the model sees its system prompt, the summary, the user's current message, and any per-turn context; earlier conversation and the reply's own earlier tool calls and results are replaced by the summary, which records the progress made so far.
+After that compaction the model sees its system prompt, the user's current message, any per-turn context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
 The tool calls still appear in the reply.
 If the summary and the current message together exceed the model's `context_window` minus `reserve_tokens`, the reply fails with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
 If the summary model fails, the reply continues without compacting and may then fail with a provider error.
