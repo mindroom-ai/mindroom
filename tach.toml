@@ -1559,7 +1559,7 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.api.connections_sessions"
+path = "mindroom.api.connections_session_cookie"
 depends_on = []
 
 [[modules]]
@@ -1567,7 +1567,7 @@ path = "mindroom.api.auth"
 depends_on = [
     "mindroom.authorization",
     "mindroom.api.config_lifecycle",
-    "mindroom.api.connections_sessions",
+    "mindroom.api.connections_session_cookie",
     "mindroom.api.open_access",
     "mindroom.constants",
     "mindroom.origins",
@@ -1771,7 +1771,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.connection_agents",
-    "mindroom.api.connections_sessions",
+    "mindroom.api.connections_session_cookie",
     "mindroom.constants",
     "mindroom.matrix_openid",
     "mindroom.runtime_env_policy",

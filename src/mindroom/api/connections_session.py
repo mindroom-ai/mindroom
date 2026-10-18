@@ -18,7 +18,7 @@ from mindroom.api.connection_agents import (
     require_connections_same_origin,
     resolve_connection_user,
 )
-from mindroom.api.connections_sessions import (
+from mindroom.api.connections_session_cookie import (
     CONNECTIONS_SESSION_COOKIE,
     CONNECTIONS_SESSION_SECONDS,
     issue_connections_session,

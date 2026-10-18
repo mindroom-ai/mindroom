@@ -18,7 +18,7 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom.api import auth, connections_session, frontend, main
-from mindroom.api.connections_sessions import (
+from mindroom.api.connections_session_cookie import (
     CONNECTIONS_SESSION_COOKIE,
     connections_session_user,
     issue_connections_session,

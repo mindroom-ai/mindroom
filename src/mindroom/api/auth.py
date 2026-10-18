@@ -21,7 +21,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
-from mindroom.api.connections_sessions import CONNECTIONS_SESSION_COOKIE, connections_session_user
+from mindroom.api.connections_session_cookie import CONNECTIONS_SESSION_COOKIE, connections_session_user
 from mindroom.api.open_access import open_access_rejection
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (

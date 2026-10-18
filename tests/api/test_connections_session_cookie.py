@@ -2,8 +2,8 @@
 
 import pytest
 
-from mindroom.api import connections_sessions
-from mindroom.api.connections_sessions import (
+from mindroom.api import connections_session_cookie
+from mindroom.api.connections_session_cookie import (
     CONNECTIONS_SESSION_SECONDS,
     connections_session_user,
     issue_connections_session,
@@ -37,7 +37,7 @@ def test_session_naming_another_user_is_rejected() -> None:
 def test_session_from_another_process_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each process signs with its own key, so a restart signs every portal user out."""
     token = issue_connections_session(ALICE, now=NOW)
-    monkeypatch.setattr(connections_sessions, "_SESSION_KEY", b"another process")
+    monkeypatch.setattr(connections_session_cookie, "_SESSION_KEY", b"another process")
     assert connections_session_user(token, now=NOW) is None
 
 
