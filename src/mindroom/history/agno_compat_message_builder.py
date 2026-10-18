@@ -6,7 +6,7 @@ This throwaway monkey-patch mirrors the Agent message-builder path until Agno
 Team has the same upstream behavior.
 Both builders, and the entry points that resume paused runs, also remove
 ordinary inline payloads from persisted history while retaining marked, bounded
-tool images for replay, and place the scope's compaction summary before replayed
+tool images for replay, and place the scope's compaction summary in replayed
 history.
 """
 
@@ -31,7 +31,12 @@ from agno.utils.log import log_warning
 
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay
-from mindroom.history.replay import compaction_summary_message, current_summary_text, is_scope_summary
+from mindroom.history.replay import (
+    compaction_summary_message,
+    current_summary_text,
+    is_scope_summary,
+    summary_follows,
+)
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -67,8 +72,8 @@ if TYPE_CHECKING:
 # AGNO_COMPAT: Agno renders the session summary only inside its system message.
 # Reason: Agno appends session.summary to the system prompt when add_session_summary_to_context is on, so every
 # compaction rewrites the cached prompt prefix, and a string system_message (minimal agents) never shows it.
-# MindRoom turns that flag off and places the summary as the first history message in every new and continued
-# request instead.
+# MindRoom turns that flag off and places the summary as a history message in every new and continued request
+# instead: first, or right after the prompt of a turn that compacted mid-turn.
 # Upstream issue: Tracking gap. Related open issues https://github.com/agno-agi/agno/issues/8790 (rolling
 # compaction, still injected into the system prompt) and https://github.com/agno-agi/agno/issues/9461 (unify
 # history, summary, and compression across agents, members, and workflows) do not propose a history-positioned
@@ -78,7 +83,8 @@ if TYPE_CHECKING:
 # must still replay exactly once and be counted once.
 # Coverage: tests/test_history_summary_message.py::test_summary_is_the_first_history_message_for_new_runs;
 # tests/test_history_summary_message.py::test_summary_is_reinserted_on_synchronous_continuation;
-# tests/test_history_summary_message.py::test_approval_resume_replays_the_summary_once.
+# tests/test_history_summary_message.py::test_approval_resume_replays_the_summary_once;
+# tests/test_mid_turn_compaction.py::test_next_turn_reuses_the_post_compaction_prefix.
 
 # AGNO_COMPAT: No public reference to the session a running loop writes when it ends.
 # Reason: Agno loads a run's session privately and writes that object back when the run ends, so mid-turn
@@ -181,14 +187,16 @@ def _record_request_session(target: object, run_id: str | None, session: AgentSe
 
 
 def _insert_session_summary(run_messages: RunMessages, session: AgentSession | TeamSession) -> None:
-    """Place the scope's summary directly after the leading prompt messages, once."""
+    """Place the scope's summary once: after the prompt a mid-turn compaction placed it after, else first in history."""
     summary = current_summary_text(session)
     if summary is None or any(is_scope_summary(m) for m in run_messages.messages):
         return
-    index = next(
-        (i for i, message in enumerate(run_messages.messages) if message.role not in {"system", "developer"}),
-        len(run_messages.messages),
-    )
+    index = next((i + 1 for i, message in enumerate(run_messages.messages) if summary_follows(message)), None)
+    if index is None:
+        index = next(
+            (i for i, message in enumerate(run_messages.messages) if message.role not in {"system", "developer"}),
+            len(run_messages.messages),
+        )
     run_messages.messages.insert(index, compaction_summary_message(summary, run_local=False))
 
 

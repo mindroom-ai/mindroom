@@ -38,6 +38,8 @@ from mindroom.history.replay import (
     compaction_summary_text,
     estimate_request_messages_tokens,
     is_compaction_summary,
+    is_scope_summary,
+    mark_summary_follows,
 )
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
@@ -723,11 +725,19 @@ def _summary_usage_recorder(
 
 
 def _rewrite(messages: list[Message], layout: _Layout, summary_message: Message) -> None:
-    """Replace the folded history and the turn's exchanges with the summary, keeping the kept messages in order."""
+    """Replace the folded history and the turn's exchanges with the summary, keeping the kept messages in order.
+
+    The summary follows the current prompt, where the turn's folded work was: a model that reads the prompt last can
+    start the request over even when the summary records it finished. The prompt is marked so that a resume and later
+    turns replay the scope's summary in the same place; a run-local summary is stored in place with its run.
+    """
     leading = messages[: layout.leading]
     for message in leading:
         strip_embedded_summary(message)
-    messages[:] = [*leading, summary_message, *layout.kept]
+    after_prompt = next((index + 1 for index, message in enumerate(layout.kept) if message is layout.prompt), 0)
+    if after_prompt and is_scope_summary(summary_message):
+        mark_summary_follows(layout.kept[after_prompt - 1])
+    messages[:] = [*leading, *layout.kept[:after_prompt], summary_message, *layout.kept[after_prompt:]]
 
 
 def _carry_request_usage(run_response: RunOutput | TeamRunOutput, folded: Sequence[Message]) -> None:

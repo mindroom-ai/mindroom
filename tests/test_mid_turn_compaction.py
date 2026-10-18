@@ -39,7 +39,12 @@ from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import agno_compat_message_builder, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
-from mindroom.history.replay import compaction_summary_message, estimate_request_messages_tokens, is_compaction_summary
+from mindroom.history.replay import (
+    compaction_summary_message,
+    estimate_request_messages_tokens,
+    is_compaction_summary,
+    is_scope_summary,
+)
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import (
     new_scope_session,
@@ -329,6 +334,11 @@ def _first_compacted(model: _ToolLoopModel) -> _Request:
     return next(request for request in model.requests if any(is_compaction_summary(m) for m in request.messages))
 
 
+def _ends_with_prompt_then_summary(request: _Request, prompt: str = "Do the task") -> bool:
+    """Whether a compacted request ends with its prompt and then the summary of the work done on it."""
+    return request.contents[-2] == prompt and is_compaction_summary(request.messages[-1])
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_run_local_tool_loop_compacts_and_finishes(
@@ -348,7 +358,7 @@ async def test_run_local_tool_loop_compacts_and_finishes(
     summaries = [message for message in compacted.messages if is_compaction_summary(message)]
     assert len(summaries) == 1
     assert summaries[0].from_history is False
-    assert compacted.contents[-1] == "Do the task"
+    assert _ends_with_prompt_then_summary(compacted)
     assert "tool" not in compacted.roles
     assert all(message.role != "assistant" for message in compacted.messages)
     stored_roles = [message.role for message in output.messages or []]
@@ -622,7 +632,8 @@ async def test_unseen_thread_context_is_folded_and_transient_context_kept(
 
     compacted = _first_compacted(model)
     assert "u" * 6000 not in compacted.contents
-    assert compacted.contents[-2:] == ["transient turn context", "Do the task"]
+    assert compacted.contents[-3:-1] == ["transient turn context", "Do the task"]
+    assert is_compaction_summary(compacted.messages[-1])
     assert "u" * 100 in summary_calls.inputs[0]
     assert "transient turn context" not in summary_calls.inputs[0]
 
@@ -933,7 +944,10 @@ async def test_queued_notice_survives_mid_turn_compaction(tmp_path: Path, summar
 
     assert summary_calls.inputs
     compacted = _first_compacted(model)
-    assert compacted.contents[-2:] == ["Do the task", "A newer message is waiting."]
+    # The notice arrived after the folded work, so it stays the last word after the summary.
+    assert compacted.contents[-3] == "Do the task"
+    assert is_compaction_summary(compacted.messages[-2])
+    assert compacted.contents[-1] == "A newer message is waiting."
 
 
 def test_replayed_queued_notice_is_folded() -> None:
@@ -1384,7 +1398,7 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
     summaries = [message for message in compacted.messages if is_compaction_summary(message)]
     assert len(summaries) == 1
     assert summaries[0].from_history is True
-    assert compacted.contents[-1] == "Do the task"
+    assert _ends_with_prompt_then_summary(compacted)
     assert not {"q1", "a1", "q2", "a2"} & set(compacted.contents)
     # The fold's rows sort after the stored runs they cover, and the run after them.
     rows = summary_rows_of(storage, _SCOPE.key)
@@ -1431,7 +1445,7 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     summaries = [message for message in compacted.messages if is_compaction_summary(message)]
     assert len(summaries) == 1
     assert summaries[0].from_history is True
-    assert compacted.contents[-1] == "Do the task"
+    assert _ends_with_prompt_then_summary(compacted)
     assert not any("team question" in content or "team answer" in content for content in compacted.contents)
     rows = summary_rows_of(storage, _TEAM_SCOPE.key)
     assert log_of(storage, _TEAM_SCOPE.key) == [
@@ -1617,6 +1631,36 @@ async def test_run_local_compaction_summarizes_replayed_history_it_folds(
     assert summary_calls.inputs
     assert "q1" in summary_calls.inputs[0]
     assert "q2" in summary_calls.inputs[0]
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_run_local_fold_leaves_the_scope_summary_first(
+    tmp_path: Path,
+    summary_calls: _SummaryCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a scoped fold moves the scope's summary after its prompt; a stored run-local fold keeps its own in place."""
+    config, paths = _config(tmp_path)
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    session = _session("session-1")
+    seed_session(storage, session)
+    seed_summary(storage, session, _SCOPE, "EARLIER-WORK")
+    model = _ToolLoopModel(tool_rounds=5)
+    agent = _scoped_agent(model, config, paths, storage)
+    with monkeypatch.context() as patched:
+        # A request that replays history but cannot update its stored session compacts run-locally.
+        patched.setattr(mid_turn_compaction, "_scoped_session", lambda *_args: None)
+        await _run_in_session(agent, "Do the task")
+    assert summary_calls.inputs
+    model.requests.clear()
+    model.tool_rounds = 0
+
+    await _run_in_session(agent, "Thanks")
+
+    request = model.requests[0]
+    first_history = next(index for index, message in enumerate(request.messages) if message.role != "system")
+    assert is_scope_summary(request.messages[first_history])
+    assert "Do the task" in request.contents
 
 
 @pytest.mark.asyncio
@@ -1952,8 +1996,8 @@ def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
     # The leading message is edited in place, so projections that track it by identity (approval receipts) still do.
     assert messages[0] is legacy_system
     assert messages[0].content == "Be precise.\n\nCurrent date: Monday"
-    assert [is_compaction_summary(message) for message in messages] == [False, True, False]
-    assert messages[2] is prompt
+    assert [is_compaction_summary(message) for message in messages] == [False, False, True]
+    assert messages[1] is prompt
 
 
 class _NativeToolLoopModel(NativeCompactionModel, _ToolLoopModel):
@@ -1995,7 +2039,7 @@ async def test_oversized_native_request_turns_native_off_and_compacts_as_text(
     assert summary_calls.inputs
     assert model.native_compaction is None
     compacted = _first_compacted(model)
-    assert compacted.contents[-1] == "Do the task"
+    assert _ends_with_prompt_then_summary(compacted)
     assert "tool" not in compacted.roles
 
 

@@ -19,6 +19,7 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
   Every redaction change drops the scope's metadata seen ids, because dropping ids can only re-offer messages, never hide them.
 - A completed approval moves to the end of the log, after the turns that happened while it waited, because its continuation saw them.
 - The summary replays as the first history message instead of inside Agno's system prompt, so a compaction never changes the cached prompt prefix, and minimal agents with a string system message see it too.
+  After a mid-turn compaction it follows that turn's prompt instead, in the rewritten request, its resume, and later turns, because a fast model that reads the prompt last restarts the request even when the summary records it finished (evidence in `docs/dev/2026-10-10-compaction-unification-design.md`).
   It is marked as history, so Agno never stores it in a run and an approval resume rebuilds it with the rest of its history.
 - Persisted replay fitting runs once before a reply; the mid-turn hook sizes every model request of the reply, from the latest response's reported usage when the loop received one, and by estimate on native routes, whose checkpoint responses are billed for the transcript they replaced.
 - A mid-turn compaction folds everything but the system prompt, the current prompt, transient messages, and queued notices, summarizing the scope's stored runs after the latest summary row together with the running turn's exchanges.

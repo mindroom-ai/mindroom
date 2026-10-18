@@ -174,7 +174,7 @@ def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
         content=(
             "The earlier part of this conversation was compacted into this summary:\n\n"
             f"<compacted_history>\n{summary}\n</compacted_history>\n\n"
-            "The conversation continues after this summary. If it records progress on the request that follows, "
+            "The conversation continues after this summary. If it records progress on the current request, "
             "continue that work from its next steps instead of starting over."
         ),
         provider_data={_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
@@ -197,6 +197,19 @@ def is_compaction_summary(message: Message) -> bool:
 def is_scope_summary(message: Message) -> bool:
     """Return whether one message is the scope's summary, as opposed to one run's own."""
     return _summary_kind(message) == _SCOPE_SUMMARY
+
+
+_SUMMARY_FOLLOWS_KEY = "mindroom_compaction_summary_follows"
+
+
+def mark_summary_follows(prompt: Message) -> None:
+    """Record that the scope's summary replays right after this prompt, where a mid-turn compaction placed it."""
+    prompt.provider_data = {**(prompt.provider_data or {}), _SUMMARY_FOLLOWS_KEY: True}
+
+
+def summary_follows(message: Message) -> bool:
+    """Return whether the scope's summary replays right after this message."""
+    return isinstance(message.provider_data, dict) and message.provider_data.get(_SUMMARY_FOLLOWS_KEY) is True
 
 
 def _summary_kind(message: Message) -> object:

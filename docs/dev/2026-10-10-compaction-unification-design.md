@@ -9,7 +9,7 @@ This record keeps only the decisions that do not depend on how compacted history
 Compaction behaves the same way for every agent, team, subagent, workflow participant, and agent mode: after a compaction the summary replaces all older messages, and the conversation builds on from there.
 Compaction also runs inside a turn, between two model requests, so a long tool loop can compact and keep going.
 After a compaction the request settles on a new stable prefix that later requests reuse, so prompt caching survives.
-Every request that replays persisted history has the shape `[system, tools, summary message, remaining history, current input, current-turn messages]`, with the system prompt and tools byte-identical across compactions.
+Every request that replays persisted history has the shape `[system, tools, summary message, remaining history, current input, current-turn messages]`, with the system prompt and tools byte-identical across compactions; after a mid-turn compaction the summary instead follows that turn's input.
 A turn whose next request would exceed the context window compacts before that request and continues, on every route a MindRoom agent or team runs on as its primary model, including minimal agents and single-turn subagents.
 
 ## Why
@@ -29,6 +29,10 @@ Behavior on `main` when this design was written:
 - Agno no longer renders the summary; MindRoom inserts it as a user message after the leading system and developer messages and before replayed history, in new runs and continuations alike.
   A compaction therefore never changes the cached prompt prefix, and minimal agents and authored subagents get the summary with no special case while their system prompts stay byte for byte.
 - The message tells the model that the earlier conversation was compacted and to continue recorded progress from its next steps instead of starting over, so the agent continues its task after a compaction instead of restarting it.
+- A mid-turn compaction places the summary right after the current prompt instead, where the turn's folded work was, and marks that prompt so an approval resume and later turns replay the summary in the same place, which keeps the resumed request's prefix and the next turn's cached prefix.
+  A fast model that reads the prompt last can start the request over even when the summary records it finished: on a logged team-member request whose summary recorded all six file reads, gpt-6-luna restarted at the first file 12/12 with the summary before the prompt and 0/12 after it, and in a live run that member looped through about 30 folds until it was stopped.
+  gpt-6.1-sol, gpt-6-astra, and gemini-3.8-flash answered in both orders, and with partial progress every model continued at the next file in both orders.
+  Rewording the closing line without moving the summary restarted 12/12, and a firmer "do not call them again" line restarted 1/12 and would also discourage a repeat the user asks for in a later turn.
 - The summary is never stored as a message: it is marked as history, so Agno drops it when it stores a run, later turns cannot replay it twice, and an approval resume rebuilds it together with the history it re-fetches.
 - A replay plan that replays only the summary keeps history on with zero runs instead of turning history off, so the summary still replays.
   A scheduled task with `history_limit: 0` turns history off and therefore no longer sees the summary, matching "`0` for none" in the scheduling docs.
@@ -49,7 +53,7 @@ Behavior on `main` when this design was written:
 
 ### What stays verbatim in a compacted request
 
-- A compacted request keeps the leading system and developer messages, the summary, the current prompt, transient messages, and queued-message notices, in their original order, and folds everything else, including every current-turn assistant and tool message.
+- A compacted request keeps the leading system and developer messages, the current prompt, transient messages, and queued-message notices in their original order, with the summary right after the prompt, and folds everything else, including every current-turn assistant and tool message.
 - Folding every model and tool message of the turn and keeping only the user's input is what Codex CLI's inline auto-compaction and Claude Code's auto-compaction do, and it leaves no tool-call pairs, signed reasoning, or provider response chains for the rewritten request to keep valid.
 - Transient messages, such as the per-turn transient context and the approval receipt, stay because they are never stored, so they are never summarized either.
 - The rest of the turn's input, such as unseen thread messages, is folded, so a large unseen thread context with a short prompt does not survive the fold.
