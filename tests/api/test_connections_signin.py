@@ -20,8 +20,8 @@ from fastapi.testclient import TestClient
 from mindroom.api import auth, connections_session, frontend, main
 from mindroom.api.connections_session_cookie import (
     CONNECTIONS_SESSION_COOKIE,
-    connections_session_user,
     issue_connections_session,
+    read_connections_session,
 )
 from mindroom.matrix_openid import MatrixOpenIDError, verify_matrix_openid
 from mindroom.oauth import registry as oauth_registry
@@ -62,6 +62,8 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
 
     verifier = AsyncMock(side_effect=verify)
     monkeypatch.setattr(connections_session, "verify_matrix_openid", verifier)
+    binds = AsyncMock(return_value=False)
+    monkeypatch.setattr(connections_session, "homeserver_binds_openid_audience", binds)
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
@@ -99,6 +101,7 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         "payload": payload,
         "provider": provider,
         "verifier": verifier,
+        "binds": binds,
     }
 
 
@@ -156,9 +159,55 @@ def test_sign_in_sets_portal_session_cookie(signin: dict[str, Any]) -> None:
     assert response.headers["referrer-policy"] == "no-referrer"
     token = signin["client"].cookies.get(CONNECTIONS_SESSION_COOKIE)
     assert token is not None
-    assert connections_session_user(token, now=time.time()) == "@alice:example.org"
+    assert read_connections_session(token, now=time.time()) == ("@alice:example.org", False)
     assert signin["verifier"].await_args.args[0].access_token == "alice"  # noqa: S105
     assert signin["verifier"].await_args.args[1] == signin["paths"]
+
+
+def _session_of(client: TestClient) -> tuple[str, bool] | None:
+    """Read the portal session cookie the client holds."""
+    token = client.cookies.get(CONNECTIONS_SESSION_COOKIE)
+    return read_connections_session(token, now=time.time()) if token else None
+
+
+def _with_admin(signin: dict[str, Any], admin: str = "@alice:example.org", **env: str) -> None:
+    _serve(signin, {**signin["payload"], "administrators": [admin]}, **env)
+
+
+def test_admin_sign_in_on_binding_homeserver_gets_dashboard_bit(signin: dict[str, Any]) -> None:
+    """An administrator whose token the homeserver bound to this deployment may open the dashboard."""
+    _with_admin(signin)
+    signin["binds"].return_value = True
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", True)
+
+
+@pytest.mark.parametrize(
+    ("admin", "binds"),
+    [("@bob:example.org", True), ("@alice:example.org", False)],
+    ids=["not-an-administrator", "homeserver-does-not-bind"],
+)
+def test_dashboard_bit_needs_admin_and_binding(signin: dict[str, Any], admin: str, binds: bool) -> None:
+    """Without both administrator authority and token binding, the session stays portal-only."""
+    _with_admin(signin, admin)
+    signin["binds"].return_value = binds
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+
+
+def test_dashboard_bit_needs_public_url(signin: dict[str, Any]) -> None:
+    """Without MINDROOM_PUBLIC_URL no audience was sent, so the token was never bound to this deployment."""
+    _with_admin(signin, MINDROOM_PUBLIC_URL="")
+    signin["binds"].return_value = True
+    sign_in(signin["client"], "alice")
+    session = _session_of(signin["client"])
+    assert session is None or session.dashboard is False
+
+
+def test_binding_probe_runs_only_for_administrators(signin: dict[str, Any]) -> None:
+    """Signing in an ordinary user never contacts the homeserver's versions endpoint."""
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert signin["binds"].await_count == 0
 
 
 def test_sign_in_refuses_user_without_visible_agents(signin: dict[str, Any]) -> None:
@@ -484,7 +533,7 @@ def test_expired_session_is_rejected(signin: dict[str, Any]) -> None:
     """A session stops authenticating once its fixed lifetime ends."""
     client = signin["client"]
     for issued_at, status in ((time.time(), 200), (time.time() - 3600, 401)):
-        token = issue_connections_session("@alice:example.org", now=issued_at)
+        token = issue_connections_session("@alice:example.org", now=issued_at, dashboard=False)
         client.cookies.set(CONNECTIONS_SESSION_COOKIE, token)
         assert client.get("/api/connections").status_code == status
 

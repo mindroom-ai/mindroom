@@ -22,7 +22,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
-from mindroom.api.connections_session_cookie import CONNECTIONS_SESSION_COOKIE, connections_session_user
+from mindroom.api.connections_session_cookie import CONNECTIONS_SESSION_COOKIE, read_connections_session
 from mindroom.api.open_access import open_access_rejection
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
@@ -1002,9 +1002,10 @@ def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
     ):
         return None
     token = request.cookies.get(CONNECTIONS_SESSION_COOKIE)
-    matrix_user_id = connections_session_user(token, now=time.time()) if token else None
-    if matrix_user_id is None:
+    session = read_connections_session(token, now=time.time()) if token else None
+    if session is None:
         return None
+    matrix_user_id = session.matrix_user_id
     return {"user_id": matrix_user_id, "email": None, "matrix_user_id": matrix_user_id, "auth_source": "matrix_openid"}
 
 

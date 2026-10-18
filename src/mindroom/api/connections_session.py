@@ -12,7 +12,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import require_connections_user
+from mindroom.api.auth import is_administrator, require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     require_connections_same_origin,
@@ -24,8 +24,13 @@ from mindroom.api.connections_session_cookie import (
     issue_connections_session,
 )
 from mindroom.constants import RuntimePaths
-from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
-from mindroom.origins import allowed_client_origins
+from mindroom.matrix_openid import (
+    MatrixOpenIDError,
+    MatrixOpenIDToken,
+    homeserver_binds_openid_audience,
+    verify_matrix_openid,
+)
+from mindroom.origins import allowed_client_origins, normalized_origin
 from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV
 
 if TYPE_CHECKING:
@@ -96,14 +101,18 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
         raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
     # Any homeserver user can obtain a valid token, so only users with portal access get a session.
     app_state = config_lifecycle.app_state(request.app)
-    user = resolve_connection_user(
-        config_lifecycle.bind_current_request_snapshot(request),
-        matrix_user_id,
-        membership_index=app_state.agent_reply_memberships,
-    )
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    user = resolve_connection_user(snapshot, matrix_user_id, membership_index=app_state.agent_reply_memberships)
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
-    token = issue_connections_session(matrix_user_id, now=time.time())
+    # The dashboard is full control, so only an administrator whose token the homeserver bound to this
+    # deployment's origin may open it; an unbound token could have been replayed from another deployment.
+    dashboard = (
+        is_administrator(matrix_user_id, snapshot)
+        and normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL")) is not None
+        and await homeserver_binds_openid_audience(paths)
+    )
+    token = issue_connections_session(matrix_user_id, now=time.time(), dashboard=dashboard)
     response.headers.update(CONNECTIONS_HEADERS)
     response.set_cookie(
         CONNECTIONS_SESSION_COOKIE,
