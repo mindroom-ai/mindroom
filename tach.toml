@@ -2583,7 +2583,7 @@ visibility = ["mindroom.approval.execution", "mindroom.history.runtime", "mindro
 
 [[modules]]
 path = "mindroom.native_compaction"
-depends_on = []
+depends_on = ["mindroom.logging_config"]
 visibility = [
     "mindroom.providers.claude_native_compaction",
     "mindroom.history.replay",
