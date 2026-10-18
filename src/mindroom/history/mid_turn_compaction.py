@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from typing import Any
 
-    from agno.models.response import ModelResponse
+    from agno.metrics import MessageMetrics
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -675,7 +675,7 @@ async def _summarize_run_locally(
         scope=scope,
         config=binding.config,
         runtime_paths=binding.runtime_paths,
-        on_response=_summary_usage_recorder(binding, run_response),
+        on_usage=_summary_usage_recorder(binding, run_response),
     )
     return compaction_summary_message(summary, run_local=True)
 
@@ -683,12 +683,12 @@ async def _summarize_run_locally(
 def _summary_usage_recorder(
     binding: _MidTurnCompaction,
     run_response: RunOutput | TeamRunOutput,
-) -> Callable[[Model, ModelResponse], Awaitable[None]] | None:
+) -> Callable[[Model, MessageMetrics], Awaitable[None]] | None:
     """Record each summary response under the reply's usage owner, else in the target's own session storage."""
     owner = get_helper_usage_owner()
     if owner is not None:
 
-        async def record_for_owner(model: Model, response: ModelResponse) -> None:
+        async def record_for_owner(model: Model, usage: MessageMetrics) -> None:
             await run_session_storage_operation(
                 owner.storage_factory,
                 partial(
@@ -696,7 +696,7 @@ def _summary_usage_recorder(
                     session_id=owner.session_id,
                     requester_id=run_response.user_id,
                     model=model,
-                    response=response,
+                    usage=usage,
                     initial_session=owner.initial_session,
                 ),
             )

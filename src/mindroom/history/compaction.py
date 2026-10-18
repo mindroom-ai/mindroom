@@ -58,9 +58,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from agno.db.base import BaseDb
+    from agno.metrics import MessageMetrics
     from agno.models.base import Model
     from agno.models.message import Message
-    from agno.models.response import ModelResponse
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
@@ -96,11 +96,11 @@ class Summarizer:
     history_settings: ResolvedHistorySettings
     session_id: str
     scope: HistoryScope
-    # Receives every summary response, including rejected ones, so its usage is recorded.
-    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None
+    # Receives the usage of every summary response that reports it, including rejected ones.
+    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None
 
 
-def scope_usage_recorder(storage: BaseDb, session_id: str) -> Callable[[Model, ModelResponse], Awaitable[None]]:
+def scope_usage_recorder(storage: BaseDb, session_id: str) -> Callable[[Model, MessageMetrics], Awaitable[None]]:
     """Record each summary response's usage in the scope's storage, under the reply's requester."""
     # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
     requester_context = get_tool_runtime_context() or get_detached_requester_context()
@@ -629,9 +629,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 summary_input=summary_input,
                 summary_prompt=summarizer.prompt,
                 timeout_seconds=summarizer.timeout_seconds,
-                on_response=(
-                    partial(summarizer.on_response, summary_model.model) if summarizer.on_response is not None else None
-                ),
+                on_usage=partial(summarizer.on_usage, summary_model.model) if summarizer.on_usage is not None else None,
             )
         except Exception as exc:
             logger.warning(

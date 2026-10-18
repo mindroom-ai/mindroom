@@ -74,6 +74,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from agno.metrics import MessageMetrics
+
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
@@ -95,7 +97,7 @@ def _summarizer(
     timeout_seconds: float = DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     session_id: str = "session-1",
     scope: HistoryScope | None = None,
-    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None = None,
+    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None = None,
 ) -> Summarizer:
     """Return a summarizer for the test agent's scope, by default with the production summary prompt."""
     return Summarizer(
@@ -106,7 +108,7 @@ def _summarizer(
         history_settings=history_settings,
         session_id=session_id,
         scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
-        on_response=on_response,
+        on_usage=on_usage,
     )
 
 

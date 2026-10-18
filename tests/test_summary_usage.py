@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.db.sqlite import SqliteDb
@@ -109,7 +109,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
                     timeout_seconds=10,
                     scope=scope,
                     prompt="Summarize.",
-                    on_response=scope_usage_recorder(storage, session.session_id),
+                    on_usage=scope_usage_recorder(storage, session.session_id),
                 ),
                 available_history_budget=None,
                 replay_window_tokens=None,
@@ -273,7 +273,7 @@ async def test_retry_keeps_cost_of_rejected_attempt(tmp_path: Path) -> None:
                 timeout_seconds=10,
                 session_id="session",
                 scope=scope,
-                on_response=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
+                on_usage=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
                 prompt="Summarize.",
             ),
             None,
@@ -322,7 +322,7 @@ async def test_usage_pool_timeout_cannot_issue_another_paid_summary(tmp_path: Pa
                     timeout_seconds=10,
                     session_id="session",
                     scope=scope,
-                    on_response=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
+                    on_usage=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
                     prompt="Summarize.",
                 ),
                 None,
@@ -356,10 +356,10 @@ async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
         ],
     )
 
-    async def record(response: ModelResponse) -> None:
+    async def record(usage: MessageMetrics) -> None:
         recording.set()
         try:
-            await record_summary_usage(model, response, storage=storage, session_id="session", requester_id=None)
+            await record_summary_usage(model, usage, storage=storage, session_id="session", requester_id=None)
         finally:
             recorded.set()
 
@@ -371,7 +371,7 @@ async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
                 summary_input="Input.",
                 summary_prompt="Summarize.",
                 timeout_seconds=0.01,
-                on_response=record,
+                on_usage=record,
             ),
         )
         try:
@@ -422,8 +422,8 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
 
     model = _LateModel(id="summary-model", provider="test-provider")
 
-    async def record(response: ModelResponse) -> None:
-        await record_summary_usage(model, response, storage=storage, session_id="session", requester_id=None)
+    async def record(usage: MessageMetrics) -> None:
+        await record_summary_usage(model, usage, storage=storage, session_id="session", requester_id=None)
         recorded.set()
 
     try:
@@ -433,7 +433,7 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
                 summary_input="Input.",
                 summary_prompt="Summarize.",
                 timeout_seconds=0.01,
-                on_response=record,
+                on_usage=record,
             )
         await asyncio.wait_for(recorded.wait(), timeout=2)
         report = collect_admin_usage(config=config, runtime_paths=paths)
@@ -441,3 +441,25 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
         assert report.model_breakdown[0].run_count == 0
     finally:
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_response_without_usage_records_nothing() -> None:
+    """A provider that reports no usage leaves the usage storage untouched, so its failures cannot fail the summary."""
+    model = _SummaryModel(
+        id="summary-model",
+        provider="test-provider",
+        responses=[ModelResponse(content="A complete summary.")],
+    )
+    on_usage = AsyncMock()
+
+    summary = await generate_compaction_summary(
+        model=model,
+        summary_input="Input.",
+        summary_prompt="Summarize.",
+        timeout_seconds=10,
+        on_usage=on_usage,
+    )
+
+    assert summary.summary == "A complete summary."
+    on_usage.assert_not_awaited()

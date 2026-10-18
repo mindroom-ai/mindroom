@@ -58,8 +58,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
     from agno.db.base import BaseDb
+    from agno.metrics import MessageMetrics
     from agno.models.base import Model
-    from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.session.summary import SessionSummary
@@ -72,14 +72,14 @@ _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_
 
 async def record_summary_usage(
     model: Model,
-    response: ModelResponse,
+    usage: MessageMetrics,
     *,
     storage: BaseDb,
     session_id: str,
     requester_id: str | None,
     initial_session: AgentSession | TeamSession | None = None,
 ) -> None:
-    """Record returned counters even when the summary is rejected or later cancelled."""
+    """Record a summary response's counters even when the summary is rejected or later cancelled."""
     await run_blocking_until_complete(
         partial(
             save_compaction_usage,
@@ -87,7 +87,7 @@ async def record_summary_usage(
             session_id=session_id,
             requester_id=requester_id,
             model=model,
-            response=response,
+            usage=usage,
             initial_session=initial_session,
         ),
     )

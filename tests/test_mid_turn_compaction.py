@@ -200,11 +200,11 @@ class _SummaryCalls:
         summary_input: str,
         summary_prompt: str,  # noqa: ARG002
         timeout_seconds: float,  # noqa: ARG002
-        on_response: Callable[[ModelResponse], Any] | None = None,
+        on_usage: Callable[[MessageMetrics], Any] | None = None,
     ) -> SessionSummary:
         self.inputs.append(summary_input)
-        if on_response is not None:
-            await on_response(ModelResponse(response_usage=MessageMetrics(input_tokens=7, output_tokens=3)))
+        if on_usage is not None:
+            await on_usage(MessageMetrics(input_tokens=7, output_tokens=3))
         if self.cancel:
             raise asyncio.CancelledError
         if self.fail:

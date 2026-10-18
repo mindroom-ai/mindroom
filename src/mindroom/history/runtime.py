@@ -70,9 +70,9 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
+    from agno.metrics import MessageMetrics
     from agno.models.base import Model
     from agno.models.message import Message
-    from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
@@ -581,7 +581,7 @@ async def _compact_before_reply(
                 runtime_paths=runtime_paths,
                 session_id=session.session_id,
                 scope=scope,
-                on_response=scope_usage_recorder(storage, session.session_id),
+                on_usage=scope_usage_recorder(storage, session.session_id),
             ),
             available_history_budget=history_budget,
             before_tokens=before_tokens,
@@ -604,7 +604,7 @@ def _load_summarizer(
     runtime_paths: RuntimePaths,
     session_id: str,
     scope: HistoryScope,
-    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None,
+    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None,
 ) -> Summarizer:
     """Load the summary model and, when distinct and loadable, its safeguard fallback."""
     execution_plan = resolved_inputs.execution_plan
@@ -652,7 +652,7 @@ def _load_summarizer(
         history_settings=resolved_inputs.history_settings,
         session_id=session_id,
         scope=scope,
-        on_response=on_response,
+        on_usage=on_usage,
     )
 
 
@@ -664,7 +664,7 @@ async def summarize_run_locally(
     scope: HistoryScope,
     config: Config,
     runtime_paths: RuntimePaths,
-    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None,
+    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None,
 ) -> str:
     """Summarize one run's own folded messages, oldest first, with the scope's summary model, storing nothing."""
     summarizer = _load_summarizer(
@@ -673,7 +673,7 @@ async def summarize_run_locally(
         runtime_paths=runtime_paths,
         session_id=snapshots[0].session_id or "",
         scope=scope,
-        on_response=on_response,
+        on_usage=on_usage,
     )
     summary, _served_by = await summarize_runs(summarizer, previous_summary, snapshots)
     return summary
@@ -717,7 +717,7 @@ async def compact_scope_mid_turn(
                 runtime_paths=runtime_paths,
                 session_id=session.session_id,
                 scope=scope,
-                on_response=scope_usage_recorder(storage, session.session_id),
+                on_usage=scope_usage_recorder(storage, session.session_id),
             ),
             before_tokens=before_tokens,
             replay_window_tokens=execution_plan.replay_window_tokens,

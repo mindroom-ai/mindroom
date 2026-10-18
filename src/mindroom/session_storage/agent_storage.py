@@ -42,8 +42,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.metrics import MessageMetrics
     from agno.models.base import Model
-    from agno.models.response import ModelResponse
     from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
     from sqlalchemy.sql.dml import Insert
@@ -85,13 +85,11 @@ def save_compaction_usage(
     session_id: str,
     requester_id: str | None,
     model: Model,
-    response: ModelResponse,
+    usage: MessageMetrics,
     initial_session: AgentSession | TeamSession | None = None,
 ) -> None:
     """Persist one summary response's returned counters independently of conversation changes."""
-    if response.response_usage is None:
-        return
-    metrics = response.response_usage.to_dict()
+    metrics = usage.to_dict()
     created_at = time.time()
     save_independent_usage(
         storage,
