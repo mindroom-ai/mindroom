@@ -53,6 +53,7 @@ from mindroom.streaming import (
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
@@ -1045,6 +1046,7 @@ async def prepare_agent_execution_context(
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,
+            current_prompt_tokens=estimate_text_tokens(prepared_prompt),
         )
 
     return await _prepare_execution_context_common(
@@ -1123,6 +1125,7 @@ async def _prepare_bound_team_execution_context(
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,
+            current_prompt_tokens=estimate_text_tokens(prepared_prompt),
         )
 
     return await _prepare_execution_context_common(

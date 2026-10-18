@@ -27,7 +27,9 @@ from mindroom.history.policy import (
 from mindroom.history.replay import (
     configured_replay_plan,
     estimate_prompt_visible_history_tokens,
+    estimate_request_messages_tokens,
     has_effective_persisted_replay,
+    history_skip_roles,
     log_replay_plan,
     plan_replay_that_fits,
     scope_visible_runs,
@@ -61,6 +63,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.logging_config import get_logger
+from mindroom.model_usage import response_context_tokens
 from mindroom.providers import model_loading
 from mindroom.providers.agno_compat_provider_errors import is_provider_timeout
 from mindroom.redaction import redact_sensitive_text
@@ -312,12 +315,18 @@ async def prepare_scope_history(
     pipeline_timing: DispatchPipelineTiming | None = None,
     active_model: Model | None = None,
     allow_native_compaction: bool = True,
+    current_prompt_tokens: int = 0,
 ) -> PreparedScopeHistory:
-    """Prepare durable scope history before final replay planning."""
+    """Prepare durable scope history before final replay planning.
+
+    ``current_prompt_tokens`` is the share of the plan's static prompt estimate that this reply's prompt and
+    unseen context take, which no earlier request held.
+    """
     resolved_scope = scope or resolve_history_scope(agent)
+    model = active_model if active_model is not None else agent.model
     configure_native = partial(
         configure_native_history,
-        active_model if active_model is not None else agent.model,
+        model,
         plan=resolved_inputs.execution_plan,
         history_settings=resolved_inputs.history_settings,
         allowed=allow_native_compaction,
@@ -352,7 +361,7 @@ async def prepare_scope_history(
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     native_route = native_history_route(native_model)
     # Large provider projections spend seconds in tokenizers that release the GIL.
-    current_history_tokens = await asyncio.to_thread(
+    estimated_history_tokens = await asyncio.to_thread(
         estimate_prompt_visible_history_tokens,
         session=session,
         scope=scope_context.scope,
@@ -361,6 +370,23 @@ async def prepare_scope_history(
         replay_model=native_model,
     )
     visible_runs = scope_visible_runs(session, scope_context.scope)
+    # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
+    reported_history_tokens = (
+        _reported_history_tokens(
+            session=session,
+            latest_run=visible_runs[-1],
+            resolved_inputs=resolved_inputs,
+            config=config,
+            model=model,
+            replay_model=native_model,
+            current_prompt_tokens=current_prompt_tokens,
+        )
+        if native_route is None and visible_runs
+        else None
+    )
+    # The provider's count only ever raises the estimate, so a count that misses replayed content cannot hide it.
+    current_history_tokens = max(estimated_history_tokens, reported_history_tokens or 0)
+    history_tokens_source = "reported_usage" if current_history_tokens > estimated_history_tokens else "estimate"
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -377,6 +403,8 @@ async def prepare_scope_history(
         replay_window=execution_plan.replay_window_tokens,
         static_prompt_tokens=execution_plan.static_prompt_tokens,
         current_tokens=current_history_tokens,
+        current_tokens_source=history_tokens_source,
+        estimated_tokens=estimated_history_tokens,
         force=state.force_compact_before_next_run,
         compaction_decision=compaction_decision.mode,
         compaction_reason=compaction_decision.reason,
@@ -388,6 +416,7 @@ async def prepare_scope_history(
             compaction_decision=compaction_decision.mode,
             compaction_reason=compaction_decision.reason,
             compaction_current_history_tokens=current_history_tokens,
+            compaction_current_history_tokens_source=history_tokens_source,
             compaction_trigger_budget_tokens=compaction_decision.trigger_budget_tokens,
             compaction_hard_budget_tokens=compaction_decision.hard_budget_tokens,
             compaction_fitted_replay_tokens=compaction_decision.fitted_replay_tokens,
@@ -458,6 +487,63 @@ async def prepare_scope_history(
         compaction_reply_outcome=compaction_reply_outcome,
         native_model=native_model,
     )
+
+
+def _reported_history_tokens(
+    *,
+    session: AgentSession | TeamSession,
+    latest_run: RunOutput | TeamRunOutput,
+    resolved_inputs: HistoryPreparationInputs,
+    config: Config,
+    model: Model | None,
+    replay_model: NativeCompactionModel | None,
+    current_prompt_tokens: int,
+) -> int | None:
+    """Size history from the request the provider reported for the scope's latest answer, or None when stale.
+
+    That request held the system prompt, the tools, and all the history this reply replays except the answer.
+    The replay budgets are what remains after the plan's static estimate of the system prompt, tools, and this
+    reply's prompt, so taking that estimate's system prompt and tools share off converts the count to their units.
+    """
+    history_settings = resolved_inputs.history_settings
+    static_prompt_tokens = resolved_inputs.execution_plan.static_prompt_tokens
+    if (
+        model is None
+        or static_prompt_tokens is None
+        # Replay limits drop the oldest content as runs accrue, so that request held more than will replay.
+        or history_settings.policy.mode != "all"
+        or history_settings.max_tool_calls_from_history is not None
+        # Another model counts with another tokenizer.
+        or (latest_run.model, latest_run.model_provider) != (model.id, model.provider)
+    ):
+        return None
+    skip_roles = history_skip_roles(history_settings)
+    messages = [
+        message for message in latest_run.messages or [] if not message.from_history and message.role not in skip_roles
+    ]
+    anchor = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "assistant"), None)
+    # History replay drops or bounds media that request carried in full.
+    if anchor is None or any(
+        message.images or message.audio or message.videos or message.files for message in messages
+    ):
+        return None
+    answer = messages[anchor]
+    summary = session.summary
+    # A summary written after that request started folded runs it held. Agno creates the answer's message before a
+    # mid-turn fold of that request runs, so such a fold also counts as later and the estimate decides.
+    if summary is not None and (summary.updated_at is None or summary.updated_at.timestamp() > answer.created_at):
+        return None
+    configured = config.models.get(resolved_inputs.active_model_name)
+    reported = response_context_tokens(
+        answer,
+        provider=model.get_provider(),
+        configured_provider=configured.provider if configured is not None else None,
+        model_id=model.id,
+    )
+    if reported is None:
+        return None
+    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=replay_model)
+    return reported + newer_tokens - (static_prompt_tokens - current_prompt_tokens)
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
@@ -864,6 +950,7 @@ async def prepare_bound_scope_history(
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     allow_native_compaction: bool = True,
+    current_prompt_tokens: int = 0,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
     if scope_context is not None:
@@ -911,6 +998,7 @@ async def prepare_bound_scope_history(
         pipeline_timing=pipeline_timing,
         active_model=team.model,
         allow_native_compaction=allow_native_compaction,
+        current_prompt_tokens=current_prompt_tokens,
     )
 
 

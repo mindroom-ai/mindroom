@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.media import Image
+from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
@@ -25,6 +27,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history.replay import _summary_tokens, estimate_prompt_visible_history_tokens
 from mindroom.history.runtime import (
+    PreparedScopeHistory,
     prepare_bound_scope_history,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
@@ -68,6 +71,7 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _session,
     _team_session,
+    compact_runs,
     completed_outcome,
     folded_run_ids,
     latest_summary_model,
@@ -1802,3 +1806,216 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
     assert prepared.compaction_reply_outcome == "none"
     assert prepared.replays_persisted_history is True
+
+
+# Three runs of 2,000 + 2,000 characters estimate to 3,000 history tokens at chars / 4, under the trigger.
+_REPORTED_USAGE_PLAN = ResolvedHistoryExecutionPlan(
+    authored_compaction_enabled=True,
+    text_compaction_available=True,
+    explicit_compaction_model=True,
+    compaction_model_name="summary-model",
+    replay_window_tokens=64_000,
+    trigger_threshold_tokens=5_000,
+    reserve_tokens=0,
+    static_prompt_tokens=1_000,
+    replay_budget_tokens=4_000,
+    hard_replay_budget_tokens=6_000,
+    summary_input_budget_tokens=50_000,
+    compaction_timeout_seconds=600.0,
+)
+
+
+def _reported_run(
+    run_id: str,
+    *,
+    input_tokens: int = 0,
+    model: str = "fake-model",
+    created_at: int = 2_000_000_000,
+    provider_data: dict[str, object] | None = None,
+    images: list[Image] | None = None,
+) -> RunOutput:
+    """Return a completed run whose answer carries the request size its provider reported.
+
+    The default ``created_at`` (2033) puts the answer after any summary a test writes.
+    """
+    run = _completed_run(
+        run_id,
+        messages=[
+            Message(role="user", content="u" * 2_000, images=images),
+            Message(
+                role="assistant",
+                content="a" * 2_000,
+                metrics=MessageMetrics(input_tokens=input_tokens),
+                provider_data=provider_data,
+                created_at=created_at,
+            ),
+        ],
+    )
+    run.model = model
+    run.model_provider = "fake"
+    return run
+
+
+async def _prepare_with_reported_usage(
+    tmp_path: Path,
+    runs: list[RunOutput],
+    *,
+    history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
+    folded_run_ids: tuple[str, ...] = (),
+    current_prompt_tokens: int = 0,
+) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
+    """Prepare one reply's history; return it, the chars / 4 history estimate, and the compaction notices."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = seed_session(storage, _session("session-1", runs=list(runs)))
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    if folded_run_ids:
+        compact_runs(storage, session, scope, list(folded_run_ids), "Earlier summary")
+    estimate = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    agent = _agent(db=storage)
+    resolved_inputs = replace(
+        resolve_agent_preparation_inputs(agent=agent, agent_name="test_agent", config=config, static_prompt_tokens=0),
+        history_settings=history_settings,
+        execution_plan=_REPORTED_USAGE_PLAN,
+    )
+    lifecycle = RecordingCompactionLifecycle()
+    with (
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="short summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        prepared = await prepare_scope_history(
+            compaction_lifecycle=lifecycle,
+            agent=agent,
+            agent_name="test_agent",
+            resolved_inputs=resolved_inputs,
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            current_prompt_tokens=current_prompt_tokens,
+        )
+    return prepared, estimate, lifecycle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_prompt_tokens", [0, 600])
+async def test_the_latest_reported_request_size_decides_compaction_before_a_reply(
+    tmp_path: Path,
+    current_prompt_tokens: int,
+) -> None:
+    """Chars / 4 undercounts real tokenizers (Qwen by about 1.3x), so the provider's count of the last request wins."""
+    prepared, estimate, lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", input_tokens=8_000)],
+        current_prompt_tokens=current_prompt_tokens,
+    )
+
+    assert estimate == 3_000
+    # That request held the system prompt, tools, and all history but its own 500-token answer; the static
+    # estimate's prompt share is this reply's prompt, which it never held.
+    expected = 8_000 + 500 - (1_000 - current_prompt_tokens)
+    assert prepared.compaction_decision.current_history_tokens == expected
+    assert prepared.compaction_decision.mode == "required"
+    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
+    assert prepared.compaction_reply_outcome == "success"
+    assert completed_outcome(lifecycle).before_tokens == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "latest",
+    [
+        pytest.param({}, id="no-reported-usage"),
+        pytest.param({"input_tokens": 8_000, "provider_data": {"mindroom_aggregate_usage": True}}, id="summed-retries"),
+        pytest.param({"input_tokens": 8_000, "model": "other-model"}, id="another-model-answered"),
+        pytest.param({"input_tokens": 2_000}, id="below-the-estimate"),
+        pytest.param(
+            {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},
+            id="media-replay-drops",
+        ),
+    ],
+)
+async def test_history_keeps_its_estimate_without_a_usable_reported_size(
+    tmp_path: Path,
+    latest: dict[str, object],
+) -> None:
+    prepared, estimate, lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)],
+    )
+
+    assert prepared.compaction_decision.current_history_tokens == estimate
+    assert prepared.compaction_decision.reason == "under_trigger"
+    assert lifecycle.events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "history_settings",
+    [
+        pytest.param(
+            ResolvedHistorySettings(policy=HistoryPolicy(mode="runs", limit=2), max_tool_calls_from_history=None),
+            id="run-limit",
+        ),
+        pytest.param(
+            ResolvedHistorySettings(policy=HistoryPolicy(mode="messages", limit=4), max_tool_calls_from_history=None),
+            id="message-limit",
+        ),
+        pytest.param(
+            ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=1),
+            id="tool-call-limit",
+        ),
+    ],
+)
+async def test_replay_limits_make_the_reported_request_size_stale(
+    tmp_path: Path,
+    history_settings: ResolvedHistorySettings,
+) -> None:
+    """Each new run pushes the oldest replayed content out, so the last request held more than will replay."""
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", input_tokens=8_000)],
+        history_settings=history_settings,
+    )
+
+    assert prepared.compaction_decision.current_history_tokens == estimate
+    assert prepared.compaction_decision.reason == "under_trigger"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary_after_response", [True, False])
+async def test_a_summary_written_after_the_reported_request_makes_its_size_stale(
+    tmp_path: Path,
+    *,
+    summary_after_response: bool,
+) -> None:
+    """A compaction after that request folded runs it held; one before it was part of what the provider counted."""
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        [
+            _reported_run("run-0"),
+            _reported_run("run-1"),
+            _reported_run("run-2", input_tokens=8_000, created_at=1 if summary_after_response else 2_000_000_000),
+        ],
+        folded_run_ids=("run-0",),
+    )
+
+    if summary_after_response:
+        assert prepared.compaction_decision.current_history_tokens == estimate
+        assert prepared.compaction_decision.reason == "under_trigger"
+        return
+    assert prepared.compaction_decision.current_history_tokens == 7_500
+    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"

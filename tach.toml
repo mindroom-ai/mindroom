@@ -823,6 +823,7 @@ visibility = [
     "mindroom.llm_request_logging",
     "mindroom.skill_learning.reviewer",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
 ]
 
 [[modules]]
@@ -2517,6 +2518,7 @@ depends_on = [
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
+    "mindroom.token_budget",
     "mindroom.tool_system.events",
 ]
 
@@ -2715,6 +2717,7 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.logging_config",
+    "mindroom.model_usage",
     "mindroom.providers.model_loading",
     "mindroom.history.team_scope",
     "mindroom.timing",
