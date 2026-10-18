@@ -22,7 +22,7 @@ from mindroom.execution_preparation import (
     prepare_agent_execution_context,
     prepare_bound_team_run_context,
 )
-from mindroom.history.replay import _estimate_session_summary_tokens, estimate_prompt_visible_history_tokens
+from mindroom.history.replay import _summary_tokens, estimate_prompt_visible_history_tokens
 from mindroom.history.runtime import (
     prepare_bound_scope_history,
     prepare_scope_history,
@@ -1031,7 +1031,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     outcome = prepared.compaction_outcomes[0]
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
-    summary_only_tokens = _estimate_session_summary_tokens(persisted.summary.summary)
+    summary_only_tokens = _summary_tokens(persisted)
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
     assert folded_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]

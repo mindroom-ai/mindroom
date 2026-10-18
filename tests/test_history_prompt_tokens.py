@@ -31,7 +31,7 @@ from mindroom.history.prompt_tokens import (
 )
 from mindroom.history.replay import (
     _estimate_history_messages_tokens,
-    _estimate_session_summary_tokens,
+    _summary_tokens,
     compaction_summary_message,
     estimate_prompt_visible_history_tokens,
 )
@@ -358,18 +358,15 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
 
     expected_wrapper = str(compaction_summary_message("merged summary", run_local=False).content)
 
-    assert _estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
+    assert _summary_tokens(session) == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens > 0
 
 
-def test__estimate_session_summary_tokens_none() -> None:
-    assert _estimate_session_summary_tokens(None) == 0
-
-
-def test__estimate_session_summary_tokens_empty() -> None:
-    assert _estimate_session_summary_tokens("") == 0
-    assert _estimate_session_summary_tokens("   ") == 0
+def test_summary_tokens_without_a_summary_are_zero() -> None:
+    assert _summary_tokens(_session("session-1")) == 0
+    for text in ("", "   "):
+        assert _summary_tokens(_session("session-1", summary=SessionSummary(summary=text))) == 0
 
 
 def _docs_toolkit() -> Toolkit:
