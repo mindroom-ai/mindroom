@@ -695,7 +695,7 @@ async def test_prepare_agent_and_prompt_keeps_outcomes_empty_when_no_compaction_
         )
 
     prepared = prepared_run.prepared_history
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
 
 
 @pytest.mark.asyncio

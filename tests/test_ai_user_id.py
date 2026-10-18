@@ -753,7 +753,7 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "test"
         assert unseen_event_ids == []
-        assert prepared_history.compaction_outcomes == []
+        assert prepared_history.compaction_reply_outcome != "success"
         assert prepared_history.replays_persisted_history is False
         assert prepared_history.replay_plan is not None
         assert prepared_history.replay_plan.mode == "configured"
@@ -863,7 +863,7 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "prepared prompt"
         assert unseen_event_ids == []
-        assert prepared_history.compaction_outcomes == []
+        assert prepared_history.compaction_reply_outcome != "success"
         assert mock_build_prompt_parts.await_args is not None
         assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
         assert mock_prepare_execution.await_args is not None

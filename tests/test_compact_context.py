@@ -57,7 +57,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
-from tests.history_helpers import folded_run_ids
+from tests.history_helpers import RecordingCompactionLifecycle, completed_outcome, folded_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -461,7 +461,9 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
             ),
         ),
     ):
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
+            compaction_lifecycle=lifecycle,
             agent=_agent(),
             agent_name="test_agent",
             full_prompt="Current question",
@@ -478,8 +480,8 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     assert persisted.summary.summary == "merged summary"
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
-    assert len(prepared.compaction_outcomes) == 1
-    outcome = prepared.compaction_outcomes[0]
+    assert prepared.compaction_reply_outcome == "success"
+    outcome = completed_outcome(lifecycle)
     assert outcome.window_tokens == 0
     assert outcome.history_budget_tokens is None
     assert outcome.to_notice_metadata()["version"] == 3
@@ -654,7 +656,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     assert persisted.summary is None
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     summary_mock.assert_not_awaited()
 
 
@@ -706,7 +708,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
     assert len(folded_run_ids(storage)) == 1
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
 
 
 @pytest.mark.asyncio
@@ -776,7 +778,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
     assert state.force_compact_before_next_run is False
     assert persisted.summary is not None
     assert persisted.summary.summary == "merged summary"
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
 
 
 @pytest.mark.asyncio

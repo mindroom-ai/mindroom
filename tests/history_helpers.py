@@ -172,6 +172,12 @@ class RecordingCompactionLifecycle:
         self.events.append(event)
 
 
+def completed_outcome(lifecycle: RecordingCompactionLifecycle) -> CompactionOutcome:
+    """Return the one compaction outcome the lifecycle reported as completed."""
+    [outcome] = [event for event in lifecycle.events if isinstance(event, CompactionOutcome)]
+    return outcome
+
+
 @dataclass
 class FailingStartCompactionLifecycle(RecordingCompactionLifecycle):
     """Lifecycle test double whose initial notice delivery fails."""

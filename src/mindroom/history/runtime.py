@@ -222,7 +222,6 @@ class PreparedScopeHistory:
     scope: HistoryScope | None
     session: AgentSession | TeamSession | None
     resolved_inputs: HistoryPreparationInputs
-    compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
@@ -350,7 +349,6 @@ async def prepare_scope_history(
     native_model = configure_native(session=session)
     if state.force_compact_before_next_run and native_model is not None:
         native_model.configure_native_compaction(threshold=None)
-    compaction_outcomes: list[CompactionOutcome] = []
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     native_route = native_history_route(native_model)
     # Large provider projections spend seconds in tokenizers that release the GIL.
@@ -441,7 +439,6 @@ async def prepare_scope_history(
         outcome = compaction_result.outcome
         compaction_reply_outcome = compaction_result.reply_outcome
         if outcome is not None:
-            compaction_outcomes.append(outcome)
             logger.info(
                 "Compaction completed",
                 agent=agent_name,
@@ -457,7 +454,6 @@ async def prepare_scope_history(
         scope=scope_context.scope,
         session=scope_context.session,
         resolved_inputs=resolved_inputs,
-        compaction_outcomes=compaction_outcomes,
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
         native_model=native_model,
@@ -850,7 +846,6 @@ def finalize_history_preparation(
             fitted_replay_tokens=replay_plan.estimated_tokens,
         )
     return PreparedHistoryState(
-        compaction_outcomes=prepared_scope_history.compaction_outcomes,
         replay_plan=replay_plan,
         replays_persisted_history=replays_persisted_history,
         compaction_decision=prepared_scope_history.compaction_decision,

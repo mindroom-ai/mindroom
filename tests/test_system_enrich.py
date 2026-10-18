@@ -366,7 +366,7 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
     assert agent is prepared_agent
     assert full_prompt == "prepared prompt"
     assert unseen_event_ids == []
-    assert prepared_history.compaction_outcomes == []
+    assert prepared_history.compaction_reply_outcome != "success"
     assert agent.additional_context == rendered
     assert rendered in _agent_system_message(agent)
 

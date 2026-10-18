@@ -87,6 +87,7 @@ from tests.history_helpers import (  # noqa: F401
     _reported,
     _session,
     _summarizer,
+    completed_outcome,
     folded_run_ids,
     summary_rows_of,
 )
@@ -695,7 +696,9 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
+            compaction_lifecycle=lifecycle,
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -707,7 +710,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
             session=session,
         )
 
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
     assert observed[0] == (
         "compaction:before",
         "agent:test_agent",
@@ -722,11 +725,11 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         "agent:test_agent",
         ["run-1 question", "run-1 answer", "run-2 question", "run-2 answer"],
         observed[2][3],
-        prepared.compaction_outcomes[0].after_tokens,
+        completed_outcome(lifecycle).after_tokens,
         "merged summary",
     )
-    assert observed[0][3] == prepared.compaction_outcomes[0].before_tokens
-    assert observed[2][3] == prepared.compaction_outcomes[0].before_tokens
+    assert observed[0][3] == completed_outcome(lifecycle).before_tokens
+    assert observed[2][3] == completed_outcome(lifecycle).before_tokens
     assert active_states == [True, False]
 
 
@@ -885,7 +888,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
             compaction_lifecycle=lifecycle,
         )
 
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     assert observed == []
     assert lifecycle.events == []
 
@@ -933,7 +936,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             session=session,
         )
 
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
 
 
 @pytest.mark.asyncio
@@ -993,7 +996,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     assert persisted.summary is None
     assert len(persisted.runs or []) == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     assert observed == []
 
 
@@ -1061,7 +1064,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
             session=session,
         )
 
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
     assert observed == ["agent:test_agent:test_agent:!room:localhost:$thread"]
 
 
@@ -1178,7 +1181,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
             session=session,
         )
 
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
     assert observed == ["slow", "fast:session-1"]
 
 
@@ -1234,7 +1237,7 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
             session=session,
         )
 
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
     assert observed == ["failed", "fast:session-1"]
 
 

@@ -1918,7 +1918,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     runtime_generate_summary.assert_not_awaited()
     assert prepared.compaction_decision.reason == "compaction_unavailable"
     assert prepared.compaction_reply_outcome == "none"
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     repeated = get_agent_session(storage, "session-1")
     assert repeated is not None
     assert repeated.summary is not None
@@ -1967,7 +1967,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     assert len(attempts) == 2
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert prepared.compaction_reply_outcome == "timeout"
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is None

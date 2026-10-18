@@ -67,6 +67,7 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _session,
     _team_session,
+    completed_outcome,
     folded_run_ids,
     latest_summary_model,
 )
@@ -115,7 +116,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
     )
 
     assert prepared.replays_persisted_history is True
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
 
 
 @pytest.mark.asyncio
@@ -155,7 +156,9 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
             ),
         ),
     ):
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
+            compaction_lifecycle=lifecycle,
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -179,8 +182,8 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert state.force_compact_before_next_run is False
 
     assert prepared.replays_persisted_history is True
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].summary == "merged summary"
+    assert prepared.compaction_reply_outcome == "success"
+    assert completed_outcome(lifecycle).summary == "merged summary"
 
 
 @pytest.mark.asyncio
@@ -233,8 +236,8 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
             compaction_lifecycle=lifecycle,
         )
 
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].lifecycle_notice_event_id == "$compaction"
+    assert prepared.compaction_reply_outcome == "success"
+    assert completed_outcome(lifecycle).lifecycle_notice_event_id == "$compaction"
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_reply_outcome == "success"
     assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
@@ -282,7 +285,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_reply_outcome == "failed"
     assert len(lifecycle.events) == 2
@@ -432,7 +435,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
             compaction_lifecycle=lifecycle,
         )
 
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     assert prepared.compaction_reply_outcome == "timeout"
     assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
     assert lifecycle.events[1].status == "timeout"
@@ -510,7 +513,9 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
             ),
         ),
     ):
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
+            compaction_lifecycle=lifecycle,
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -531,8 +536,8 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
     assert persisted_thread.summary is not None
     assert persisted_thread.summary.summary == "thread summary"
     assert persisted_thread.runs == []
-    assert len(prepared.compaction_outcomes) == 1
-    outcome = prepared.compaction_outcomes[0]
+    assert prepared.compaction_reply_outcome == "success"
+    outcome = completed_outcome(lifecycle)
     assert outcome.session_id == thread_session_id
     assert outcome.scope == scope.key
     assert outcome.to_notice_metadata()["session_id"] == thread_session_id
@@ -657,7 +662,9 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
             new=summary_mock,
         ),
     ):
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
+            compaction_lifecycle=lifecycle,
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -678,9 +685,9 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     assert persisted.runs == []
     assert len(folded_run_ids(storage)) == 3
     assert summary_mock.await_count == 2
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].compacted_run_count == 3
-    assert prepared.compaction_outcomes[0].runs_after == 0
+    assert prepared.compaction_reply_outcome == "success"
+    assert completed_outcome(lifecycle).compacted_run_count == 3
+    assert completed_outcome(lifecycle).runs_after == 0
 
 
 @pytest.mark.asyncio
@@ -800,7 +807,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     assert persisted.summary.summary == second_summary_text
     assert persisted.runs == []
     assert summary_mock.await_count == 2
-    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_reply_outcome == "success"
     assert len(folded_run_ids(storage)) == 3
 
 
@@ -868,7 +875,9 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         ),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
     ):
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
+            compaction_lifecycle=lifecycle,
             agent=agent,
             agent_name="test_agent",
             resolved_inputs=resolved_inputs,
@@ -883,7 +892,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
     if allow_native_compaction:
         assert prepared.compaction_decision.mode == "none"
         assert prepared.compaction_decision.reason == "within_hard_budget"
-        assert prepared.compaction_outcomes == []
+        assert prepared.compaction_reply_outcome != "success"
         summary_mock.assert_not_awaited()
         assert len(persisted.runs or []) == 3
         return
@@ -892,7 +901,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
     assert prepared.compaction_decision.reason == "over_trigger_native_disabled"
     assert prepared.compaction_reply_outcome == "success"
     summary_mock.assert_awaited_once()
-    [outcome] = prepared.compaction_outcomes
+    outcome = completed_outcome(lifecycle)
     assert outcome.history_budget_tokens == trigger_budget
     assert outcome.before_tokens == history_tokens
     assert outcome.after_tokens <= trigger_budget
@@ -1025,8 +1034,8 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     assert "RUN-09" in summary_inputs[0]
     assert "RUN-10" not in summary_inputs[0]
     assert all("CURRENT-RUN" not in summary_input for summary_input in summary_inputs)
-    assert len(prepared.compaction_outcomes) == 1
-    outcome = prepared.compaction_outcomes[0]
+    assert prepared.compaction_reply_outcome == "success"
+    outcome = completed_outcome(lifecycle)
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
     summary_only_tokens = _summary_tokens(persisted)
@@ -1192,7 +1201,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     assert [run.run_id for run in persisted.runs or []] == ["run-3"]
     assert summary_mock.await_count == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
 
 
 @pytest.mark.asyncio
@@ -1380,8 +1389,8 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
             compaction_lifecycle=lifecycle,
         )
 
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].summary_model == "summary-model"
+    assert prepared.compaction_reply_outcome == "success"
+    assert completed_outcome(lifecycle).summary_model == "summary-model"
     assert summary_mock.await_count == 1
     assert summary_mock.await_args.kwargs["model"].id == "summary-model-id"
     fallback_warnings = [
@@ -1490,8 +1499,8 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     assert persisted.summary.summary == "all runs summary"
     assert persisted.runs == []
     assert summary_mock.await_count == 1
-    assert len(first_prepared.compaction_outcomes) == 1
-    assert second_prepared.compaction_outcomes == []
+    assert first_prepared.compaction_reply_outcome == "success"
+    assert second_prepared.compaction_reply_outcome != "success"
 
 
 @pytest.mark.asyncio
@@ -1544,7 +1553,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
@@ -1662,7 +1671,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     assert state.force_compact_before_next_run is False
     assert latest_summary_model(storage, scope) is None
 
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     assert prepared.replays_persisted_history is True
 
 
@@ -1700,5 +1709,5 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome != "success"
     assert prepared.replays_persisted_history is True

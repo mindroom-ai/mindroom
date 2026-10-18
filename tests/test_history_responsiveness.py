@@ -31,12 +31,14 @@ from mindroom.session_storage.agent_storage import create_state_storage, get_age
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import (
+    RecordingCompactionLifecycle,
     _agent,
     _completed_run,
     _make_config,
     _reported,
     _session,
     _summarizer,
+    completed_outcome,
 )
 
 if TYPE_CHECKING:
@@ -251,7 +253,9 @@ async def test_forced_compaction_reuses_canonical_history_count(
         AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
     )
     try:
+        lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
+            compaction_lifecycle=lifecycle,
             agent=agent,
             agent_name="test_agent",
             resolved_inputs=resolved,
@@ -260,8 +264,8 @@ async def test_forced_compaction_reuses_canonical_history_count(
             scope_context=ScopeSessionContext(scope, storage, session),
         )
         assert counted_history == [["Hello"]]
-        assert len(prepared.compaction_outcomes) == 1
-        assert prepared.compaction_outcomes[0].before_tokens == 11
+        assert prepared.compaction_reply_outcome == "success"
+        assert completed_outcome(lifecycle).before_tokens == 11
         assert session.summary is not None
         assert session.summary.summary == "Greeting received."
     finally:
