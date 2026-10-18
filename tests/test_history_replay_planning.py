@@ -1008,7 +1008,8 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
         static_prompt_tokens=2_000,
     )
 
-    assert execution_plan.compaction_context_window == 32_000
+    # The summary model's 32,000 window, half of it reserved, minus prompt overhead and a 10% margin.
+    assert execution_plan.summary_input_budget_tokens == 10_800
     assert execution_plan.replay_window_tokens == 20_000
     assert execution_plan.summary_input_budget_tokens is not None
     assert execution_plan.trigger_threshold_tokens == 16_000
@@ -1217,7 +1218,6 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
         static_prompt_tokens=10_000,
     )
 
-    assert execution_plan.compaction_context_window == active_context_window
     assert execution_plan.replay_window_tokens == expected_replay_window
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
@@ -1240,7 +1240,6 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=32_000,
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
@@ -1286,7 +1285,6 @@ def test_classify_compaction_decision_compacts_at_trigger_only_without_native_co
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=32_000,
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,

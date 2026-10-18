@@ -117,7 +117,6 @@ class _MidTurnCompaction:
             return resolve_agent_preparation_inputs(
                 agent=self.target,
                 agent_name=self.entity_name or self.target.id or "",
-                full_prompt="",
                 config=self.config,
                 active_model_name=self.model_name,
                 static_prompt_tokens=0,

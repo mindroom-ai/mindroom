@@ -92,7 +92,6 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -180,7 +179,6 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -292,7 +290,6 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -488,7 +485,6 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -501,7 +497,11 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         config=config,
         scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=prepared.resolved_inputs.static_prompt_tokens,
+    )
 
     assert final.replay_plan is not None
     assert final.replay_plan.mode == "limited"
@@ -536,7 +536,6 @@ def test_reused_responses_model_uses_current_replay_budget(tmp_path: Path) -> No
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -643,7 +642,6 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -655,7 +653,11 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=prepared.resolved_inputs.static_prompt_tokens,
+    )
     assert final.replay_plan is not None
     assert final.replay_plan.add_history_to_context
     assert final.replay_plan.num_history_runs is None
@@ -713,7 +715,6 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -725,7 +726,11 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=prepared.resolved_inputs.static_prompt_tokens,
+    )
     assert final.replay_plan is not None
     if auto_compact:
         assert prepared.compaction_reply_outcome == "success"
@@ -791,7 +796,6 @@ async def test_native_activation_respects_history_policy(
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -831,7 +835,6 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -873,7 +876,6 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -921,7 +923,6 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         agents=[member],
         team=team,
         team_name="team",
-        full_prompt="Continue.",
         config=config,
         runtime_paths=paths,
         scope_context=ScopeSessionContext(HistoryScope(kind="team", scope_id="team"), db, session),
@@ -1023,7 +1024,6 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )

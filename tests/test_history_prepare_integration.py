@@ -25,9 +25,7 @@ from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
 )
-from mindroom.history.prompt_tokens import (
-    estimate_agent_static_tokens,
-)
+from mindroom.history.prompt_tokens import agent_static_token_estimator
 from mindroom.history.replay import is_compaction_summary
 from mindroom.history.session_context import open_scope_session_context
 from mindroom.history.storage import (
@@ -279,10 +277,9 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
         )
 
     assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == estimate_agent_static_tokens(
+    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == agent_static_token_estimator(
         live_agent,
-        "Current prompt",
-    )
+    ).estimate("Current prompt")
 
 
 @pytest.mark.asyncio

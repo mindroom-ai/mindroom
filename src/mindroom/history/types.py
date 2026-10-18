@@ -116,7 +116,6 @@ class ResolvedHistoryExecutionPlan:
     text_compaction_available: bool
     explicit_compaction_model: bool
     compaction_model_name: str
-    compaction_context_window: int | None
     replay_window_tokens: int | None
     trigger_threshold_tokens: int | None
     reserve_tokens: int

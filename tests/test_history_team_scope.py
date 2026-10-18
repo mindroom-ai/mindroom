@@ -18,8 +18,8 @@ from agno.tools import Toolkit
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.history.prompt_tokens import team_static_token_estimator
 from mindroom.history.runtime import (
-    _estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     prepare_bound_scope_history,
 )
@@ -131,14 +131,15 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
         prepared_scope_history = await prepare_bound_scope_history(
             agents=[peer_agent, owner_agent],
             team=team,
-            full_prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
+            static_prompt_tokens=team_static_token_estimator(team).estimate("Current prompt"),
             scope_context=scope_context,
         )
         prepared = finalize_history_preparation(
             prepared_scope_history=prepared_scope_history,
             config=config,
+            static_prompt_tokens=expected_static_prompt_tokens,
         )
 
     assert prepared.replays_persisted_history is True
@@ -147,10 +148,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["agent"] is owner_agent
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
-    assert (
-        _estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
-        == expected_static_prompt_tokens
-    )
+    assert team_static_token_estimator(team).estimate("Current prompt") == expected_static_prompt_tokens
     assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == expected_static_prompt_tokens
 
 
@@ -269,7 +267,6 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         await prepare_bound_scope_history(
             agents=[owner_agent, peer_agent],
             team=team,
-            full_prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -280,7 +277,7 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
     assert mock_prepare.await_args.kwargs["scope"] == opened_scope
 
 
-def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool() -> None:
+def test_team_static_token_estimator_includes_agentic_state_tool() -> None:
     owner_agent = _agent(agent_id="alpha", name="Alpha")
     peer_agent = _agent(agent_id="beta", name="Beta")
     team = Team(
@@ -337,13 +334,10 @@ def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool
         expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
     expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
 
-    assert (
-        _estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
-        == expected_static_prompt_tokens
-    )
+    assert team_static_token_estimator(team).estimate("Current prompt") == expected_static_prompt_tokens
 
 
-def test_estimate_preparation_static_tokens_for_team_preserves_tool_instructions() -> None:
+def test_team_static_token_estimator_preserves_tool_instructions() -> None:
     owner_agent = _agent(agent_id="alpha", name="Alpha")
     peer_agent = _agent(agent_id="beta", name="Beta")
     team = Team(
@@ -356,7 +350,7 @@ def test_estimate_preparation_static_tokens_for_team_preserves_tool_instructions
     )
     team._tool_instructions = ["keep me"]
 
-    _estimate_preparation_static_tokens_for_team(team, full_prompt="Current prompt")
+    team_static_token_estimator(team).estimate("Current prompt")
 
     assert team._tool_instructions == ["keep me"]
 

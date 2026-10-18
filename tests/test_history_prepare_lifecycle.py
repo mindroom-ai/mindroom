@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -626,7 +627,6 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=4_096,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=1,
         reserve_tokens=0,
@@ -750,7 +750,6 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=4_096,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=1,
         reserve_tokens=0,
@@ -842,7 +841,6 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=64_000,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=trigger_budget,
         reserve_tokens=0,
@@ -853,11 +851,8 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         compaction_timeout_seconds=600.0,
     )
     agent = _agent(db=storage)
-    resolved_inputs = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        full_prompt="Current prompt",
-        config=config,
+    resolved_inputs = replace(
+        resolve_agent_preparation_inputs(agent=agent, agent_name="test_agent", config=config, static_prompt_tokens=0),
         history_settings=_ALL_HISTORY_SETTINGS,
         execution_plan=execution_plan,
     )
@@ -976,7 +971,6 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=4_096,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=1,
         reserve_tokens=0,
@@ -1147,7 +1141,6 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=4_096,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=1,
         reserve_tokens=0,
@@ -1261,7 +1254,6 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=4_096,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=1,
         reserve_tokens=0,
@@ -1342,7 +1334,6 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=4_096,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=1,
         reserve_tokens=0,

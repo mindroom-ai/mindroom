@@ -21,7 +21,6 @@ from mindroom.history.policy import (
     describe_compaction_unavailability,
     resolve_history_execution_plan,
 )
-from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
 from mindroom.history.replay import (
     configured_replay_plan,
     estimate_prompt_visible_history_tokens,
@@ -64,7 +63,6 @@ from mindroom.providers import model_loading
 from mindroom.providers.agno_compat_provider_errors import is_provider_timeout
 from mindroom.redaction import redact_sensitive_text
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -781,7 +779,7 @@ def finalize_history_preparation(
     *,
     prepared_scope_history: PreparedScopeHistory,
     config: Config,
-    static_prompt_tokens: int | None = None,
+    static_prompt_tokens: int,
     available_history_budget: int | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
@@ -793,16 +791,13 @@ def finalize_history_preparation(
     if pipeline_timing is not None:
         pipeline_timing.mark("replay_plan_start")
     resolved_inputs = prepared_scope_history.resolved_inputs
-    resolved_static_prompt_tokens = (
-        resolved_inputs.static_prompt_tokens if static_prompt_tokens is None else static_prompt_tokens
-    )
     execution_plan = resolve_history_execution_plan(
         config=config,
         compaction_config=resolved_inputs.compaction_config,
         has_authored_compaction_config=resolved_inputs.has_authored_compaction_config,
         active_model_name=resolved_inputs.active_model_name,
         active_context_window=resolved_inputs.active_context_window,
-        static_prompt_tokens=resolved_static_prompt_tokens,
+        static_prompt_tokens=static_prompt_tokens,
     )
     history_budget = available_history_budget
     if history_budget is None:
@@ -826,7 +821,7 @@ def finalize_history_preparation(
             history_settings=resolved_inputs.history_settings,
             estimated_tokens=0,
         )
-        prepared_context_tokens = resolved_static_prompt_tokens + replay_plan.estimated_tokens
+        prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
         if pipeline_timing is not None:
             pipeline_timing.mark("replay_plan_ready")
             pipeline_timing.note(
@@ -882,7 +877,7 @@ def finalize_history_preparation(
             estimated_tokens=current_history_tokens,
         )
 
-    prepared_context_tokens = resolved_static_prompt_tokens + replay_plan.estimated_tokens
+    prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
     if pipeline_timing is not None:
         pipeline_timing.mark("replay_plan_ready")
         pipeline_timing.note(
@@ -908,15 +903,14 @@ def finalize_history_preparation(
 async def prepare_bound_scope_history(
     *,
     agents: list[Agent],
-    team: Team | None = None,
-    full_prompt: str,
+    team: Team,
     runtime_paths: RuntimePaths,
     config: Config,
+    static_prompt_tokens: int,
     scope_context: ScopeSessionContext | None = None,
     team_name: str | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
-    static_prompt_tokens: int | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     allow_native_compaction: bool = True,
@@ -941,24 +935,10 @@ async def prepare_bound_scope_history(
             config=config,
             team_name=team_name,
         )
-    resolved_static_prompt_tokens = (
-        static_prompt_tokens
-        if static_prompt_tokens is not None
-        else (
-            _estimate_preparation_static_tokens_for_team(
-                team,
-                full_prompt=full_prompt,
-            )
-            if team is not None
-            else _estimate_preparation_prompt_tokens(
-                full_prompt=full_prompt,
-            )
-        )
-    )
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name if team_name in config.teams else None,
-        static_prompt_tokens=resolved_static_prompt_tokens,
+        static_prompt_tokens=static_prompt_tokens,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
@@ -979,26 +959,9 @@ async def prepare_bound_scope_history(
         scope=bound_scope.scope,
         compaction_lifecycle=compaction_lifecycle,
         pipeline_timing=pipeline_timing,
-        active_model=team.model if team is not None else None,
+        active_model=team.model,
         allow_native_compaction=allow_native_compaction,
     )
-
-
-def _estimate_preparation_prompt_tokens(
-    *,
-    full_prompt: str,
-) -> int:
-    """Estimate prompt-only tokens for persisted replay planning."""
-    return estimate_text_tokens(full_prompt)
-
-
-def _estimate_preparation_static_tokens_for_team(
-    team: Team,
-    *,
-    full_prompt: str,
-) -> int:
-    """Estimate team static tokens for persisted replay planning."""
-    return estimate_team_static_tokens(team, full_prompt)
 
 
 def _history_settings_from_agent(agent: Agent) -> ResolvedHistorySettings:
@@ -1023,50 +986,32 @@ def resolve_entity_preparation_inputs(
     active_model_name: str | None,
     active_context_window: int | None,
     history_settings: ResolvedHistorySettings | None = None,
-    compaction_config: CompactionConfig | None = None,
-    has_authored_compaction_config: bool | None = None,
-    execution_plan: ResolvedHistoryExecutionPlan | None = None,
 ) -> HistoryPreparationInputs:
-    """Resolve history settings, compaction config, runtime model, and plan for one agent or team scope."""
+    """Resolve history settings, compaction config, runtime model, and plan for one agent or team scope.
+
+    ``history_settings`` replaces the entity's authored settings, for an agent that is not configured.
+    """
     resolved_entity = config.resolve_entity(entity_name)
-    resolved_history_settings = history_settings
-    if resolved_history_settings is None:
-        resolved_history_settings = resolved_entity.history_settings
-
-    resolved_compaction_config = compaction_config
-    if resolved_compaction_config is None:
-        resolved_compaction_config = resolved_entity.compaction_config
-
-    resolved_has_authored_compaction_config = has_authored_compaction_config
-    if resolved_has_authored_compaction_config is None:
-        resolved_has_authored_compaction_config = resolved_entity.has_authored_compaction_config
-
     runtime_model = config.resolve_runtime_model(
         entity_name=entity_name,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
-    resolved_execution_plan = (
-        execution_plan
-        if execution_plan is not None
-        else resolve_history_execution_plan(
-            config=config,
-            compaction_config=resolved_compaction_config,
-            has_authored_compaction_config=resolved_has_authored_compaction_config,
-            active_model_name=runtime_model.model_name,
-            active_context_window=runtime_model.context_window,
-            static_prompt_tokens=static_prompt_tokens,
-        )
-    )
-
     return HistoryPreparationInputs(
-        history_settings=resolved_history_settings,
-        compaction_config=resolved_compaction_config,
-        has_authored_compaction_config=resolved_has_authored_compaction_config,
+        history_settings=history_settings or resolved_entity.history_settings,
+        compaction_config=resolved_entity.compaction_config,
+        has_authored_compaction_config=resolved_entity.has_authored_compaction_config,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
         static_prompt_tokens=static_prompt_tokens,
-        execution_plan=resolved_execution_plan,
+        execution_plan=resolve_history_execution_plan(
+            config=config,
+            compaction_config=resolved_entity.compaction_config,
+            has_authored_compaction_config=resolved_entity.has_authored_compaction_config,
+            active_model_name=runtime_model.model_name,
+            active_context_window=runtime_model.context_window,
+            static_prompt_tokens=static_prompt_tokens,
+        ),
     )
 
 
@@ -1074,37 +1019,20 @@ def resolve_agent_preparation_inputs(
     *,
     agent: Agent,
     agent_name: str,
-    full_prompt: str,
     config: Config,
-    history_settings: ResolvedHistorySettings | None = None,
-    compaction_config: CompactionConfig | None = None,
-    has_authored_compaction_config: bool | None = None,
+    static_prompt_tokens: int,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
-    static_prompt_tokens: int | None = None,
-    execution_plan: ResolvedHistoryExecutionPlan | None = None,
 ) -> HistoryPreparationInputs:
-    """Resolve every history-preparation input for one agent run in one place.
-
-    Explicitly provided values win; everything else falls back to the agent's
-    authored config (or the live Agent object for unconfigured agents).
-    """
-    resolved_static_prompt_tokens = static_prompt_tokens
-    if resolved_static_prompt_tokens is None:
-        resolved_static_prompt_tokens = estimate_agent_static_tokens(agent, full_prompt)
-    resolved_history_settings = history_settings
-    if resolved_history_settings is None and agent_name not in config.agents:
-        resolved_history_settings = _history_settings_from_agent(agent)
+    """Resolve every history-preparation input for one agent run, from its authored config or, unconfigured, its live Agent."""
+    configured = agent_name in config.agents
     return resolve_entity_preparation_inputs(
         config=config,
-        entity_name=agent_name if agent_name in config.agents else None,
-        static_prompt_tokens=resolved_static_prompt_tokens,
+        entity_name=agent_name if configured else None,
+        static_prompt_tokens=static_prompt_tokens,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
-        history_settings=resolved_history_settings,
-        compaction_config=compaction_config,
-        has_authored_compaction_config=has_authored_compaction_config,
-        execution_plan=execution_plan,
+        history_settings=None if configured else _history_settings_from_agent(agent),
     )
 
 

@@ -53,7 +53,6 @@ async def test_history_sizing_allows_loop_progress(
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -222,7 +221,6 @@ async def test_forced_compaction_reuses_canonical_history_count(
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -279,7 +277,6 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model, db=storage),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -373,7 +370,6 @@ async def test_cancelled_finalization_finishes_before_agent_reuse(  # noqa: PLR0
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -505,7 +501,6 @@ async def test_cancelling_preparation_sizing_preserves_input(
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )

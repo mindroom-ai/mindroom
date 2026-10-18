@@ -27,7 +27,6 @@ from mindroom.history.prompt_tokens import (
     _prompt_tool_surface_for_tools,
     _StaticTokenEstimator,
     agent_static_token_estimator,
-    estimate_agent_static_tokens,
 )
 from mindroom.history.replay import (
     _estimate_history_messages_tokens,
@@ -118,7 +117,7 @@ def test_static_token_estimator_cache_fields_are_not_constructor_inputs() -> Non
     assert "_non_prompt_tokens" not in inspect.signature(_StaticTokenEstimator).parameters
 
 
-def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None:
+def test_agent_static_token_estimator_uses_real_system_message_builder() -> None:
     @dataclass
     class PromptAwareModel(FakeModel):
         def get_instructions_for_model(self, tools: list[Any] | None = None) -> list[str] | None:
@@ -155,7 +154,7 @@ def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None
     assert system_message.content is not None
 
     expected_tokens = estimate_text_tokens("Current prompt") + estimate_text_tokens(str(system_message.content))
-    assert estimate_agent_static_tokens(agent, "Current prompt") == expected_tokens
+    assert agent_static_token_estimator(agent).estimate("Current prompt") == expected_tokens
 
 
 def test_estimate_tool_definition_tokens_processes_functions_with_custom_parameters() -> None:
@@ -399,7 +398,7 @@ def test_static_budgeting_reuses_one_tool_surface(monkeypatch: pytest.MonkeyPatc
 
     estimator = agent_static_token_estimator(agent)
     first_estimate = estimator.estimate("Current prompt")
-    re_estimate = estimate_agent_static_tokens(agent, "Current prompt")
+    re_estimate = agent_static_token_estimator(agent).estimate("Current prompt")
     payloads = _agent_prompt_tool_surface(agent).payloads
 
     assert get_tools_calls == 1
@@ -543,7 +542,7 @@ def test_concurrent_surface_preparation_stays_consistent() -> None:
             for _ in range(10):
                 payloads = _agent_prompt_tool_surface(agent).payloads
                 assert [payload["name"] for payload in payloads] == ["search_docs"]
-                assert estimate_agent_static_tokens(agent, "Current prompt") > 0
+                assert agent_static_token_estimator(agent).estimate("Current prompt") > 0
         except BaseException as exc:
             errors.append(exc)
 
