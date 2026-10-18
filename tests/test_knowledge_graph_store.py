@@ -16,6 +16,7 @@ import pytest_asyncio
 from falkordb.asyncio.graph import AsyncGraph
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType, EpisodicNode
+from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 from redis.asyncio import Redis
 
 from mindroom.config.agent import AgentConfig
@@ -203,6 +204,110 @@ async def test_entity_returns_summary_and_facts(store: GraphitiStore) -> None:
     assert [fact.fact for fact in entity.facts] == ["Alice leads Project Atlas"]
     assert entity.facts[0].sources[0].description.startswith("tool_results:")
     assert await store.entity(BETA, "Alice") is None
+
+
+async def _seed_entity(
+    graph_store: GraphitiStore,
+    scope: GraphScope,
+    name: str,
+    *,
+    summary: str = "",
+    facts: int = 0,
+    name_embedding: list[float] | None = None,
+) -> None:
+    """Store an entity with ``facts`` edges to other new entities, and optionally a chosen name embedding."""
+
+    async def seed() -> None:
+        graphiti = await graph_store._graphiti_client()
+        driver = graphiti.driver.clone(database=scope.graph_name)
+        node = EntityNode(name=name, group_id=scope.graph_name, summary=summary)
+        if name_embedding is None:
+            await node.generate_name_embedding(graphiti.embedder)
+        else:
+            node.name_embedding = name_embedding
+        await node.save(driver)
+        for index in range(facts):
+            other = EntityNode(name=f"Counterpart {index}", group_id=scope.graph_name)
+            await other.generate_name_embedding(graphiti.embedder)
+            await other.save(driver)
+            edge = EntityEdge(
+                source_node_uuid=node.uuid,
+                target_node_uuid=other.uuid,
+                name="RELATES",
+                fact=f"{name} fact {index}",
+                group_id=scope.graph_name,
+                episodes=[],
+                created_at=JAN,
+                valid_at=JAN,
+            )
+            await edge.generate_embedding(graphiti.embedder)
+            await edge.save(driver)
+
+    await graph_store._run(seed())
+
+
+async def _top_search_hit(graph_store: GraphitiStore, scope: GraphScope, query: str) -> str:
+    """The name Graphiti's hybrid search ranks first, which is what a lookup used before it tried exact names."""
+
+    async def search() -> str:
+        graphiti = await graph_store._graphiti_client()
+        results = await graphiti.search_(
+            query,
+            config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": 1}),
+            group_ids=[scope.graph_name],
+        )
+        return results.nodes[0].name
+
+    return await graph_store._run(search())
+
+
+@pytest.mark.asyncio
+async def test_entity_prefers_an_exact_name_over_a_better_search_hit(store: GraphitiStore) -> None:
+    """A name that matches an entity exactly finds it, even where search ranks a longer name higher."""
+    await _seed_entity(
+        store,
+        ALPHA,
+        "Marcella - Individual",
+        summary="Marcella marcella marcella investment account",
+    )
+    # The exact entity's name embedding points away from the query, as a real embedding can for a bare first name.
+    await _seed_entity(store, ALPHA, "Marcella", summary="A person.", facts=3, name_embedding=[1.0] * 32)
+    assert await _top_search_hit(store, ALPHA, "marcella") == "Marcella - Individual"
+
+    entity = await store.entity(ALPHA, "marcella")
+
+    assert entity is not None
+    assert entity.name == "Marcella"
+    assert entity.summary == "A person."
+    assert len(entity.facts) == 3
+    assert entity.others == []
+
+
+@pytest.mark.asyncio
+async def test_entity_with_several_exact_names_picks_the_one_with_most_facts(store: GraphitiStore) -> None:
+    """Names that differ only in case are all exact matches, and the entity with the most facts wins."""
+    await _seed_entity(store, ALPHA, "marcella", summary="A stray duplicate.", facts=1)
+    await _seed_entity(store, ALPHA, "Marcella", summary="A person.", facts=3)
+    await _seed_entity(store, ALPHA, "MARCELLA", summary="Another duplicate.")
+
+    entity = await store.entity(ALPHA, "Marcella")
+
+    assert entity is not None
+    assert entity.summary == "A person."
+    assert entity.others == []
+
+
+@pytest.mark.asyncio
+async def test_entity_without_exact_match_lists_other_close_matches(store: GraphitiStore) -> None:
+    """With no exact name, the best search hit is the entity and the next hits are listed as other close matches."""
+    for name in ("Atlas dashboard v2", "Atlas Labs", "Project dashboard"):
+        await _seed_entity(store, ALPHA, name, summary=f"{name} summary.")
+
+    entity = await store.entity(ALPHA, "Atlas dashboard")
+
+    assert entity is not None
+    assert entity.name == "Atlas dashboard v2"
+    assert sorted(entity.others) == ["Atlas Labs", "Project dashboard"]
 
 
 def _holds_embedding(value: object) -> bool:

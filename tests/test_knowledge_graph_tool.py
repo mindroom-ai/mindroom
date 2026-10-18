@@ -60,7 +60,16 @@ class _Store:
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
         self.queries.append((scope.graph_name, name, 0))
-        return _GraphEntity(name="Alice", summary="Alice leads Atlas.", facts=[FACT]) if name == "Alice" else None
+        if name == "Alice":
+            return _GraphEntity(name="Alice", summary="Alice leads Atlas.", facts=[FACT], others=[])
+        if name == "Marce":
+            return _GraphEntity(
+                name="Marcella",
+                summary="A person.",
+                facts=[],
+                others=["Marcella Holm", "Marcella's workspace"],
+            )
+        return None
 
 
 @pytest.fixture
@@ -120,6 +129,20 @@ async def test_graph_entity_returns_summary_or_says_unknown(tmp_path: Path) -> N
 
     assert "Alice leads Atlas." in await tools.graph_entity("Alice")
     assert "No entity matches" in await tools.graph_entity("Nobody")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("store")
+async def test_graph_entity_shows_other_close_matches(tmp_path: Path) -> None:
+    """A fuzzy match names the next closest entities, and an exact match adds nothing."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    tools = KnowledgeGraphTools("mind", _config(), paths, None)
+
+    fuzzy = await tools.graph_entity("Marce")
+    exact = await tools.graph_entity("Alice")
+
+    assert fuzzy.endswith("\nOther close matches: Marcella Holm, Marcella's workspace")
+    assert "Other close matches" not in exact
 
 
 @pytest.mark.asyncio

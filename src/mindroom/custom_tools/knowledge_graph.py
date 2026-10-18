@@ -73,6 +73,9 @@ class KnowledgeGraphTools(Toolkit):
     async def graph_entity(self, name: str) -> str:
         """Show what the knowledge graph knows about one person, organization, project, or other entity.
 
+        An entity named exactly ``name``, in any letter case, is returned; otherwise the closest match, followed by the
+        names of other close matches to look up if it is not the one you meant.
+
         Args:
             name: The entity's name, for example "Alice" or "Project Atlas".
 
@@ -103,4 +106,7 @@ class KnowledgeGraphTools(Toolkit):
         if entity is None:
             return f"No entity matches {text!r}."
         facts = "\n".join(_render_fact(fact) for fact in entity.facts) or "No facts yet."
-        return f"{entity.name}: {entity.summary}\n{facts}"
+        text = f"{entity.name}: {entity.summary}\n{facts}"
+        if entity.others:
+            text += f"\nOther close matches: {', '.join(entity.others)}"
+        return text

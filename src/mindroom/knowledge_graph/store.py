@@ -42,6 +42,15 @@ _DOTENV_DISABLED = "PYTHON_DOTENV_DISABLED"
 _CONTROL_CHARACTERS = str.maketrans(dict.fromkeys([*range(0x20), *range(0x7F, 0xA0)], " "))
 # Facts listed for one entity, current ones first.
 _MAX_ENTITY_FACTS = 30
+# Entities a fuzzy lookup considers: the best hit is the answer and the rest are named as other close matches.
+_ENTITY_CANDIDATES = 5
+# FalkorDB's Cypher has no case-insensitive regex, so names are compared lowercased. Among several exact matches the
+# one with the most facts wins, because a duplicate extracted once has few.
+_EXACT_ENTITY_QUERY = """
+MATCH (n:Entity) WHERE toLower(n.name) = toLower($name)
+OPTIONAL MATCH (n)-[r:RELATES_TO]-()
+RETURN n.uuid AS uuid, count(r) AS facts ORDER BY facts DESC LIMIT 1
+"""
 
 
 @dataclass(frozen=True)
@@ -77,11 +86,12 @@ class GraphFact:
 
 @dataclass(frozen=True)
 class _GraphEntity:
-    """An entity's summary and the facts that touch it."""
+    """An entity's summary and the facts that touch it, and the names of the next closest entities after a fuzzy match."""
 
     name: str
     summary: str
     facts: list[GraphFact]
+    others: list[str]
 
 
 class GraphStore(Protocol):
@@ -94,7 +104,7 @@ class GraphStore(Protocol):
         """Return the scope's facts most relevant to ``query``."""
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
-        """Return the scope's entity best matching ``name``, or None."""
+        """Return the scope's entity named ``name`` in any letter case, else the best fuzzy match, or None."""
 
 
 class UnusableExtractionError(ValueError):
@@ -324,7 +334,7 @@ class GraphitiStore:
         return await self._run(self._search_facts(scope, query, limit))
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
-        """Return the scope's entity best matching ``name`` with the facts that touch it."""
+        """Return the scope's entity named ``name`` in any letter case, else the best fuzzy match, with its facts."""
         return await self._run(self._entity(scope, name))
 
     async def _add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
@@ -359,17 +369,26 @@ class GraphitiStore:
     async def _entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
         graphiti = await self._graphiti_client()
         from graphiti_core.edges import EntityEdge  # noqa: PLC0415
+        from graphiti_core.nodes import EntityNode  # noqa: PLC0415
         from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF  # noqa: PLC0415
 
-        results = await graphiti.search_(
-            name,
-            config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": 1}),
-            group_ids=[scope.graph_name],
-        )
-        if not results.nodes:
-            return None
-        node = results.nodes[0]
         driver = graphiti.driver.clone(database=scope.graph_name)
+        # Hybrid search ranks an entity whose summary or longer name mentions the text above one named exactly that
+        # (a bare first name), so an exact name is looked up first.
+        records, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=name)
+        others: list[str] = []
+        if records:
+            node = await EntityNode.get_by_uuid(driver, records[0]["uuid"])
+        else:
+            results = await graphiti.search_(
+                name,
+                config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": _ENTITY_CANDIDATES}),
+                group_ids=[scope.graph_name],
+            )
+            if not results.nodes:
+                return None
+            node = results.nodes[0]
+            others = [other.name for other in results.nodes[1:]]
         edges = await EntityEdge.get_by_node_uuid(driver, node.uuid)
         # Current facts first, then the most recently valid.
         edges.sort(key=lambda edge: (edge.invalid_at is not None, -(edge.valid_at or edge.created_at).timestamp()))
@@ -377,6 +396,7 @@ class GraphitiStore:
             name=node.name,
             summary=node.summary,
             facts=await _facts(driver, edges[:_MAX_ENTITY_FACTS]),
+            others=others,
         )
 
     async def close(self) -> None:

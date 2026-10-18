@@ -93,6 +93,8 @@ Rejected: mapping MindRoom providers onto Graphiti's own provider clients.
 It duplicates key precedence and base-URL rules per provider, covers fewer providers, and gives no usage accounting.
 Search uses Graphiti's hybrid search with reciprocal-rank fusion and no cross-encoder, so a query costs no LLM call.
 Graphiti builds an OpenAI reranker when none is passed, which needs an OpenAI key, so MindRoom passes a reranker that is never called by the search recipes it uses.
+An entity lookup tries a case-insensitive exact name first (the entity with the most facts when several match) and falls back to the hybrid search, because the search can rank an entity that merely mentions a name above the entity named exactly that: `graph_entity("Marcella")` returned her investment account although a `Marcella` entity with 293 facts existed.
+A fuzzy match returns the best hit and names the next four, so the agent can look up the one it meant.
 
 Graphiti needs structured output; small local models may fail extraction, which the ingestion worker reports and retries rather than hides.
 
