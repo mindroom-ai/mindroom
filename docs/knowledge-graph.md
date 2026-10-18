@@ -43,7 +43,8 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 
-With the defaults, new turns reach the graph 2 to 12 minutes after a conversation goes quiet, plus extraction time, and later when many conversations are waiting; up to four graphs are filled at once.
+With the defaults, new turns reach the graph 2 to 12 minutes after a conversation goes quiet, plus extraction time, and later when many conversations are waiting.
+Up to four graphs are filled at the same time, so the extraction model can receive requests for four graphs at once.
 Facts are embedded with [`memory.embedder`](memory.md#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read but keeps its memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory.

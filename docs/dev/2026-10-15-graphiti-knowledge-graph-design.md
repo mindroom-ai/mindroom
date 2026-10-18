@@ -127,11 +127,10 @@ Against the previous instructions, noise fell from 27% to 4% of facts on `gpt-6-
 Rejected: forbidding every assistant action (it also dropped facts like a filed issue), adding "plans" and an `Account` description that excludes an assistant's own account (more lost facts, no less noise), and asking the model to connect single-subject facts to an event or document (it did not recover them); the last two were measured on an earlier version of the episodes, whose agent shared the project's name and which had no episode with an action that changed things for others.
 Graphiti's separate node and edge extraction, the path `add_episode` uses, links two distinct entities, so a status the assistant reports about a single subject with no other entity named can be dropped where the previous instructions kept it by linking it to the agent, or attached to another named entity instead, such as the person who asked; drops showed on both models and the misattribution on `gpt-6-luna`, and target coverage fell from 85% to 83% on `gpt-6-luna` and from 81% to 75% on `gpt-6.1-sol`.
 
-### Graphs are filled side by side, each one episode at a time
+### Graphs are filled side by side, each one episode at a time, without waiting while a backlog remains
 
 The first build on a deployment with four graphs took 37.6 hours, 85% of it extracting one episode after another across all graphs (a median of 60 seconds and about 23 model calls each) and 15% waiting between passes.
-Each pass therefore gives every graph its own budget and fills up to four graphs at once, and a pass that ingested anything is followed at once, so a backlog is worked through without waiting the interval.
-Graphs share only the Graphiti client and the embedded server: Graphiti 0.31 gives each `add_episode` call its own database handle instead of switching the shared client's database, which corrupted concurrent graphs before ([graphiti#1676](https://github.com/getzep/graphiti/issues/1676), fixed by [graphiti#1699](https://github.com/getzep/graphiti/pull/1699)).
+Graphs can share the Graphiti client because Graphiti 0.31 gives each `add_episode` call its own database handle; earlier versions switched the shared client's database, which corrupted concurrent graphs ([graphiti#1676](https://github.com/getzep/graphiti/issues/1676), fixed by [graphiti#1699](https://github.com/getzep/graphiti/pull/1699)).
 Rejected: several episodes of one graph at once, because Graphiti resolves an episode's entities and facts against what its graph already holds, so two episodes extracted together can each create the same person; Graphiti's bulk import, which uses other prompts and previous-episode context and has not been evaluated; and a separate loop per graph, which would stop a long backlog from delaying other graphs' passes but adds lifecycle machinery while the graph with the longest backlog bounds a build either way.
 
 ## Ingestion invariants
@@ -182,6 +181,7 @@ Rejected: several episodes of one graph at once, because Graphiti resolves an ep
 - Redacting or deleting a message does not remove facts already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
 - A config reload that changes the embedder during a pass can add that pass's remaining episodes to the old graph.
 - A pass waits for its slowest graph, so while one graph works through a long backlog, new turns in the others wait up to that graph's share of the pass.
+- Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.
 
 ## Open questions
 

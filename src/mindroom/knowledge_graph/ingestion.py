@@ -170,15 +170,15 @@ class KnowledgeGraphIngestionWorker:
                 self._wake_event.clear()
                 config = self.config_provider()
                 interval = _IDLE_POLL_SECONDS
-                ingested = False
+                progressed = False
                 if config is not None and config.knowledge_graph_agents():
                     try:
-                        ingested = await self._run_cycle(config, now=time.time())
+                        progressed = await self._run_cycle(config, now=time.time())
                     except Exception as exc:
                         _report_failure("Knowledge graph ingestion pass failed", exc)
                     interval = config.knowledge_graph.ingest.interval_seconds
-                # A pass that ingested something may have left a backlog, which the next pass works on at once.
-                if not ingested:
+                # A pass that added something may have left a backlog, which the next pass works on at once.
+                if not progressed:
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
         finally:
@@ -187,22 +187,22 @@ class KnowledgeGraphIngestionWorker:
     async def _run_cycle(self, config: Config, *, now: float) -> bool:
         """Ingest up to ``max_sessions_per_cycle`` idle conversations with new turns from each graph, several at once.
 
-        Return whether any conversation was ingested.
+        Return whether any conversation added something, so a backlog is worked through without waiting.
         """
         # These read files, including every private instance's records, so they stay off the event loop.
         automation_thread_ids = await asyncio.to_thread(automation_threads, self.runtime_paths)
         entity_names = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
         scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
+        budget = config.knowledge_graph.ingest.max_sessions_per_cycle
         outcomes: list[bool] = []
         slots = asyncio.Semaphore(_CONCURRENT_GRAPHS)
 
-        async def ingest_graph(scope: GraphScope) -> int:
-            """Ingest one graph's due conversations and return how many were ingested."""
+        async def ingest_graph(scope: GraphScope) -> bool:
+            """Ingest one graph's due conversations and return whether any of them added something."""
             async with slots:
                 # One agent or private instance whose conversations cannot be read must not stop the others.
                 try:
                     state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
-                    budget = config.knowledge_graph.ingest.max_sessions_per_cycle
                     due, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
                     if changed:
                         await self._persist(scope.graph_name, state)
@@ -212,10 +212,10 @@ class KnowledgeGraphIngestionWorker:
                         await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
                         for session in due
                     ]
-                    # A conversation whose agent is not running, or whose redaction check failed, is looked at again
-                    # later and is not counted.
-                    ingested = [result for result in results if result is not None]
-                    outcomes.extend(ingested)
+                    # A conversation that added nothing, such as one whose agent is not running or whose first episode
+                    # failed, is looked at again later and is not counted.
+                    progressed = [result for result in results if result is not None]
+                    outcomes.extend(progressed)
                     # A conversation's failure is saved with it, so health stays failing until it succeeds, even across
                     # passes in which it is not due.
                     if any(entry["failures"] for entry in state["sessions"].values()):
@@ -223,15 +223,15 @@ class KnowledgeGraphIngestionWorker:
                 except Exception as exc:
                     _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
                     outcomes.append(False)
-                    return 0
-                return len(ingested)
+                    return False
+                return bool(progressed)
 
-        counts = await asyncio.gather(*(ingest_graph(scope) for scope in scopes))
+        progress = await asyncio.gather(*(ingest_graph(scope) for scope in scopes))
         # Health reports a failure until a pass ingests something, nothing in it fails, and no conversation's last
         # attempt failed.
         if outcomes and all(outcomes):
             record_knowledge_graph_failure(None)
-        return any(counts)
+        return any(progress)
 
     def _due_sessions(
         self,
@@ -299,8 +299,8 @@ class KnowledgeGraphIngestionWorker:
     ) -> bool | None:
         """Ingest a bounded number of one conversation's new episodes and return whether none failed or was dropped.
 
-        Return None when its agent cannot say yet what was redacted, or the check failed and was saved as a failure,
-        which leaves the conversation for a later pass.
+        Return None when nothing was added because its agent cannot say yet what was redacted, the check failed, or the
+        first episode failed and waits for its retry, which leaves the conversation for a later pass.
         """
         settings = config.knowledge_graph.ingest
         finished, blocked_until = finished_runs(session.runs, config, now=now)
@@ -354,7 +354,7 @@ class KnowledgeGraphIngestionWorker:
                 )
                 outcome = await self._add(scope, state, entry, kind, rendered, usage, now)
                 if outcome is None:
-                    return False
+                    return False if added else None
                 clean = clean and outcome
                 added += 1
                 # A long backlog spreads over passes; the conversation stays due because its update time is unchanged.

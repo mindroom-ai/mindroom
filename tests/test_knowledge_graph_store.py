@@ -24,16 +24,19 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
+from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.extraction import ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.scope import GraphScope
 from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
-from mindroom.knowledge_graph.usage import UsageTarget
+from mindroom.knowledge_graph.usage import UsageTarget, current_usage_target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from falkordb.query_result import QueryResult
+    from graphiti_core.prompts.models import Message
+    from pydantic import BaseModel
 
 ALPHA = GraphScope(agent_name="mind", execution_identity=None, graph_name="kg_" + "a" * 24)
 BETA = GraphScope(agent_name="mind", execution_identity=None, graph_name="kg_" + "b" * 24)
@@ -587,3 +590,45 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
     assert kwargs["entity_types"] is ENTITY_TYPES
     assert kwargs["excluded_entity_types"] == ["Entity"]
     assert kwargs["custom_extraction_instructions"] == extraction_instructions("Focus on lab equipment.")
+
+
+@pytest.mark.asyncio
+async def test_episodes_of_two_graphs_extracted_at_once_stay_apart(store: GraphitiStore) -> None:
+    """Each episode lands in its own graph and charges its own conversation while another graph extracts alongside it."""
+    both_extracting = asyncio.Event()
+    charged: dict[str, set[str]] = {"alpha": set(), "beta": set()}
+
+    async def extract(self: MindRoomLLMClient, messages: list[Message], response_model: type[BaseModel] | None) -> dict:
+        del self
+        episode = "alpha" if "alpha-only" in "\n".join(message.content for message in messages) else "beta"
+        target = current_usage_target()
+        assert target is not None
+        charged[episode].add(target.session_id)
+        if all(charged.values()):
+            both_extracting.set()
+        await both_extracting.wait()
+        return {name: [] for name in response_model.model_fields} if response_model is not None else {}
+
+    episodes = {
+        scope: EpisodeInput("conversation", name, f"person @alice (x): {name}-only news", "conversation: room !r", JAN)
+        for scope, name in ((ALPHA, "alpha"), (BETA, "beta"))
+    }
+    with patch.object(MindRoomLLMClient, "_extract", extract):
+        await asyncio.wait_for(
+            asyncio.gather(
+                store.add_episode(ALPHA, episodes[ALPHA], UsageTarget("mind", "!r:$alpha", None)),
+                store.add_episode(BETA, episodes[BETA], UsageTarget("mind", "!r:$beta", None)),
+            ),
+            timeout=30,
+        )
+
+    async def episode_names(scope: GraphScope) -> list[str]:
+        graphiti = await store._graphiti_client()
+        records, _, _ = await graphiti.driver.clone(database=scope.graph_name).execute_query(
+            "MATCH (e:Episodic) RETURN e.name AS name",
+        )
+        return sorted(record["name"] for record in records)
+
+    assert await store._run(episode_names(ALPHA)) == ["alpha"]
+    assert await store._run(episode_names(BETA)) == ["beta"]
+    assert charged == {"alpha": {"!r:$alpha"}, "beta": {"!r:$beta"}}

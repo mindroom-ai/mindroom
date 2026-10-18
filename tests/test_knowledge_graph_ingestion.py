@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -735,21 +736,20 @@ async def test_graphs_are_ingested_at_the_same_time(tmp_path: Path) -> None:
 
 @dataclass
 class _InFlightStore(_FakeStore):
-    """Records whether an episode started while another was still being added."""
+    """Holds the first episode until another graph starts one, and records whether one did."""
 
-    in_flight: int = 0
-    overlapped: bool = False
+    first_graph: str | None = None
+    overlapped: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
-        self.overlapped = self.overlapped or self.in_flight > 0
-        self.in_flight += 1
-        try:
-            # Long enough for another graph's pass to reach its first episode, were nothing holding it back.
-            for _ in range(50):
-                await asyncio.sleep(0.01)
-            await super().add_episode(scope, episode, usage)
-        finally:
-            self.in_flight -= 1
+        if self.first_graph is None:
+            self.first_graph = scope.graph_name
+            # Long enough for the other graph to reach its first episode, were nothing holding it back.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.overlapped.wait(), timeout=0.5)
+        elif scope.graph_name != self.first_graph and len(self.episodes) == 0:
+            self.overlapped.set()
+        await super().add_episode(scope, episode, usage)
 
 
 @pytest.mark.asyncio
@@ -765,7 +765,7 @@ async def test_no_more_graphs_than_the_limit_are_ingested_at_once(tmp_path: Path
         await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
 
     assert sorted(store.sessions()) == ["!room:x:$m1", "!room:x:$p1"]
-    assert not store.overlapped
+    assert not store.overlapped.is_set()
 
 
 @pytest.mark.asyncio
@@ -787,6 +787,46 @@ async def test_a_pass_that_ingested_something_starts_the_next_at_once(tmp_path: 
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_pass_that_added_nothing_waits_for_the_interval(tmp_path: Path) -> None:
+    """The worker does not spin while there is nothing to add; only a wake or the interval starts the next pass."""
+    config, paths = _config(interval_seconds=3600), _paths(tmp_path)
+    worker = _worker(config, paths, _FakeStore())
+    passes = 0
+    first_pass = asyncio.Event()
+
+    async def empty_pass(config: Config, *, now: float) -> bool:
+        del config, now
+        nonlocal passes
+        passes += 1
+        first_pass.set()
+        await asyncio.sleep(0)
+        return False
+
+    with patch.object(worker, "_run_cycle", empty_pass):
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(first_pass.wait(), timeout=10)
+            await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert passes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_pass_whose_every_attempt_failed_added_nothing(tmp_path: Path) -> None:
+    """During a provider outage the worker waits for the interval instead of trying every due conversation at once."""
+    config, paths = _config(max_sessions_per_cycle=1), _paths(tmp_path)
+    store = _FakeStore(error=ConnectionError("provider outage"))
+    for thread in ("$t1", "$t2"):
+        _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"])
+
+    assert await _worker(config, paths, store)._run_cycle(config, now=T0 + 10) is False
+    assert knowledge_graph_failure() is not None
 
 
 @pytest.mark.asyncio
