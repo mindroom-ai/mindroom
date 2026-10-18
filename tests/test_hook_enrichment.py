@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from mindroom.hooks import EnrichmentItem, render_enrichment_block, render_transient_context
 from mindroom.hooks.enrichment import is_transient_context, strip_enrichment_blocks
+from tests.cpu_budget_helpers import cpu_budget
 
 
 def test_render_enrichment_block_is_stable() -> None:
@@ -60,24 +59,24 @@ def test_render_transient_context_wraps_nonempty_parts() -> None:
     assert render_transient_context(()) == ""
 
 
+_BLOCK = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+
+
 def test_strip_enrichment_blocks_removes_every_block() -> None:
     """Every rendered block goes, with the blank lines around it, and plain text is untouched."""
-    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
-    text = f"When does Atlas ship?\n\n{block}"
+    text = f"When does Atlas ship?\n\n{_BLOCK}"
 
     assert strip_enrichment_blocks(text) == "When does Atlas ship?"
-    assert strip_enrichment_blocks(f"{block}\n\nhi\n\n{block}") == "hi"
+    assert strip_enrichment_blocks(f"{_BLOCK}\n\nhi\n\n{_BLOCK}") == "hi"
     assert strip_enrichment_blocks("no context") == "no context"
 
 
 def test_strip_enrichment_blocks_joins_the_text_around_a_block_with_one_blank_line() -> None:
     """A block between two pieces of text leaves exactly one blank line between them."""
-    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
-
-    assert strip_enrichment_blocks(f"a\n\n{block}\n\nb") == "a\n\nb"
-    assert strip_enrichment_blocks(f"a\n{block}\nb") == "a\n\nb"
-    assert strip_enrichment_blocks(f"{block}\n\n    indented") == "    indented"
-    assert strip_enrichment_blocks(f"  first\n\n{block}") == "  first"
+    assert strip_enrichment_blocks(f"a\n\n{_BLOCK}\n\nb") == "a\n\nb"
+    assert strip_enrichment_blocks(f"a\n{_BLOCK}\nb") == "a\n\nb"
+    assert strip_enrichment_blocks(f"{_BLOCK}\n\n    indented") == "    indented"
+    assert strip_enrichment_blocks(f"  first\n\n{_BLOCK}") == "  first"
 
 
 def test_strip_enrichment_blocks_leaves_text_without_a_block_byte_identical() -> None:
@@ -90,12 +89,10 @@ def test_strip_enrichment_blocks_leaves_text_without_a_block_byte_identical() ->
 
 def test_strip_enrichment_blocks_collapses_adjacent_blocks_to_one_blank_line() -> None:
     """Blocks that follow one another leave one blank line between the text around them, not one per block."""
-    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
-
-    assert strip_enrichment_blocks(f"a\n\n{block}\n\n{block}\n\nb") == "a\n\nb"
-    assert strip_enrichment_blocks(f"a{block}{block}b") == "a\n\nb"
-    assert strip_enrichment_blocks(f"{block}\n\n{block}") == ""
-    assert strip_enrichment_blocks(f"a\n\n{block}\n\nm\n\n{block}\n\nb") == "a\n\nm\n\nb"
+    assert strip_enrichment_blocks(f"a\n\n{_BLOCK}\n\n{_BLOCK}\n\nb") == "a\n\nb"
+    assert strip_enrichment_blocks(f"a{_BLOCK}{_BLOCK}b") == "a\n\nb"
+    assert strip_enrichment_blocks(f"{_BLOCK}\n\n{_BLOCK}") == ""
+    assert strip_enrichment_blocks(f"a\n\n{_BLOCK}\n\nm\n\n{_BLOCK}\n\nb") == "a\n\nm\n\nb"
 
 
 def test_strip_enrichment_blocks_keeps_an_unclosed_block() -> None:
@@ -105,7 +102,6 @@ def test_strip_enrichment_blocks_keeps_an_unclosed_block() -> None:
     assert strip_enrichment_blocks(text) == text
 
 
-_BLOCK = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
 _LONG_TEXTS = {
     "spaces": " " * 200_000,
     "newlines": "\n" * 200_000,
@@ -121,7 +117,5 @@ _LONG_TEXTS = {
 @pytest.mark.parametrize("text", _LONG_TEXTS.values(), ids=_LONG_TEXTS)
 def test_strip_enrichment_blocks_is_linear_in_the_text_length(text: str) -> None:
     """A long run of whitespace in a pasted message must not stall the readers that call this."""
-    started = time.perf_counter()
-    strip_enrichment_blocks(text)
-
-    assert time.perf_counter() - started < 1.0
+    with cpu_budget(0.5):
+        strip_enrichment_blocks(text)

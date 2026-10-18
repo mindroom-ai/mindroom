@@ -18,6 +18,7 @@ import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
+from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
@@ -1057,6 +1058,19 @@ def test_credentials_are_removed_before_the_extractor() -> None:
     assert "hunter2" not in text
     # A secret on one line does not swallow the lines after it.
     assert "remember the deploy is Friday" in text
+
+
+def test_context_that_hooks_attach_to_a_message_stays_out_of_the_extractor() -> None:
+    """A location a hook added to the prompt is MindRoom's, so it never reaches daily memory."""
+    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+    messages = [
+        Message(role="user", content=render_msg_tag(sender=ALICE, body=f"When does Atlas ship?\n\n{block}")),
+        Message(role="user", content=render_msg_tag(sender=ALICE, body=block)),
+    ]
+
+    lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
+
+    assert lines == [f"{ALICE}: When does Atlas ship?"]
 
 
 def test_extractor_output_becomes_one_line_of_distinct_facts() -> None:

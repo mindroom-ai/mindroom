@@ -3299,7 +3299,7 @@ It applies only to agents whose effective backend is `file`, including each requ
 4. Results are appended to `memory/YYYY-MM-DD.md`, and a retry never appends the same result twice.
 
 Compacted turns and voice-call turns are included.
-Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start, tasks another agent delegated, team conversations, and conversations through the OpenAI-compatible API.
+Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start, tasks another agent delegated, team conversations, conversations through the OpenAI-compatible API, and context that hooks attach to messages, such as location.
 A message redacted before its turn is flushed stays out of memory, and so does the turn that read it.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
