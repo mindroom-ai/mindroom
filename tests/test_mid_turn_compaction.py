@@ -37,7 +37,7 @@ from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner
-from mindroom.history import agno_compat_message_builder, mid_turn_compaction
+from mindroom.history import agno_compat_message_builder, compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
 from mindroom.history.replay import (
     compaction_summary_message,
@@ -53,7 +53,14 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import CompactionOutcome, HistoryScope, HistoryScopeState, PreparedHistoryState
+from mindroom.history.types import (
+    CompactionLifecycleFailure,
+    CompactionLifecycleStart,
+    CompactionOutcome,
+    HistoryScope,
+    HistoryScopeState,
+    PreparedHistoryState,
+)
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, HookRegistry, hook
 from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import NativeCompactionModel, record_native_checkpoint
@@ -194,11 +201,11 @@ class _SummaryCalls:
         summary_input: str,
         summary_prompt: str,  # noqa: ARG002
         timeout_seconds: float,  # noqa: ARG002
-        on_response: Callable[[ModelResponse], Any] | None = None,
+        on_usage: Callable[[MessageMetrics], Any] | None = None,
     ) -> SessionSummary:
         self.inputs.append(summary_input)
-        if on_response is not None:
-            await on_response(ModelResponse(response_usage=MessageMetrics(input_tokens=7, output_tokens=3)))
+        if on_usage is not None:
+            await on_usage(MessageMetrics(input_tokens=7, output_tokens=3))
         if self.cancel:
             raise asyncio.CancelledError
         if self.fail:
@@ -1060,6 +1067,26 @@ async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls
     summaries = [json.loads(row) for row in rows if json.loads(row).get("kind") == "compaction_summary"]
     assert len(summaries) == len(summary_calls.inputs) >= 1
     assert all(summary["metrics"]["input_tokens"] == 7 for summary in summaries)
+
+
+@pytest.mark.asyncio
+async def test_scoped_summary_usage_is_recorded_in_the_scope_storage(
+    tmp_path: Path,
+    summary_calls: _SummaryCalls,
+) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    assert isinstance(storage, SqliteDb)
+    try:
+        await _run_in_session(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+
+        with storage.db_engine.begin() as connection:
+            rows = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
+    finally:
+        storage.close()
+
+    summaries = [json.loads(row) for row in rows if json.loads(row).get("kind") == "compaction_summary"]
+    assert len(summaries) == len(summary_calls.inputs) >= 1
 
 
 @pytest.mark.asyncio
@@ -1973,6 +2000,105 @@ async def test_cancellation_after_the_commit_keeps_the_fold_and_its_effects(tmp_
     # The fold stays: a restarted attempt replays its summary instead of the runs it covered.
     assert [run_id for run_id, _segment in segments_of(storage, _SCOPE.key)] == [run_ids[-1]]
     assert folded_run_ids(storage) == ["run-1", "run-2"]
+
+
+@dataclass
+class _HeldSuccess(RecordingCompactionLifecycle):
+    """Hold the success notice until released, so the turn can be stopped while it is being delivered."""
+
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def complete_success(self, outcome: CompactionOutcome) -> None:
+        self.entered.set()
+        await self.release.wait()
+        await super().complete_success(outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_stopping_the_turn_after_the_commit_still_reports_success(tmp_path: Path) -> None:
+    """A stopped turn finishes reporting a stored fold, so its notice never claims the compaction failed."""
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage)
+    lifecycle = _HeldSuccess()
+    bind_compaction_lifecycle(agent, lifecycle)
+
+    task = asyncio.create_task(_run_in_session(agent, "Do the task"))
+    await asyncio.wait_for(lifecycle.entered.wait(), timeout=5)
+    task.cancel()
+    await asyncio.sleep(0)
+    lifecycle.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [type(event) for event in lifecycle.events] == [CompactionLifecycleStart, CompactionOutcome]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_stopping_the_turn_while_the_fold_is_stored_still_reports_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop that lands while the row is being written still lets the stored fold apply and report success."""
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage)
+    lifecycle = RecordingCompactionLifecycle()
+    bind_compaction_lifecycle(agent, lifecycle)
+    loop = asyncio.get_running_loop()
+    appending = asyncio.Event()
+    release = threading.Event()
+    append_fold = compaction.append_fold
+
+    def held_append(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        loop.call_soon_threadsafe(appending.set)
+        assert release.wait(timeout=5)
+        return append_fold(*args, **kwargs)
+
+    monkeypatch.setattr(compaction, "append_fold", held_append)
+    task = asyncio.create_task(_run_in_session(agent, "Do the task"))
+    await asyncio.wait_for(appending.wait(), timeout=5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [type(event) for event in lifecycle.events] == [CompactionLifecycleStart, CompactionOutcome]
+    assert len(segments_of(storage, _SCOPE.key)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_a_fold_that_loses_its_append_reports_the_change_and_keeps_the_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold another writer outran stores nothing, leaves the request whole, and says the conversation changed."""
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    model = _ToolLoopModel(tool_rounds=5)
+    agent = _scoped_agent(model, config, paths, storage)
+    lifecycle = RecordingCompactionLifecycle()
+    bind_compaction_lifecycle(agent, lifecycle)
+    requests: list[list[Message]] = []
+
+    async def capture(messages: list[Message], _tools: object, _run_response: object) -> None:
+        requests.append(list(messages))
+
+    install_request_preparation(model, marker="_test_capture", prepare=capture)
+    monkeypatch.setattr(compaction, "append_fold", lambda *_args, **_kwargs: False)
+
+    await _run_in_session(agent, "Do the task")
+
+    assert type(lifecycle.events[0]) is CompactionLifecycleStart
+    assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
+    assert lifecycle.events[1].failure_reason == "The conversation changed during compaction."
+    assert not any(is_compaction_summary(message) for request in requests for message in request)
+    assert segments_of(storage, _SCOPE.key) == []
 
 
 def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:

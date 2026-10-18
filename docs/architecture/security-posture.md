@@ -166,6 +166,21 @@ The rest require the primary runtime and cannot run in a worker (`claude_agent`,
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
 
+## Connections portal sign-in
+
+This section holds the mechanics behind [Matrix sign-in from MindRoom Chat](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat).
+The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to 30 seconds.
+It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
+MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`.
+It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
+MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL` as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
+MindRoom then sets the `__Host-mindroom_connections_session` cookie.
+The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`.
+The cookie is browser-wide, so a second sign-in in another tab replaces it.
+To keep a stale tab from acting as the new account, the Connections pages send the Matrix ID they show in the `X-MindRoom-Connections-User` header on every `/api/connections` request.
+MindRoom answers 401 when that header names a different account than the request authenticates as, whether by a session or by trusted upstream.
+Requests without the header, such as OAuth popup navigations, still work.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
@@ -225,6 +240,11 @@ Do not report or "fix" these; they are deliberate.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](../deployment/upgrades.md#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
+- The Connections portal signs users in either through trusted upstream strict JWT auth or, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists MindRoom Chat origins, through a Matrix OpenID token that Chat hands to the portal window.
+  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates only the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page; it never grants dashboard or administrator access, even to an administrator.
+  An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust.
+  On a homeserver that does not bind tokens to one deployment, a backend that Chat opens could replay a user's token to another deployment on the same homeserver until it expires; [audience binding](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) closes that where the homeserver supports it.
+  The `/connections` page shell is served without authentication, while every API stays protected.
 - The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings

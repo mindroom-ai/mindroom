@@ -71,16 +71,25 @@ ENTITY_TYPES: dict[str, type[BaseModel]] = {
 # not check it for an edge endpoint the model names without listing it as a node, so such a node stays untyped.
 EXCLUDED_ENTITY_TYPES = ["Entity"]
 
-# Appended to Graphiti's node and edge extraction prompts.
-_EXTRACTION_INSTRUCTIONS = """\
+# Appended to Graphiti's node and edge extraction prompts, before any instructions the operator configures and the
+# names of the episode's known entities. A speaker is labeled by name, and the list marks which names are agents.
+_BUILT_IN_INSTRUCTIONS = """\
 Name each person, agent, organization, and project by its full name when the text gives one, and use that same name every time.
 Never create entities for file paths, source files, URLs, environment variables, configuration keys, commit hashes, branch names, command lines, or log files; mention them inside the facts that use them.
-Date each fact by when it happened or held, as the text states or implies, never by when it was discussed. When a document states dates, use them."""
+Date each fact by when it happened or held, as the text states or implies, never by when it was discussed. When a document states dates, use them.
+Lines from a speaker listed below as an agent are written by an AI assistant. Record the facts it reports about their subjects, never as something the assistant said, found, or reported.
+Never create facts about an assistant's own lookups and housekeeping, such as searches, reads, notes it saved, and tool calls, about its access, accounts, tools, configuration, or instructions, about progress or counts in its own tasks, or about what a search or listing returned; extract the knowledge they contain instead. Something the assistant did that changed things for others, such as sending a message or filing an issue, is a fact."""
 
 
-def extraction_instructions(known: Sequence[KnownEntity]) -> str:
-    """Return the static instructions with the one name to use for each of the ``known`` entities."""
-    lines = [_EXTRACTION_INSTRUCTIONS, "When the text mentions one of these, use exactly this name:"]
+def extraction_instructions(configured: str, known: Sequence[KnownEntity]) -> str:
+    """Return the built-in instructions, the operator's own when set, and the one name to use for each known entity.
+
+    The rules come before the episode's names, so the text up to the names is the same for every episode.
+    """
+    lines = [_BUILT_IN_INSTRUCTIONS]
+    if extra := configured.strip():
+        lines.append(extra)
+    lines.append("When the text mentions one of these, use exactly this name:")
     for entity in known:
         details: list[str] = [entity.kind] if entity.kind else []
         if entity.aliases:

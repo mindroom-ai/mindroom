@@ -6,7 +6,7 @@ import pytest
 from agno.agent import Agent
 from agno.team import Team
 
-from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
+from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
 from tests.conftest import FakeModel
 
 if TYPE_CHECKING:
@@ -24,10 +24,10 @@ def test_prompt_builder_failure_restores_original_instruction_list(
     estimate: Callable
     if is_team:
         entity = Team(members=[], model=FakeModel(id="test"), telemetry=False)
-        estimate = estimate_team_static_tokens
+        estimate = team_static_token_estimator
     else:
         entity = Agent(model=FakeModel(id="test"), telemetry=False)
-        estimate = estimate_agent_static_tokens
+        estimate = agent_static_token_estimator
     original = ["Retain this exact live instruction list"]
     entity._tool_instructions = original
 
@@ -37,5 +37,5 @@ def test_prompt_builder_failure_restores_original_instruction_list(
 
     monkeypatch.setattr(entity, "get_system_message", fail)
     with pytest.raises(RuntimeError, match="prompt construction failed"):
-        estimate(entity, "Current prompt")
+        estimate(entity).estimate("Current prompt")
     assert entity._tool_instructions is original

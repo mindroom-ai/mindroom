@@ -600,9 +600,10 @@ async def test_the_embedder_is_built_off_the_event_loop(store: GraphitiStore) ->
 async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) -> None:
     """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt.
 
-    The episode is extracted into the entity types, with the generic type excluded and the instructions added, which
-    name the agents and people the episode knows.
+    The episode is extracted into the entity types, with the generic type excluded and the instructions added: the
+    built-in ones, the configured ones, and the names of the agents and people the episode knows.
     """
+    store._config_provider().knowledge_graph.extraction_instructions = "Focus on lab equipment."
     graphiti = await store._run(store._graphiti_client())
     known = (KnownEntity("alice", "person", ("@alice:x",)),)
     episode = EpisodeInput("conversation", "conversation", "alice: hi", "conversation: room !r", JAN, known)
@@ -615,4 +616,4 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
     assert kwargs["previous_episode_uuids"] == []
     assert kwargs["entity_types"] is ENTITY_TYPES
     assert kwargs["excluded_entity_types"] == ["Entity"]
-    assert kwargs["custom_extraction_instructions"] == extraction_instructions(known)
+    assert kwargs["custom_extraction_instructions"] == extraction_instructions("Focus on lab equipment.", known)

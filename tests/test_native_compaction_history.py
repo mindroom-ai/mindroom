@@ -20,6 +20,7 @@ from agno.models.response import ModelResponse
 from agno.session.summary import SessionSummary
 from agno.team import Team
 from PIL import Image as PillowImage
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
@@ -35,7 +36,7 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
-from mindroom.native_compaction import record_native_checkpoint
+from mindroom.native_compaction import checkpoint_estimated_tokens, record_native_checkpoint
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
@@ -92,7 +93,6 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -180,7 +180,6 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -292,7 +291,6 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -488,7 +486,6 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -501,7 +498,11 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         config=config,
         scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=100,
+    )
 
     assert final.replay_plan is not None
     assert final.replay_plan.mode == "limited"
@@ -536,7 +537,6 @@ def test_reused_responses_model_uses_current_replay_budget(tmp_path: Path) -> No
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(model=model),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -643,7 +643,6 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -655,7 +654,11 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=100,
+    )
     assert final.replay_plan is not None
     assert final.replay_plan.add_history_to_context
     assert final.replay_plan.num_history_runs is None
@@ -713,7 +716,6 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -725,7 +727,11 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         config=config,
         scope_context=ScopeSessionContext(scope, db, session),
     )
-    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+    final = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=100,
+    )
     assert final.replay_plan is not None
     if auto_compact:
         assert prepared.compaction_reply_outcome == "success"
@@ -791,7 +797,6 @@ async def test_native_activation_respects_history_policy(
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -831,7 +836,6 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -873,7 +877,6 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     resolved = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -921,7 +924,6 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         agents=[member],
         team=team,
         team_name="team",
-        full_prompt="Continue.",
         config=config,
         runtime_paths=paths,
         scope_context=ScopeSessionContext(HistoryScope(kind="team", scope_id="team"), db, session),
@@ -1023,7 +1025,6 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
     resolved = resolve_agent_preparation_inputs(
         agent=_agent(),
         agent_name="test_agent",
-        full_prompt="Continue",
         config=config,
         static_prompt_tokens=100,
     )
@@ -1083,3 +1084,30 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> 
     )
 
     assert with_summary == without_summary
+
+
+@pytest.mark.parametrize(
+    ("items", "logged"),
+    [
+        ([{"type": "compaction", "content": "provider checkpoint"}, {"type": "text", "text": "Done"}], True),
+        ([{"type": "compaction", "content": None}, {"type": "text", "text": "Done"}], False),
+        ([{"type": "text", "text": "Done"}], False),
+    ],
+)
+def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]], *, logged: bool) -> None:
+    """Only a response that carries a real checkpoint reports that the provider compacted."""
+    model = MindRoomAnthropicClaude(id="claude-sonnet-4-6")
+    model.configure_native_compaction(threshold=60_000)
+    assert model.native_compaction is not None
+
+    with capture_logs() as logs:
+        record_native_checkpoint(ModelResponse(content="Done"), items, model.native_compaction)
+
+    events = [log for log in logs if log["event"] == "Native compaction checkpoint"]
+    expected = {
+        "event": "Native compaction checkpoint",
+        "log_level": "info",
+        "threshold_tokens": 60_000,
+        "checkpoint_tokens": checkpoint_estimated_tokens(items[:1]),
+    }
+    assert events == ([expected] if logged else [])

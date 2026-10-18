@@ -2732,6 +2732,8 @@ class ResponseRunner:
         user_message: str,
         user_message_is_structured: bool,
         reply_to_event_id: str | None,
+        room_id: str,
+        thread_id: str | None,
         requester_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
@@ -2744,6 +2746,8 @@ class ResponseRunner:
             build_matrix_run_metadata(
                 reply_to_event_id,
                 [],
+                room_id=room_id,
+                thread_id=thread_id,
                 requester_id=requester_id,
                 extra_metadata=matrix_run_metadata,
             ),
@@ -4781,6 +4785,8 @@ class ResponseRunner:
             user_message=prepared_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=resolved_target.resolved_thread_id,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
         )
@@ -5504,6 +5510,8 @@ class ResponseRunner:
             user_message=runtime.model_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_agent_run_metadata(request),
         )
@@ -5647,6 +5655,8 @@ class ResponseRunner:
             user_message=runtime.model_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_agent_run_metadata(request),
         )

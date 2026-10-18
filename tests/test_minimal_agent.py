@@ -34,7 +34,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
-from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, estimate_agent_static_tokens
+from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, agent_static_token_estimator
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.hooks import EnrichmentItem
 from mindroom.memory.functions import MemoryPromptParts
@@ -781,7 +781,7 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
         session_id=runtime.session_id,
     )
     agent.response_context = _turn_context()
-    assert estimate_agent_static_tokens(agent, "budget input") > 0
+    assert agent_static_token_estimator(agent).estimate("budget input") > 0
     assert [item["name"] for item in _agent_prompt_tool_surface(agent).payloads] == ["bash"]
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
@@ -800,7 +800,7 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
             shell_env = lifetime.owner.shell_env
             # The worker reaches MindRoom over the network and already has its own `mindroom-agent`.
             assert shell_env == AgentCliShellEnv("http://primary.test:8765", shell_env.token)
-            assert estimate_agent_static_tokens(agent, "budget input") > 0
+            assert agent_static_token_estimator(agent).estimate("budget input") > 0
             assert lifetime.owner.catalog is catalog
             assert lifetime.owner.shell_env is shell_env
 

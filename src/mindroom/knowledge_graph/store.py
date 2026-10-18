@@ -363,7 +363,10 @@ class GraphitiStore:
                 previous_episode_uuids=[],
                 entity_types=ENTITY_TYPES,
                 excluded_entity_types=EXCLUDED_ENTITY_TYPES,
-                custom_extraction_instructions=extraction_instructions(episode.known_entities),
+                custom_extraction_instructions=extraction_instructions(
+                    self._config_provider().knowledge_graph.extraction_instructions,
+                    episode.known_entities,
+                ),
             )
 
     async def _search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:

@@ -1,8 +1,10 @@
-"""Knowledge graph settings: the extraction model, conversation ingestion, and the names of known entities."""
+"""Knowledge graph settings: the extraction model, extraction instructions, conversation ingestion, and known names."""
 
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from mindroom.config.schema_hints import dashboard_hint
 
 
 class KnowledgeGraphIngestConfig(BaseModel):
@@ -52,6 +54,14 @@ class KnowledgeGraphConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Model alias that extracts entities and facts; required when any agent enables the graph",
+    )
+    extraction_instructions: str = Field(
+        default="",
+        description=(
+            "Instructions added to the built-in ones when extracting entities and facts, such as which topics, systems, "
+            "or kinds of facts matter most"
+        ),
+        json_schema_extra=dashboard_hint(multiline=True),
     )
     ingest: KnowledgeGraphIngestConfig = Field(
         default_factory=KnowledgeGraphIngestConfig,

@@ -200,7 +200,6 @@ def _prepared_team_execution_context(
         replay_plan=replay_plan,
         unseen_event_ids=[],
         replays_persisted_history=replays_persisted_history,
-        compaction_outcomes=[],
         compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
         compaction_reply_outcome="none",
         prepared_context_tokens=prepared_context_tokens,

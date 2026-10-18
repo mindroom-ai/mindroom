@@ -103,7 +103,7 @@ Graphiti needs structured output; small local models may fail extraction, which 
 ### Entity types tell extraction what an entity is
 
 Graphiti's default extraction creates an entity for anything noun-like, and the real openclaw graph shows the result: 2,097 of its 8,627 entities have no facts, and file paths (`/home/basnijholt/.mindroom-chat/config.yaml`), source files (`compaction.py`), memory notes (`memory/2026-04-05.md`), URLs, and a `capacitor://` link became entities.
-`knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and extraction instructions.
+`knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and built-in extraction instructions.
 Graphiti reads a type model's docstring as the type's description, so the docstrings are what the extractor sees: a handle, Matrix ID, or email address names whoever it belongs to and is never an entity of its own, and a `Document` is never a file path.
 With `Entity` excluded, Graphiti removes it from the list of types the extractor is asked to choose from, and drops a node whose type id falls outside that list.
 Keeping paths and URLs out is what the docstrings and the instructions aim for, not something the exclusion guarantees, so each docstring says what does not belong to its type.
@@ -117,6 +117,16 @@ The accepted costs are a longer prompt and coverage: anything outside the nine t
 Rejected: fields on the type models.
 Graphiti makes an extra model call to fill the fields of every node whose type has any, which would raise the cost of each episode, and a field named like one of `EntityNode`'s own (`name`, `summary`, `attributes`, and others) raises `EntityTypeValidationError`.
 Types are labels here, not a schema.
+
+### An assistant's own activity is not knowledge
+
+Graphs built from real use held many facts about the agent rather than its subject: what it searched, read, or saved, its tools, accounts, and channel access, the counts of its own syncs and backlogs, and what a listing returned, and a reported fact was often attached to the agent as "the agent reported that ...".
+The built-in instructions therefore record what an assistant reports as facts about their subjects, leave out its lookups and housekeeping, access, configuration, and task progress, and keep what it did for others, such as filing an issue or sending a message.
+Operator text is appended rather than replacing the built-in instructions, so an organization adds its own focus without losing these general rules.
+The wording was chosen on synthetic episodes about a fictional lab, extracted through the real store with each candidate; the scoring checks keywords for wanted facts and noise patterns, and the episodes were written alongside the wording, so the results show direction rather than held-out accuracy.
+Against the previous instructions, noise fell from 27% to 4% of facts on `gpt-6-luna` and from 36% to 5% on `gpt-6.1-sol`, with as many other facts as before.
+Rejected: forbidding every assistant action (it also dropped facts like a filed issue), adding "plans" and an `Account` description that excludes an assistant's own account (more lost facts, no less noise), and asking the model to connect single-subject facts to an event or document (it did not recover them); the last two were measured on an earlier version of the episodes, whose agent shared the project's name and which had no episode with an action that changed things for others.
+Graphiti's separate node and edge extraction, the path `add_episode` uses, links two distinct entities, so a status the assistant reports about a single subject with no other entity named can be dropped where the previous instructions kept it by linking it to the agent, or attached to another named entity instead, such as the person who asked; drops showed on both models and the misattribution on `gpt-6-luna`, and target coverage fell from 85% to 83% on `gpt-6-luna` and from 81% to 75% on `gpt-6.1-sol`.
 
 ### Known people and agents get one name
 
@@ -138,6 +148,8 @@ Each episode's instructions list the graph's own agent, the episode's speakers, 
 Entities that share a name are listed once, and an alias that another listed entity is named, or that two of them go by, is left out, so no listed name means two entities.
 `graph_entity` follows the same rule: an entry's or agent's own name wins over another entry's alias, so an entry that keeps a person apart from an agent with their display name never turns a lookup of the agent's name into the person.
 `custom_extraction_instructions` reach only Graphiti's node and edge extraction prompts, which is where names are chosen.
+They are joined as the built-in rules, then the operator's `knowledge_graph.extraction_instructions`, then the episode's names, so the operator's text reads as a continuation of the rules and everything before the names is the same for every episode.
+The built-in rule that keeps an assistant's own activity out named the old `agent <name>` label; it now points at the speakers the list marks as agents, a wording change made after that rule's measurements and not measured again.
 `graph_entity` tries the name as asked when the one name has no entity, because graphs extracted earlier hold entities under agent keys and Matrix IDs; existing duplicate nodes stay.
 
 Rejected: matching entries against display names.

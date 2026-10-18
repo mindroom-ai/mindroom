@@ -47,7 +47,7 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
 )
 from mindroom.history.policy import resolve_history_execution_plan
-from mindroom.history.prompt_tokens import estimate_agent_static_tokens
+from mindroom.history.prompt_tokens import agent_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
     HistoryPolicy,
@@ -149,7 +149,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
             has_authored_compaction_config=False,
             active_model_name="test-model",
             active_context_window=10_000,
-            static_prompt_tokens=10,
             execution_plan=execution_plan,
         ),
     )
@@ -693,8 +692,7 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
 
     preparation_process_entrypoint_calls = process_entrypoint_calls
     count_schema_processing = False
-    assert prepared.prepared_history.prepared_context_tokens == estimate_agent_static_tokens(
-        agent,
+    assert prepared.prepared_history.prepared_context_tokens == agent_static_token_estimator(agent).estimate(
         prepared.final_prompt,
     )
     assert preparation_process_entrypoint_calls == 1
@@ -833,7 +831,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
     assert all(agent_id not in str(message.content) for message in prepared.context_messages)
 
 
-def test_estimate_agent_static_tokens_reuses_function_schema_processing_across_fresh_agents(
+def test_agent_static_token_estimator_reuses_function_schema_processing_across_fresh_agents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Stable function schema processing should be reused across fresh agent instances."""
@@ -862,7 +860,7 @@ def test_estimate_agent_static_tokens_reuses_function_schema_processing_across_f
     clear_tool_schema_cache()
 
     for _ in range(2):
-        estimate_agent_static_tokens(make_agent(), "Current request")
+        agent_static_token_estimator(make_agent()).estimate("Current request")
 
     assert process_entrypoint_calls == 1
 

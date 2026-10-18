@@ -48,12 +48,26 @@ def test_graphiti_prompt_lists_exactly_the_types_with_their_docstrings_and_no_en
     ] == [(type_id, name, model.__doc__) for type_id, (name, model) in enumerate(ENTITY_TYPES.items())]
 
 
-def test_instructions_keep_paths_and_urls_out_and_date_by_occurrence() -> None:
-    """Paths and URLs belong inside facts, and a fact is dated by when it held, not when it was discussed."""
-    text = extraction_instructions((KnownEntity("Mind", "agent", ()),))
-    for word in ("file paths", "URLs", "environment variables", "commit hashes", "branch names"):
-        assert word in text
-    assert "when it happened" in text
+def test_instructions_keep_paths_and_an_assistants_own_activity_out() -> None:
+    """Paths and URLs belong inside facts, dated by when they held; an assistant's lookups stay out, its effects stay in."""
+    text = extraction_instructions("", (KnownEntity("Mind", "agent", ()),))
+    for phrase in ("file paths", "URLs", "environment variables", "commit hashes", "branch names", "when it happened"):
+        assert phrase in text
+    assert "speaker listed below as an agent" in text
+    for phrase in ("lookups", "access", "configuration", "counts", "listing returned", "changed things for others"):
+        assert phrase in text
+
+
+def test_configured_instructions_follow_the_built_in_ones_and_precede_the_known_names() -> None:
+    """An operator's instructions add to the built-in ones, blank text adds nothing, and the episode's names come last."""
+    known = (KnownEntity("Mind", "agent", ()),)
+    names = "When the text mentions one of these, use exactly this name:\n- Mind (agent)"
+    built_in = extraction_instructions("", known).removesuffix(f"\n{names}")
+
+    assert extraction_instructions("  \n", known) == f"{built_in}\n{names}"
+    assert (
+        extraction_instructions("  Focus on lab equipment.\n", known) == f"{built_in}\nFocus on lab equipment.\n{names}"
+    )
 
 
 def test_instructions_give_each_known_entity_one_name() -> None:
@@ -65,8 +79,8 @@ def test_instructions_give_each_known_entity_one_name() -> None:
         KnownEntity("Beacon", None, ()),
     )
 
-    static = extraction_instructions(())
-    text = extraction_instructions(known)
+    static = extraction_instructions("", ())
+    text = extraction_instructions("", known)
 
     assert text.startswith(static)
     assert text.removeprefix(static).splitlines()[1:] == [

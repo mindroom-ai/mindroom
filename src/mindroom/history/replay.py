@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.constants import prompt_roles_for_history_storage
@@ -18,7 +17,7 @@ from mindroom.history.message_content import (
     project_history_media_for_replay,
     render_message_content,
 )
-from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
@@ -28,6 +27,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.agent import Agent
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -58,7 +59,7 @@ def estimate_prompt_visible_history_tokens(
     replay_model: NativeCompactionModel | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
-    summary_tokens = _estimate_session_summary_tokens(current_summary_text(session))
+    summary_tokens = _summary_tokens(session)
     history_messages = _history_messages_for_estimation(
         session=session,
         scope=scope,
@@ -216,20 +217,16 @@ def _summary_kind(message: Message) -> object:
     return message.provider_data.get(_COMPACTION_SUMMARY_MARKER) if isinstance(message.provider_data, dict) else None
 
 
-def _estimate_session_summary_tokens(summary_text: str | None) -> int:
-    """Estimate prompt-visible tokens contributed by one stored session summary."""
-    if summary_text is None:
+def _summary_tokens(session: AgentSession | TeamSession) -> int:
+    """Estimate the tokens the scope's summary message adds to a request."""
+    summary = current_summary_text(session)
+    if summary is None:
         return 0
-    normalized_summary = summary_text.strip()
-    if not normalized_summary:
-        return 0
-    return estimate_text_tokens(str(compaction_summary_message(normalized_summary, run_local=False).content))
+    return estimate_text_tokens(str(compaction_summary_message(summary, run_local=False).content))
 
 
 def _estimate_history_messages_tokens(messages: list[Message]) -> int:
     """Estimate the token count of materialized history messages."""
-    if not messages:
-        return 0
     return sum(_estimated_message_chars(message) for message in messages) // 4
 
 
@@ -263,50 +260,21 @@ def _session_history_messages(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    limit = history_settings.policy.limit
+    policy = history_settings.policy
+    skip_roles = history_skip_roles(history_settings)
     if scope.kind == "team":
-        return _team_session_history_messages(
-            session=cast("TeamSession", session),
-            scope_id=scope.scope_id,
-            history_settings=history_settings,
-            limit=limit,
+        return cast("TeamSession", session).get_messages(
+            team_id=scope.scope_id,
+            last_n_runs=policy.num_history_runs,
+            limit=policy.num_history_messages,
+            skip_roles=skip_roles,
         )
-    return _agent_session_history_messages(
-        session=cast("AgentSession", session),
-        scope_id=scope.scope_id,
-        history_settings=history_settings,
-        limit=limit,
+    return cast("AgentSession", session).get_messages(
+        agent_id=scope.scope_id,
+        last_n_runs=policy.num_history_runs,
+        limit=policy.num_history_messages,
+        skip_roles=skip_roles,
     )
-
-
-def _agent_session_history_messages(
-    *,
-    session: AgentSession,
-    scope_id: str,
-    history_settings: ResolvedHistorySettings,
-    limit: int | None,
-) -> list[Message]:
-    skip_roles = history_skip_roles(history_settings)
-    if history_settings.policy.mode == "runs":
-        return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
-    if history_settings.policy.mode == "messages":
-        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles)
-
-
-def _team_session_history_messages(
-    *,
-    session: TeamSession,
-    scope_id: str,
-    history_settings: ResolvedHistorySettings,
-    limit: int | None,
-) -> list[Message]:
-    skip_roles = history_skip_roles(history_settings)
-    if history_settings.policy.mode == "runs":
-        return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
-    if history_settings.policy.mode == "messages":
-        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
 
 
 def history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
@@ -319,17 +287,7 @@ def scope_visible_runs(
     scope: HistoryScope,
 ) -> list[RunOutput | TeamRunOutput]:
     """Return this scope's model-history-visible runs in stored order."""
-    return _runs_for_scope([run for run in session.runs or [] if is_model_history_visible_run(run)], scope)
-
-
-def _runs_for_scope(
-    runs: Sequence[RunOutput | TeamRunOutput],
-    scope: HistoryScope,
-) -> list[RunOutput | TeamRunOutput]:
-    """Filter model-history-visible runs down to one persisted history scope."""
-    if scope.kind == "team":
-        return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
-    return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
+    return [run for run in session.runs or [] if is_model_history_visible_run(run) and run_in_scope(run, scope)]
 
 
 def current_summary_text(session: AgentSession | TeamSession) -> str | None:
@@ -370,7 +328,7 @@ def plan_replay_that_fits(
     replay_model: NativeCompactionModel | None = None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
-    summary_tokens = _session_summary_replay_tokens(session)
+    summary_tokens = _summary_tokens(session)
     if summary_tokens > available_history_budget:
         raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
     if current_history_tokens <= available_history_budget:
@@ -394,19 +352,19 @@ def plan_replay_that_fits(
         replay_model=replay_model,
     )
     if fitting_limit > 0:
-        num_history_runs, num_history_messages = _history_limit_fields(limit_mode, fitting_limit)
+        policy = HistoryPolicy(mode=limit_mode, limit=fitting_limit)
         return ResolvedReplayPlan(
             mode="limited",
             estimated_tokens=fitting_tokens,
             add_history_to_context=True,
-            num_history_runs=num_history_runs,
-            num_history_messages=num_history_messages,
+            num_history_runs=policy.num_history_runs,
+            num_history_messages=policy.num_history_messages,
         )
 
     # Zero raw runs still replays history, which is what places the summary before the prompt.
     return ResolvedReplayPlan(
         mode="disabled",
-        estimated_tokens=_session_summary_replay_tokens(session),
+        estimated_tokens=summary_tokens,
         add_history_to_context=True,
         num_history_runs=0,
     )
@@ -461,11 +419,7 @@ def _find_fitting_history_limit_for_budget(
         candidate_tokens = estimate_prompt_visible_history_tokens(
             session=session,
             scope=scope,
-            history_settings=_history_settings_with_limit(
-                history_settings,
-                mode=limit_mode,
-                limit=mid,
-            ),
+            history_settings=replace(history_settings, policy=HistoryPolicy(mode=limit_mode, limit=mid)),
             replay_model=replay_model,
         )
         if candidate_tokens <= available_history_budget:
@@ -515,41 +469,13 @@ def configured_replay_plan(
     estimated_tokens: int,
 ) -> ResolvedReplayPlan:
     """Preserve authored replay limits when the history already fits."""
-    num_history_runs, num_history_messages = _history_limit_fields(
-        history_settings.policy.mode,
-        history_settings.policy.limit,
-    )
     return ResolvedReplayPlan(
         mode="configured",
         estimated_tokens=estimated_tokens,
         add_history_to_context=True,
-        num_history_runs=num_history_runs,
-        num_history_messages=num_history_messages,
+        num_history_runs=history_settings.policy.num_history_runs,
+        num_history_messages=history_settings.policy.num_history_messages,
     )
-
-
-def _history_settings_with_limit(
-    history_settings: ResolvedHistorySettings,
-    *,
-    mode: Literal["runs", "messages"],
-    limit: int,
-) -> ResolvedHistorySettings:
-    return ResolvedHistorySettings(
-        policy=HistoryPolicy(mode=mode, limit=limit),
-        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        system_message_role=history_settings.system_message_role,
-    )
-
-
-def _history_limit_fields(
-    mode: Literal["all", "runs", "messages"],
-    limit: int | None,
-) -> tuple[int | None, int | None]:
-    if mode == "runs":
-        return limit, None
-    if mode == "messages":
-        return None, limit
-    return None, None
 
 
 def has_effective_persisted_replay(
@@ -559,20 +485,8 @@ def has_effective_persisted_replay(
     replay_plan: ResolvedReplayPlan,
 ) -> bool:
     """Report whether a summary or permitted raw runs will reach the model."""
-    if _session_has_summary_replay(session):
+    if current_summary_text(session) is not None:
         return True
     if not replay_plan.add_history_to_context or replay_plan.num_history_runs == 0:
         return False
     return bool(scope_visible_runs(session, scope))
-
-
-def _session_has_summary_replay(session: AgentSession | TeamSession) -> bool:
-    if session.summary is None:
-        return False
-    return bool(session.summary.summary.strip())
-
-
-def _session_summary_replay_tokens(session: AgentSession | TeamSession) -> int:
-    if session.summary is None:
-        return 0
-    return _estimate_session_summary_tokens(session.summary.summary)

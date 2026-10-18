@@ -1579,10 +1579,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections_session_cookie"
+depends_on = []
+
+[[modules]]
 path = "mindroom.api.auth"
 depends_on = [
     "mindroom.authorization",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.connections_session_cookie",
     "mindroom.api.open_access",
     "mindroom.constants",
     "mindroom.origins",
@@ -1782,6 +1787,19 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections_session"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.api.connections_session_cookie",
+    "mindroom.constants",
+    "mindroom.matrix_openid",
+    "mindroom.runtime_env_policy",
+    "mindroom.origins",
+]
+
+[[modules]]
 path = "mindroom.api.connection_agents"
 depends_on = [
     "mindroom.access_policy",
@@ -1855,9 +1873,9 @@ depends_on = [
     "mindroom.credentials.legacy_tool_credentials",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.api.computers",
-    "mindroom.worker_computer.auth",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
+    "mindroom.api.connections_session",
     "mindroom.api.thread_exports",
     "mindroom.agent_policy",
     "mindroom.api.auth",
@@ -2583,7 +2601,7 @@ visibility = ["mindroom.approval.execution", "mindroom.history.runtime", "mindro
 
 [[modules]]
 path = "mindroom.native_compaction"
-depends_on = []
+depends_on = ["mindroom.logging_config"]
 visibility = [
     "mindroom.providers.claude_native_compaction",
     "mindroom.history.replay",
@@ -2691,7 +2709,6 @@ depends_on = [
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",
-    "mindroom.history.prompt_tokens",
     "mindroom.providers.agno_compat_provider_errors",
     "mindroom.history.replay",
     "mindroom.history.session_context",
@@ -2701,7 +2718,6 @@ depends_on = [
     "mindroom.providers.model_loading",
     "mindroom.history.team_scope",
     "mindroom.timing",
-    "mindroom.token_budget",
 ]
 
 [[modules]]
@@ -5182,6 +5198,7 @@ depends_on = [
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.browser_proxy",
+    "mindroom.origins",
 ]
 # The broker's wiring points: every module outside the feature that may import it.
 visibility = [
@@ -7730,14 +7747,12 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.worker_computer.auth"
+path = "mindroom.matrix_openid"
 depends_on = [
     "mindroom.bounded_bytes",
-    "mindroom.runtime_env_policy",
     "mindroom.constants",
     "mindroom.origins",
     "mindroom.requester_identity",
-    "mindroom.worker_computer.sessions",
 ]
 
 [[modules]]
@@ -7753,11 +7768,12 @@ path = "mindroom.api.computers"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.worker_computer.auth",
+    "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend",
     "mindroom.workers.runtime",
+    "mindroom.origins",
 ]
 
 [[modules]]
@@ -9125,7 +9141,7 @@ visibility = [
 # Knowledge graph: one store per runtime, fed by background ingestion and read by the knowledge_graph tool.
 [[modules]]
 path = "mindroom.config.knowledge_graph"
-depends_on = []
+depends_on = ["mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.knowledge_graph"
@@ -9261,7 +9277,6 @@ path = "mindroom.history.mid_turn_compaction"
 depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.agno_compat_model_hooks",
-    "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.history.agno_compat_message_builder",

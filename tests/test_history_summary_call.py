@@ -410,7 +410,6 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     assert persisted.summary is None
     assert len(persisted.runs) == 4
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
     assert prepared.compaction_reply_outcome == "timeout"
     events = [entry["event"] for entry in logs]
     assert "Compaction failed; continuing without compaction" in events
@@ -649,6 +648,32 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
         ("assistant", "assistant answer"),
         ("tool", "tool result"),
     ]
+
+
+def test_build_summary_input_skips_replayed_history_copies() -> None:
+    """A run that stored the history its request replayed is summarized from its own turn only."""
+    run = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="earlier question", from_history=True),
+            Message(role="assistant", content="earlier answer", from_history=True),
+            Message(role="tool", content="earlier tool output", from_history=True),
+            Message(role="user", content="current question"),
+            Message(role="assistant", content="current answer"),
+        ],
+    )
+
+    summary_input, included_runs = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        max_input_tokens=1_000,
+    )
+
+    assert included_runs == [run]
+    assert "earlier" not in summary_input
+    assert "current question" in summary_input
+    assert "current answer" in summary_input
 
 
 def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:

@@ -33,6 +33,7 @@ from mindroom.timing import timed
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from agno.metrics import MessageMetrics
     from agno.models.base import Model
     from agno.models.response import ModelResponse
 
@@ -204,7 +205,7 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
-    on_response: Callable[[ModelResponse], Awaitable[None]] | None = None,
+    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None = None,
 ) -> SessionSummary:
     """Bound the provider request, then persist returned usage before validating the summary."""
     timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
@@ -219,9 +220,9 @@ async def generate_compaction_summary(
             )
         finally:
             provider_done.set_result(None)
-        if on_response is not None:
+        if on_usage is not None and response.response_usage is not None:
             try:
-                await on_response(response)
+                await on_usage(response.response_usage)
             except Exception as error:
                 msg = "Could not persist compaction summary usage"
                 raise _CompactionSummaryUsageError(msg) from error

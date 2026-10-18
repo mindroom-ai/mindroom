@@ -2482,6 +2482,15 @@
           "description": "Model alias that extracts entities and facts; required when any agent enables the graph",
           "title": "Model"
         },
+        "extraction_instructions": {
+          "default": "",
+          "description": "Instructions added to the built-in ones when extracting entities and facts, such as which topics, systems, or kinds of facts matter most",
+          "title": "Extraction Instructions",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
         "ingest": {
           "$ref": "#/$defs/KnowledgeGraphIngestConfig",
           "default": {
@@ -5283,6 +5292,7 @@
       "$ref": "#/$defs/KnowledgeGraphConfig",
       "default": {
         "model": null,
+        "extraction_instructions": "",
         "ingest": {
           "backfill_days": 7,
           "idle_seconds": 120,

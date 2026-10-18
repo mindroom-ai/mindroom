@@ -1030,7 +1030,6 @@ async def prepare_agent_execution_context(
         resolved_inputs = resolve_agent_preparation_inputs(
             agent=agent,
             agent_name=agent_name,
-            full_prompt=prepared_prompt,
             config=config,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
@@ -1048,11 +1047,6 @@ async def prepare_agent_execution_context(
             allow_native_compaction=ctx.scheduled_history_budget is None,
         )
 
-    def _estimate_agent_static_tokens(
-        prepared_prompt: str,
-    ) -> int:
-        return static_token_estimator.estimate(prepared_prompt)
-
     return await _prepare_execution_context_common(
         ctx,
         scope_context=scope_context,
@@ -1067,7 +1061,7 @@ async def prepare_agent_execution_context(
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
-        estimate_static_tokens_fn=_estimate_agent_static_tokens,
+        estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_messages_text,
         thread_history_render_limits=None,
         fallback_static_token_budget=_fallback_static_token_budget(
@@ -1119,7 +1113,6 @@ async def _prepare_bound_team_execution_context(
         return await prepare_bound_scope_history(
             agents=agents,
             team=team,
-            full_prompt=prepared_prompt,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -1131,11 +1124,6 @@ async def _prepare_bound_team_execution_context(
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,
         )
-
-    def _estimate_team_static_tokens(
-        prepared_prompt: str,
-    ) -> int:
-        return static_token_estimator.estimate(prepared_prompt)
 
     return await _prepare_execution_context_common(
         ctx,
@@ -1151,7 +1139,7 @@ async def _prepare_bound_team_execution_context(
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
-        estimate_static_tokens_fn=_estimate_team_static_tokens,
+        estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
         attachment_context=_ThreadAttachmentContext(

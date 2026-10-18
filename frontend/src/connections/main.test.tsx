@@ -19,6 +19,8 @@ beforeEach(() => {
     const path = String(input);
     if (path === "/api/connections/egress") return json({ agents: [] });
     if (path === "/api/connections") return json({ agents: [] });
+    if (path === "/api/connections/session")
+      return json({ matrix_user_id: "@bob:example.org" });
     if (path === "/api/connections/me")
       return json({
         matrix_user_id: "@bob:example.org",
@@ -49,6 +51,21 @@ it.each([
   expect(
     await screen.findByRole("heading", { name: "Agent Keys" }),
   ).toBeInTheDocument();
+});
+
+it("signs the egress page in, so its requests name the account it shows", async () => {
+  await loadEntry("/connections/egress");
+  await screen.findByRole("heading", { name: "Agent Keys" });
+  const egress = vi
+    .mocked(fetch)
+    .mock.calls.filter(
+      ([input]) => String(input) === "/api/connections/egress",
+    );
+  expect(egress.length).toBeGreaterThan(0);
+  for (const [, init] of egress)
+    expect(init?.headers).toMatchObject({
+      "X-MindRoom-Connections-User": "@bob:example.org",
+    });
 });
 
 // The server serves the egress page for its own path segment only, so a

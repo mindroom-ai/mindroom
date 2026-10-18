@@ -42,6 +42,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.metrics import MessageMetrics
+    from agno.models.base import Model
     from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
     from sqlalchemy.sql.dml import Insert
@@ -82,12 +84,12 @@ def save_compaction_usage(
     *,
     session_id: str,
     requester_id: str | None,
-    model_provider: str,
-    model: str,
-    metrics: Mapping[str, object],
-    initial_session: AgentSession | TeamSession | None = None,
+    model: Model,
+    usage: MessageMetrics,
+    initial_session: AgentSession | TeamSession | None,
 ) -> None:
-    """Persist one incurred summary response independently of conversation changes."""
+    """Persist one summary response's returned counters independently of conversation changes."""
+    metrics = usage.to_dict()
     created_at = time.time()
     save_independent_usage(
         storage,
@@ -97,10 +99,10 @@ def save_compaction_usage(
         requester_id=requester_id,
         initial_session=initial_session,
         run={
-            "model_provider": model_provider,
-            "model": model,
+            "model_provider": model.get_provider(),
+            "model": model.id,
             "created_at": created_at,
-            "metrics": dict(metrics),
+            "metrics": metrics,
             "messages": [{"role": "assistant", "created_at": created_at, "metrics": dict(metrics)}],
         },
     )
