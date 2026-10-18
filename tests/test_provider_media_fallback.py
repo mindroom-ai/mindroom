@@ -206,10 +206,44 @@ def test_media_fallback_marks_receipt_before_synthetic_viewed_image() -> None:
     )
 
     stripped = cast("list[Message]", kwargs["messages"])
+    assert len(stripped) == 2
     assert stripped[1].images is None
     receipt = json.loads(str(stripped[0].content))
     assert receipt["view_status"] == "unsupported"
-    assert stripped[2].content == "[Inline media unavailable for this model]\nContinue without media."
+    assert stripped[1].content == (
+        "The tool call above generated the attached media.\n\n"
+        "[Inline media unavailable for this model]\nContinue without media."
+    )
+
+
+def test_media_fallback_note_stays_on_the_message_that_lost_media() -> None:
+    """A retry inside a tool loop must not add what reads as a new user turn after the latest tool result."""
+    voice_note = Message(
+        role="user",
+        content="Check the skill.",
+        audio=[Audio(content=b"audio", mime_type="audio/mp4")],
+    )
+    tool_call = Message(
+        role="assistant",
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
+    )
+    tool_result = Message(role="tool", content="file contents", tool_call_id="call_1")
+    messages = [voice_note, tool_call, tool_result]
+
+    _args, kwargs = provider_media_fallback._call_without_media_kinds(
+        (),
+        {"messages": messages},
+        messages,
+        frozenset({"audio"}),
+        "Continue without media.",
+    )
+
+    sent = cast("list[Message]", kwargs["messages"])
+    assert [message.role for message in sent] == ["user", "assistant", "tool"]
+    assert sent[0].audio is None
+    assert sent[0].content == "Check the skill.\n\n[Inline media unavailable for this model]\nContinue without media."
+    assert sent[2].content == "file contents"
+    assert voice_note.audio
 
 
 def _load[LoadedModel](model: LoadedModel, tmp_path: Path) -> LoadedModel:
@@ -389,8 +423,8 @@ async def test_loaded_model_retries_once_without_inline_media_and_preserves_atta
     assert retry_messages[0].images is None
     assert retry_messages[0].files is None
     assert retry_messages[0].videos is None
-    assert retry_messages[-1].temporary is True
-    assert "Inline media unavailable for this model" in str(retry_messages[-1].content)
+    assert len(retry_messages) == 1
+    assert "Inline media unavailable for this model" in str(retry_messages[0].content)
     assert original == original_snapshot
 
 
@@ -433,10 +467,10 @@ async def test_adapter_omissions_are_visible_to_the_model(
         await model.ainvoke(messages=[original])
 
     assert len(provider_calls) == 1
-    sent, guidance = provider_calls[0]
+    (sent,) = provider_calls[0]
     sent_media = {"audio": sent.audio, "image": sent.images, "file": sent.files, "video": sent.videos}
     assert {kind for kind, media in sent_media.items() if media is None} == removed
-    assert "Inline media unavailable" in str(guidance.content)
+    assert "Inline media unavailable" in str(sent.content)
     assert "att_123" in str(sent.content)
     assert original.audio
     assert original.videos
@@ -971,8 +1005,10 @@ async def test_one_rejected_file_does_not_strip_later_pdfs_for_the_route(tmp_pat
         "Error code: 400 - {'object': 'error', 'message': 'text-only is not a multimodal model'}",
         "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
         "Error code: 404 - {'error': {'message': 'No endpoints found that support image input', 'code': 404}}",
+        "Error code: 400 - {'object': 'error', 'message': 'At most 0 image(s) may be provided in one prompt. "
+        "(parameter=image)'}",
     ],
-    ids=["anthropic", "openai", "vllm", "llama_cpp", "openrouter"],
+    ids=["anthropic", "openai", "vllm", "llama_cpp", "openrouter", "vllm_modality_limit"],
 )
 async def test_capability_rejection_teaches_route_after_success(tmp_path: Path, message: str) -> None:
     """A rejection naming the missing input capability lets later requests skip the failed call."""
