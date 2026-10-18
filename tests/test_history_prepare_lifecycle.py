@@ -1043,6 +1043,8 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     progress_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleProgress)]
     assert progress_events
     assert progress_events[-1].runs_remaining > 0
+    # Every progress edit targets the notice the compaction started.
+    assert {event.notice_event_id for event in progress_events} == {lifecycle.start_event_id}
     assert isinstance(lifecycle.events[-1], CompactionOutcome)
 
     persisted.runs = [
