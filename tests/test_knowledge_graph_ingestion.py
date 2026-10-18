@@ -646,6 +646,35 @@ async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_pass_that_does_not_reach_a_failing_agent_keeps_health_failing(tmp_path: Path) -> None:
+    """Another agent's clean pass does not clear a failure until the failing agent's graph is visited cleanly."""
+    config = _config(max_sessions_per_cycle=1)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$m1", ["rm1"])
+    _seed(config, paths, "!room:x:$p1", ["rp1"], agent="pal")
+    failing = True
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del room_id, event_ids
+        if agent_name == "mind" and failing:
+            msg = "event journal unavailable"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    worker = _worker(config, paths, store, redacted)
+    await worker._run_cycle(config, now=T0 + 10)
+    await worker._run_cycle(config, now=T0 + 11)
+    assert store.sessions() == ["!room:x:$p1"]
+    assert knowledge_graph_failure() is not None
+
+    failing = False
+    await worker._run_cycle(config, now=T0 + 12)
+    assert store.sessions() == ["!room:x:$p1", "!room:x:$m1"]
+    assert knowledge_graph_failure() is None
+
+
+@pytest.mark.asyncio
 async def test_a_busy_agent_does_not_take_every_pass(tmp_path: Path) -> None:
     """Passes take turns starting with each agent, so one with a long backlog cannot starve the others."""
     config = _config(max_sessions_per_cycle=1)
@@ -734,7 +763,7 @@ async def test_a_conversation_first_recorded_empty_still_starts_after_the_backfi
     config, paths, store = _config(backfill_days=0), _paths(tmp_path), _FakeStore()
     worker = _worker(config, paths, store)
     await worker._run_cycle(config, now=T0 + 10)
-    # A turn still running when the graph started is stored, but not finished, so the conversation looks empty.
+    # A turn that has not finished, such as one still running when the graph started, is not a Matrix turn yet.
     _seed(config, paths, "!room:x:$t1", ["old"], at=T0 + 5, updated_at=T0 + 20, matrix=False)
     await worker._run_cycle(config, now=T0 + 30)
 

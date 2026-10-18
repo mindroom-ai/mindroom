@@ -208,7 +208,9 @@ class KnowledgeGraphIngestionWorker:
                 # A conversation whose agent is not running is looked at again later and spends none of the budget.
                 budget -= sum(result is not None for result in results)
                 outcomes.extend(result for result in results if result is not None)
-                if any(entry["failing_piece"] for entry in state["sessions"].values()):
+                # A failed conversation keeps its graph failing until a later visit, so a pass that spends its budget
+                # before reaching the graph cannot clear health.
+                if False in results or any(entry["failing_piece"] for entry in state["sessions"].values()):
                     self._failing_graphs.add(scope.graph_name)
                 else:
                     self._failing_graphs.discard(scope.graph_name)
