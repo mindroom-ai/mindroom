@@ -543,7 +543,10 @@ class ChatUITools(Toolkit):
 
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. Without it, show_canvas creates a separate canvas: use a new canvas for a
+        canvas ID. show_canvas reads a ``path`` as soon as it starts, and tool calls made
+        together run at the same time, so call it only after the call that writes the
+        file has returned, never alongside it, or the user gets the old page.
+        Without ``canvas_event_id``, show_canvas creates a separate canvas: use a new canvas for a
         distinct artifact and an update for a new version of the same one. The user can
         switch between this conversation's canvases from the room header. Success means
         the request was sent, not that the user opened or answered it.
