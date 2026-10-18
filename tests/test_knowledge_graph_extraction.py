@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
+import re
+
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, EXTRACTION_INSTRUCTIONS
 
 
 def test_every_entity_type_has_a_description_and_no_fields() -> None:
@@ -25,25 +27,29 @@ def test_every_entity_type_has_a_description_and_no_fields() -> None:
 
 
 def test_every_entity_type_says_what_does_not_belong() -> None:
-    """Without a generic type to fall back on, a type's description is what keeps paths, URLs, and handles out of it."""
+    """The extractor sees only a type's description, so it has to say what is not that type."""
     for name, model in ENTITY_TYPES.items():
         assert model.__doc__
-        description = model.__doc__.lower()
-        assert "never" in description or "not" in description, name
+        assert re.search(r"\b(never|not)\b", model.__doc__.lower()), name
 
 
-def test_graphiti_accepts_the_types_and_the_exclusion() -> None:
-    """Graphiti's own checks in ``add_episode`` reject field names that clash with its nodes and unknown exclusions."""
-    from graphiti_core.helpers import validate_excluded_entity_types  # noqa: PLC0415
-    from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types  # noqa: PLC0415
+def test_graphiti_prompt_lists_exactly_the_types_with_their_docstrings_and_no_entity() -> None:
+    """With ``Entity`` excluded, the types in Graphiti's extraction prompt are ours, described by our docstrings."""
+    from graphiti_core.utils.maintenance.node_operations import (  # noqa: PLC0415
+        _build_entity_types_context,
+        _filter_entity_types_context,
+    )
 
-    assert validate_entity_types(ENTITY_TYPES)
-    assert validate_excluded_entity_types(EXCLUDED_ENTITY_TYPES, ENTITY_TYPES)
+    context = _filter_entity_types_context(_build_entity_types_context(ENTITY_TYPES), EXCLUDED_ENTITY_TYPES)
+
+    assert [
+        (entry["entity_type_id"], entry["entity_type_name"], entry["entity_type_description"]) for entry in context
+    ] == [(type_id, name, model.__doc__) for type_id, (name, model) in enumerate(ENTITY_TYPES.items())]
 
 
 def test_instructions_keep_paths_and_urls_out_and_date_by_occurrence() -> None:
     """Paths and URLs belong inside facts, and a fact is dated by when it held, not when it was discussed."""
-    text = extraction_instructions()
+    text = EXTRACTION_INSTRUCTIONS
     for word in ("file paths", "URLs", "environment variables", "commit hashes", "branch names"):
         assert word in text
     assert "when it happened" in text

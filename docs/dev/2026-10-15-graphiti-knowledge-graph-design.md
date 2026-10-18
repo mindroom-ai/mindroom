@@ -100,12 +100,15 @@ Graphiti needs structured output; small local models may fail extraction, which 
 
 Graphiti's default extraction creates an entity for anything noun-like, and the real openclaw graph shows the result: 2,097 of its 8,627 entities have no facts, and file paths (`/home/basnijholt/.mindroom-chat/config.yaml`), source files (`compaction.py`), memory notes (`memory/2026-04-05.md`), URLs, and a `capacitor://` link became entities.
 `knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and fixed extraction instructions.
-Graphiti reads a type model's docstring as the type's description, so the docstrings are what the extractor sees: handles and email addresses belong to a person, and a `Document` is never a file path.
-With `Entity` excluded, Graphiti removes it from the list of types the extractor chooses from, so the model must pick one of the nine types for a node or leave the node out; only a type id outside the list falls back to `Entity`, which is then dropped.
-Keeping paths and URLs out therefore rests on the docstrings and the instructions, not on a filter, and each docstring says what does not belong to its type.
+Graphiti reads a type model's docstring as the type's description, so the docstrings are what the extractor sees: a handle, Matrix ID, or email address names whoever it belongs to and is never an entity of its own, and a `Document` is never a file path.
+With `Entity` excluded, Graphiti removes it from the list of types the extractor is asked to choose from, and drops a node whose type id falls outside that list.
+Keeping paths and URLs out is what the docstrings and the instructions aim for, not something the exclusion guarantees, so each docstring says what does not belong to its type.
+When the edge extractor names an endpoint that is not in the extracted node list, Graphiti's `materialize_dangling_endpoint_node` saves it as a node labelled only `Entity` and never checks `excluded_entity_types` on that path; its own comment says this happens especially for value-like endpoints, for example `openclaw -> EDITED -> config.yaml`.
+Such untyped nodes can still appear, and cleaning them up belongs to the separate maintenance command.
 The instructions ask for one full name per entity, keep paths, source files, URLs, environment variables, configuration keys, commit hashes, branch names, command lines, and log files inside the facts that use them, and date each fact by when it happened or held rather than when it was discussed.
 They reach only the node and edge extraction prompts, not entity deduplication or summaries.
-Existing graphs keep their old nodes; only new episodes follow the types, at the cost of a longer prompt.
+Existing graphs keep their old nodes; only new episodes follow the types.
+The accepted costs are a longer prompt and coverage: anything outside the nine types (pets, illnesses, foods, hobbies, topics) gets no node, and a fact that needs it as an endpoint is dropped, or becomes an untyped dangling node as above.
 
 Rejected: fields on the type models.
 Graphiti makes an extra model call to fill the fields of every node whose type has any, which would raise the cost of each episode, and a field named like one of `EntityNode`'s own (`name`, `summary`, `attributes`, and others) raises `EntityTypeValidationError`.

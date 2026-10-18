@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge_graph import store as store_module
-from mindroom.knowledge_graph.extraction import ENTITY_TYPES, extraction_instructions
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXTRACTION_INSTRUCTIONS
 from mindroom.knowledge_graph.scope import GraphScope
 from mindroom.knowledge_graph.store import EpisodeInput, GraphitiStore, _FactSource
 from mindroom.knowledge_graph.usage import UsageTarget
@@ -451,4 +451,4 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
     assert kwargs["previous_episode_uuids"] == []
     assert kwargs["entity_types"] is ENTITY_TYPES
     assert kwargs["excluded_entity_types"] == ["Entity"]
-    assert kwargs["custom_extraction_instructions"] == extraction_instructions()
+    assert kwargs["custom_extraction_instructions"] == EXTRACTION_INSTRUCTIONS

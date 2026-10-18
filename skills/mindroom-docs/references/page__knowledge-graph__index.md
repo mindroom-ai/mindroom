@@ -48,7 +48,8 @@ Changing the embedder starts a new, empty graph that fills again from conversati
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Extraction sorts what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, and leaves out anything that fits none of them; file paths, URLs, and the like stay inside the facts that mention them instead of becoming entities.
+Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, and to leave out what fits none of them, so pets, foods, hobbies, and topics get no entity of their own, and to keep file paths, URLs, and the like inside the facts that mention them.
+This steers the model rather than filtering its output, so an occasional untyped entity, such as a file that only a fact names, can still appear.
 
 Not added: threads started by other automations such as `dreaming`, graph lookups, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, and team conversations.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
