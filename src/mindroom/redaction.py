@@ -24,6 +24,7 @@ __all__ = [
     "nests_beyond_redaction_depth",
     "redact_config_text",
     "redact_log_event",
+    "redact_private_keys",
     "redact_sensitive_data",
     "redact_sensitive_text",
     "truncate_review_text",
@@ -555,6 +556,11 @@ def _redact_prose_token(match: re.Match[str]) -> str:
     return _redact_matched_token(match)
 
 
+def redact_private_keys(value: str) -> str:
+    """Replace each PEM private key, which spans several lines, with the redaction placeholder."""
+    return _PRIVATE_KEY_PATTERN.sub(REDACTED, value)
+
+
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
     has_assignment = "=" in bounded_value or ":" in bounded_value
@@ -567,7 +573,7 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key)):
         return _truncate_text(bounded_value, max_length)
     # Keys go first, so the patterns below never see, or fail closed on, a key's body.
-    redacted = _PRIVATE_KEY_PATTERN.sub(REDACTED, bounded_value) if has_private_key else bounded_value
+    redacted = redact_private_keys(bounded_value) if has_private_key else bounded_value
     redacted = URL_PATTERN.sub(_redact_url_match, redacted) if has_url else redacted
     redact_token = _redact_prose_token if prose else _redact_matched_token
     if has_bearer:

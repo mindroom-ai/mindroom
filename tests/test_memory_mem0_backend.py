@@ -32,13 +32,14 @@ from mindroom.memory import (
     delete_agent_memory,
     get_agent_memory,
     list_all_agent_memories,
+    redact_memory_text,
     search_agent_memories,
     store_conversation_memory,
     update_agent_memory,
 )
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
-from mindroom.redaction import REDACTION_FAILED
+from mindroom.redaction import REDACTED, REDACTION_FAILED
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -1121,3 +1122,13 @@ async def test_conversation_memory_removes_credentials_before_mem0(
     assert "env:" in messages[-1]["content"]
     if with_history:
         assert messages[1]["content"] == "Noted, Atlas is yours."
+
+
+def test_memory_text_removes_a_pasted_private_key_whole() -> None:
+    """A PEM private key spans several lines, so it is removed from its BEGIN line through its END line."""
+    body = "\n".join(f"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC{index:032d}" for index in range(4))
+    key = f"-----BEGIN OPENSSH PRIVATE KEY-----\n{body}\n-----END OPENSSH PRIVATE KEY-----"
+
+    redacted = redact_memory_text(f"The mirror uses this key:\n{key}\nRotate it yearly.")
+
+    assert redacted == f"The mirror uses this key:\n{REDACTED}\nRotate it yearly."
