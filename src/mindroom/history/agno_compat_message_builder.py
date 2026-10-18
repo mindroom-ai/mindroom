@@ -84,7 +84,8 @@ if TYPE_CHECKING:
 # Coverage: tests/test_history_summary_message.py::test_summary_is_the_first_history_message_for_new_runs;
 # tests/test_history_summary_message.py::test_summary_is_reinserted_on_synchronous_continuation;
 # tests/test_history_summary_message.py::test_approval_resume_replays_the_summary_once;
-# tests/test_mid_turn_compaction.py::test_next_turn_reuses_the_post_compaction_prefix.
+# tests/test_mid_turn_compaction.py::test_next_turn_reuses_the_post_compaction_prefix;
+# tests/test_mid_turn_log.py::test_a_fold_completed_after_a_later_turn_replays_its_summary_first.
 
 # AGNO_COMPAT: No public reference to the session a running loop writes when it ends.
 # Reason: Agno loads a run's session privately and writes that object back when the run ends, so mid-turn

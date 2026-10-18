@@ -2319,7 +2319,7 @@ def create_agent(  # noqa: PLR0915
         tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
-        # The summary replays as the first history message instead (history/agno_compat_message_builder.py).
+        # The summary replays as a history message instead (history/agno_compat_message_builder.py).
         add_session_summary_to_context=False,
         num_history_runs=history_policy.num_history_runs,
         num_history_messages=history_policy.num_history_messages,
