@@ -1465,6 +1465,7 @@ depends_on = [
     "mindroom.agent_policy",
     "mindroom.constants",
     "mindroom.private_storage.private_instance_identity_store",
+    "mindroom.requester_identity",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]

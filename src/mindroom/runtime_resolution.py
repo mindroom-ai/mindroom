@@ -21,6 +21,7 @@ from mindroom.constants import (
     resolve_session_state_root,
 )
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -156,6 +157,7 @@ def _resolved_private_state_root(
 def resolve_agent_execution(
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
@@ -172,6 +174,10 @@ def resolve_agent_execution(
             raise ValueError(msg)
         if not execution_identity.requester_id or not execution_identity.requester_id.strip():
             msg = f"Private agent '{agent_name}' requires a requester identity to resolve requester-local state"
+            raise ValueError(msg)
+        # MindRoom's own accounts act for no one, so they never own a private instance.
+        if not is_access_checked_requester_id(execution_identity.requester_id, config, runtime_paths):
+            msg = f"Private agent '{agent_name}' requires a human or bot-account requester to resolve requester-local state"
             raise ValueError(msg)
     resolved_worker_execution = resolve_worker_execution_scope(
         execution_scope,
@@ -295,6 +301,7 @@ def resolve_agent_storage(
     resolved_execution = resolve_agent_execution(
         agent_name,
         config,
+        runtime_paths,
         execution_identity=execution_identity,
     )
     if resolved_execution.policy.private_workspace_enabled:

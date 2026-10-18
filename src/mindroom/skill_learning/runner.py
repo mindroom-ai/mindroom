@@ -64,9 +64,9 @@ class _ReviewScope:
     session: str
     identity: ToolExecutionIdentity | None
 
-    def key(self, config: Config) -> str:
+    def key(self, config: Config, runtime_paths: RuntimePaths) -> str:
         """Return the conversation's key: its agent, private worker scope, and session."""
-        execution = resolve_agent_execution(self.agent, config, execution_identity=self.identity)
+        execution = resolve_agent_execution(self.agent, config, runtime_paths, execution_identity=self.identity)
         worker = f"{execution.worker_key}:" if execution.is_private else ""
         return f"{self.agent}:{worker}{self.session}"
 
@@ -127,7 +127,8 @@ class SkillReviewRunner:
         identity: ToolExecutionIdentity | None,
     ) -> None:
         """Stop a conversation's review because a response starts in it."""
-        if (task := self._reviews.get(_ReviewScope(agent_name, session_id, identity).key(config))) is not None:
+        key = _ReviewScope(agent_name, session_id, identity).key(config, self.runtime_paths)
+        if (task := self._reviews.get(key)) is not None:
             task.cancel()
 
     async def count(
@@ -148,7 +149,7 @@ class SkillReviewRunner:
         """
         scope = _ReviewScope(agent_name, session_id, identity)
         replies, restarted = await asyncio.to_thread(_response_replies, config, self.runtime_paths, scope, run_id)
-        key = scope.key(config)
+        key = scope.key(config, self.runtime_paths)
         replies += 0 if restarted else self._replies.get(key, 0)
         running = self._reviews.get(key)
         if (

@@ -121,7 +121,7 @@ def agent_instances(
 
     Only the primary's copy of an owner record names a requester, so an instance worker code created is not listed.
     A requester now aliased to another ID is skipped, because ingress would route that requester to the other ID's
-    instance.
+    instance, and so is an instance owned by one of MindRoom's own accounts, which may not own one.
     """
     instances: list[tuple[str, str | None]] = []
     for agent_name in agent_names:
@@ -139,6 +139,7 @@ def agent_instances(
             record.requester_id
             for record in records
             if record.requester_id is not None
+            and is_access_checked_requester_id(record.requester_id, config, runtime_paths)
             and resolve_human_requester_alias(record.requester_id, config, runtime_paths) == record.requester_id
         }
         instances.extend((agent_name, requester_id) for requester_id in sorted(requesters))

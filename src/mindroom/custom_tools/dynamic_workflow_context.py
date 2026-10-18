@@ -56,6 +56,7 @@ def _agent_scope_owner_id(context: ToolRuntimeContext) -> str:
     resolved_execution = resolve_agent_execution(
         context.agent_name,
         context.config,
+        context.runtime_paths,
         execution_identity=execution_identity,
     )
     if not resolved_execution.policy.private_workspace_enabled:

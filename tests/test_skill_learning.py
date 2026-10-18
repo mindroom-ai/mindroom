@@ -251,7 +251,8 @@ async def _count(
         captured=captured,
         correlation_id=correlation_id,
     )
-    return runner._reviews.get(runner_module._ReviewScope("mind", session_id, identity).key(config))
+    key = runner_module._ReviewScope("mind", session_id, identity).key(config, runner.runtime_paths)
+    return runner._reviews.get(key)
 
 
 @dataclass

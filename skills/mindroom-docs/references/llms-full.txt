@@ -1780,6 +1780,7 @@ How a private agent behaves:
 - Private agents cannot be configured as team members, and a shared team member cannot reach one through `delegate_to`.
   Tagging a private agent together with other agents in a message still forms an ad hoc team for that requester.
 - A private agent runs only for a known requester; otherwise it fails with `Private agent '<name>' requires an active execution identity to resolve requester-local state`.
+- It never runs for MindRoom's own router, agent, and team accounts or the internal `mindroom_user` account, for example when a shared agent's automation mentions it, delegates to it, or assigns it a todo; that run fails with `Private agent '<name>' requires a human or bot-account requester to resolve requester-local state`.
 
 ### Private Fields
 

@@ -12,8 +12,14 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature
 from mindroom.knowledge_graph.scope import _graph_name, graph_scope, graph_scopes
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.worker_routing import build_requester_execution_identity
+from mindroom.tool_system.worker_routing import (
+    build_requester_execution_identity,
+    private_instance_scope_root_path,
+    resolve_worker_key,
+)
+from tests.identity_helpers import fixture_entity_matrix_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -106,3 +112,20 @@ def test_private_instances_get_distinct_graphs(tmp_path: Path) -> None:
     for requester in (ALICE, BOB):
         identity = build_requester_execution_identity(agent_name="pal", runtime_paths=paths, requester_id=requester)
         assert graph_scope("pal", config, paths, identity).graph_name == by_owner[("pal", requester)]
+
+
+def test_an_instance_an_agent_account_owns_gets_no_graph(tmp_path: Path) -> None:
+    """No turn runs an instance one of MindRoom's own accounts came to own, so it is skipped, not failing every graph."""
+    config = _config()
+    paths = _paths(tmp_path)
+    _create_private_instance(config, paths, ALICE)
+    agent_id = fixture_entity_matrix_id("mind", config.get_domain(paths), paths).full_id
+    identity = build_requester_execution_identity(agent_name="pal", runtime_paths=paths, requester_id=agent_id)
+    worker_key = resolve_worker_key("user", identity, agent_name="pal")
+    assert worker_key is not None
+    ensure_private_instance_identity(paths.storage_root, worker_key=worker_key, requester_id=agent_id)
+    (private_instance_scope_root_path(paths.storage_root, worker_key) / "pal").mkdir()
+
+    scopes = graph_scopes(config, paths)
+
+    assert {(scope.agent_name, _requester(scope)) for scope in scopes} == {("mind", None), ("pal", ALICE)}

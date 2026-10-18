@@ -57,7 +57,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, Mod
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
-from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
+from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
@@ -1536,13 +1536,24 @@ def test_resolve_agent_runtime_separates_previously_colliding_requesters(
 
 def test_resolve_agent_execution_rejects_private_instance_identity_without_requester(tmp_path: Path) -> None:
     """Private execution resolution must reject a missing requester before routing a worker."""
-    bound_config, _, execution_identity = _private_runtime_resolution_context(tmp_path, requester_id=None)
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path, requester_id=None)
 
     with pytest.raises(
         ValueError,
         match=re.escape("Private agent 'general' requires a requester identity to resolve requester-local state"),
     ):
-        resolve_agent_execution("general", bound_config, execution_identity=execution_identity)
+        resolve_agent_execution("general", bound_config, runtime_paths, execution_identity=execution_identity)
+
+
+def test_session_storage_refuses_a_private_instance_owned_by_a_mindroom_account(tmp_path: Path) -> None:
+    """A private agent run as its own account, like an internal todo poke, must not create an instance it owns."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    agent_identity = replace(execution_identity, requester_id=current_entity_id("general", runtime_paths).full_id)
+
+    with pytest.raises(ValueError, match=re.escape("requires a human or bot-account requester")):
+        create_session_storage("general", bound_config, runtime_paths, execution_identity=agent_identity)
+
+    assert private_instances_for_agent(runtime_paths.storage_root, "general", "user") == ()
 
 
 def test_resolve_agent_runtime_rejects_whitespace_private_instance_requester_before_creation(
@@ -1794,6 +1805,7 @@ def test_runtime_resolution_exports_public_resolved_agent_execution_contract(tmp
     resolved_execution = runtime_resolution.resolve_agent_execution(
         "general",
         config,
+        runtime_paths,
         execution_identity=None,
     )
 
