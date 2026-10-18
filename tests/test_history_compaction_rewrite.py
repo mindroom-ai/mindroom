@@ -1877,3 +1877,63 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
     assert "RUN1-MARKER" in summary_inputs[1]
     assert "RUN2-MARKER" in summary_inputs[2]
     assert "first chunk summary" in summary_inputs[2]
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_model(tmp_path: Path) -> None:
+    """Only a stored chunk's model is reported; a refused chunk the fallback wrote but could not store is not."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                f"run-{index}",
+                messages=[
+                    Message(role="user", content=f"RUN{index}-MARKER " + ("u" * 16_000)),
+                    Message(role="assistant", content="a" * 16_000),
+                ],
+            )
+            for index in (1, 2)
+        ],
+    )
+    seed_session(storage, session)
+    fallback = SummaryModel(FakeModel(id="fallback-model-id", provider="fake"), "fallback-model", 6_000)
+    summary_mock = AsyncMock(
+        side_effect=[
+            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
+            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
+            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+        ],
+    )
+    appended: list[bool] = []
+
+    def append_chunk(*args: object, **kwargs: object) -> bool:
+        # The fallback's chunk loses its compare-and-append to a concurrent writer.
+        stored = append_compaction_chunk(*args, **kwargs) if not appended else False
+        appended.append(stored)
+        return stored
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.compaction.append_compaction_chunk", new=append_chunk),
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            summarizer=_summarizer(input_budget_tokens=6_000, fallback=fallback),
+            available_history_budget=None,
+            before_tokens=0,
+            replay_window_tokens=None,
+            threshold_tokens=None,
+            progress=None,
+            complete=_reported,
+            replay_model=None,
+        )
+
+    assert appended == [True, False]
+    assert outcome is not None
+    assert outcome.summary == "first chunk summary"
+    assert outcome.summary_model == "summary-model"

@@ -372,7 +372,6 @@ async def _rewrite_working_session_for_compaction(
                 summary_input_budget_tokens=summarizer.model.input_budget_tokens,
             )
             break
-        summarizer = chunk.summarizer
         await before_persist(chunk.included_runs)
         compacted_run_ids = tuple(run.run_id for run in chunk.included_runs if run.run_id)
         chunk_summary = SessionSummary(summary=chunk.summary.summary, updated_at=datetime.now(UTC))
@@ -385,12 +384,13 @@ async def _rewrite_working_session_for_compaction(
                 basis=basis,
                 included_run_ids=compacted_run_ids,
                 summary=chunk_summary,
-                summary_model=_model_identifier(summarizer.model.model),
+                summary_model=_model_identifier(chunk.summarizer.model.model),
             ),
         )
         if not appended:
             _log_conversation_changed(persisted_session.session_id, scope, compacted_run_count)
             break
+        summarizer = chunk.summarizer
         summary_text = chunk_summary.summary
         working_session.summary = chunk_summary
         working_session.runs = runs_without(working_session.runs or [], compacted_run_ids)
