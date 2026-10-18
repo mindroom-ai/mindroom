@@ -131,8 +131,9 @@ Display names are stored only in each message's `<msg>` envelope, and a stopped 
 A name keeps letters, digits, spaces, `.'-`, and a combining mark on a letter, because display names carry emoji and colons and Graphiti ends a speaker at the first colon.
 A `knowledge_graph.aliases` entry gives an agent or person its name only through a stable ID it lists, a Matrix user ID, which has a server part, or an agent or team key, in any letter case as validation compares aliases; its other aliases are plain names that the instructions list and `graph_entity` resolves.
 A linked person or agent keeps the other names it had without the entry (a listed Matrix ID's localpart, an agent's display name), so adding an entry never loses a name.
-Someone whose display name is an entry's name, without their Matrix ID in it, goes by their localpart, so they never merge into the entry's person.
-Localparts repeat across federated homeservers, so a localpart that an entry or agent is named gets the server added, without a colon (`alice work.example`).
+Someone whose display name is the name of an entry that links someone (it lists a Matrix ID or stands for an agent), without their Matrix ID in it, goes by their localpart, so they never merge into the entry's person or agent.
+An entry that links nobody gets no such guard: a speaker named like it merges with it by name, as Graphiti would anyway, which is what someone who names an entry after their own display name wants.
+Localparts repeat across federated homeservers, so a localpart that a linking entry or an agent is named gets the server added, without a colon (`alice work.example`).
 Each episode's instructions list the graph's own agent, the episode's speakers, and every entry, so people and things MindRoom has no account for get one name too.
 Entities that share a name are listed once, and an alias that another listed entity is named, or that two of them go by, is left out, so no listed name means two entities.
 `graph_entity` follows the same rule: an entry's or agent's own name wins over another entry's alias, so an entry that keeps a person apart from an agent with their display name never turns a lookup of the agent's name into the person.
@@ -148,7 +149,7 @@ Rejected: labeling speakers by Matrix ID, which makes the Matrix ID the entity, 
 Rejected: remembering each person's display name in the ingestion state, since the conversation's stored turns already hold it.
 
 Limitations: a person whose display name changes gets the new name in later episodes, and a message without a display name names its sender by localpart unless another of their messages in the conversation carried one.
-Two people with one display name, or a person named like an agent, share an entity unless an entry names one of them through their Matrix ID.
+Two people with one display name, a person named like an agent, or anyone named like an entry that links nobody share an entity unless an entry names one of them through their Matrix ID.
 Every entry is in every episode's instructions, so a long list lengthens every extraction prompt.
 
 ## Ingestion invariants

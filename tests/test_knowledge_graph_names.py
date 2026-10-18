@@ -195,3 +195,15 @@ def test_a_username_an_entry_or_agent_is_named_gets_its_server() -> None:
     assert names.speaker("@alice:work.test:8448", {}, "mind").name == "alice work.test 8448"
     assert names.speaker("@bob:work.test", {"@bob:work.test": "Bob"}, "mind").name == "Bob"
     assert names.speaker("@bob:work.test", {}, "mind").name == "bob"
+
+
+def test_a_speaker_named_like_an_entry_that_links_nobody_joins_it() -> None:
+    """Only an entry that links someone keeps others' display names off its name; a plain entry adds names to a speaker."""
+    names = _names({"Robin Vale": ["Robin", "robin@example.test"]})
+
+    robin = names.speaker("@rvale:example.test", {"@rvale:example.test": "Robin Vale"}, "mind")
+
+    assert robin.name == "Robin Vale"
+    assert names.known_entities("mind", [robin])[1:] == (
+        KnownEntity("Robin Vale", "person", ("@rvale:example.test", "rvale", "Robin", "robin@example.test")),
+    )

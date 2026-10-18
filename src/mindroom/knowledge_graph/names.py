@@ -70,17 +70,19 @@ class EntityNames:
         """Return who said a message: the graph's own agent when ``sender`` is None, another agent, or a person.
 
         A person is named by the entry listing their Matrix ID, else by their display name in ``display_names``, else by
-        their localpart, which also names someone whose display name is an entry's name, since anyone can take one.
-        Usernames repeat across homeservers, so a localpart that an entry or agent is named gets the server too.
+        their localpart, which also names someone whose display name is the name of an entry that links someone else,
+        since anyone can take a display name; an entry that links nobody instead adds its names to such a speaker.
+        Usernames repeat across homeservers, so a localpart that such an entry or an agent is named gets the server too.
         """
         if sender is None:
             return self.agents[own_agent]
         if (linked := self.linked.get(sender.casefold())) is not None:
             return linked
         localpart, _, server = sender.removeprefix("@").partition(":")
-        taken = {entity.name.casefold() for entity in (*self.entries.values(), *self.agents.values())}
+        linking = {entry.name.casefold() for entry in self.entries.values() if entry.kind is not None}
+        taken = linking | {agent.name.casefold() for agent in self.agents.values()}
         name = _canonical_name(display_names.get(sender), localpart)
-        if name.casefold() in {entry.casefold() for entry in self.entries}:
+        if name.casefold() in linking:
             name = localpart
         if name == localpart and localpart.casefold() in taken:
             # Cleaned like a display name, so a server's port adds no colon.
