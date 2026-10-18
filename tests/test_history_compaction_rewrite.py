@@ -1937,3 +1937,39 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
     assert outcome is not None
     assert outcome.summary == "first chunk summary"
     assert outcome.summary_model == "summary-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("before_tokens", "available_history_budget"), [(1_000, 1_000), (1_000, None)])
+async def test_compact_scope_history_skips_unforced_history_that_fits(
+    tmp_path: Path,
+    before_tokens: int,
+    available_history_budget: int | None,
+) -> None:
+    """Without a manual request, history at or under its budget, or with no budget, is left alone."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")]))
+    session = get_agent_session(storage, "session-1")
+    assert session is not None
+    summary_mock = AsyncMock(return_value=SessionSummary(summary="unused", updated_at=datetime.now(UTC)))
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            state=HistoryScopeState(),
+            summarizer=_summarizer(),
+            available_history_budget=available_history_budget,
+            before_tokens=before_tokens,
+            replay_window_tokens=None,
+            threshold_tokens=None,
+            progress=None,
+            complete=_reported,
+            replay_model=None,
+        )
+
+    assert outcome is None
+    summary_mock.assert_not_awaited()
+    assert summary_rows_of(storage, "agent:test_agent") == []

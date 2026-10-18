@@ -116,7 +116,7 @@ def scope_usage_recorder(storage: BaseDb, session_id: str) -> Callable[[Model, M
 class _SummaryChunk:
     summary: SessionSummary
     included_runs: list[RunOutput | TeamRunOutput]
-    # What later chunks use: once a fallback served a chunk, it serves the rest too.
+    # The summarizer that served this chunk, which later chunks use: once a fallback served one, it serves the rest.
     summarizer: Summarizer
 
 
@@ -217,7 +217,7 @@ async def compact_scope_history(
 ) -> CompactionOutcome | None:
     """Compact one scope by appending summary rows that fold its oldest runs, chunk by chunk.
 
-    ``progress`` receives each persisted chunk's progress and ``complete`` the outcome once every chunk is stored.
+    ``progress`` receives each persisted chunk's progress and ``complete`` the outcome after the last stored chunk.
     """
     history_settings = summarizer.history_settings
     visible_runs = scope_visible_runs(session, scope)
