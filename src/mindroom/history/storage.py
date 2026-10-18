@@ -509,6 +509,11 @@ def _adopt_session_fields(
     session.summary = source.summary
 
 
+def reload_session(storage: BaseDb, session: AgentSession | TeamSession) -> None:
+    """Sync one in-memory session's durable fields from its freshest stored row."""
+    _adopt_session_fields(session, _latest_persisted_session(storage, session))
+
+
 def update_scope_state_on_latest(
     storage: BaseDb,
     session: AgentSession | TeamSession,
@@ -586,7 +591,7 @@ def append_compaction_chunk(
     )
     if row_id is None:
         return False
-    _adopt_session_fields(session, _latest_persisted_session(storage, session))
+    reload_session(storage, session)
     return True
 
 

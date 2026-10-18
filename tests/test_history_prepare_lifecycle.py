@@ -1065,9 +1065,12 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_chunk", ["fails", "outrun"])
 async def test_prepare_history_for_run_persists_successful_compaction_chunks_before_later_failure(
     tmp_path: Path,
+    second_chunk: str,
 ) -> None:
+    """A later chunk's failure, or a writer outrunning it, keeps the chunks already stored."""
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -1157,12 +1160,17 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         summary_input_budget_tokens=summary_input_budget,
         compaction_timeout_seconds=600.0,
     )
-    summary_mock = AsyncMock(
-        side_effect=[
-            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
-            RuntimeError("summary failed"),
-        ],
-    )
+
+    async def summarize(**_kwargs: object) -> SessionSummary:
+        if summary_mock.await_count == 1:
+            return SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC))
+        if second_chunk == "fails":
+            msg = "summary failed"
+            raise RuntimeError(msg)
+        storage.delete_runs(["run-3"])
+        return SessionSummary(summary="stale second summary", updated_at=datetime.now(UTC))
+
+    summary_mock = AsyncMock(side_effect=summarize)
 
     with (
         patch(
@@ -1192,10 +1200,15 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == first_summary_text
-    assert [run.run_id for run in persisted.runs or []] == ["run-3"]
+    assert [run.run_id for run in persisted.runs or []] == (["run-3"] if second_chunk == "fails" else [])
     assert summary_mock.await_count == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
+    if second_chunk == "fails":
+        assert prepared.compaction_outcomes == []
+    else:
+        [outcome] = prepared.compaction_outcomes
+        assert outcome.summary == first_summary_text
+        assert outcome.compacted_run_count == 2
 
 
 @pytest.mark.asyncio
@@ -1714,6 +1727,8 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
     assert persisted is not None
     assert persisted.summary is None
     assert read_scope_state(persisted, scope).force_compact_before_next_run is True
+    # The reply plans with what the conversation holds now, not the run the redaction removed.
+    assert [run.run_id for run in session.runs or []] == ["run-2"]
     assert prepared.compaction_reply_outcome == "failed"
     assert isinstance(lifecycle.events[-1], CompactionLifecycleFailure)
     assert lifecycle.events[-1].failure_reason == "The conversation changed during compaction."
