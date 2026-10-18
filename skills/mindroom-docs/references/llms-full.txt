@@ -14744,6 +14744,12 @@ The cookie is browser-wide, so a second sign-in in another tab replaces it.
 To keep a stale tab from acting as the new account, the Connections pages send the Matrix ID they show in the `X-MindRoom-Connections-User` header on every `/api/connections` request.
 MindRoom answers 401 when that header names a different account than the request authenticates as, whether by a session or by trusted upstream.
 Requests without the header, such as OAuth popup navigations, still work.
+At sign-in, MindRoom also records in the signed cookie whether the session may open the dashboard.
+It may only when the user is in `administrators`, `MINDROOM_PUBLIC_URL` is set, and the homeserver's `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true`, which MindRoom's Tuwunel fork does while it binds tokens.
+Under binding, a token that verified with this deployment's audience was requested for this deployment, so another deployment's operator cannot replay it here; without binding they could, and the dashboard is full control.
+The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.
+Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
+Signing out of the dashboard deletes the cookie.
 
 ## Known gaps
 
@@ -19460,8 +19466,13 @@ A session authenticates only these paths:
 - The OAuth callback, `/api/oauth/{provider}/callback`, for flows started under the session.
 - The OAuth success page, `/api/oauth/{provider}/success`.
 
-It never grants dashboard or administrator access, even to an administrator.
-Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth, which the dashboard keeps using, and alongside trusted upstream sign-in.
+For a user listed in `administrators`, the session also opens the dashboard and its APIs, with no API key, when the homeserver binds tokens: MindRoom's Tuwunel fork with `mindroom_openid_audience` on, which MindRoom detects from `/_matrix/client/versions` at sign-in.
+Without binding, a token could have been replayed from another deployment on the same homeserver, and the dashboard is full control of this one.
+So the session reaches the dashboard only when it was started while the homeserver bound tokens and `MINDROOM_PUBLIC_URL` was set, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
+The Connections header links the dashboard for administrators only.
+Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
+Signing out of the dashboard also ends this session.
+Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 `GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
 
 ## Helm Charts
@@ -19496,7 +19507,7 @@ Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
 With the Connections portal enabled, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the portal and the OAuth callback, success, and reset pages keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
-A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) never reaches dashboard routes, so it needs no administrator check.
+A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
 Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.
 A personal OAuth link opened by a browser signed in as anyone other than the requester who received it fails with `403`; see [Connect An Account](https://docs.mindroom.chat/oauth-framework/#connect-an-account) for link rules.

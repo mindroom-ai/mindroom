@@ -433,6 +433,122 @@ def test_session_ignored_on_dashboard_routes(signin: dict[str, Any]) -> None:
     assert client.get("/api/config/agents", headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
 
 
+def _admin_dashboard_client(signin: dict[str, Any]) -> TestClient:
+    """Return a browser signed in from Chat as administrator alice on a homeserver that binds tokens."""
+    _with_admin(signin)
+    signin["binds"].return_value = True
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    return client
+
+
+def test_admin_dashboard_session_reaches_dashboard_api(signin: dict[str, Any]) -> None:
+    """An administrator signed in with a bound token uses the dashboard API without the API key."""
+    client = _admin_dashboard_client(signin)
+    assert client.get("/api/config/agents").status_code == 200
+
+
+def test_admin_dashboard_session_loads_dashboard_page(
+    signin: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard shell loads instead of redirecting the administrator to the API-key login."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("administrator dashboard")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
+    client = _admin_dashboard_client(signin)
+
+    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 200
+    assert response.text == "administrator dashboard"
+
+
+def test_session_without_dashboard_bit_keeps_api_key_rule(signin: dict[str, Any]) -> None:
+    """An administrator whose sign-in was not proven bound still needs the API key for the dashboard."""
+    _with_admin(signin)
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    assert client.get("/api/config/agents").status_code == 401
+    assert client.get("/api/config/agents", headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
+
+
+def test_removed_admin_loses_dashboard_access_next_request(signin: dict[str, Any]) -> None:
+    """Administrator authority is read on every request, not frozen into the session."""
+    client = _admin_dashboard_client(signin)
+    _serve(signin)
+    assert client.get("/api/config/agents").status_code == 401
+
+
+def test_dashboard_session_ignored_in_platform_mode(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hosted platform dashboards keep their account ownership check, so the session never authenticates them."""
+    _admin_dashboard_client(signin)
+    token = signin["client"].cookies.get(CONNECTIONS_SESSION_COOKIE)
+    monkeypatch.setattr(auth, "_init_supabase_auth", lambda _paths, _settings: object())
+    _with_admin(signin)
+
+    def session_user(path: str) -> dict[str, Any] | None:
+        request = Request(
+            {
+                "type": "http",
+                "app": main.app,
+                "method": "GET",
+                "scheme": "https",
+                "server": ("portal.example.org", 443),
+                "path": path,
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"portal.example.org"),
+                    (b"cookie", f"{CONNECTIONS_SESSION_COOKIE}={token}".encode()),
+                ],
+            },
+        )
+        return auth._connections_session_auth_user(request)
+
+    assert session_user("/api/config/agents") is None
+    assert session_user("/api/connections/session") is not None
+
+
+def test_dashboard_session_cannot_finish_api_key_started_flow(signin: dict[str, Any]) -> None:
+    """A flow started with the API key finishes only as the API-key identity, even beside an admin session."""
+    dashboard = _dashboard_client()
+    state = _dashboard_connect_state(dashboard)
+    portal = _admin_dashboard_client(signin)
+
+    rejected = portal.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 401
+
+    _complete_callback(dashboard, state)
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@owner:example.org") is not None
+    assert stored(requester_id="@alice:example.org") is None
+
+
+def test_dashboard_session_mutation_requires_same_origin(signin: dict[str, Any]) -> None:
+    """Dashboard changes made with the session keep the same-origin rule."""
+    client = _admin_dashboard_client(signin)
+    connect = partial(client.post, "/api/oauth/google_drive/connect", params={"agent_name": "personal"})
+    assert connect(headers={"Origin": "https://evil.example"}).status_code == 403
+    assert connect(headers={"Origin": PORTAL_ORIGIN}).status_code == 200
+
+
+def test_dashboard_sign_out_clears_portal_session(signin: dict[str, Any]) -> None:
+    """Signing out of the dashboard also ends the portal session that opened it."""
+    client = _admin_dashboard_client(signin)
+    response = client.delete("/api/auth/session", headers={"Origin": PORTAL_ORIGIN})
+    assert response.status_code == 200
+    cleared = response.headers.get_list("set-cookie")
+    assert any(cookie.startswith("mindroom_api_key=") for cookie in cleared)
+    assert any(cookie.startswith(f"{CONNECTIONS_SESSION_COOKIE}=") and "Secure" in cookie for cookie in cleared)
+    assert client.get("/api/connections/session").status_code == 401
+    assert client.get("/api/config/agents").status_code == 401
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [
@@ -498,7 +614,7 @@ def test_session_cookie_ignored_for_admin_on_dashboard_routes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Even an administrator's portal session never opens administrator routes; their signed upstream identity does."""
+    """Without token binding, an administrator's portal session never opens administrator routes."""
     payload = {**signin["payload"], "administrators": ["@alice:example.org"]}
     client, upstream = _serve_with_strict_upstream(signin, tmp_path, monkeypatch, payload)
 

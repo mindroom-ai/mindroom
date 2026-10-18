@@ -180,6 +180,12 @@ The cookie is browser-wide, so a second sign-in in another tab replaces it.
 To keep a stale tab from acting as the new account, the Connections pages send the Matrix ID they show in the `X-MindRoom-Connections-User` header on every `/api/connections` request.
 MindRoom answers 401 when that header names a different account than the request authenticates as, whether by a session or by trusted upstream.
 Requests without the header, such as OAuth popup navigations, still work.
+At sign-in, MindRoom also records in the signed cookie whether the session may open the dashboard.
+It may only when the user is in `administrators`, `MINDROOM_PUBLIC_URL` is set, and the homeserver's `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true`, which MindRoom's Tuwunel fork does while it binds tokens.
+Under binding, a token that verified with this deployment's audience was requested for this deployment, so another deployment's operator cannot replay it here; without binding they could, and the dashboard is full control.
+The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.
+Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
+Signing out of the dashboard deletes the cookie.
 
 ## Known gaps
 
