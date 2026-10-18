@@ -452,6 +452,12 @@ def desktop_setup(
         help="Pinned controller fingerprint.",
         rich_help_panel="Pairing",
     ),
+    allow_requester: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--allow-requester",
+        help="Chat user from the setup message; defaults to the logged-in account. Repeat as needed.",
+        rich_help_panel="Access",
+    ),
     allow_agent: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--allow-agent",
@@ -570,7 +576,7 @@ def desktop_setup(
             revision=base_revision,
             enabled=True,
             controller=controller,
-            allowed_requester_ids=(session.user_id,),
+            allowed_requester_ids=tuple(allow_requester) if allow_requester else (session.user_id,),
             allowed_agent_names=tuple(allow_agent),
             allowed_app_ids=tuple(allow_app)
             if allow_app is not None

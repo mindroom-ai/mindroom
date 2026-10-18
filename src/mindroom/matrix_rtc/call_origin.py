@@ -17,6 +17,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, projected_thread_history
 from mindroom.thread_summary import current_thread_summary_from_history
 from mindroom.token_budget import approximate_o200k_tokens
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -169,7 +170,7 @@ async def resolve_call_origin_context(  # noqa: PLR0911
     for message in history:
         if message.sender in trusted_sender_ids and isinstance(message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
             continue
-        body = message.body.strip()
+        body = body_without_tool_markers(message.body, message.content).strip()
         if not body:
             continue
         label = _brief_label(message, room, own_user_id=context.client.user_id, trusted_sender_ids=trusted_sender_ids)

@@ -46,13 +46,13 @@ if TYPE_CHECKING:
 
 @pytest.mark.parametrize("exclusions", [None, [], ["shell", "native_plugin"]])
 def test_background_job_yaml_round_trip(exclusions: list[str] | None) -> None:
-    """The public mapping preserves explicit toolkit exclusions and the shell default."""
+    """The public mapping preserves explicit toolkit exclusions and the empty default."""
     settings: dict[str, object] = {"enabled": True}
     if exclusions is not None:
         settings["exclude_toolkits"] = exclusions
     config = Config.model_validate(yaml.safe_load(yaml.safe_dump({"background_tool_jobs": settings})))
     assert config.background_tool_jobs.enabled
-    assert config.background_tool_jobs.exclude_toolkits == (["shell"] if exclusions is None else exclusions)
+    assert config.background_tool_jobs.exclude_toolkits == ([] if exclusions is None else exclusions)
     assert Config.model_validate(config.model_dump(mode="json")).background_tool_jobs == config.background_tool_jobs
 
 

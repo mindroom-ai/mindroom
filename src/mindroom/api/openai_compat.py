@@ -870,6 +870,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         include_interactive_questions=False,
         include_openai_compat_guidance=True,
+        show_tool_calls=False,
         run_metadata_collector=run_metadata,
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,

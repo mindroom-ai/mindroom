@@ -56,6 +56,7 @@ from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader, projected_visible_messages
 from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.thread_export.storage import exported_content
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     import nio
@@ -247,6 +248,8 @@ async def fetch_projected_thread_history(
     while True:
         visible = projected_visible_messages(page)
         for message in visible:
+            # The trimmed content drops the tool trace that proves which lines are display markers.
+            message.body = body_without_tool_markers(message.body, message.content)
             message.content = exported_content(message)
             # Bytes rather than characters, since one character can take up to four bytes in memory.
             retained_bytes += len(json.dumps(message.to_dict(), ensure_ascii=False).encode("utf-8"))

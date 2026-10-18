@@ -13,7 +13,7 @@ _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
-_CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
+_CompactionLifecycleStatus = Literal["failed", "timeout"]
 CompactionAvailabilityReason = Literal[
     "no_context_window",
     "non_positive_summary_input_budget",
@@ -101,8 +101,8 @@ class ResolvedHistorySettings:
 class HistoryScopeState:
     """Persisted compaction control state stored in session metadata.
 
-    Compaction history itself (summary generations and archived runs) lives in
-    the compaction archive owned by ``history/storage.py``.
+    Compaction history itself lives in the summary rows beside the runs table,
+    owned by ``history/summary_rows.py``.
     """
 
     force_compact_before_next_run: bool = False
@@ -116,7 +116,6 @@ class ResolvedHistoryExecutionPlan:
     text_compaction_available: bool
     explicit_compaction_model: bool
     compaction_model_name: str
-    compaction_context_window: int | None
     replay_window_tokens: int | None
     trigger_threshold_tokens: int | None
     reserve_tokens: int
@@ -171,7 +170,6 @@ class CompactionLifecycleStart:
 class CompactionLifecycleProgress:
     """Visible lifecycle progress payload emitted after persisted compaction chunks."""
 
-    notice_event_id: str | None
     mode: _CompactionMode
     session_id: str
     scope: str
@@ -184,6 +182,7 @@ class CompactionLifecycleProgress:
     runs_remaining: int
     threshold_tokens: int | None = None
     duration_ms: int | None = None
+    notice_event_id: str | None = None
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized progress metadata for Matrix compaction messages."""
@@ -277,13 +276,12 @@ class CompactionOutcome:
     history_budget_tokens: int | None = None
     lifecycle_notice_event_id: str | None = None
     duration_ms: int | None = None
-    status: _CompactionLifecycleStatus = "success"
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
         meta: dict[str, object] = {
             "version": 3,
-            "status": self.status,
+            "status": "success",
             "mode": self.mode,
             "session_id": self.session_id,
             "scope": self.scope,
@@ -321,7 +319,6 @@ class CompactionOutcome:
 class PreparedHistoryState:
     """Prepared persisted-history state for one run."""
 
-    compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
     replay_plan: ResolvedReplayPlan | None = None
     replays_persisted_history: bool = False
     compaction_decision: CompactionDecision = field(

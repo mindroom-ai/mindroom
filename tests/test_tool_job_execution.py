@@ -7,6 +7,7 @@ import base64
 import json
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
@@ -57,11 +58,15 @@ from mindroom.tool_jobs.results import (
     encode_tool_result,
     read_result_payload,
 )
-from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_jobs.runtime import JobAccessError, job_summary, register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import (
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+    run_async_entrypoint_blocking_call,
+)
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -82,6 +87,22 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
+
+
+def _hold_job_outcomes(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Hold every job's outcome until the returned event is set, so a released call returns its handle first.
+
+    A job that finished before its caller's wait looked would return its result inline instead.
+    """
+    reply_returned = threading.Event()
+    encode = agno_execution.encode_result_payload
+
+    def held(payload: ToolResultPayload) -> dict[str, object]:
+        assert reply_returned.wait(JOB_TEST_TIMEOUT)
+        return encode(payload)
+
+    monkeypatch.setattr(agno_execution, "encode_result_payload", held)
+    return reply_returned
 
 
 @pytest.mark.asyncio
@@ -223,10 +244,12 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
 @pytest.mark.parametrize(("managed", "background_after"), [(False, None), (True, None), (True, 0)])
 async def test_registered_sync_tool_completes_through_sdk_dispatch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     managed: bool,
     background_after: float | None,
 ) -> None:
     """The registered sync hook bridge must not give its job a foreign-loop completion task."""
+    reply_returned = _hold_job_outcomes(monkeypatch) if background_after == 0 else threading.Event()
     (tmp_path / "input.txt").write_text("registered sync result\n")
     paths = _runtime_paths(tmp_path)
     config = Config(
@@ -270,6 +293,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
                 if managed:
                     jobs = await runtime.list_jobs(owner=owner, depth=0)
                     assert len(jobs) == 1
+                    reply_returned.set()
                     waited = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
                     assert waited.job.status == "completed", waited.job.result
                     assert "registered sync result" in waited.job.result
@@ -278,6 +302,72 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
                     assert "registered sync result" in tool.result
                 else:
                     assert json.loads(tool.result)["job_id"] == jobs[0].job_id
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_failed_shell_command_states_exit_code_inline_and_as_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    managed: bool,
+) -> None:
+    """A non-zero exit is the command's returned result, so its job completes; its exit code leads the summary."""
+    reply_returned = _hold_job_outcomes(monkeypatch) if managed else threading.Event()
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
+    )
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    if managed:
+        pin_background_tool_jobs(context.config, paths)
+        register_background_runtime(paths, runtime)
+    toolkit = get_tool_by_name(
+        "shell",
+        paths,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
+    prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
+    bind_toolkit_authority(toolkit, authored_name="shell")
+    arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}
+    if managed:
+        arguments["background_after"] = 0
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("run_shell_command", "shell-call", **arguments)]),
+            ModelResponse(content="done"),
+        ],
+    )
+    if managed:
+        install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[toolkit])
+    expected = [f"[cwd: {tmp_path}]", "Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                response = await agent.arun("run the command", session_id=context.session_id)
+                assert response.tools is not None
+                tool = response.tools[0]
+                if not managed:
+                    assert not tool.tool_call_error, tool.result
+                    assert tool.result.splitlines() == expected
+                    return
+                job_id = json.loads(tool.result)["job_id"]
+                reply_returned.set()
+                waited = await asyncio.wait_for(runtime.wait(job_id, owner=owner, depth=0), JOB_TEST_TIMEOUT)
+                listed = job_summary(waited.job)
+                assert listed["status"] == "completed"
+                assert listed["summary"].splitlines()[:2] == expected[:2]
+                payload = await read_result_payload(runtime, waited.job)
+                assert payload.error is None
+                assert str(payload.value).splitlines() == expected
     finally:
         await runtime.shutdown()
 
@@ -771,6 +861,54 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_a_jobs_blocking_call_runs_on_its_own_thread_not_the_shared_pool(tmp_path: Path, managed: bool) -> None:
+    """A job's call may block for hours, so what its entrypoint offloads, like a worker request, gets its own thread."""
+    shared = ThreadPoolExecutor(thread_name_prefix="shared-pool")
+    threads: list[str] = []
+
+    def blocking() -> str:
+        threads.append(threading.current_thread().name)
+        return "done"
+
+    async def offloading() -> str:
+        return await run_async_entrypoint_blocking_call(blocking, executor=shared)
+
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader")},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
+    )
+    context = _delegate_runtime_context(config, paths)
+    runtime = await tool_job_runtime(tmp_path)
+    if managed:
+        pin_background_tool_jobs(context.config, paths)
+        register_background_runtime(paths, runtime)
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("offloading", "offloading-call")]), ModelResponse(content="done")],
+    )
+    if managed:
+        install_tool_job_execution(model)
+    toolkit = Toolkit(name="threads", tools=[offloading])
+    bind_toolkit_authority(toolkit, authored_name="threads")
+    agent = Agent(id="leader", model=model, tools=[toolkit])
+
+    @owned_tool_execution()
+    async def parent_run() -> RunOutput | TeamRunOutput:
+        return await agent.arun("start", session_id=context.session_id)
+
+    try:
+        with tool_runtime_context(context):
+            await asyncio.wait_for(parent_run(), JOB_TEST_TIMEOUT)
+        [thread] = threads
+        assert thread.startswith("mindroom-job-call" if managed else "shared-pool")
+    finally:
+        shared.shutdown(wait=False)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("structured", [False, True])
 @pytest.mark.parametrize("team_event", [False, True])
 async def test_fast_generator_preserves_sdk_events(tmp_path: Path, *, structured: bool, team_event: bool) -> None:
@@ -1248,8 +1386,13 @@ async def test_a_call_that_ran_never_reads_as_one_that_did_not(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["waited", "released", "stopped"])
-async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path, case: str) -> None:
+async def test_reply_records_a_managed_call_before_its_job_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
     """A restart's account names a job's call as it names an inline one, and a Stop committed first refuses it."""
+    reply_returned = _hold_job_outcomes(monkeypatch) if case == "released" else threading.Event()
     ran: list[str] = []
 
     async def write_note(text: str) -> str:
@@ -1292,6 +1435,7 @@ async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path
         if case == "released":
             handle = json.loads(str(result))
             assert handle["tool"] == "write_note"
+            reply_returned.set()
             await wait_for_status(runtime, handle["job_id"], "completed")
         else:
             assert result == "noted hello"

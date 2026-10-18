@@ -2,6 +2,8 @@
 
 A background subagent's gated calls ask here, and so does a gated tool call that runs as a job. The job stays
 `awaiting_approval` while its cards are open; an exit before every decision arrives denies the cards it posted.
+Timed approvals work as they do for a paused reply: the cards offer them, and an active one approves a call
+without a card.
 """
 
 from __future__ import annotations
@@ -13,8 +15,12 @@ from typing import TYPE_CHECKING
 from agno.models.response import ToolExecution
 
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.response import plan_approval_calls
-from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, resolve_tool_approval_approver
+from mindroom.approval.response import plan_approval_calls, timed_grant_operation
+from mindroom.approval.tool_approval import (
+    POLICY_CONFIRMATION_APPROVAL_TYPE,
+    BackgroundScriptToolOrigin,
+    resolve_tool_approval_approver,
+)
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import ApprovalDecision
 from mindroom.logging_config import get_logger
@@ -89,7 +95,13 @@ async def ask_tool_call_approval(
     The policy, the card, and the execution all read the same frozen arguments.
     """
     assert call.call_id is not None, "a managed call has its exact call identity"
-    tool = ToolExecution(tool_call_id=call.call_id, tool_name=call.function.name, tool_args=dict(call.arguments or {}))
+    # Only the approval policy gates a call that asks as its job; a tool's own confirmation keeps pausing the reply.
+    tool = ToolExecution(
+        tool_call_id=call.call_id,
+        tool_name=call.function.name,
+        tool_args=dict(call.arguments or {}),
+        approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
+    )
     plan = await plan_approval_calls(
         ((tool, call.call_id, call.function.name, owner.agent_name),),
         config=config,
@@ -142,6 +154,9 @@ async def _decide(
         tool_name=call.tool_name,
         arguments=dict(tool.tool_args or {}),
         timeout_seconds=max(0.0, (call.expires_at_ns - time.time_ns()) / 1_000_000_000),
+        # Timed approvals bind to the conversation the job's reply answered, exactly as a paused reply's do.
+        entity_name=owner.recipient,
+        grant_operation=timed_grant_operation(config, tool, call),
     )
     return decision.status == "approved", decision.reason
 

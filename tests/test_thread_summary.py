@@ -29,7 +29,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.google_gemini import MindRoomGoogleGemini
-from mindroom.providers.openai_models import MindRoomOpenAIResponses, MindRoomOpenRouter
+from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses, MindRoomOpenRouter
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _THREAD_SUMMARY_MAX_LENGTH,
@@ -67,6 +67,7 @@ from mindroom.thread_tags import (
     ThreadTagsError,
     ThreadTagsState,
 )
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
 from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
 from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
@@ -2553,10 +2554,18 @@ class TestGenerateSummary:
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
         assert mock_model.temperature == 0.1
 
-    @pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"])
-    async def test_generate_summary_omits_unsupported_direct_gpt6_temperature_from_request(self, model_id: str) -> None:
-        """Direct GPT-6 summary requests must omit unsupported sampling controls."""
-        model = MindRoomOpenAIResponses(id=model_id, api_key="dummy-key", temperature=0.9)
+    @pytest.mark.parametrize("model_class", [MindRoomOpenAIResponses, MindRoomOpenAIChat])
+    @pytest.mark.parametrize(
+        "model_id",
+        ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "gpt-5-mini", "gpt-5-nano", "gpt-5-2025-08-07", "gpt-5.5"],
+    )
+    async def test_generate_summary_omits_unsupported_direct_openai_temperature_from_request(
+        self,
+        model_class: type[MindRoomOpenAIResponses | MindRoomOpenAIChat],
+        model_id: str,
+    ) -> None:
+        """Direct GPT-5 and GPT-6 summary requests must omit the sampling controls most of these models reject."""
+        model = model_class(id=model_id, api_key="dummy-key", temperature=0.9)
 
         _configure_summary_model_temperature(
             model,
@@ -2566,12 +2575,27 @@ class TestGenerateSummary:
 
         assert "temperature" not in model.get_request_params()
 
-    @pytest.mark.parametrize("model_id", ["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-6-luna"])
-    async def test_generate_summary_omits_unsupported_openrouter_gpt6_temperature_from_request(
+    async def test_generate_summary_preserves_supported_direct_openai_temperature_in_request(self) -> None:
+        """Older OpenAI models keep the configured summary temperature."""
+        model = MindRoomOpenAIChat(id="gpt-4.1-mini", api_key="dummy-key", temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.get_request_params()["temperature"] == 0.2
+
+    @pytest.mark.parametrize(
+        "model_id",
+        ["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-6-luna", "openai/gpt-5-mini", "openai/gpt-5.5"],
+    )
+    async def test_generate_summary_omits_unsupported_openrouter_openai_temperature_from_request(
         self,
         model_id: str,
     ) -> None:
-        """OpenRouter GPT-6 summary requests must omit unsupported sampling controls."""
+        """OpenRouter GPT-5 and GPT-6 summary requests must omit unsupported sampling controls."""
         model = MindRoomOpenRouter(
             id=model_id,
             api_key="dummy-key",
@@ -3473,3 +3497,17 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         _, sent = await self._run_pass(reader, first_threshold=5)
 
         assert sent[0]["io.mindroom.thread_summary"]["message_count"] == 7
+
+
+def test_conversation_text_drops_tool_markers() -> None:
+    """The summarizer reads an agent reply's text without its display markers."""
+    trace = [ToolTraceEntry(type="tool_call_completed", tool_name="shell")]
+    message = ResolvedVisibleMessage.synthetic(
+        sender="@mindroom_code:localhost",
+        body="Listing.\n\n🔧 `shell` [1]\n\nDone.",
+        event_id="$reply",
+        content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+    )
+    text = _build_conversation_text([message], trusted_sender_ids=set())
+    assert "🔧" not in text
+    assert "Done." in text

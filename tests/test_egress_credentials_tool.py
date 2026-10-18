@@ -315,7 +315,7 @@ def test_manage_url_points_at_the_dashboard_or_the_personal_page(tmp_path: Path)
 # What the tool says where a personal scope's keys cannot be set: the broker's refusal says the same.
 _PAGE_NOT_SERVED_NOTE = (
     "Each user sets this agent's keys and accounts on the Connections page, which this deployment does not serve. "
-    "An administrator can enable trusted upstream auth or make the agent shared."
+    "An administrator can enable Connections sign-in or make the agent shared."
 )
 
 

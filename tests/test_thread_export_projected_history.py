@@ -35,6 +35,7 @@ from mindroom.thread_export.projected_history import (
     export_conversation_reader,
     fetch_projected_thread_history,
 )
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, make_matrix_client_mock, serve_media_download
 from tests.journal_membership_helpers import admit_room_membership
 
@@ -640,6 +641,31 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
         },
     }
     assert messages[1].reply_to_event_id == ROOT
+
+
+async def test_an_agent_reply_exports_without_tool_display_markers(router: PrincipalStore) -> None:
+    """Agents grep exports with file tools, so a reply keeps its text and loses its display markers."""
+    homeserver = FakeHomeserver()
+    body = "Checked.\n\n🔧 `shell` [1]\n\nAll good."
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=100),
+        [
+            raw(
+                "$reply:example.org",
+                body,
+                ts=200,
+                sender=ROUTER,
+                thread_id=ROOT,
+                extra_content=build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]),
+            ),
+        ],
+    )
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert "🔧" not in messages[1].body
+    assert messages[1].body.endswith("All good.")
 
 
 @pytest.mark.parametrize("character", ["x", "€"])

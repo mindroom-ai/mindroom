@@ -294,11 +294,7 @@ def test_openai_presets_use_current_models() -> None:
         "openai/gpt-6-luna",
         1_050_000,
     )
-    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
-        "gpt-6-astra",
-        "gpt-6.1-sol",
-        "gpt-6-luna",
-    )
+    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES == ("gpt-5", "gpt-6")
 
 
 def test_glm_presets_use_current_generation() -> None:

@@ -1,8 +1,11 @@
 """Tests for shared browser origin helpers."""
 
+from pathlib import Path
+
 import pytest
 
-from mindroom.origins import normalized_origin, parse_browser_origin
+from mindroom.constants import resolve_runtime_paths
+from mindroom.origins import allowed_client_origins, normalized_origin, parse_browser_origin
 
 
 @pytest.mark.parametrize(
@@ -91,3 +94,42 @@ def test_parse_browser_origin_rejects(value: str) -> None:
     """Everything else raises."""
     with pytest.raises(ValueError, match="rowser origin"):
         parse_browser_origin(value)
+
+
+def test_allowed_client_origins_reads_named_env(tmp_path: Path) -> None:
+    """Reads exact origins from the named env var."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://chat.example.org", "capacitor://localhost"]',
+        },
+    )
+    assert allowed_client_origins(paths, "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS") == (
+        "https://chat.example.org",
+        "capacitor://localhost",
+    )
+    # Computer env unset returns empty tuple
+    assert allowed_client_origins(paths, "MINDROOM_COMPUTER_ALLOWED_ORIGINS") == ()
+
+
+def test_allowed_client_origins_fails_closed(tmp_path: Path) -> None:
+    """Invalid configuration fails closed with empty tuple."""
+    # Wildcard rejected
+    wildcard_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://ok.example.org", "https://*.example.org"]',
+        },
+    )
+    assert allowed_client_origins(wildcard_paths, "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS") == ()
+    # Non-list rejected
+    non_list_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '"https://chat.example.org"',
+        },
+    )
+    assert allowed_client_origins(non_list_paths, "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS") == ()

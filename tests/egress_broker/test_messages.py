@@ -88,7 +88,7 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
         (
             "destination_blocked",
             {"host": "metadata.internal"},
-            "metadata.internal resolves to a private or internal address, which agents may not reach.",
+            "metadata.internal resolves to a private or internal address that the administrator's egress policy does not let agents reach.",
         ),
         ("request_body_too_large", {}, "The request body is larger than the broker accepts."),
         ("upstream_unreachable", {"host": "api.github.com"}, "api.github.com could not be reached."),
@@ -186,7 +186,7 @@ def test_path_not_allowed_by_the_operator_names_an_administrator_whatever_the_sc
 # Where the personal page is not served, a personal scope's keys and services cannot be set anywhere.
 _PAGE_NOT_SERVED = (
     "on the Connections page, which this deployment does not serve. "
-    "An administrator can enable trusted upstream auth or make the agent shared."
+    "An administrator can enable Connections sign-in or make the agent shared."
 )
 _PATH = {"host": "api.github.com", "path": "/repos/o/b?page=2", "service": "github-limited"}
 

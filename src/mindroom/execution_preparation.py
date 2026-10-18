@@ -25,7 +25,6 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     THREAD_SUMMARY_CONTENT_KEY,
-    TOOL_TRACE_CONTENT_KEY,
     UI_ACTION_CONTENT_KEY,
     RuntimePaths,
 )
@@ -51,10 +50,10 @@ from mindroom.streaming import (
     TEAM_PROGRESS_PLACEHOLDER,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
-    strip_visible_tool_markers,
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -265,7 +264,7 @@ def _should_strip_visible_tool_markers(
     response_sender_id: str | None,
 ) -> bool:
     """Return whether visible marker lines are known MindRoom display chrome."""
-    if isinstance(message.content.get(TOOL_TRACE_CONTENT_KEY), dict):
+    if has_tool_trace(message.content):
         return True
     return _is_own_reply(message, response_sender_id)
 
@@ -798,7 +797,7 @@ def _prepared_history_with_scheduled_limit(
             replays_persisted_history=False,
         )
     plan = prepared_history.replay_plan
-    if plan is None or not plan.add_history_to_context:
+    if plan is None or not plan.add_history_to_context or plan.mode == "disabled":
         return prepared_history
     if plan.num_history_messages is not None and plan.num_history_messages <= max_persisted_messages:
         return prepared_history
@@ -858,7 +857,7 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
-    # Compacted history's seen ids are read from the archive; keep that SQLite read off the loop.
+    # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
     seen_event_ids = await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
     scheduled_history_budget = ctx.scheduled_history_budget
     if scheduled_history_budget is not None:
@@ -1031,7 +1030,6 @@ async def prepare_agent_execution_context(
         resolved_inputs = resolve_agent_preparation_inputs(
             agent=agent,
             agent_name=agent_name,
-            full_prompt=prepared_prompt,
             config=config,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
@@ -1049,11 +1047,6 @@ async def prepare_agent_execution_context(
             allow_native_compaction=ctx.scheduled_history_budget is None,
         )
 
-    def _estimate_agent_static_tokens(
-        prepared_prompt: str,
-    ) -> int:
-        return static_token_estimator.estimate(prepared_prompt)
-
     return await _prepare_execution_context_common(
         ctx,
         scope_context=scope_context,
@@ -1068,7 +1061,7 @@ async def prepare_agent_execution_context(
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
-        estimate_static_tokens_fn=_estimate_agent_static_tokens,
+        estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_messages_text,
         thread_history_render_limits=None,
         fallback_static_token_budget=_fallback_static_token_budget(
@@ -1120,7 +1113,6 @@ async def _prepare_bound_team_execution_context(
         return await prepare_bound_scope_history(
             agents=agents,
             team=team,
-            full_prompt=prepared_prompt,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -1132,11 +1124,6 @@ async def _prepare_bound_team_execution_context(
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,
         )
-
-    def _estimate_team_static_tokens(
-        prepared_prompt: str,
-    ) -> int:
-        return static_token_estimator.estimate(prepared_prompt)
 
     return await _prepare_execution_context_common(
         ctx,
@@ -1152,7 +1139,7 @@ async def _prepare_bound_team_execution_context(
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
-        estimate_static_tokens_fn=_estimate_team_static_tokens,
+        estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
         attachment_context=_ThreadAttachmentContext(

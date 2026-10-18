@@ -27,6 +27,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
+from mindroom.api.connections_session import router as connections_session_router
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -63,16 +64,19 @@ from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.knowledge_graph.store import knowledge_graph_failure
 from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
+from mindroom.origins import allowed_client_origins
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
 from mindroom.usage.legacy_usage_storage import migrate_usage_storage
-from mindroom.worker_computer.auth import computer_origins
 from mindroom.workers.backend import maintain_workers
+from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -138,7 +142,11 @@ class _RuntimeDashboardCorsMiddleware:
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
-        origins = computer_origins(paths) if path.startswith("/api/computers") else gateway_cors_origins(paths, path)
+        origins = (
+            allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
+            if path.startswith("/api/computers")
+            else gateway_cors_origins(paths, path)
+        )
         settings = (
             _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
             if origins is not None
@@ -244,6 +252,7 @@ def _cleanup_workers_once(
             touch_live_workers(worker_manager)
         for worker_key in computer_worker_keys:
             worker_manager.touch_worker(worker_key)
+        touch_workers_in_flight(worker_manager)
         maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
@@ -720,6 +729,7 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 
 # Include routers
 app.include_router(auth_router)
+app.include_router(connections_session_router)
 app.include_router(connections_router)
 app.include_router(egress_credentials_router)
 install_gateway_routes(app)
@@ -773,6 +783,9 @@ async def health_check(request: Request) -> JSONResponse:
         # Additive diagnostic only: a broken embedder degrades semantic search
         # but must not flip liveness and restart an otherwise usable runtime.
         response["embedder"] = {"status": "failing", "detail": embedder_failure}
+    if (knowledge_graph_failure_detail := knowledge_graph_failure()) is not None:
+        # Additive diagnostic only, like the embedder block: a failing graph must not flip liveness.
+        response["knowledge_graph"] = {"status": "failing", "detail": knowledge_graph_failure_detail}
 
     if runtime_state.phase == "ready" and not sync_health.is_healthy:
         response["status"] = "unhealthy"

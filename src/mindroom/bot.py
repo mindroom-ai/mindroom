@@ -64,7 +64,6 @@ from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_loop import bot_ingestion_config, sliding_sync_room_subscriptions
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
-from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -82,7 +81,6 @@ from mindroom.runtime_shutdown import (
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
@@ -140,7 +138,6 @@ from .response_runner import (
     ResponseRequest,
     ResponseRunner,
     ResponseRunnerDeps,
-    prepare_memory_and_model_context,
 )
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .scheduling.tasks import (
@@ -3003,16 +3000,6 @@ class TeamBot(AgentBot):
                 response_kind="team",
             )
         assert self.client is not None
-        memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
-            prepare_memory_and_model_context(
-                request.prompt,
-                request.thread_history,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                model_prompt=request.model_prompt,
-            )
-        )
-
         team_config = self.config.teams[self.agent_name]
         configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
         availability = self._turn_policy.responder_availability()
@@ -3034,39 +3021,9 @@ class TeamBot(AgentBot):
             )
         assert team_resolution.mode is not None
 
-        registry = entity_identity_registry(self.config, self.runtime_paths)
-        agent_names = [
-            registry.current_entity_name_for_user_id(mid.full_id, include_router=False) or mid.username
-            for mid in team_resolution.eligible_members
-        ]
-        session_id = target.session_id
-        execution_identity = self._tool_runtime_support.build_execution_identity(
-            target=target,
-            user_id=request.user_id,
-        )
-        with tool_execution_identity(execution_identity):
-            create_background_task(
-                store_conversation_memory(
-                    memory_prompt,
-                    agent_names,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    self.runtime_paths,
-                    memory_thread_history,
-                    request.user_id,
-                    execution_identity=execution_identity,
-                ),
-                name=f"memory_save_team_{session_id}",
-                owner=self._runtime_view,
-            )
-
         return await self._response_runner.generate_team_response_helper(
             replace(
                 request,
-                prompt=memory_prompt,
-                model_prompt=model_prompt_text,
-                thread_history=model_thread_history,
                 media=request.media or MediaInputs(),
                 user_id=request.user_id or "",
                 correlation_id=request.correlation_id or target.reply_to_event_id,

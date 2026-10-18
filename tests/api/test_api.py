@@ -38,6 +38,7 @@ from mindroom.config.main import Config, dashboard_config_schema
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
+from mindroom.knowledge_graph.store import record_knowledge_graph_failure
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
@@ -48,6 +49,7 @@ from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.backend import WorkerBackend
+from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -941,6 +943,33 @@ def test_worker_cleanup_touches_live_script_workers_before_maintenance(
     assert actions == ["touch", "maintain"]
 
 
+def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker running a long tool call has its lease refreshed before idle cleanup, however idle it looks."""
+    actions: list[str] = []
+    worker_manager = MagicMock()
+    worker_manager.backend_name = "test"
+    worker_manager.cleanup_locator = "local:test"
+    worker_manager.touch_worker.side_effect = lambda key: actions.append(f"touch {key}")
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
+    monkeypatch.setattr(
+        main,
+        "maintain_workers",
+        lambda _backend: actions.append("maintain") or WorkerMaintenanceResult(cleaned=(), reconciled=()),
+    )
+
+    with worker_call_in_flight(worker_manager, "agent:busy"):
+        main._cleanup_workers_once(main._app_runtime_paths(main.app))
+    main._cleanup_workers_once(main._app_runtime_paths(main.app))
+
+    assert actions == ["touch agent:busy", "maintain", "maintain"]
+
+
 def test_health_check(test_client: TestClient) -> None:
     """Test the health check endpoint."""
     reset_matrix_sync_health()
@@ -967,6 +996,22 @@ def test_health_check_reports_recorded_embedder_failure(test_client: TestClient)
         "status": "failing",
         "detail": "embedder authentication failed (HTTP 401)",
     }
+
+
+def test_health_check_reports_knowledge_graph_failure(test_client: TestClient) -> None:
+    """A failing graph ingestion appears as an additive block without flipping status."""
+    reset_matrix_sync_health()
+    record_knowledge_graph_failure("ValueError: structured output did not match")
+    try:
+        response = test_client.get("/api/health")
+    finally:
+        record_knowledge_graph_failure(None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["knowledge_graph"] == {"status": "failing", "detail": "ValueError: structured output did not match"}
+    assert "knowledge_graph" not in test_client.get("/api/health").json()
 
 
 def test_health_check_omits_embedder_block_when_healthy(test_client: TestClient) -> None:

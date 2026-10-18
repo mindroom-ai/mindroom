@@ -21,7 +21,7 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.replay import (
-    _HistorySummaryBudgetError,
+    HistorySummaryBudgetError,
     apply_replay_plan,
     estimate_prompt_visible_history_tokens,
     plan_replay_that_fits,
@@ -55,7 +55,7 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _runtime_paths,
     _session,
-    archived_run_ids,
+    folded_run_ids,
 )
 
 
@@ -267,7 +267,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome == "none"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
@@ -328,7 +328,7 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome == "none"
     assert prepared.replays_persisted_history is True
     assert mock_warning.call_args_list == []
 
@@ -367,7 +367,7 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome == "none"
     assert prepared.replays_persisted_history is True
     assert mock_warning.call_args_list == []
 
@@ -1008,9 +1008,9 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
         static_prompt_tokens=2_000,
     )
 
-    assert execution_plan.compaction_context_window == 32_000
+    # The summary model's 32,000 window, half of it reserved, minus prompt overhead and a 10% margin.
+    assert execution_plan.summary_input_budget_tokens == 10_800
     assert execution_plan.replay_window_tokens == 20_000
-    assert execution_plan.summary_input_budget_tokens is not None
     assert execution_plan.trigger_threshold_tokens == 16_000
     assert execution_plan.replay_budget_tokens == 8_000
     assert execution_plan.hard_replay_budget_tokens == 8_000
@@ -1217,7 +1217,6 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
         static_prompt_tokens=10_000,
     )
 
-    assert execution_plan.compaction_context_window == active_context_window
     assert execution_plan.replay_window_tokens == expected_replay_window
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
@@ -1240,7 +1239,6 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=32_000,
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
@@ -1286,7 +1284,6 @@ def test_classify_compaction_decision_compacts_at_trigger_only_without_native_co
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=32_000,
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
@@ -1389,7 +1386,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome == "none"
 
 
 @pytest.mark.asyncio
@@ -1531,7 +1528,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
         ),
-        pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"),
+        pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
         await prepare_history_for_run_for_test(
             agent=agent,
@@ -1543,6 +1540,8 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
             execution_identity=None,
             storage=storage,
             session=session,
+            # The final prompt leaves one token of the 64,000-token window after its reserve.
+            static_prompt_tokens=64_000 - 16_384 - 1,
             available_history_budget=1,
         )
 
@@ -1552,7 +1551,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     assert persisted.summary.summary == "merged summary"
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
-    assert len(archived_run_ids(storage)) == 2
+    assert len(folded_run_ids(storage)) == 2
     assert state.force_compact_before_next_run is False
 
 
@@ -1565,7 +1564,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
     size = estimate_prompt_visible_history_tokens(session=session, scope=scope, history_settings=settings)
 
-    with pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"):
+    with pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"):
         plan_replay_that_fits(
             session=session,
             scope=scope,
@@ -1649,6 +1648,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
     apply_replay_plan(target=agent, replay_plan=replay_plan)
 
     assert replay_plan.mode == "disabled"
-    assert agent.add_history_to_context is False
-    assert agent.num_history_runs is None
+    # History stays on with zero raw runs so the saved summary still replays first.
+    assert agent.add_history_to_context is True
+    assert agent.num_history_runs == 0
     assert agent.num_history_messages is None

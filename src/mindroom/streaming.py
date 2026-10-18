@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
@@ -48,8 +47,8 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
     complete_pending_tool_block,
-    is_visible_tool_marker_line,
     remap_visible_tool_marker_indices,
+    strip_visible_tool_markers,
     tool_markers_match_trace,
 )
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
@@ -104,7 +103,6 @@ __all__ = [
     "send_streaming_response",
     "stream_progress_edits",
     "strip_matching_visible_tool_markers",
-    "strip_visible_tool_markers",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
@@ -141,7 +139,6 @@ _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
-_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 StreamInputChunk = (
     str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -160,41 +157,6 @@ class _NonTerminalDeliveryError(Exception):
 
 class _StreamDeliveryShutdownTimeoutError(TimeoutError):
     """Raised when the single non-terminal delivery owner refuses to stop."""
-
-
-def strip_visible_tool_markers(text: str) -> str:
-    """Remove display-only tool marker lines before text re-enters model context."""
-    lines = text.splitlines()
-    if not any(is_visible_tool_marker_line(line) for line in lines):
-        return text
-
-    filtered_lines: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if not is_visible_tool_marker_line(line):
-            filtered_lines.append(line)
-            index += 1
-            continue
-
-        index += 1
-        spacer_lines: list[str] = []
-        while index < len(lines) and not lines[index].strip():
-            spacer_lines.append(lines[index])
-            index += 1
-
-        # Tool markers rendered by MindRoom are often followed by a markdown
-        # separator. Remove the separator with the marker, but preserve ordinary
-        # blank-line spacing so surrounding prose does not get smashed together.
-        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
-            filtered_lines.extend(spacer_lines)
-            index += 1
-            if index < len(lines) and not lines[index].strip():
-                index += 1
-            continue
-
-        filtered_lines.extend(spacer_lines)
-    return "\n".join(filtered_lines).rstrip()
 
 
 def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTraceEntry]) -> str:
@@ -626,7 +588,7 @@ class StreamingResponse:
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
-    visible_progress_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     # How the terminal edit reaches Matrix, when the caller wants it durable.
     # A streamed answer becomes visible through edits, so the last one is the
@@ -1336,7 +1298,9 @@ class StreamingResponse:
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
         if self.visible_progress_callback is not None:
-            self.visible_progress_callback(committed_state.rendered_body)
+            # Hidden tool calls leave no markers, so the text keeps its marker-shaped lines.
+            public_trace = tuple(committed_state.tool_trace) if self.show_tool_calls else ()
+            self.visible_progress_callback(committed_state.rendered_body, public_trace)
 
     def _committed_terminal_snapshot(
         self,
@@ -2188,7 +2152,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
-    visible_progress_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     latest_thread_event_id: str | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
     terminal_edit: TerminalEdit | None = None,
@@ -2498,7 +2462,7 @@ async def stream_progress_edits(
     event_id: str,
     show_tool_calls: bool,
     extra_content: dict[str, Any] | None = None,
-    visible_progress_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
     progress_write_ahead: ProgressWriteAhead | None = None,
     progress_delivered: Callable[[ProgressState, str], None] | None = None,

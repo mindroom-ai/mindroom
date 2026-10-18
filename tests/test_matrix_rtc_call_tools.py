@@ -31,12 +31,14 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelP
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.invite_router import InviteRouterTools
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
+    _call_agent_run_state,
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
@@ -2408,3 +2410,20 @@ def test_matrix_message_available_during_call_needs_the_tool_without_approval() 
         rules=[ApprovalRuleConfig(match="matrix_message", action="require_approval")],
     )
     assert not matrix_message_available_during_call(config, AGENT)
+
+
+def test_an_interrupted_voice_reply_drops_the_tools_its_fold_summarized() -> None:
+    """A voice reply that compacted mid-turn is saved without the calls the summary holds."""
+    recorder = TurnRecorder(user_message="question")
+    recorder.set_run_metadata({"source": "voice"})
+    recorder.completed_tools = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="folded"),
+        ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="after"),
+    ]
+    recorder.record_folded_tool_calls({"folded"})
+    recorder.mark_interrupted()
+
+    state = _call_agent_run_state(recorder, session_id="session", fallback_run_id="run")
+
+    assert state.run_metadata["source"] == "voice"
+    assert [tool.tool_call_id for tool in state.completed_tools] == ["after"]

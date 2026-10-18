@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from html import escape
@@ -12,6 +11,7 @@ from agno.utils.message import filter_tool_calls
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
@@ -20,6 +20,7 @@ from mindroom.history.message_content import media_payload_snapshot, message_med
 from mindroom.history.replay import history_skip_roles
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -34,12 +35,18 @@ if TYPE_CHECKING:
 _WRAPPER_OVERHEAD_TOKENS = 200
 
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
+# A tool result names the arguments of its call so it reads correctly apart from the call message; large argument
+# values, such as a written file's content, are cut short, since the call message holds them in full.
+_TOOL_RESULT_ARG_CHARS = 200
 
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
         AI_RUN_METADATA_KEY,
         MINDROOM_COMPACTION_METADATA_KEY,
         MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+        # The run's own messages already carry its prompts.
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+        COMPACTED_REQUESTS_METADATA_KEY,
         "model_params",
         "tools_schema",
     },
@@ -69,9 +76,7 @@ def build_summary_input(
     token_estimator: Callable[[str], int] = estimate_compaction_input_tokens,
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     """Fit prior summary and ordered runs into one serialized summary request."""
-    summary_block = ""
-    if previous_summary is not None and previous_summary.strip():
-        summary_block = _previous_summary_block(previous_summary)
+    summary_block = _previous_summary_block(previous_summary)
 
     empty_input = _compose_summary_input(summary_block, "")
     remaining = max_input_tokens - token_estimator(empty_input) - _WRAPPER_OVERHEAD_TOKENS
@@ -119,9 +124,7 @@ def _build_oversized_summary_input(
     max_input_tokens: int,
     token_estimator: Callable[[str], int],
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
-    summary_block = (
-        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
-    )
+    summary_block = _previous_summary_block(previous_summary)
     if not compacted_runs:
         return summary_block, []
     first_run = compacted_runs[0]
@@ -129,7 +132,7 @@ def _build_oversized_summary_input(
         first_run,
         index=0,
         history_settings=history_settings,
-        max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block, token_estimator),
+        max_tokens=max_input_tokens - token_estimator(_compose_summary_input(summary_block, "")),
         token_estimator=token_estimator,
     )
     if oversized_excerpt is None:
@@ -152,9 +155,7 @@ def minimum_summary_input_tokens(
     wrapper overhead covers the builder's own envelope accounting and
     tokenizer boundary effects.
     """
-    summary_block = (
-        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
-    )
+    summary_block = _previous_summary_block(previous_summary)
     minimal_excerpt = _serialize_run_excerpt(first_run, index=0, blocks=(), content_budget_chars=0)
     return token_estimator(_compose_summary_input(summary_block, minimal_excerpt)) + _WRAPPER_OVERHEAD_TOKENS
 
@@ -218,7 +219,13 @@ def _compaction_replay_messages(
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
     skip_roles = set(history_skip_roles(history_settings))
-    messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
+    # A stored run can hold copies of the history its request replayed; replay skips them, and the runs they came
+    # from are summarized on their own.
+    messages = [
+        deepcopy(message)
+        for message in run.messages or []
+        if message.role not in skip_roles and not message.from_history
+    ]
     if history_settings.max_tool_calls_from_history is not None and messages:
         filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     strip_stale_anthropic_replay_fields(messages)
@@ -233,9 +240,14 @@ def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHi
             blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(metadata), "</run_metadata>"))
     for message in _compaction_replay_messages(run, history_settings):
         content = render_message_content(message)
-        if not content:
-            continue
-        blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
+        if content:
+            tool_args = _tool_result_args(message)
+            if tool_args is not None:
+                blocks.append(_ExcerptBlock("<tool_args>", tool_args, "</tool_args>"))
+            blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
+        if message.tool_calls:
+            # A result cut short still names the call and arguments that produced it.
+            blocks.append(_ExcerptBlock("<tool_calls>", stable_serialize(message.tool_calls), "</tool_calls>"))
     return blocks
 
 
@@ -254,14 +266,6 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
     return f"{text[: max_chars - 1].rstrip()}…"
 
 
-def _remaining_excerpt_budget(
-    max_input_tokens: int,
-    summary_block: str,
-    token_estimator: Callable[[str], int],
-) -> int:
-    return max_input_tokens - token_estimator(_compose_summary_input(summary_block, ""))
-
-
 def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     parts: list[str] = []
     if summary_block:
@@ -270,7 +274,9 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     return "\n\n".join(parts)
 
 
-def _previous_summary_block(summary: str) -> str:
+def _previous_summary_block(summary: str | None) -> str:
+    if summary is None or not summary.strip():
+        return ""
     return f"<previous_summary>\n{_escape_xml_content(summary)}\n</previous_summary>"
 
 
@@ -299,7 +305,9 @@ def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings:
 
 
 def _serialize_message(message: Message) -> list[str]:
-    lines = [_message_open_tag(message), _escape_xml_content(render_message_content(message)), "</message>"]
+    tool_args = _tool_result_args(message)
+    lines = [] if tool_args is None else ["<tool_args>", _escape_xml_content(tool_args), "</tool_args>"]
+    lines += [_message_open_tag(message), _escape_xml_content(render_message_content(message)), "</message>"]
     if message.tool_calls:
         lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
     for tag, media_value in message_media_entries(message):
@@ -325,7 +333,24 @@ def _message_open_tag(message: Message) -> str:
         attrs.append(f'name="{escape(message.name, quote=True)}"')
     if message.tool_call_id:
         attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
+    if message.role == "tool" and message.tool_name:
+        attrs.append(f'tool_name="{escape(message.tool_name, quote=True)}"')
     return f"<message {' '.join(attrs)}>"
+
+
+def _tool_result_args(message: Message) -> str | None:
+    """Return a tool result's own call arguments, bounded, so it reads correctly apart from its call message."""
+    if message.role != "tool" or not message.tool_args:
+        return None
+    args = message.tool_args
+    if not isinstance(args, dict):
+        return _truncate_excerpt(stable_serialize(args), _TOOL_RESULT_ARG_CHARS)
+    return stable_serialize({key: _bounded_arg(value) for key, value in args.items()})
+
+
+def _bounded_arg(value: object) -> object:
+    serialized = stable_serialize(value)
+    return value if len(serialized) <= _TOOL_RESULT_ARG_CHARS else _truncate_excerpt(serialized, _TOOL_RESULT_ARG_CHARS)
 
 
 def _serialize_media_payload(media_value: object | None) -> str:

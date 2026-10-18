@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def storage(tmp_path: Path) -> Iterator[BaseDb]:
-    """Conversation storage for reading seen ids, which include the compaction archive's."""
+    """Conversation storage for reading seen ids, which include the summary rows'."""
     db = create_state_storage("test_agent", tmp_path / "seen", subdir="sessions", session_table="test_agent_sessions")
     try:
         yield db

@@ -3,19 +3,30 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+import asyncio
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from anthropic.types import Message as AnthropicMessage
+from mem0 import AsyncMemory
+from mem0.llms.openai import OpenAILLM
+from ollama import ChatResponse as OllamaChatResponse
+from ollama import Message as OllamaMessage
 from openai import AuthenticationError
+from openai.types.chat import ChatCompletion
 from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import _MemoryLLMConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,
@@ -25,7 +36,9 @@ from mindroom.memory import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
+from mindroom.redaction import REDACTION_FAILED
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -37,7 +50,10 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
+
+    from agno.run.agent import RunOutput
 
 
 async def _search_memory_results(*args: object, **kwargs: object) -> list:
@@ -694,3 +710,414 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
         assert not any(result.get("memory") == "Team shared note" for result in calculator_deleted)
         assert not any(result.get("memory") == "Updated team shared note" for result in general_deleted)
         assert not any(result.get("memory") == "Updated team shared note" for result in calculator_deleted)
+
+
+def _chat_completion(prompt_tokens: int, completion_tokens: int, **usage: object) -> ChatCompletion:
+    return ChatCompletion.model_validate(
+        {
+            "id": "completion",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-6-luna",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "{}"}}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                **usage,
+            },
+        },
+    )
+
+
+def _mem0_memory_reporting_usage(
+    config: Config,
+    *,
+    fail_after_extraction: bool = False,
+) -> Callable[..., SimpleNamespace]:
+    """Return a Mem0 factory whose memories run one extraction call reporting 120 input and 30 output tokens per add."""
+    config.memory.backend = "mem0"
+    config.memory.llm = _MemoryLLMConfig(provider="openai", config={"api_key": "test-key", "model": "gpt-6-luna"})
+
+    def from_config(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=MagicMock(return_value=_chat_completion(120, 30)))),
+        )
+        with patch("mem0.llms.openai.OpenAI", return_value=client):
+            mem0_llm = OpenAILLM(config.memory.llm.config)
+
+        async def add(messages: list[dict], **_: object) -> None:
+            # Mem0 runs its extraction prompt in a worker thread.
+            await asyncio.to_thread(mem0_llm.generate_response, messages=messages)
+            if fail_after_extraction:
+                msg = "the vector store rejected the extracted facts"
+                raise RuntimeError(msg)
+
+        return SimpleNamespace(llm=mem0_llm, vector_store=object(), add=add)
+
+    return from_config
+
+
+def _recorder() -> tuple[list[tuple[RunOutput, dict[str, object]]], Callable[..., Awaitable[None]]]:
+    recorded: list[tuple[RunOutput, dict[str, object]]] = []
+
+    async def record(response: RunOutput, **kwargs: object) -> None:
+        recorded.append((response, kwargs))
+
+    return recorded, record
+
+
+@pytest.mark.asyncio
+async def test_conversation_memory_extraction_records_its_token_usage(storage_path: Path, config: Config) -> None:
+    """Mem0 calls its own LLM client, so its extraction tokens are recorded for the conversation that produced them."""
+    recorded, record = _recorder()
+
+    with (
+        patch.object(AsyncMemory, "from_config", side_effect=_mem0_memory_reporting_usage(config)),
+        patch("mindroom.memory._mem0_backend.record_helper_usage", side_effect=record),
+    ):
+        await store_conversation_memory(
+            "Remember that Atlas ships Friday.",
+            "general",
+            storage_path,
+            "session-alice",
+            config,
+            runtime_paths_for(config),
+            user_id="@alice:example.org",
+        )
+
+    [(run, kwargs)] = recorded
+    owner = cast("HelperUsageOwner", kwargs["owner"])
+    assert (owner.session_id, kwargs["kind"], kwargs["requester_id"]) == (
+        "session-alice",
+        "memory_extraction",
+        "@alice:example.org",
+    )
+    assert run.metrics is not None
+    assert (run.metrics.input_tokens, run.metrics.output_tokens, run.metrics.total_tokens) == (120, 30, 150)
+    # Each extraction call is one request in usage reports.
+    [message] = run.messages or []
+    assert message.role == "assistant"
+    assert message.metrics is not None
+    assert message.metrics.total_tokens == 150
+    assert message.provider_data == {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI"}}
+
+
+@pytest.mark.asyncio
+async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Path, config: Config) -> None:
+    """A team conversation has no single agent session, so its extraction is reported as internal work."""
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    fake_stores = MagicMock(side_effect=_mem0_memory_reporting_usage(config))
+    recorded, record = _recorder()
+
+    with (
+        patch.object(AsyncMemory, "from_config", fake_stores),
+        patch("mindroom.memory._mem0_backend.record_system_usage", side_effect=record),
+    ):
+        await store_conversation_memory(
+            "Remember that Atlas ships Friday.",
+            ["general", "calculator"],
+            storage_path,
+            "team-session",
+            config,
+            runtime_paths_for(config),
+            user_id="@alice:example.org",
+        )
+
+    [(run, kwargs)] = recorded
+    # Internal work names no requester, like the team's routing and mode decisions.
+    assert kwargs == {"runtime_paths": runtime_paths_for(config), "kind": "memory_extraction"}
+    assert run.metrics is not None
+    # Team memory is extracted once into each store it is kept in.
+    assert run.metrics.total_tokens == 150 * fake_stores.call_count
+    assert len(run.messages or []) == fake_stores.call_count
+
+
+@pytest.mark.asyncio
+async def test_extraction_usage_is_recorded_when_a_later_store_fails(storage_path: Path, config: Config) -> None:
+    """The first store's extraction is paid for even when opening the next store fails."""
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    stores = _mem0_memory_reporting_usage(config)
+    opened = 0
+
+    def open_store(*args: object, **kwargs: object) -> SimpleNamespace:
+        nonlocal opened
+        opened += 1
+        if opened == 2:
+            msg = "the second store is corrupt"
+            raise RuntimeError(msg)
+        return stores(*args, **kwargs)
+
+    recorded, record = _recorder()
+
+    with (
+        patch.object(AsyncMemory, "from_config", side_effect=open_store),
+        patch("mindroom.memory._mem0_backend.record_system_usage", side_effect=record),
+        pytest.raises(RuntimeError, match="second store"),
+    ):
+        await store_conversation_memory(
+            "Remember that Atlas ships Friday.",
+            ["general", "calculator"],
+            storage_path,
+            "team-session",
+            config,
+            runtime_paths_for(config),
+        )
+
+    [(run, _kwargs)] = recorded
+    assert run.metrics is not None
+    assert run.metrics.total_tokens == 150
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The memory tool runs inside a reply, so its extraction tokens go to that reply's conversation and requester."""
+    owner = HelperUsageOwner(storage_factory=MagicMock(), session_id="reply-session")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="reply-session",
+    )
+    recorded, record = _recorder()
+
+    with (
+        patch.object(AsyncMemory, "from_config", side_effect=_mem0_memory_reporting_usage(config)),
+        patch("mindroom.memory._mem0_backend.record_helper_usage", side_effect=record),
+        helper_usage_owner_context(owner),
+    ):
+        await add_agent_memory(
+            "Atlas ships Friday.",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=identity,
+        )
+
+    [(run, kwargs)] = recorded
+    assert (kwargs["owner"], kwargs["kind"], kwargs["requester_id"]) == (
+        owner,
+        "memory_extraction",
+        "@alice:example.org",
+    )
+    assert run.metrics is not None
+    assert run.metrics.total_tokens == 150
+
+
+@pytest.mark.asyncio
+async def test_memory_addition_outside_a_reply_counts_as_internal_usage(storage_path: Path, config: Config) -> None:
+    """An addition with no reply or call to charge is reported as internal work."""
+    recorded, record = _recorder()
+
+    with (
+        patch.object(AsyncMemory, "from_config", side_effect=_mem0_memory_reporting_usage(config)),
+        patch("mindroom.memory._mem0_backend.record_system_usage", side_effect=record),
+    ):
+        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+
+    [(run, kwargs)] = recorded
+    assert kwargs["kind"] == "memory_extraction"
+    assert run.metrics is not None
+    assert run.metrics.total_tokens == 150
+
+
+@pytest.mark.asyncio
+async def test_memory_addition_records_usage_when_storing_the_facts_fails(storage_path: Path, config: Config) -> None:
+    """The extraction call is paid for even when storing what it extracted fails afterwards."""
+    recorded, record = _recorder()
+
+    with (
+        patch.object(
+            AsyncMemory,
+            "from_config",
+            side_effect=_mem0_memory_reporting_usage(config, fail_after_extraction=True),
+        ),
+        patch("mindroom.memory._mem0_backend.record_helper_usage", side_effect=record),
+        helper_usage_owner_context(HelperUsageOwner(storage_factory=MagicMock(), session_id="reply-session")),
+        pytest.raises(RuntimeError, match="rejected the extracted facts"),
+    ):
+        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+
+    [(run, _kwargs)] = recorded
+    assert run.metrics is not None
+    assert run.metrics.total_tokens == 150
+
+
+@pytest.mark.asyncio
+async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(storage_path: Path, config: Config) -> None:
+    """Usage recording comes after the memory is stored, so a failure there does not fail the memory tool."""
+    with (
+        patch.object(AsyncMemory, "from_config", side_effect=_mem0_memory_reporting_usage(config)),
+        patch("mindroom.memory._mem0_backend.record_helper_usage", side_effect=OSError("usage store is locked")),
+        helper_usage_owner_context(HelperUsageOwner(storage_factory=MagicMock(), session_id="reply-session")),
+        capture_logs() as logs,
+    ):
+        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+
+    assert any(log["event"] == "Memory extraction usage could not be recorded" for log in logs)
+
+
+@pytest.mark.parametrize(
+    ("provider", "client", "expected"),
+    [
+        pytest.param(
+            "openai",
+            SimpleNamespace(
+                chat=SimpleNamespace(
+                    completions=SimpleNamespace(
+                        create=lambda **_: _chat_completion(
+                            100,
+                            20,
+                            prompt_tokens_details={"cached_tokens": 40},
+                            completion_tokens_details={"reasoning_tokens": 8},
+                        ),
+                    ),
+                ),
+            ),
+            (100, 20, 40, 0, 8),
+            id="openai",
+        ),
+        pytest.param(
+            "anthropic",
+            SimpleNamespace(
+                messages=SimpleNamespace(
+                    create=lambda **_: AnthropicMessage.model_validate(
+                        {
+                            "id": "message",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                            "model": "extractor",
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {
+                                "input_tokens": 90,
+                                "output_tokens": 10,
+                                "cache_read_input_tokens": 30,
+                                "cache_creation_input_tokens": 20,
+                            },
+                        },
+                    ),
+                ),
+            ),
+            (90, 10, 30, 20, 0),
+            id="anthropic",
+        ),
+        pytest.param(
+            "ollama",
+            SimpleNamespace(
+                chat=lambda **_: OllamaChatResponse(
+                    model="extractor",
+                    message=OllamaMessage(role="assistant", content="{}"),
+                    prompt_eval_count=70,
+                    eval_count=5,
+                ),
+            ),
+            (70, 5, 0, 0, 0),
+            id="ollama",
+        ),
+    ],
+)
+def test_each_provider_reports_its_extraction_tokens(
+    provider: str,
+    client: SimpleNamespace,
+    expected: tuple[int, int, int, int, int],
+) -> None:
+    """Each provider SDK reports usage in its own shape."""
+    llm = SimpleNamespace(config=SimpleNamespace(model="extractor"), client=client)
+    install_mem0_usage_capture(llm, provider)
+    call = {
+        "openai": lambda: llm.client.chat.completions.create(),
+        "anthropic": lambda: llm.client.messages.create(),
+        "ollama": lambda: llm.client.chat(),
+    }[provider]
+
+    call()  # Outside a memory write, nothing is collected.
+    with counted_mem0_usage() as calls:
+        call()
+
+    run = mem0_usage_run(calls)
+    assert run is not None
+    assert run.metrics is not None
+    metrics = run.metrics
+    assert (
+        metrics.input_tokens,
+        metrics.output_tokens,
+        metrics.cache_read_tokens,
+        metrics.cache_write_tokens,
+        metrics.reasoning_tokens,
+    ) == expected
+
+
+def test_calls_without_reported_usage_record_nothing() -> None:
+    """A provider that reports no usage leaves nothing to record rather than a zero-token request."""
+    completion = _chat_completion(0, 0).model_copy(update={"usage": None})
+    llm = SimpleNamespace(
+        config=SimpleNamespace(model="extractor"),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: completion))),
+    )
+    install_mem0_usage_capture(llm, "openai")
+
+    with counted_mem0_usage() as calls:
+        llm.client.chat.completions.create()
+
+    assert mem0_usage_run(calls) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_history", [False, True])
+async def test_conversation_memory_removes_credentials_before_mem0(
+    storage_path: Path,
+    config: Config,
+    with_history: bool,
+) -> None:
+    """Mem0 extracts and stores memories from what it is given, so credential-like values are removed first."""
+    config.memory.backend = "mem0"
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    # A line longer than redaction scans is dropped like an unreadable one.
+    oversized = "x" * 70_000
+    history = [
+        ResolvedVisibleMessage.synthetic(sender="@alice:example.org", body=f"My token is {token}", event_id="$1"),
+        ResolvedVisibleMessage.synthetic(sender="@general:example.org", body="Noted, Atlas is yours.", event_id="$2"),
+    ]
+    sent: list[list[dict]] = []
+
+    class FakeScopedMemory:
+        async def add(self, messages: list[dict], **_: object) -> None:
+            sent.append(messages)
+
+    async def create_fake_memory_instance(*_args: object, **_kwargs: object) -> FakeScopedMemory:
+        return FakeScopedMemory()
+
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
+        await store_conversation_memory(
+            # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
+            f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
+            "Use API key: my-secret-key for the local endpoint.\nThe launch is Friday.",
+            "general",
+            storage_path,
+            "session-alice",
+            config,
+            runtime_paths_for(config),
+            history if with_history else None,
+            "@alice:example.org",
+        )
+
+    [messages] = sent
+    assert len(messages) == (3 if with_history else 1)
+    assert all(token not in message["content"] and "correct horse" not in message["content"] for message in messages)
+    assert REDACTION_FAILED not in messages[-1]["content"]
+    assert oversized not in messages[-1]["content"]
+    # A key a person chose, after an explicit label, is removed too.
+    assert "my-secret-key" not in messages[-1]["content"]
+    assert "The launch is Friday." in messages[-1]["content"]
+    assert "env:" in messages[-1]["content"]
+    if with_history:
+        assert messages[1]["content"] == "Noted, Atlas is yours."

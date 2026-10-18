@@ -64,6 +64,12 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
+# A PEM private key from its BEGIN line through the matching END line, or to the end of the text without one, so a key
+# cut off by a length bound or a mismatched END line never leaves its body behind. Certificates are public and stay.
+_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN (?P<label>[A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?)-----.*?(?:-----END (?P=label)-----|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -557,9 +563,12 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     has_bearer = "bearer" in lowered_value
     has_api_key_message = "api key" in lowered_value
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
-    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token)):
+    has_private_key = "private key" in lowered_value
+    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key)):
         return _truncate_text(bounded_value, max_length)
-    redacted = URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    # Keys go first, so the patterns below never see, or fail closed on, a key's body.
+    redacted = _PRIVATE_KEY_PATTERN.sub(REDACTED, bounded_value) if has_private_key else bounded_value
+    redacted = URL_PATTERN.sub(_redact_url_match, redacted) if has_url else redacted
     redact_token = _redact_prose_token if prose else _redact_matched_token
     if has_bearer:
         redacted = _BEARER_TOKEN_PATTERN.sub(redact_token, redacted)

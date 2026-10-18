@@ -143,7 +143,7 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
                 )
         assert response.status is RunStatus.completed
         retrieved = next(tool for tool in response.tools if tool.tool_call_id == "retrieve")
-        assert retrieved.result == "Tool job is not available in this conversation."
+        assert retrieved.result.startswith("No job with this ID is available to you in this conversation.")
         assert executions == 1
     finally:
         await coordinator.stop()

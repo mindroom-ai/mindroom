@@ -67,6 +67,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
+    private_instances_for_agent,
 )
 from mindroom.prompts import (
     HIDDEN_TOOL_CALLS_PROMPT,
@@ -80,7 +81,7 @@ from mindroom.runtime_resolution import (
 from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
-from mindroom.session_storage.agent_storage import get_agent_runtime_state_dbs
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_runtime_state_dbs
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
@@ -1400,6 +1401,24 @@ def test_resolve_agent_runtime_persists_private_instance_identity_on_materializa
         worker_key=worker_key,
         requester_id="requester-a",
     )
+
+
+def test_session_storage_records_the_owner_of_a_new_private_instance(tmp_path: Path) -> None:
+    """A turn can open its session storage before building the agent; the owner record must come first anyway."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    create_session_storage("general", bound_config, runtime_paths, execution_identity=execution_identity).close()
+    resolve_agent_runtime("general", bound_config, runtime_paths, execution_identity=execution_identity, create=True)
+
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == PrivateInstanceIdentity(
+        worker_key=worker_key,
+        requester_id="requester-a",
+    )
+    owners = private_instances_for_agent(runtime_paths.storage_root, "general", "user")
+    assert [owner.requester_id for owner in owners] == ["requester-a"]
 
 
 def test_resolve_agent_runtime_reconciles_a_populated_legacy_workspace_without_an_identity_record(
@@ -4171,7 +4190,7 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
     depth: int,
     asks_as_job: bool,
 ) -> None:
-    """A subagent's calls and excluded toolkits keep pausing their run, as every call does with jobs off."""
+    """A subagent's calls keep pausing their run, as every call does with jobs off."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(
         Config(
@@ -4198,9 +4217,8 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
     }
     expected = JOB_APPROVAL_TYPE if asks_as_job else POLICY_CONFIRMATION_APPROVAL_TYPE
     assert (functions["add"].requires_confirmation, functions["add"].approval_type) == (not asks_as_job, expected)
-    # Shell keeps its own waiting behavior by default, so it keeps pausing for its approval.
     shell = functions["run_shell_command"]
-    assert (shell.requires_confirmation, shell.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
+    assert (shell.requires_confirmation, shell.approval_type) == (not asks_as_job, expected)
 
 
 def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:

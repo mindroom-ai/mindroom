@@ -86,11 +86,6 @@ def team_static_token_estimator(team: Team) -> _StaticTokenEstimator:
     return _StaticTokenEstimator(partial(_estimate_team_non_prompt_static_tokens, team))
 
 
-def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate the non-history agent prompt using Agno's real system-message builder."""
-    return agent_static_token_estimator(agent).estimate(full_prompt)
-
-
 def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
     """Estimate system-message and tool tokens that do not depend on the prompt text."""
     surface = _agent_prompt_tool_surface(agent)
@@ -106,11 +101,6 @@ def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
     if system_message is not None and system_message.content is not None:
         static_tokens += estimate_text_tokens(str(system_message.content))
     return static_tokens + surface.definition_tokens
-
-
-def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
-    """Estimate the non-history team prompt using Agno's team system-message builder."""
-    return team_static_token_estimator(team).estimate(full_prompt)
 
 
 def _estimate_team_non_prompt_static_tokens(team: Team) -> int:

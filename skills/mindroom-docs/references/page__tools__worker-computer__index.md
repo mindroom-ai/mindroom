@@ -105,6 +105,11 @@ Each entry must be a scheme and host with an optional port, and no wildcard.
 An optional single trailing `/` is accepted, and any other path is invalid.
 HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
+The Connections portal's [Matrix sign-in](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules, and Chat uses the same runtime origin for both.
+
+Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
+Audience binding, its `MINDROOM_PUBLIC_URL` requirement, and the rollout order are described under [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat).
+Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](https://docs.mindroom.chat/authorization/#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.
@@ -231,6 +236,10 @@ Configuration fails with `MINDROOM_WORKER_COMPUTER_ENABLED=true requires MINDROO
 Computer workers must also run as a non-root user.
 `MINDROOM_DOCKER_WORKER_USER=root` or UID 0, including a runtime that itself runs as root and passes its UID to workers, fails configuration, and a worker that starts as root refuses requests.
 An empty `MINDROOM_DOCKER_WORKER_USER` uses the image's default user.
+
+With gVisor as the worker runtime (`MINDROOM_DOCKER_WORKER_RUNTIME=runsc`), Computer needs gVisor 20261005 or later, because gVisor 20260406 crashes Chromium's page loads.
+By default, gVisor does not apply the `computer` seccomp profile inside its sandbox.
+Kata Containers (`MINDROOM_DOCKER_WORKER_RUNTIME=io.containerd.kata.v2`) applies the profile only when its configuration sets `disable_guest_seccomp = false`, which is not the default.
 
 ### Kubernetes
 

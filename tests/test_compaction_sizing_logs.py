@@ -13,10 +13,8 @@ from agno.models.anthropic import Claude
 from agno.session.summary import SessionSummary
 from structlog.testing import capture_logs
 
-from mindroom.constants import DEFAULT_COMPACTION_TIMEOUT_SECONDS
-from mindroom.history.compaction import SummaryModel, _rewrite_working_session_for_compaction
-from mindroom.history.types import HistoryScope, HistoryScopeState
-from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.history.compaction import _rewrite_working_session_for_compaction
+from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import (  # noqa: F401
@@ -25,6 +23,7 @@ from tests.history_helpers import (  # noqa: F401
     _completed_run,
     _make_config,
     _session,
+    _summarizer,
 )
 
 if TYPE_CHECKING:
@@ -48,21 +47,11 @@ async def _rewrite_with_summary_model(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
-        summary_model=SummaryModel(summary_model, "summary-model", summary_input_budget),
-        session_id=working_session.session_id,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        state=HistoryScopeState(force_compact_before_next_run=True),
-        history_settings=_ALL_HISTORY_SETTINGS,
-        available_history_budget=None,
-        selected_run_ids=("run-1",),
-        before_tokens=0,
-        runs_before=len(working_session.runs or []),
-        threshold_tokens=None,
-        summary_prompt=COMPACTION_SUMMARY_PROMPT,
-        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-        lifecycle_notice_event_id=None,
-        progress_callback=None,
-        collect_compaction_hook_messages=False,
+        summarizer=_summarizer(summary_model, summary_input_budget, session_id=working_session.session_id),
+        runs=[run for run in working_session.runs or [] if run.run_id == "run-1"],
+        before_persist=AsyncMock(),
+        after_persist=AsyncMock(),
     )
 
 
@@ -156,7 +145,7 @@ async def test_chunk_events_report_actual_sizing_strategy(
 async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
     summary_inputs: list[str] = []
 
     async def fail_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -191,7 +180,7 @@ async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
 async def test_no_run_fit_warning_uses_token_budget_field(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock()),

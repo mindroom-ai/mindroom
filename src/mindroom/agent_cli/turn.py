@@ -42,6 +42,7 @@ from mindroom.agno_compat_prepared_tools import stop_function_call
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
 from mindroom.response_turn import PausedAttempt
+from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -176,6 +177,8 @@ class LiveTurnTools(TurnToolBridge):
         self._windows: dict[str, Context] = {}
         self._closed = False
         self._binding_retired = False
+        # Retired attempt catalogs that open shell windows still call through, closed with this owner.
+        self._retired_catalogs: list[PreparedAgentToolCatalog] = []
         self.control_executions: list[ToolExecution] = []
         self._close_task: asyncio.Task[None] | None = None
         self.close_for_shutdown = False
@@ -200,7 +203,11 @@ class LiveTurnTools(TurnToolBridge):
     async def operation(self, operation: AgentCliOperation, *, window: str | None) -> dict[str, object]:
         """Metadata reads are pure; describes and calls run only inside the caller's open Bash window."""
         self._check_live()
-        if self._binding_retired and isinstance(operation, ToolListOperation | ToolSearchOperation):
+        if (
+            self._binding_retired
+            and not self._windows
+            and isinstance(operation, ToolListOperation | ToolSearchOperation)
+        ):
             msg = "Agent tool catalog is being rebuilt; retry shortly"
             raise CliOperationError(msg)
         if isinstance(operation, ToolListOperation):
@@ -332,25 +339,29 @@ class LiveTurnTools(TurnToolBridge):
 
     @asynccontextmanager
     async def _window(self, window: str) -> AsyncIterator[None]:
+        """Run one command's CLI calls; the command's timeout stops its processes, never the agent's calls it made."""
         async with self._admission:
             self._check_live()
             self._windows[window] = copy_context()
         try:
             yield
         except asyncio.CancelledError:
-            self._cancel_active()
+            self._cancel_window(window)
             raise
         finally:
+            # A call the command left running, such as one waiting for a person's approval, finishes first.
             await wait_for_future_until_complete(
                 asyncio.create_task(self._drain_window(window), name="agent-cli-window-drain"),
-                on_cancel=self._cancel_active,
+                on_cancel=partial(self._cancel_window, window),
             )
 
-    def _cancel_active(self) -> None:
-        self.revoke()
-        self.close_for_shutdown = self._is_shutdown()
-        for task in self._active:
-            request_task_cancel(task, process_shutdown=self.close_for_shutdown)
+    def _cancel_window(self, window: str) -> None:
+        """Stop one command's admitted CLI work and refuse its later calls; other running commands keep their CLI."""
+        self._windows.pop(window, None)
+        shutdown = self._is_shutdown()
+        for task, owner in self._active.items():
+            if owner == window:
+                request_task_cancel(task, process_shutdown=shutdown)
 
     async def _drain_window(self, window: str) -> None:
         failures: list[Exception] = []
@@ -791,10 +802,19 @@ class LiveTurnTools(TurnToolBridge):
                 )
 
     async def retire_binding(self) -> None:
-        """Retire this attempt while retaining receipts and the response grant."""
+        """Retire this attempt while retaining receipts and the response grant.
+
+        Open shell windows keep its catalog until they drain, and background jobs, which may still open a window
+        once approved, keep it until they settle.
+        """
         async with self._outer:
             self._binding_retired = True
-            await self.catalog.close()
+            if defer_execution_cleanup(self.catalog.close, resource=self.catalog):
+                return
+            if self._windows:
+                self._retired_catalogs.append(self.catalog)
+            else:
+                await self.catalog.close()
 
     def bind_catalog(self, catalog: PreparedAgentToolCatalog, *, context: Mapping[str, str] | None = None) -> None:
         """Install the next attempt only after retiring the previous catalog."""
@@ -829,4 +849,6 @@ class LiveTurnTools(TurnToolBridge):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._calls.clear()
-        await self.catalog.close()
+        for catalog in (*self._retired_catalogs, self.catalog):
+            await catalog.close()
+        self._retired_catalogs.clear()

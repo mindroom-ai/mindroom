@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import re
 import unicodedata
 from collections.abc import Collection, Mapping  # noqa: TC003
@@ -236,6 +237,11 @@ class EgressRules:
     def unmatched_hosts(self) -> Literal["passthrough", "deny"]:
         """Return what happens to hosts without applicable rules, as the operator configured it."""
         return self.operator.unmatched_hosts
+
+    @property
+    def private_networks(self) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+        """Return the private networks the operator lets requests reach."""
+        return tuple(ipaddress.ip_network(network) for network in self.operator.private_networks)
 
     def intercepts(self, host: str, port: int) -> bool:
         """Return whether a rule applies on `host`:`port`; under `deny` only where an operator rule names it."""

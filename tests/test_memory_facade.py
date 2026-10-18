@@ -79,8 +79,6 @@ async def list_all_agent_memories(
     storage_path: Path,
     config: Config,
     limit: int = 100,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ) -> list[MemoryResult]:
     return await public_list_all_agent_memories(
         agent_name,
@@ -88,7 +86,6 @@ async def list_all_agent_memories(
         config,
         runtime_paths_for(config),
         limit,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
 

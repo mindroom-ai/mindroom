@@ -38,6 +38,7 @@ from mindroom.background_tasks import create_background_task, run_coroutine_unti
 from mindroom.budgets.monitor import budget_model
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -45,6 +46,7 @@ from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -65,19 +67,16 @@ from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
+from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
+from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     replace_visible_message,
 )
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
-from mindroom.memory import (
-    mark_auto_flush_dirty_session,
-    reprioritize_auto_flush_sessions,
-    store_conversation_memory,
-    strip_user_turn_time_prefix,
-)
-from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
+from mindroom.memory import store_conversation_memory, strip_user_turn_time_prefix
+from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -142,7 +141,6 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
     clean_partial_reply_text,
-    strip_visible_tool_markers,
 )
 from mindroom.teams import (
     TeamMode,
@@ -154,11 +152,13 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
+from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.events import body_without_tool_markers, strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -215,7 +215,7 @@ if TYPE_CHECKING:
     from agno.run.requirement import RunRequirement
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -223,6 +223,7 @@ if TYPE_CHECKING:
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.event_journal import JournalEvent, PrincipalStore
     from mindroom.history.types import HistoryScope
+    from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.identity import MatrixID
@@ -454,13 +455,16 @@ def _split_delivery_tool_trace(
     return completed, interrupted
 
 
-def _materialize_matrix_run_metadata(
-    matrix_run_metadata: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Return a concrete metadata dict for downstream APIs that require one."""
-    if matrix_run_metadata is None:
-        return None
-    return dict(matrix_run_metadata)
+def _agent_run_metadata(request: ResponseRequest) -> dict[str, Any]:
+    """Record what started this turn, so stored runs show which automation asked or that MindRoom wrote the prompt.
+
+    The turn recorder gets it too, so a turn stopped before its run starts keeps it.
+    """
+    envelope = request.response_envelope
+    recorded = {**(request.matrix_run_metadata or {}), TURN_INTENT_RUN_METADATA_KEY: envelope.origin.intent.value}
+    if envelope.hook_source is not None:
+        recorded[HOOK_SOURCE_RUN_METADATA_KEY] = envelope.hook_source
+    return recorded
 
 
 def _reply_authorization_entity_names(
@@ -593,7 +597,7 @@ def _timestamp_thread_history_user_turns(
     return timestamped_history
 
 
-def prepare_memory_and_model_context(
+def _prepare_memory_and_model_context(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -698,16 +702,10 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
-def _mid_turn_for_request(
-    request: ResponseRequest,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    on_defer: Callable[[str, str], Awaitable[None]],
-) -> MidTurnGate | None:
-    """Treat deferred attachment registration as incomplete judgment context too."""
+def _request_has_media(request: ResponseRequest) -> bool:
+    """Count deferred attachment registration as media too."""
     preparation = request.payload_preparation
-    has_media = bool(
+    return bool(
         request.attachment_ids
         or (request.media is not None and request.media.has_any())
         or (
@@ -720,6 +718,17 @@ def _mid_turn_for_request(
             )
         ),
     )
+
+
+def _mid_turn_for_request(
+    request: ResponseRequest,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    on_defer: Callable[[str, str], Awaitable[None]],
+) -> MidTurnGate | None:
+    """Treat deferred attachment registration as incomplete judgment context too."""
+    has_media = _request_has_media(request)
     gate = create_mid_turn_gate(
         config,
         runtime_paths,
@@ -1690,7 +1699,11 @@ class ResponseRunner:
                 origin=request.response_envelope.origin,
                 memory_prompt=request.prompt,
                 memory_thread_history=tuple(
-                    ApprovalMemoryTurn(sender=message.sender, body=message.body) for message in request.thread_history
+                    ApprovalMemoryTurn(
+                        sender=message.sender,
+                        body=body_without_tool_markers(message.body, message.content),
+                    )
+                    for message in request.thread_history
                 ),
                 thread_summary_message_count_hint=thread_summary_message_count_hint(
                     request.thread_history,
@@ -2463,12 +2476,6 @@ class ResponseRunner:
             thread_summary_thread_id=target.resolved_thread_id,
             thread_summary_message_count_hint=continuation.thread_summary_message_count_hint,
             thread_summary_entity_name=continuation.entity_name,
-            memory_prompt=(
-                continuation.memory_prompt
-                if continuation.memory_prompt is not None
-                else continuation.request_body or None
-            ),
-            memory_thread_history=self._approval_memory_history(continuation),
         )
 
     def _approval_post_response_deps(self, continuation: ApprovalContinuation) -> PostResponseEffectsDeps:
@@ -2536,8 +2543,12 @@ class ResponseRunner:
         return count, replace(runtime, skill_review_capture=capture)
 
     def _approval_memory_persistence(self, continuation: ApprovalContinuation) -> Callable[[], None] | None:
-        """Return the normal agent-memory handoff for a completed continuation."""
-        if continuation.entity_kind != "agent":
+        """Return the normal memory handoff for a completed continuation."""
+        if continuation.entity_kind == "agent":
+            agent_name: str | list[str] = continuation.entity_name
+        elif continuation.entity_name in self.deps.runtime.config.teams:
+            agent_name = list(continuation.team_member_names)
+        else:
             return None
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
@@ -2546,7 +2557,7 @@ class ResponseRunner:
         if execution_identity is None:
             return None
         return self._memory_persistence(
-            agent_name=continuation.entity_name,
+            agent_name=agent_name,
             session_id=continuation.session_id,
             execution_identity=execution_identity,
             prompt=(
@@ -2555,48 +2566,47 @@ class ResponseRunner:
             thread_history=self._approval_memory_history(continuation),
             user_id=continuation.requester_id,
             hook_source=continuation.hook_source,
+            origin=continuation.origin,
         )
 
     def _memory_persistence(
         self,
         *,
-        agent_name: str,
+        agent_name: str | list[str],
         session_id: str,
         execution_identity: ToolExecutionIdentity,
         prompt: str,
         thread_history: Sequence[ResolvedVisibleMessage],
         user_id: str | None,
         hook_source: str | None,
+        origin: TurnOrigin,
     ) -> Callable[[], None] | None:
-        """Build the shared completed-agent memory handoff, or None for a turn that is not memory."""
-        if is_automation_hook_source(hook_source):
-            # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory.
+        """Build the completed-turn Mem0 or team memory handoff, or None for a turn whose prompt is not memory."""
+        # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory, and a job follow-up's
+        # prompt is MindRoom's instruction to collect the results, not conversation to extract.
+        if is_automation_hook_source(hook_source) or origin.intent is TurnIntent.JOB_FOLLOW_UP:
+            return None
+        # A file-memory agent's conversation is saved by auto-flush from stored sessions; a team's goes to its shared
+        # memory.
+        if isinstance(agent_name, str) and self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
             return None
 
         def queue() -> None:
-            mark_auto_flush_dirty_session(
-                self.deps.storage_path,
-                self.deps.runtime.config,
-                agent_name=agent_name,
-                session_id=session_id,
-                execution_identity=execution_identity,
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    agent_name,
+                    self.deps.storage_path,
+                    session_id,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    thread_history,
+                    user_id,
+                    execution_identity=execution_identity,
+                ),
+                name=f"memory_save_{agent_name if isinstance(agent_name, str) else 'team'}_{session_id}",
+                owner=self.deps.runtime,
             )
-            if self.deps.runtime.config.resolve_entity(agent_name).memory_backend == "mem0":
-                create_background_task(
-                    store_conversation_memory(
-                        prompt,
-                        agent_name,
-                        self.deps.storage_path,
-                        session_id,
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                        thread_history,
-                        user_id,
-                        execution_identity=execution_identity,
-                    ),
-                    name=f"memory_save_{agent_name}_{session_id}",
-                    owner=self.deps.runtime,
-                )
 
         return queue
 
@@ -2734,6 +2744,8 @@ class ResponseRunner:
         user_message: str,
         user_message_is_structured: bool,
         reply_to_event_id: str | None,
+        room_id: str,
+        thread_id: str | None,
         requester_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
@@ -2746,6 +2758,8 @@ class ResponseRunner:
             build_matrix_run_metadata(
                 reply_to_event_id,
                 [],
+                room_id=room_id,
+                thread_id=thread_id,
                 requester_id=requester_id,
                 extra_metadata=matrix_run_metadata,
             ),
@@ -3817,18 +3831,18 @@ class ResponseRunner:
 
     def _bind_mid_turn_context(self, request: ResponseRequest) -> None:
         """Only successfully refreshed public history may authorize continuing tools."""
-        bind_mid_turn_conversation_context(
-            lambda: (
-                None
-                if request.requires_model_history_refresh
-                else conversation_context_for_mid_turn(
-                    request.thread_history,
-                    source_event_ids=request.sources.logical_source_event_ids,
-                    thread_id=request.thread_id,
-                    config=self.deps.runtime.config,
-                    runtime_paths=self.deps.runtime_paths,
-                )
-            ),
+        bind_mid_turn_conversation_context(lambda: self._judgment_context(request))
+
+    def _judgment_context(self, request: ResponseRequest) -> tuple[JudgmentMessage, ...] | None:
+        """Return the public thread text judges read, or None until the history is refreshed."""
+        if request.requires_model_history_refresh:
+            return None
+        return conversation_context_before_sources(
+            request.thread_history,
+            source_event_ids=request.sources.logical_source_event_ids,
+            thread_id=request.thread_id,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
         )
 
     async def _prepare_request_after_lock(
@@ -3925,7 +3939,7 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_agent_run_metadata(request),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
@@ -4662,14 +4676,12 @@ class ResponseRunner:
                 post_response_deps=lambda: self._post_response_deps(request),
             )
         requester_user_id = request.user_id or ""
-        _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
-            prepare_memory_and_model_context(
-                request.prompt,
-                request.thread_history,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                model_prompt=request.model_prompt,
-            )
+        memory_prompt, memory_thread_history, prepared_prompt, model_thread_history = _prepare_memory_and_model_context(
+            request.prompt,
+            request.thread_history,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            model_prompt=request.model_prompt,
         )
         assert turn_models is not None
         model_name = turn_models.team_model_name
@@ -4754,7 +4766,7 @@ class ResponseRunner:
         response_run_id = str(uuid4())
         team_run_metadata_content: dict[str, Any] = {}
         progress = _DeliveryProgress()
-        matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
+        matrix_run_metadata = None if request.matrix_run_metadata is None else dict(request.matrix_run_metadata)
         active_event_ids = await self._active_response_event_ids(request.room_id)
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
@@ -4785,6 +4797,8 @@ class ResponseRunner:
             user_message=prepared_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=resolved_target.resolved_thread_id,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
         )
@@ -4824,6 +4838,21 @@ class ResponseRunner:
             session_id=session_id,
             session_type=session_type,
             create_storage=team_storage_factory,
+        )
+        # A configured team keeps the conversations it answers in its members' shared memory.
+        queue_memory_persistence = (
+            self._memory_persistence(
+                agent_name=agent_names,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                prompt=memory_prompt,
+                thread_history=memory_thread_history,
+                user_id=request.user_id,
+                hook_source=request.response_envelope.hook_source,
+                origin=request.response_envelope.origin,
+            )
+            if self.deps.agent_name in self.deps.runtime.config.teams
+            else None
         )
 
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
@@ -5079,8 +5108,6 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
-                memory_prompt=_memory_prompt,
-                memory_thread_history=_memory_thread_history,
             )
 
         placeholder_state.settlement_started = True
@@ -5095,6 +5122,7 @@ class ResponseRunner:
             build_post_response_outcome=build_team_post_response_outcome,
             post_response_deps=lambda: self._post_response_deps(
                 request,
+                queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
             ),
             streaming_delivery_error_handler=settle_team_streaming_delivery_error,
@@ -5495,8 +5523,10 @@ class ResponseRunner:
             user_message=runtime.model_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_agent_run_metadata(request),
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
@@ -5638,8 +5668,10 @@ class ResponseRunner:
             user_message=runtime.model_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            matrix_run_metadata=_agent_run_metadata(request),
         )
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
@@ -5832,6 +5864,67 @@ class ResponseRunner:
                 await request.on_no_response_handled()
             return None
 
+    async def _cold_cache_model(
+        self,
+        request: ResponseRequest,
+        *,
+        runtime_model: ResolvedRuntimeModel,
+        thread_id: str | None,
+    ) -> str:
+        """Let a judge move a thread whose prompt cache went cold to the agent's cheap model."""
+        resolved_model = runtime_model.model_name
+        config = self.deps.runtime.config
+        agent = config.agents.get(self.deps.agent_name)
+        cheap_model = config.get_agent_cheap_model(self.deps.agent_name) if agent is not None else None
+        if (
+            agent is None
+            or agent.cold_cache is None
+            or cheap_model is None
+            # Scheduled, thread, and room choices are explicit, and an earlier switch is a thread choice.
+            or runtime_model.overridden
+            or resolved_model != agent.model
+            # Only a thread can be switched for good.
+            or thread_id is None
+            # A regenerated or resumed answer follows one the agent model just gave.
+            or request.edit_regeneration
+            or _resumed_reply() is not None
+            # The judge cannot see media, and the cheap model may not read it.
+            or _request_has_media(request)
+        ):
+            return resolved_model
+        selected = await select_cold_cache_model(
+            agent.cold_cache,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            agent_name=self.deps.agent_name,
+            agent_model=resolved_model,
+            cheap_model=cheap_model,
+            idle_seconds=idle_seconds_before_turn(
+                request.thread_history,
+                agent_user_id=self.deps.matrix_full_id,
+                source_event_ids=request.sources.logical_source_event_ids,
+                now=time.time(),
+            ),
+            context=self._judgment_context(request),
+            prompt=request.prompt,
+        )
+        if selected == resolved_model:
+            return selected
+        try:
+            # The thread stays on the cheap model, like a `!model` choice, until someone changes it.
+            set_thread_model_override(
+                self.deps.runtime_paths,
+                thread_id=thread_id,
+                model_name=selected,
+                entity_names=(self.deps.agent_name,),
+                config=config,
+            )
+        except OSError:
+            # The switch is an optimization, so a failed save must not fail the reply.
+            self.deps.logger.warning("cold_cache_switch_save_failed", thread_id=thread_id, exc_info=True)
+            return resolved_model
+        return selected
+
     async def _generate_response_with_participation_locked(
         self,
         request: ResponseRequest,
@@ -5866,13 +5959,13 @@ class ResponseRunner:
         request = admitted_request
         _approve_continued_reply(participation, request)
         response_thread_id = _response_thread_id(request, resolved_target)
-        active_model_name = self.deps.runtime.config.resolve_runtime_model(
+        runtime_model = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,
             active_model_name=request.scheduled_model,
             room_id=resolved_target.room_id,
             thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,
-        ).model_name
+        )
         prepared_request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -5887,7 +5980,7 @@ class ResponseRunner:
             return None
         request = prepared_request
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
-            prepare_memory_and_model_context(
+            _prepare_memory_and_model_context(
                 request.prompt,
                 request.thread_history,
                 config=self.deps.runtime.config,
@@ -5904,14 +5997,11 @@ class ResponseRunner:
         )
 
         session_id = resolved_target.session_id
-        reprioritize_auto_flush_sessions(
-            self.deps.storage_path,
-            self.deps.runtime.config,
-            agent_name=self.deps.agent_name,
-            active_session_id=session_id,
-            execution_identity=execution_identity,
+        active_model_name = await self._cold_cache_model(
+            request,
+            runtime_model=runtime_model,
+            thread_id=response_thread_id,
         )
-
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_response_runtime(
@@ -5950,6 +6040,7 @@ class ResponseRunner:
             thread_history=memory_thread_history,
             user_id=request.user_id,
             hook_source=request.response_envelope.hook_source,
+            origin=request.response_envelope.origin,
         )
         queue_skill_review, runtime = self._response_skill_review(
             request,
@@ -6023,8 +6114,6 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
-                memory_prompt=memory_prompt,
-                memory_thread_history=memory_thread_history,
             )
 
         placeholder_state.settlement_started = True

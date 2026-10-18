@@ -58,6 +58,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
+from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, without_fold_records
 from mindroom.history.replay import apply_replay_plan
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
@@ -1358,6 +1359,7 @@ async def _prepare_agent_run_context(
             note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
         agent = prepared_run.agent
+        bind_compaction_lifecycle(agent, compaction_lifecycle, turn_recorder)
         if agent.model is not None:
             ai_runtime.install_queued_message_notice_hook(
                 agent.model,
@@ -1373,7 +1375,7 @@ async def _prepare_agent_run_context(
             requester_id=ctx.requester_id,
             correlation_id=ctx.correlation_id,
             model_params=model_params_payload(agent.model) if agent.model is not None else {},
-            extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
+            extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
         )
         if ctx.agent_mode == "minimal":
             metadata = dict(metadata or {}) | {"agent_mode": "minimal"}
@@ -1466,6 +1468,7 @@ async def run_delegated_child_response(
                 attempt_model_runtime=ToolRuntimeModelBinding(),
                 supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
                 collect_streamed_response=True,
+                show_tool_calls=False,
                 turn_recorder=TurnRecorder(user_message=prompt),
             ),
         )

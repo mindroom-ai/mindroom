@@ -71,8 +71,6 @@ def append_agent_daily_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ):
     return memory_functions.append_agent_daily_memory(
         content,
@@ -81,7 +79,6 @@ def append_agent_daily_memory(
         config,
         runtime_paths_for(config),
         get_tool_execution_identity(),
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
 
@@ -110,8 +107,6 @@ async def list_all_agent_memories(
     storage_path: Path,
     config: Config,
     limit: int = 100,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ):
     return await public_list_all_agent_memories(
         agent_name,
@@ -120,7 +115,6 @@ async def list_all_agent_memories(
         runtime_paths_for(config),
         limit,
         get_tool_execution_identity(),
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
 
@@ -1349,6 +1343,35 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
         agent_state_root_path(storage_path, "calculator") / "memory_files" / "team_calculator+general" / "MEMORY.md"
     ).exists()
     assert not (storage_path / "memory_files" / "team_calculator+general" / "MEMORY.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_file_backend_team_conversation_memory_removes_credentials(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A team keeps each message it answers in MEMORY.md, so credential-like values are removed first."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["calculator"].memory_backend = "file"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+    await store_conversation_memory(
+        f"Use token {token}\npassword: hunter2\nfor the staging deploy on Friday",
+        ["general", "calculator"],
+        storage_path,
+        "session-alice",
+        config,
+    )
+
+    memory_file = (
+        agent_state_root_path(storage_path, "general") / "memory_files" / "team_calculator+general" / "MEMORY.md"
+    )
+    text = memory_file.read_text(encoding="utf-8")
+    assert token not in text
+    assert "hunter2" not in text
+    assert "for the staging deploy on Friday" in text
 
 
 @pytest.mark.asyncio

@@ -190,6 +190,32 @@ def resolve_agent_execution(
     )
 
 
+def record_private_instance_owner(
+    agent_name: str,
+    resolved_execution: ResolvedAgentExecution,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Record who owns a private instance before the primary stores its first data there.
+
+    A scope that already holds data when its record is first written stays undiscoverable, so every primary path
+    that creates private state calls this first.
+    """
+    # The identity record sits in the private scope above the workspace, which
+    # dedicated workers never mount; only the primary creates or locks it.
+    if not resolved_execution.policy.private_workspace_enabled or runs_in_dedicated_worker(runtime_paths):
+        return
+    execution_identity = resolved_execution.execution_identity
+    worker_key = resolved_execution.worker_key
+    if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
+        msg = f"Private agent '{agent_name}' has unresolved private execution state"
+        raise ValueError(msg)
+    ensure_private_instance_identity(
+        runtime_paths.storage_root,
+        worker_key=worker_key,
+        requester_id=execution_identity.requester_id,
+    )
+
+
 def resolve_agent_runtime(
     agent_name: str,
     config: Config,
@@ -207,20 +233,8 @@ def resolve_agent_runtime(
     )
     resolved_execution = resolved_storage.execution
     state_root = resolved_storage.state_root
-
-    # The identity record sits in the private scope above the workspace, which
-    # dedicated workers never mount; only the primary creates or locks it.
-    if create and resolved_execution.policy.private_workspace_enabled and not runs_in_dedicated_worker(runtime_paths):
-        execution_identity = resolved_execution.execution_identity
-        worker_key = resolved_execution.worker_key
-        if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
-            msg = f"Private agent '{agent_name}' has unresolved private execution state"
-            raise ValueError(msg)
-        ensure_private_instance_identity(
-            runtime_paths.storage_root,
-            worker_key=worker_key,
-            requester_id=execution_identity.requester_id,
-        )
+    if create:
+        record_private_instance_owner(agent_name, resolved_execution, runtime_paths)
 
     workspace = resolve_agent_workspace_from_state_path(
         agent_name,
@@ -379,6 +393,7 @@ __all__ = [
     "ResolvedAgentRuntime",
     "ResolvedAgentStorage",
     "ResolvedKnowledgeBinding",
+    "record_private_instance_owner",
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_agent_storage",

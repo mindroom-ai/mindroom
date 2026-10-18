@@ -29,6 +29,7 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.call_record import without_tool_call_recording
+from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -62,6 +63,10 @@ type _Cleanup = Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]
 
 class JobAccessError(ValueError):
     """The requested job is unavailable to this caller or runtime."""
+
+
+class JobUnavailableError(JobAccessError):
+    """No job with the requested ID is available to this caller, whether unknown, deleted, foreign, or revoked."""
 
 
 class JobRecoveryBlockedError(RuntimeError):
@@ -104,6 +109,8 @@ class BackgroundJob:
     consumed: bool = False
     # Whether the call that started it saved the outcome as its own result, so it never became a job to list.
     returned_inline: bool = False
+    # The latest progress its running tool reported, as of this snapshot; live state that is never saved.
+    progress: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +166,8 @@ def job_summary(job: BackgroundJob) -> dict[str, Any]:
     subagent_id = job.adapter.get("child", {}).get("subagent_id") if job.kind == "delegation" else None
     if subagent_id:
         summary["subagent_id"] = subagent_id
+    if job.progress is not None and job.status not in TERMINAL_STATUSES:
+        summary["progress"] = job.progress
     return summary
 
 
@@ -213,6 +222,8 @@ class _Entry:
     stopped_outcome: BackgroundOutcome | None = None
     # The one in-flight cancellation drain; a cancel and revocation do not await it, so a done callback logs its failure.
     drain: asyncio.Task[BackgroundJob] | None = None
+    # The latest progress its running tool reported, which snapshots of the running job carry.
+    progress: str | None = None
 
     def notify_changed(self) -> None:
         """Wake existing state waiters while keeping the next wait fresh."""
@@ -374,7 +385,7 @@ class ToolJobRuntime:
         self._ensure_open()
         entry = self._entries.get(job_id)
         if entry is None or not self._visible(entry, owner, depth):
-            raise JobAccessError(_UNAVAILABLE)
+            raise JobUnavailableError(_UNAVAILABLE)
         return entry
 
     def _waited_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> tuple[_Entry, bool]:
@@ -387,7 +398,7 @@ class ToolJobRuntime:
         self._ensure_open()
         entry = self._entries.get(job_id)
         if entry is None or not self._owns(entry.job, owner, depth) or self._denied(entry.job):
-            raise JobAccessError(_UNAVAILABLE)
+            raise JobUnavailableError(_UNAVAILABLE)
         return entry, self._authorize(entry.job)
 
     async def _publish(
@@ -449,7 +460,7 @@ class ToolJobRuntime:
             return await asyncio.to_thread(lambda: deepcopy(unsaved))
         payload_json = await self._store.load_payload(job.job_id)
         if payload_json is None:
-            raise JobAccessError(_UNAVAILABLE)
+            raise JobUnavailableError(_UNAVAILABLE)
         return await asyncio.to_thread(json.loads, payload_json)
 
     async def recover(self) -> None:
@@ -550,11 +561,23 @@ class ToolJobRuntime:
         )
 
         outcome = None
+        returned = False
+        loop = asyncio.get_running_loop()
+
+        def record_progress(text: str) -> None:
+            # A thread that outlives the call cannot report for it.
+            if not returned:
+                entry.progress = cap_progress(text)
+
+        def report_progress(text: str) -> None:
+            loop.call_soon_threadsafe(record_progress, text)
+
         try:
             try:
                 with (
                     # A newer human message releases replies, never the background work they wait for.
                     pending_human_messages_context(None),
+                    tool_progress_reporter(report_progress),
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     without_tool_call_recording(),
                     job_control_context(entry.control),
@@ -564,6 +587,7 @@ class ToolJobRuntime:
                         async with execution_resources():
                             outcome = await operation()
                     finally:
+                        returned = True
                         await finalize_queued_notice_response_turn_async(notice)
             except Exception as error:
                 outcome = BackgroundOutcome("failed", str(error))
@@ -588,8 +612,11 @@ class ToolJobRuntime:
 
     @staticmethod
     async def _snapshot(entry: _Entry) -> BackgroundJob:
-        """Copy a job's metadata."""
-        return await run_blocking_until_complete(deepcopy, entry.job)
+        """Copy a job's metadata, with the latest progress while it runs."""
+        job = await run_blocking_until_complete(deepcopy, entry.job)
+        if entry.progress is None or job.status in TERMINAL_STATUSES:
+            return job
+        return replace(job, progress=entry.progress)
 
     async def list_jobs(
         self,
@@ -635,6 +662,10 @@ class ToolJobRuntime:
         retained = False
         async with self._lock:
             entry, readable = self._waited_entry(job_id, owner, depth)
+            if not readable and claim is not None and entry.claim == claim:
+                # A wait that cannot read its job returns no claim, so it gives back the one it was handed.
+                entry.claim = None
+                self.changed.set()
             claim = entry.claim_for(claim) if readable else None
             if claim is None:
                 return _JobWait(await self._snapshot(entry))

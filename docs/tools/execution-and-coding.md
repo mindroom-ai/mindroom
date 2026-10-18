@@ -14,7 +14,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 ## Tools On This Page
 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
-- [`shell`] - Shell commands with background handles, environment passthrough, and PATH prepends.
+- [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -127,18 +127,18 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ## [`shell`]
 
-`shell` provides `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` accepts a shell command string or a list of argv strings.
+`shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-If the command finishes within `timeout` seconds (default 120), the tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
-With `mindroom_output_path`, the complete output is saved to that file instead.
+The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
+With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
+With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 
-A command that exceeds `timeout` keeps running in the background, and the tool returns a `shell:...` handle.
-Poll it with `check_shell_command(handle)` and stop it with `kill_shell_command(handle)`, or `kill_shell_command(handle, force=True)` to send SIGKILL.
-A backgrounded command with `mindroom_output_path` saves its output when it finishes, and `check_shell_command()` then returns the file receipt.
-Each runner keeps at most 16 backgrounded commands; more fail with `Error: Too many backgrounded processes (16/16). Kill or wait for existing ones before running more.`
-Records of finished commands are cleared about 10 minutes after they finish.
-For how stopping a response and worker restarts affect background commands, see [Stopping and background commands](../deployment/sandbox-proxy.md#stopping-and-background-commands).
+A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
+Without `timeout`, a call that runs as a [background job](agent-orchestration.md#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
+While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
+A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
+A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
+For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](../deployment/sandbox-proxy.md#stopping-and-background-commands).
 
 Worker-routed `shell` sees only a small default environment; which variables pass by default and which `extra_env_passthrough` never passes are listed in [Shell environment and PATH](../deployment/sandbox-proxy.md#shell-environment-and-path).
 
@@ -146,7 +146,7 @@ Worker-routed `shell` sees only a small default environment; which variables pas
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`. |
+| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()`. |
 | `all` | `boolean` | `no` | `false` | Enable all shell functions. |
 | `extra_env_passthrough` | `text` or `string[]` | `no` | `null` | Additional exported process environment variable names or glob patterns passed to shell commands; comma- or newline-separated in text form. It matches the exported process environment, not entries in the config's `.env` file. |
 | `shell_path_prepend` | `text` or `string[]` | `no` | `null` | Directories prepended to `PATH` for shell commands only, with duplicates removed; comma- or newline-separated in text form. |
@@ -169,9 +169,8 @@ agents:
 ```python
 run_shell_command("git status --short", tail=50)
 run_shell_command(["git", "status", "--short"], tail=50)
-run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
-check_shell_command("shell:abcd1234")
-kill_shell_command("shell:abcd1234")
+run_shell_command(["bash", "-lc", "make test"], timeout=900)
+run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ```
 
 ### Per-workspace environment

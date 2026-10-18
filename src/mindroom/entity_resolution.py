@@ -278,6 +278,17 @@ def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID
     return _persisted_entity_matrix_id(entity_name, runtime_matrix_domain(runtime_paths), runtime_paths)
 
 
+def prepared_entity_names_by_user_id(config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return the configured entities whose Matrix accounts are prepared, keyed by their current user ID."""
+    domain = runtime_matrix_domain(runtime_paths)
+    names: dict[str, str] = {}
+    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+        user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
+        if user_id is not None:
+            names[user_id] = entity_name
+    return names
+
+
 def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     domain = runtime_matrix_domain(runtime_paths)
     return {

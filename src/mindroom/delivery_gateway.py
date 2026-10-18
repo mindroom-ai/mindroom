@@ -569,7 +569,7 @@ class StreamingDeliveryRequest:
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
-    visible_progress_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     allow_new_terminal_message: Callable[[], bool] | None = None
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None
@@ -2023,7 +2023,7 @@ class DeliveryGateway:
         """Edit the foreground compaction lifecycle notice after failure."""
         if event.notice_event_id is None:
             return
-        body = f"Compaction failed; continuing with trimmed history. {event.failure_reason}"
+        body = f"Compaction failed; continuing without compaction. {event.failure_reason}"
         await self._edit_compaction_lifecycle_notice(
             target=target,
             event_id=event.notice_event_id,
@@ -2300,7 +2300,7 @@ class DeliveryGateway:
         identity: ResponseIdentity,
         show_tool_calls: bool,
         extra_content: dict[str, Any] | None = None,
-        visible_progress_callback: Callable[[str], None] | None = None,
+        visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     ) -> AbstractAsyncContextManager[ProgressPublisher]:
         """Stream live progress into an existing reply whose terminal delivery the caller owns.
 

@@ -101,12 +101,17 @@ from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.history.prompt_tokens import agent_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
-from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context, resolve_history_scope
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    open_resolved_scope_session_context,
+    resolve_history_scope,
+)
 from mindroom.history.types import (
     CompactionLifecycle,
     HistoryScope,
@@ -161,7 +166,6 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
     from xdist.workermanage import WorkerController
 
-    from mindroom.config.models import CompactionConfig
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
@@ -499,8 +503,6 @@ async def prepare_history_for_run_for_test(
     storage: "BaseDb | None" = None,
     session: "AgentSession | TeamSession | None" = None,
     history_settings: ResolvedHistorySettings | None = None,
-    compaction_config: "CompactionConfig | None" = None,
-    has_authored_compaction_config: bool | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
     static_prompt_tokens: int | None = None,
@@ -511,19 +513,20 @@ async def prepare_history_for_run_for_test(
 ) -> PreparedHistoryState:
     """Compose the production history-preparation seams for one test run."""
     resolved_scope = scope or resolve_history_scope(agent)
+    if static_prompt_tokens is None:
+        static_prompt_tokens = agent_static_token_estimator(agent).estimate(full_prompt)
     resolved_inputs = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name=agent_name,
-        full_prompt=full_prompt,
         config=config,
-        history_settings=history_settings,
-        compaction_config=compaction_config,
-        has_authored_compaction_config=has_authored_compaction_config,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,
-        execution_plan=execution_plan,
     )
+    if history_settings is not None:
+        resolved_inputs = replace(resolved_inputs, history_settings=history_settings)
+    if execution_plan is not None:
+        resolved_inputs = replace(resolved_inputs, execution_plan=execution_plan)
     if available_history_budget is not None:
         # prepare_scope_history reads its trigger/hard budgets from the execution
         # plan, so express the test budget override through the plan itself.
@@ -560,8 +563,7 @@ async def prepare_history_for_run_for_test(
         )
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     else:
-        with open_scope_session_context(
-            agent=agent,
+        with open_resolved_scope_session_context(
             agent_name=agent_name,
             session_id=session_id,
             runtime_paths=runtime_paths,
@@ -574,7 +576,6 @@ async def prepare_history_for_run_for_test(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=static_prompt_tokens,
-        available_history_budget=available_history_budget,
     )
 
 
@@ -3263,7 +3264,7 @@ def enforce_turn_authorization() -> None:
 def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", session: SessionT) -> SessionT:
     """Persist a session row and every run it holds, in order, and return the session.
 
-    Production code writes runs explicitly (``save_runs``/``replace_runs``);
+    Production code writes runs explicitly (``save_runs``/``delete_runs``);
     tests seed whole histories with this instead.
     """
     storage.upsert_session(session)

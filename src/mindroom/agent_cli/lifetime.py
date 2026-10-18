@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.agno_compat_cli_checkpoint import checkpoint_resolver
+from mindroom.tool_jobs.resources import defer_execution_cleanup
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -74,18 +75,23 @@ class CliTurnLifetime:
             await self.owner.retire_binding()
 
     async def close(self) -> None:
-        """Finish hooks/catalog, then forget the response's owner."""
+        """Close the response's owner, or leave that to its last background job, which may still run CLI calls."""
+        self._closed = True
         try:
-            if self.owner is not None:
-                try:
-                    await self.owner.close()
-                finally:
-                    if self._registry is not None:
-                        self._registry.unregister(self.owner)
+            if self.owner is None or not defer_execution_cleanup(self._close_owner, resource=self):
+                await self._close_owner()
         finally:
             self._clear_provider()
+
+    async def _close_owner(self) -> None:
+        """Finish hooks/catalog, then forget the response's owner and task."""
+        try:
+            if self.owner is not None:
+                await self.owner.close()
+        finally:
+            if self.owner is not None and self._registry is not None:
+                self._registry.unregister(self.owner)
             # A context copied during the response, such as a cancelled timer's, can outlive it.
-            self._closed = True
             self.owner = None
             self._registry = None
             self._response_task = None

@@ -7,7 +7,10 @@ import re
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
+
+from agno.team import Team
 
 from mindroom.constants import prompt_roles_for_history_storage, resolve_session_state_root
 from mindroom.history.storage import new_scope_session
@@ -73,6 +76,13 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
     return None
 
 
+def resolve_target_history_scope(target: Agent | Team) -> HistoryScope | None:
+    """Return the persisted history scope a live agent or team replays."""
+    if isinstance(target, Team):
+        return HistoryScope(kind="team", scope_id=target.id) if target.id else None
+    return resolve_history_scope(target)
+
+
 def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
     """Return the canonical storage owner for one bound team run."""
     candidates = [(agent_id, agent) for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]
@@ -117,59 +127,6 @@ def resolve_bound_team_scope_context(
 
 
 @contextmanager
-def _open_scope_storage(
-    *,
-    agent_name: str,
-    scope: HistoryScope,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-) -> Iterator[BaseDb]:
-    """Open the canonical storage for one persisted history scope."""
-    storage = create_scope_session_storage(
-        agent_name=agent_name,
-        scope=scope,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
-    try:
-        yield storage
-    finally:
-        close_execution_storage(storage)
-
-
-def _build_scope_session_context(
-    *,
-    scope: HistoryScope | None,
-    session_id: str | None,
-    storage: BaseDb,
-    storage_factory: Callable[[], BaseDb],
-    create_session_if_missing: bool = False,
-) -> ScopeSessionContext | None:
-    """Build one scope/session context from an already-open storage handle."""
-    if session_id is None or scope is None:
-        return None
-
-    session = get_team_session(storage, session_id) if scope.kind == "team" else get_agent_session(storage, session_id)
-    session_exists = session is not None
-    if session is None and create_session_if_missing:
-        session = new_scope_session(
-            session_id=session_id,
-            scope_id=scope.scope_id,
-            is_team=scope.kind == "team",
-        )
-    return ScopeSessionContext(
-        scope=scope,
-        storage=storage,
-        session=session,
-        session_id=session_id,
-        storage_factory=storage_factory,
-        session_exists=session_exists,
-    )
-
-
-@contextmanager
 def open_resolved_scope_session_context(
     *,
     agent_name: str,
@@ -181,62 +138,34 @@ def open_resolved_scope_session_context(
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext | None]:
     """Open one already-resolved persisted history scope for the current request."""
-    if session_id is None:
+    if session_id is None or scope is None:
         yield None
         return
-    if scope is None:
-        yield None
-        return
-
-    def storage_factory() -> BaseDb:
-        return create_scope_session_storage(
-            agent_name=agent_name,
-            scope=scope,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-
-    with _open_scope_storage(
+    storage_factory = partial(
+        create_scope_session_storage,
         agent_name=agent_name,
         scope=scope,
-        runtime_paths=runtime_paths,
         config=config,
+        runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-    ) as storage:
-        yield _build_scope_session_context(
+    )
+    storage = storage_factory()
+    try:
+        is_team = scope.kind == "team"
+        session = get_team_session(storage, session_id) if is_team else get_agent_session(storage, session_id)
+        session_exists = session is not None
+        if session is None and create_session_if_missing:
+            session = new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=is_team)
+        yield ScopeSessionContext(
             scope=scope,
-            session_id=session_id,
             storage=storage,
+            session=session,
+            session_id=session_id,
             storage_factory=storage_factory,
-            create_session_if_missing=create_session_if_missing,
+            session_exists=session_exists,
         )
-
-
-@contextmanager
-def open_scope_session_context(
-    *,
-    agent: Agent,
-    agent_name: str,
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    scope: HistoryScope | None = None,
-    create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext | None]:
-    """Open the canonical persisted history scope for one live agent."""
-    resolved_scope = scope or resolve_history_scope(agent)
-    with open_resolved_scope_session_context(
-        agent_name=agent_name,
-        scope=resolved_scope,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        create_session_if_missing=create_session_if_missing,
-    ) as scope_context:
-        yield scope_context
+    finally:
+        close_execution_storage(storage)
 
 
 @contextmanager
@@ -248,51 +177,25 @@ def open_bound_scope_session_context(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     team_name: str | None = None,
-    scope: HistoryScope | None = None,
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext | None]:
     """Open the canonical scope-backed session context for one bound team run."""
-    if scope is not None:
-        _owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-        if owner_agent_name is None:
+    if not agents and team_name is not None and team_name in config.teams:
+        owner_agent_name, scope = team_name, HistoryScope(kind="team", scope_id=team_name)
+    else:
+        bound_scope = resolve_bound_team_scope_context(
+            agents=agents,
+            config=config,
+            team_name=team_name,
+            execution_identity=execution_identity,
+        )
+        if bound_scope is None:
             yield None
             return
-        with open_resolved_scope_session_context(
-            agent_name=owner_agent_name,
-            scope=scope,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            create_session_if_missing=create_session_if_missing,
-        ) as scope_context:
-            yield scope_context
-        return
-    if not agents and team_name is not None and team_name in config.teams:
-        with open_resolved_scope_session_context(
-            agent_name=team_name,
-            scope=HistoryScope(kind="team", scope_id=team_name),
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            create_session_if_missing=create_session_if_missing,
-        ) as scope_context:
-            yield scope_context
-        return
-
-    bound_scope = resolve_bound_team_scope_context(
-        agents=agents,
-        config=config,
-        team_name=team_name,
-        execution_identity=execution_identity,
-    )
-    if bound_scope is None:
-        yield None
-        return
+        owner_agent_name, scope = bound_scope.owner_agent_name, bound_scope.scope
     with open_resolved_scope_session_context(
-        agent_name=bound_scope.owner_agent_name,
-        scope=bound_scope.scope,
+        agent_name=owner_agent_name,
+        scope=scope,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,

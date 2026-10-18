@@ -2591,8 +2591,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_fetch_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
-                prepare_memory_and_model_context=passthrough_prepare_context,
-                reprioritize_auto_flush_sessions=MagicMock(),
+                _prepare_memory_and_model_context=passthrough_prepare_context,
                 apply_post_response_effects=AsyncMock(),
             ),
         ):
@@ -2795,7 +2794,6 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_fetch_thread_history,
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
@@ -2927,7 +2925,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,

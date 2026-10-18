@@ -32,6 +32,7 @@ from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import (
@@ -3000,6 +3001,36 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert body.startswith("📞 Voice call · 2 min")
     assert "@alice:example.org (Alice): Book the train" in body
     assert "Helper: Booked" in body
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_call_transcript_memory_is_charged_to_the_callers_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Extracting memory from a call's transcript is the call's helper work, so its usage goes to the caller's call."""
+    _patch_call_writeback(monkeypatch)
+    owners: list[HelperUsageOwner | None] = []
+
+    async def add_memory(*_args: object, **_kwargs: object) -> None:
+        owners.append(get_helper_usage_owner())
+
+    monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", add_memory)
+    config = _config()
+    config.agents["helper"].memory_backend = "mem0"
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config=config, tool_support=_origin_tool_support())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    await _talk_then_hang_up(manager, client, bridge)
+
+    [owner] = owners
+    assert owner is not None
+    # The call's own conversation, whose ledger also holds its voice usage.
+    assert owner.session_id.startswith(f"{ROOM_ID}:call:")
     await manager.shutdown()
 
 

@@ -1495,7 +1495,6 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 new=AsyncMock(side_effect=fake_run_cancellable_response),
             ) as mock_run_cancellable_response,
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.response_runner.reprioritize_auto_flush_sessions", new=MagicMock()),
             patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
         ):
             task = asyncio.create_task(
@@ -4689,7 +4688,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
         progress = runner._lifecycle_coordinator.visible_progress_callback(envelope.target)
         assert (progress is not None) is enabled
         if progress is not None:
-            progress(text)
+            progress(text, ())
 
     def queue_followup() -> str:
         reservation = runner.reserve_waiting_human_message(

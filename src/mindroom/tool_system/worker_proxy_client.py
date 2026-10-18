@@ -7,8 +7,9 @@ import functools
 import json
 import secrets
 import threading
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager
+import time
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -19,6 +20,9 @@ from mindroom.credentials.manager import load_scoped_credentials
 from mindroom.credentials.policy import is_egress_broker_service
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.tool_system.progress import report_tool_progress
+from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 if TYPE_CHECKING:
@@ -32,6 +36,8 @@ SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
 SANDBOX_PROXY_VIEW_FILE_PATH = "/api/sandbox-runner/view-file"
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
+# The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
+EXECUTE_KEEPALIVE_SECONDS = 5.0
 
 logger = get_logger(__name__)
 
@@ -45,6 +51,14 @@ class _WorkerProxyResponse(Protocol):
     def json(self) -> object: ...
 
 
+class _WorkerProxyStreamedResponse(Protocol):
+    def raise_for_status(self) -> object: ...
+
+    def read(self) -> bytes: ...
+
+    def iter_bytes(self) -> Iterator[bytes]: ...
+
+
 class _WorkerProxyClient(Protocol):
     def post(
         self,
@@ -53,6 +67,16 @@ class _WorkerProxyClient(Protocol):
         json: dict[str, object],
         headers: Mapping[str, str],
     ) -> _WorkerProxyResponse: ...
+
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict[str, object],
+        headers: Mapping[str, str],
+        timeout: httpx.Timeout,
+    ) -> AbstractContextManager[_WorkerProxyStreamedResponse]: ...
 
 
 _WorkerProxyClientFactory = Callable[..., AbstractContextManager[_WorkerProxyClient]]
@@ -241,6 +265,12 @@ class WorkerCallCancellation:
                 raise asyncio.CancelledError
             self._stop = stop
 
+    @property
+    def cancelled(self) -> bool:
+        """Whether the caller stopped waiting for the call."""
+        with self._lock:
+            return self._cancelled
+
     def cancel(self) -> None:
         """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
         with self._lock:
@@ -263,6 +293,48 @@ def _post_execute_cancel(
     except Exception:
         # Best effort: the call was already abandoned, and the runner's own timeouts still apply.
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
+
+
+def _ndjson_lines(chunks: Iterator[bytes]) -> Iterator[str]:
+    """Split a streamed body on newlines alone, since JSON text may hold other Unicode line separators."""
+    pending = bytearray()
+    for chunk in chunks:
+        start = 0
+        while (end := chunk.find(b"\n", start)) != -1:
+            pending += chunk[start:end]
+            yield pending.decode("utf-8")
+            pending = bytearray()
+            start = end + 1
+        pending += chunk[start:]
+    if pending:
+        yield pending.decode("utf-8")
+
+
+def _read_execute_stream(
+    response: _WorkerProxyStreamedResponse,
+    *,
+    deadline: float | None,
+    cancellation: WorkerCallCancellation | None,
+) -> dict[str, object] | None:
+    """Relay a call's progress until its result line; None when that line is not a JSON object.
+
+    Dropping the stream stops the call at the runner, so a cancelled call stops reading at its next line.
+    """
+    for line in _ndjson_lines(response.iter_bytes()):
+        if not line:
+            continue
+        frame = _json_object(json.loads(line))
+        if frame is None or ("progress" not in frame and frame.get("keepalive") is not True):
+            return frame
+        if cancellation is not None and cancellation.cancelled:
+            raise asyncio.CancelledError
+        if deadline is not None and time.monotonic() >= deadline:
+            msg = "Worker call exceeded its time limit."
+            raise httpx.ReadTimeout(msg)
+        if "progress" in frame:
+            report_tool_progress(str(frame["progress"]))
+    msg = "Sandbox proxy stream ended without a result."
+    raise RuntimeError(msg)
 
 
 def execute_worker_proxy_request(
@@ -334,15 +406,32 @@ def execute_worker_proxy_request(
             )
             if lease_id is not None:
                 payload["lease_id"] = lease_id
-
-            response = client.post(execute_url, json=payload, headers=headers)
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                if worker_handle is None:
-                    raise RuntimeError(_proxy_http_error_message(exc.response)) from exc
-                raise
-            data = _json_object(response.json())
+            run_as_job = job_owns_execution()
+            payload["run_as_job"] = run_as_job
+            # A call that holds a reply keeps its time limit; a job call runs as long as its tool does.
+            deadline = None if run_as_job else time.monotonic() + config.proxy_timeout_seconds
+            # The read timeout spans worker preparation before the first line and every gap between keep-alives.
+            timeout = httpx.Timeout(
+                config.proxy_timeout_seconds,
+                read=max(config.proxy_timeout_seconds, 3 * EXECUTE_KEEPALIVE_SECONDS),
+            )
+            in_flight = (
+                worker_call_in_flight(worker_manager, worker_handle.worker_key)
+                if worker_handle is not None
+                else nullcontext()
+            )
+            with (
+                in_flight,
+                client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
+            ):
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    response.read()
+                    if worker_handle is None:
+                        raise RuntimeError(_proxy_http_error_message(exc.response)) from exc
+                    raise
+                data = _read_execute_stream(response, deadline=deadline, cancellation=cancellation)
     except Exception as exc:
         _record_proxy_exception_for_worker(
             exc,

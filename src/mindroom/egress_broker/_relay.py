@@ -9,7 +9,7 @@ import json
 import re
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qs, urlsplit
@@ -435,8 +435,8 @@ class Relay:
             await self.reject(client, entry, 502, refusal_body("broker_error"))
             return None
 
-    async def route(self, client: Peer, entry: AuditEntry, port: int) -> Route | None:
-        """Return the route for the entry's host, `port`, and path; otherwise answer, audit a refusal, and return None.
+    async def route(self, client: Peer, entry: AuditEntry, port: int) -> tuple[EgressRules, Route] | None:
+        """Return the rules and the route for the entry's host, `port`, and path; otherwise answer, audit, return None.
 
         A host without rules is denied under `unmatched_hosts: deny`. On a host with rules, `TRACE` and `TRACK` (in any
         letter case) get 405 `method_not_allowed`, since the upstream would echo the injected credential back. A path
@@ -455,7 +455,7 @@ class Relay:
             await self.deny(client, entry, refusal_body("method_not_allowed"), status=405)
             return None
         if route.refusal is None:
-            return route
+            return rules, route
         entry.service = route.restricted_by
         try:
             scope = self.scope_info(entry.claims)
@@ -487,13 +487,15 @@ class Relay:
         client: Peer,
         entry: AuditEntry,
         port: int,
+        rules: EgressRules,
         *,
         ssl_context: ssl.SSLContext | None,
     ) -> Peer | None:
-        """Dial `entry.host` through the guard; on failure answer the client, audit, and return None."""
+        """Dial `entry.host` through the guard and the rules' private networks; on failure answer, audit, return None."""
+        policy = replace(self.dial_policy, private_networks=rules.private_networks)
         try:
             reader, writer = await _from_upstream(
-                open_upstream(entry.host, port, policy=self.dial_policy, ssl_context=ssl_context),
+                open_upstream(entry.host, port, policy=policy, ssl_context=ssl_context),
             )
         except DestinationBlockedError:
             await self.deny(client, entry, refusal_body("destination_blocked", host=entry.host))

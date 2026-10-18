@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
+# EmbeddingGemma 2 loads its video processor, which needs torchvision, even for text.
+_SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers", "torchvision"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
 _SENTENCE_TRANSFORMER_CLIENT: tuple[str, Any] | None = None
 
@@ -43,19 +44,16 @@ def effective_knowledge_embedder_signature(
     host: str | None = None,
     dimensions: int | None = None,
 ) -> tuple[str, str, str, str]:
-    """Return the knowledge embedder settings that affect indexing behavior."""
-    effective_host = host if provider in {"openai", "ollama"} else ""
-    effective_dimensions = dimensions
-    if provider == "openai" and effective_dimensions is None:
-        effective_dimensions = _default_dimensions(model)
-    elif provider in {"ollama", "sentence_transformers"}:
-        effective_dimensions = None
-    return (
-        provider,
-        model,
-        effective_host or "",
-        str(effective_dimensions) if effective_dimensions is not None else "",
-    )
+    """Return the settings that decide whether vectors from MindRoom's own embedder are compatible.
+
+    Knowledge, file-memory, and knowledge-graph vectors come from MindRoom's embedder, which embeds
+    sentence-transformers queries and documents with the model's own prompts. The marked model keeps
+    vectors built before those prompts were applied from being queried or reused. Mem0 embeds through
+    its own client without the prompts, so its signature keeps the plain model.
+    """
+    if provider == "sentence_transformers":
+        model = f"{model}#query-document-prompts"
+    return effective_mem0_embedder_signature(provider, model, host=host, dimensions=dimensions)
 
 
 def effective_mem0_embedder_signature(
@@ -87,19 +85,42 @@ def ensure_sentence_transformers_dependencies(runtime_paths: RuntimePaths) -> No
 
 def _serialized_sentence_transformers_class() -> Callable[..., Embedder]:
     """Return the local embedder class with its torch calls serialized."""
+    # Imported with the embedder module so Agno stays out of this module's import time.
+    from agno.knowledge.embedder.base import raise_embedding_error  # noqa: PLC0415
+
     module = importlib.import_module("agno.knowledge.embedder.sentence_transformer")
     base_class = cast("Any", module.SentenceTransformerEmbedder)
 
     class SerializedSentenceTransformerEmbedder(base_class):  # type: ignore[misc, valid-type]
-        """Local embedder that admits one thread at a time into torch."""
+        """Local embedder that admits one thread at a time into torch and applies the model's prompts."""
+
+        # AGNO_COMPAT: Embedders cannot tell a search query from a document.
+        # Reason: Agno's Embedder has one embedding entry point for both, so its SentenceTransformer embedder
+        # applies one fixed prompt to queries and documents alike. Models such as EmbeddingGemma 2 define
+        # separate query and document prompts and retrieve worse without them. MindRoom infers the purpose
+        # from the method: Agno's vector stores and MindRoom's read path embed queries with ``get_embedding``,
+        # while ``Document.embed`` and MindRoom's prefetch embed chunks with ``get_embedding_and_usage``.
+        # Upstream issue: tracking gap; searching agno-agi/agno issues and PRs found no query/document input type.
+        # Upstream PR: none identified.
+        # Remove when: Agno's Embedder exposes separate query and document embedding and its vector stores call
+        # them; keep applying the model's own query and document prompts.
+        # Coverage: tests/test_embeddings.py::test_sentence_transformers_embedder_embeds_queries_and_documents_with_their_prompts,
+        # tests/test_knowledge_resumable_refresh.py::test_batch_prefetch_embeds_chunks_as_documents.
+        def _encode(self, text: str, *, query: bool) -> list[float]:
+            client = self.sentence_transformer_client
+            encode = client.encode_query if query else client.encode_document
+            with _LOCAL_EMBEDDING_LOCK:
+                try:
+                    embedding = encode(text, normalize_embeddings=self.normalize_embeddings)
+                except Exception as exc:
+                    raise_embedding_error(exc, model_id=self.id, provider="SentenceTransformer")
+            return cast("list[float]", embedding.tolist())
 
         def get_embedding(self, text: str) -> list[float]:
-            with _LOCAL_EMBEDDING_LOCK:
-                return cast("list[float]", super().get_embedding(text))
+            return self._encode(text, query=True)
 
         def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-            with _LOCAL_EMBEDDING_LOCK:
-                return cast("tuple[list[float], dict[str, Any] | None]", super().get_embedding_and_usage(text))
+            return self._encode(text, query=False), None
 
     return cast("Callable[..., Embedder]", SerializedSentenceTransformerEmbedder)
 

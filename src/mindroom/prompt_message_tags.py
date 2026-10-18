@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import html
+import re
 from xml.sax.saxutils import quoteattr as xml_quoteattr
+
+_CDATA_END = "]]>"
+_CDATA_END_ESCAPED = "]]]]><![CDATA[>"
+_MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
+_FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
+_DISPLAY_NAME_ATTR = re.compile(r"""\bdisplay_name=(["'])(.*?)\1""")
+_CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
 
 
 def _cdata_body(body: str) -> str:
     """Render body text inside CDATA without entity-escaping normal message text."""
-    return body.replace("]]>", "]]]]><![CDATA[>")
+    return body.replace(_CDATA_END, _CDATA_END_ESCAPED)
+
+
+def _cdata_body_text(rendered: str) -> str:
+    """Return the message text a rendered CDATA body holds."""
+    return rendered.replace(_CDATA_END_ESCAPED, _CDATA_END)
 
 
 def render_msg_tag(
@@ -28,3 +42,19 @@ def render_msg_tag(
     if ts is not None:
         attrs.append(f"ts={xml_quoteattr(ts)}")
     return f"<msg {' '.join(attrs)}><![CDATA[{_cdata_body(body)}]]></msg>"
+
+
+def parse_msg_tags(content: str, *, default_sender: str) -> list[tuple[str, str | None, str]]:
+    """Return each ``<msg>`` tag's sender, display name, and body.
+
+    Content holding no tag is one body from ``default_sender``, without a display name.
+    """
+    tagged = [
+        (
+            html.unescape(sender.group(2)) if (sender := _FROM_ATTR.search(attrs)) else default_sender,
+            html.unescape(name.group(2)) if (name := _DISPLAY_NAME_ATTR.search(attrs)) else None,
+            _cdata_body_text(body),
+        )
+        for attrs, body in _MSG_TAG.findall(content)
+    ]
+    return tagged or [(default_sender, None, _CONTAINER_TAG.sub("", content))]

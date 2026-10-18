@@ -40,6 +40,7 @@ from mindroom.delegation.personas import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
+from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
@@ -805,6 +806,14 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 execution_identity=execution_identity,
             ),
         )
+
+    if tool_name == "knowledge_graph":
+        if not config.agent_uses_knowledge_graph(agent_name):
+            return None
+
+        from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools  # noqa: PLC0415
+
+        return wrap_direct(KnowledgeGraphTools(agent_name, config, runtime_paths, execution_identity))
 
     if tool_name == "delegate":
         # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
@@ -2196,7 +2205,6 @@ def create_agent(  # noqa: PLR0915
         role_context.model_name,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
     )
-    install_model_call_cap(model, entity_name=agent_name)
     if tool_assembly.deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
@@ -2248,9 +2256,11 @@ def create_agent(  # noqa: PLR0915
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
+    # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
     cli_shell = (
         agent_cli_in_shell
         and agent_mode == "standard"
+        and delegation_depth == 0
         and not disable_runtime_capabilities
         and standard_cli_eligible(config, runtime_paths, agent_name, execution_identity)
         and wrap_native_shell_window(tool_assembly.tools)
@@ -2309,7 +2319,8 @@ def create_agent(  # noqa: PLR0915
         tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
-        add_session_summary_to_context=persist_runtime_state,
+        # The summary replays as a history message instead (history/agno_compat_message_builder.py).
+        add_session_summary_to_context=False,
         num_history_runs=history_policy.num_history_runs,
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
@@ -2319,6 +2330,15 @@ def create_agent(  # noqa: PLR0915
         tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,
     )
+    install_mid_turn_compaction(
+        agent,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=agent_name,
+        model_name=role_context.model_name,
+    )
+    # Installed after mid-turn compaction, so a refused request never spends a summary call.
+    install_model_call_cap(model, entity_name=agent_name)
     if isinstance(agent, MinimalAgent):
         agent.configure_minimal(
             instructions=instructions,

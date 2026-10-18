@@ -14,6 +14,7 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
@@ -1642,6 +1643,8 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
         ),
     ):
         await runner.generate_response(_plain_request(_target()))
+    # A reply whose row resolves after the button was recorded redacts the button in a settlement task.
+    assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
 
     sends = bot.client.room_send.await_args_list
     buttons = [

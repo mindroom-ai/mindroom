@@ -12,7 +12,7 @@ Operations execute inside the response that owns the grant, never in the HTTP ha
 ## Recovery
 
 Grants and call receipts exist only in the response's memory.
-When the response ends or its process dies, its grant is revoked, call polling becomes unavailable, queued work and unsaved results are lost, and the effects of interrupted calls may be unknown; after a primary crash, old grants are invalid immediately.
+When the response and its background jobs end, or its process dies, its grant is revoked, call polling becomes unavailable, queued work and unsaved results are lost, and the effects of interrupted calls may be unknown; after a primary crash, old grants are invalid immediately.
 
 Through the native approval continuation, waiting and ready confirmations can be recovered, while an attempt already claimed settles through the ordinary final-or-interruption behavior.
 Recovery never directly executes the saved Bash command that requested an approval.

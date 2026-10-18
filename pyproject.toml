@@ -283,6 +283,12 @@ jina = [
 jira = [
   "jira>=3.10.5",
 ]
+knowledge_graph = [
+  "graphiti-core[falkordblite]==0.31.1",
+  # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
+  "hiredis",
+  "psutil",
+]
 linear = [
   "requests",
 ]
@@ -368,7 +374,9 @@ self_config = [
   "pyyaml>=6",
 ]
 sentence-transformers = [
-  "sentence-transformers",
+  "sentence-transformers>=6.1",
+  "torchvision",
+  "transformers>=5.19",
 ]
 serpapi = [
   "google-search-results>=2.4.2",

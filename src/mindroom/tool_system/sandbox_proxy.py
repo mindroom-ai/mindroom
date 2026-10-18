@@ -24,6 +24,7 @@ from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
@@ -314,11 +315,14 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
 def _worker_proxy_client_config(
     proxy_config: _SandboxProxyConfig,
     runtime_paths: RuntimePaths,
+    *,
+    request_budget_seconds: float = 0.0,
 ) -> WorkerProxyClientConfig:
     return WorkerProxyClientConfig(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
-        proxy_timeout_seconds=proxy_config.proxy_timeout_seconds,
+        # A call the runner lets run longer than the proxy timeout keeps the primary waiting for its answer.
+        proxy_timeout_seconds=max(proxy_config.proxy_timeout_seconds, request_budget_seconds),
         credential_lease_ttl_seconds=proxy_config.credential_lease_ttl_seconds,
         credential_policy=proxy_config.credential_policy,
         lease_tool_credentials=primary_worker_backend_name(runtime_paths) == "static_runner",
@@ -1014,7 +1018,11 @@ def _call_proxy_sync(
         if portable_tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
         result = execute_worker_proxy_request(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            config=_worker_proxy_client_config(
+                proxy_config,
+                runtime_paths,
+                request_budget_seconds=shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
+            ),
             payload=payload,
             credentials_manager=credentials_manager,
             tool_name=tool_name,

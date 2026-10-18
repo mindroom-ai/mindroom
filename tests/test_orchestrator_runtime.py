@@ -66,6 +66,7 @@ from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
+from mindroom.memory import MemoryAutoFlushWorker
 from mindroom.orchestration import config_lifecycle as config_lifecycle_module
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
@@ -114,6 +115,36 @@ from tests.conftest import (
 )
 
 
+@pytest.mark.asyncio
+async def test_memory_auto_flush_worker_reads_redactions_through_bots_and_stops_without_waiting(tmp_path: Path) -> None:
+    """The worker asks running bots which events were redacted, and stopping it cancels a pass instead of awaiting it."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"mind": AgentConfig(display_name="Mind", memory_backend="file")},
+            memory={"auto_flush": {"enabled": True}},
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    started = asyncio.Event()
+    workers: list[MemoryAutoFlushWorker] = []
+
+    async def pass_that_never_ends(worker: MemoryAutoFlushWorker) -> None:
+        workers.append(worker)
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch.object(MemoryAutoFlushWorker, "run", pass_that_never_ends):
+        await orchestrator._sync_memory_auto_flush_worker()
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.wait_for(orchestrator._stop_memory_auto_flush_worker(), timeout=5)
+
+    [worker] = workers
+    assert worker.redacted_event_ids == orchestrator.redacted_event_ids
+    assert orchestrator._memory_auto_flush_task is None
+
+
 def test_running_entity_client_returns_only_running_bot_clients(tmp_path: Path) -> None:
     """Only a running bot with a live client lends that client to runtime collaborators."""
     config = _runtime_bound_config(Config(), tmp_path)
@@ -159,6 +190,29 @@ async def test_open_reply_event_id_reads_only_running_bots_replies(tmp_path: Pat
     )
     assert await orchestrator.open_reply_event_id("stopped", "!room", "$thread") is None
     assert await orchestrator.open_reply_event_id("unknown", "!room", "$thread") is None
+
+
+@pytest.mark.asyncio
+async def test_redacted_event_ids_read_only_running_bots_journals(tmp_path: Path) -> None:
+    """Knowledge graph ingestion learns redactions from the agent's own journal, and waits while it is not running."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+
+    def bot(*, running: bool) -> AgentBot:
+        managed_bot = MagicMock(spec=AgentBot)
+        managed_bot.running = running
+        managed_bot.journal_principal.return_value.redacted_event_ids = AsyncMock(return_value=frozenset({"$a"}))
+        return managed_bot
+
+    orchestrator.agent_bots = {"running": bot(running=True), "stopped": bot(running=False)}
+
+    assert await orchestrator.redacted_event_ids("running", "!room", ("$a", "$b")) == frozenset({"$a"})
+    orchestrator.agent_bots["running"].journal_principal.return_value.redacted_event_ids.assert_awaited_once_with(
+        "!room",
+        ("$a", "$b"),
+    )
+    assert await orchestrator.redacted_event_ids("stopped", "!room", ("$a",)) is None
+    assert await orchestrator.redacted_event_ids("unknown", "!room", ("$a",)) is None
 
 
 @pytest.mark.asyncio

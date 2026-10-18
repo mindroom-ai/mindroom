@@ -14,6 +14,7 @@ from mindroom.tool_jobs.consumption import consume_tool_job, restore_control
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
+    JobUnavailableError,
     describe_job,
     format_job_handle,
     get_background_runtime,
@@ -30,6 +31,13 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+# One answer for every reason, so a caller never learns whether a job of another conversation or caller exists.
+_UNAVAILABLE = (
+    "No job with this ID is available to you in this conversation. The ID may be wrong or incomplete, the job may "
+    "have been deleted after its retention period, it may belong to another conversation or caller, or your access "
+    'to it may have changed. Call job(action="list") to see the jobs you can access.'
+)
 
 
 def is_job_function(function: Function) -> bool:
@@ -109,8 +117,7 @@ class JobTools(Toolkit):
                 "Managed tool calls accept background_after: omitted or null waits until completion or a newer message "
                 "you answer, zero returns a job_id immediately, and a positive number is how many seconds to wait "
                 "before the call continues in the background, without cancelling it. "
-                "Only use background_after when the tool schema exposes it; excluded toolkits keep their native controls, "
-                "so a shell handle is checked or killed with check_shell_command or kill_shell_command. "
+                "Only use background_after when the tool schema exposes it; excluded toolkits keep their native controls. "
                 "Calls made inside an already running job stay with that job and accept no background_after. "
                 "A newer message you answer releases waits while work continues. "
                 'Use job(action="list") to rediscover jobs and their status after a new turn, '
@@ -180,8 +187,9 @@ class JobTools(Toolkit):
         """Discover, wait for, or cancel this caller's managed work.
 
         Args:
-            action: Operation; list reports status and saved summaries, wait retrieves the stored result, and
-                collect returns and acknowledges every ended job.
+            action: Operation; list reports status, saved summaries, and the latest progress of running work, wait
+                retrieves the stored result or, when it times out, the job's progress, and collect returns and
+                acknowledges every ended job.
             job_id: Exact job ID, required for wait and cancel.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.
@@ -224,6 +232,8 @@ class JobTools(Toolkit):
                 return "Unknown job action."
             # The job stops on its own time; the next notice reports how it ended.
             return format_job_handle(await runtime.cancel(job_id, owner=owner, depth=0))
+        except JobUnavailableError:
+            return _UNAVAILABLE
         except ValueError as error:
-            # Unavailable jobs and invalid limits, offsets, or wait budgets are the model's to correct.
+            # Invalid limits, offsets, or wait budgets are the model's to correct.
             return str(error)

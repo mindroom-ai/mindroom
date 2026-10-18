@@ -33,6 +33,9 @@ class ComputerPeer:
     generation: int = 0
     openid_status: int = 200
     openid_subject: str = "@alice:example.org"
+    # When set, userinfo answers 401 unless the query names exactly this audience.
+    expected_audience: str | None = None
+    userinfo_audiences: list[str | None] = field(default_factory=list)
     requests: list[tuple[str, str]] = field(default_factory=list)
 
     async def http(self, request: web.Request) -> web.Response:
@@ -59,7 +62,11 @@ class ComputerPeer:
 
     async def openid(self, request: web.Request) -> web.Response:
         """Verify an isolated short-lived token through the actual HTTP verifier."""
+        audience = request.query.get("io.mindroom.audience")
+        self.userinfo_audiences.append(audience)
         if request.query.get("access_token") != "openid-secret":
+            return web.Response(status=401)
+        if self.expected_audience is not None and audience != self.expected_audience:
             return web.Response(status=401)
         return web.json_response(
             {"sub": self.openid_subject},

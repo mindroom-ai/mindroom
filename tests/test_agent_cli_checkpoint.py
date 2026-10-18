@@ -66,11 +66,11 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
         assert catalog.run_response.messages == []
         await checkpoint.persist(calls[1])
 
-    def fail(**_kwargs: object) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
         msg = "injected database failure"
         raise OSError(msg)
 
-    monkeypatch.setattr(catalog.agent.db, "upsert_run", fail)
+    monkeypatch.setattr(catalog.agent.db, "save_run_row", fail)
     async with response_cli_lifetime() as lifetime:
         lifetime.bind_provider(checkpoint, function)
         calls = catalog.agent.model.get_function_calls_to_run(assistant, messages, {"bash": function})

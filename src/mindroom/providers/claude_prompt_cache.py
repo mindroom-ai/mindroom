@@ -25,7 +25,7 @@ including markers Agno itself adds, is capped at the API limit of four.
 
 Agent-built system prompts carry an explicit boundary before their session
 context. Split that text into two system blocks and move the existing system
-marker to the shared prefix. Dates, summaries, and learning can then change
+marker to the shared prefix. Dates and learning can then change
 without invalidating the agent's instructions. The message rungs still cache
 the full system and conversation prefix within each thread.
 
@@ -93,9 +93,10 @@ from mindroom.providers.tool_policy import provider_tools_disabled
 from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from agno.models.anthropic import Claude as AnthropicClaude
+    from agno.models.message import Message
 
     from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
 
@@ -344,10 +345,28 @@ def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object
     return tools, 0
 
 
-def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
+def claude_deferred_tool_names(model: object) -> frozenset[str]:
     """Return the wire tool names registered for deferred loading on one model."""
     deferred_tool_names = vars(model).get(_DEFERRED_TOOL_NAMES_ATTR)
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
+
+
+def claude_loaded_tool_names(messages: Sequence[Message]) -> frozenset[str]:
+    """Return the tool names whose definitions tool searches in these messages loaded into Claude's context."""
+    names: set[str] = set()
+    for message in messages:
+        blocks = message.provider_data.get("server_tool_blocks") if isinstance(message.provider_data, dict) else None
+        for block in blocks if isinstance(blocks, list) else ():
+            block_dict = as_dict(block)
+            content = as_dict(block_dict.get("content")) if block_dict is not None else None
+            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE or content is None:
+                continue
+            references = content.get("tool_references")
+            for reference in references if isinstance(references, list) else ():
+                reference_dict = as_dict(reference)
+                if reference_dict is not None and isinstance(name := reference_dict.get("tool_name"), str):
+                    names.add(name)
+    return frozenset(names)
 
 
 def _request_tool_names(request_kwargs: dict[str, Any]) -> frozenset[str]:
@@ -464,8 +483,8 @@ def _request_kwargs_with_deferred_tool_search(
 def split_shared_system_prefix(system: list[Any]) -> list[Any]:
     """Move a marked first system text block's cache marker to the shared instructions.
 
-    The session-context suffix becomes a separate unmarked block, so dates,
-    summaries, and learning can change without invalidating the shared prefix.
+    The session-context suffix becomes a separate unmarked block, so dates
+    and learning can change without invalidating the shared prefix.
     Returns the input list unchanged when there is no marked boundary to split.
     """
     if not system:
@@ -590,7 +609,7 @@ class _PromptCacheMessagesProxy:
         self._offload_stream_setup = offload_stream_setup
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
-        return prepare_claude_request_kwargs(self._model, request_kwargs)
+        return _prepare_claude_request_kwargs(self._model, request_kwargs)
 
     def create(self, **request_kwargs: object) -> object:
         return self._messages_namespace.create(**self._prepared(request_kwargs))
@@ -620,7 +639,7 @@ def _request_kwargs_without_provider_execution(request_kwargs: dict[str, Any]) -
     return prepared
 
 
-def prepare_claude_request_kwargs(
+def _prepare_claude_request_kwargs(
     model: AnthropicClaude,
     request_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
@@ -644,7 +663,7 @@ def prepare_claude_request_kwargs(
     )
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(
         prepared_kwargs,
-        _model_deferred_tool_names(model),
+        claude_deferred_tool_names(model),
     )
     prepared_kwargs = _request_kwargs_without_provider_execution(prepared_kwargs)
     if model.cache_system_prompt:

@@ -27,7 +27,9 @@ _MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
-_VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d+(?=\](?: ⏳)?\s*$)")
+# Bounded so an index in untrusted text never reaches int()'s digit limit.
+_VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d{1,9}(?=\](?: ⏳)?\s*$)")
+_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
 
@@ -536,6 +538,103 @@ def is_visible_tool_marker_line(line: str) -> bool:
     return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
 
 
+def strip_visible_tool_markers(text: str) -> str:
+    """Remove display-only tool marker lines before text re-enters model context."""
+    lines = text.splitlines()
+    if not any(is_visible_tool_marker_line(line) for line in lines):
+        return text
+
+    filtered_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not is_visible_tool_marker_line(line):
+            filtered_lines.append(line)
+            index += 1
+            continue
+
+        index += 1
+        spacer_lines: list[str] = []
+        while index < len(lines) and not lines[index].strip():
+            spacer_lines.append(lines[index])
+            index += 1
+
+        # Tool markers rendered by MindRoom are often followed by a markdown
+        # separator. Remove the separator with the marker, but preserve ordinary
+        # blank-line spacing so surrounding prose does not get smashed together.
+        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
+            filtered_lines.extend(spacer_lines)
+            index += 1
+            if index < len(lines) and not lines[index].strip():
+                index += 1
+            continue
+
+        filtered_lines.extend(spacer_lines)
+    return "\n".join(filtered_lines).rstrip()
+
+
+def message_tool_trace(content: Mapping[str, object]) -> list[ToolTraceEntry] | None:
+    """Return the tool trace stored on one Matrix message, or None when it carries none."""
+    payload = content.get(_TOOL_TRACE_KEY)
+    if not isinstance(payload, dict):
+        return None
+    events = cast("dict[str, object]", payload).get("events")
+    if not isinstance(events, list):
+        return []
+    try:
+        return deserialize_tool_trace(
+            cast("list[Mapping[str, object]]", [event for event in events if isinstance(event, dict)]),
+        )
+    except RuntimeError:
+        # Any room member can send this key, so a malformed trace reads as one without entries.
+        return []
+
+
+def has_tool_trace(content: Mapping[str, object]) -> bool:
+    """Whether a message carries a tool trace, which proves its marker lines are MindRoom chrome."""
+    return isinstance(content.get(_TOOL_TRACE_KEY), dict)
+
+
+def body_without_tool_markers(body: str, content: Mapping[str, object]) -> str:
+    """Remove marker lines a stored tool trace proves are MindRoom chrome; leave other text alone."""
+    if not has_tool_trace(content):
+        return body
+    return strip_visible_tool_markers(body)
+
+
+def _render_tool_tag(entry: ToolTraceEntry) -> str:
+    """Render one tool call as a tag for judges, which read conversations as data.
+
+    Values stay verbatim: any escaping changes the already redacted previews, and
+    the judges' redaction check would then rewrite them and refuse the request.
+    """
+    attrs = [f'name="{entry.tool_name}"']
+    if entry.args_preview:
+        attrs.append(f'input="{entry.args_preview}"')
+    if entry.result_preview:
+        attrs.append(f'output="{entry.result_preview}"')
+    if entry.truncated:
+        attrs.append('truncated="true"')
+    return f"<tool {' '.join(attrs)}/>"
+
+
+def body_with_tool_tags(body: str, trace: Sequence[ToolTraceEntry]) -> str:
+    """Replace each marker with its trace entry's tag; a marker without an entry, or repeating one, is dropped."""
+    lines: list[str] = []
+    rendered: set[int] = set()
+    for line in body.splitlines():
+        if not is_visible_tool_marker_line(line):
+            lines.append(line)
+            continue
+        index_match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line)
+        index = int(index_match.group()) if index_match is not None else 0
+        # Each entry renders once, so repeated markers cannot multiply a large preview.
+        if 1 <= index <= len(trace) and index not in rendered:
+            rendered.add(index)
+            lines.append(_render_tool_tag(trace[index - 1]))
+    return "\n".join(lines)
+
+
 def _line_ending(line: str) -> str:
     if line.endswith("\r\n"):
         return "\r\n"
@@ -579,6 +678,22 @@ def remap_visible_tool_marker_indices(text: str, index_map: Mapping[int, int]) -
         new_index = index_map.get(old_index, old_index)
         remapped_lines.append(f"{line[: match.start()]}{new_index}{line[match.end() :]}")
     return "".join(remapped_lines)
+
+
+def renumbered_tool_trace(body: str, trace: Sequence[ToolTraceEntry]) -> tuple[str, list[ToolTraceEntry]]:
+    """Number one body's markers from 1 and return the trace entries they now point at."""
+    index_map: dict[int, int] = {}
+    entries: list[ToolTraceEntry] = []
+    for line in body.splitlines():
+        index_match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line) if is_visible_tool_marker_line(line) else None
+        if index_match is None:
+            continue
+        old_index = int(index_match.group())
+        if old_index in index_map or not 1 <= old_index <= len(trace):
+            continue
+        entries.append(trace[old_index - 1])
+        index_map[old_index] = len(entries)
+    return remap_visible_tool_marker_indices(body, index_map), entries
 
 
 def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
@@ -812,7 +927,8 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
         toolkit_name = event.get("toolkit_name")
         truncated = event.get("truncated")
         if (
-            event_type not in {"tool_call_started", "tool_call_completed"}
+            not isinstance(event_type, str)
+            or event_type not in {"tool_call_started", "tool_call_completed"}
             or not isinstance(tool_name, str)
             or not tool_name
             or (args_preview is not None and not isinstance(args_preview, str))

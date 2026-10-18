@@ -25,7 +25,6 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.run.workflow import WorkflowRunOutput
 from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.session.workflow import WorkflowSession
 from agno.team import Team
@@ -966,8 +965,6 @@ def _session_with_row_metadata(
         session.workflow_id = "workflow"
         session.workflow_name = "before"
         session.workflow_data = entity_data
-    if isinstance(session, (AgentSession, TeamSession)):
-        session.summary = SessionSummary(summary="before", topics=["before"])
     return session, entity_data
 
 
@@ -981,8 +978,6 @@ def _assert_entity_row_metadata(session: AgentSession | TeamSession | WorkflowSe
     else:
         assert session.workflow_id == "workflow"
         assert session.workflow_data == {"model": {"id": "before"}}
-    if isinstance(session, (AgentSession, TeamSession)):
-        assert session.summary == SessionSummary(summary="before", topics=["before"])
 
 
 @pytest.mark.parametrize("session_class", [AgentSession, TeamSession, WorkflowSession])
@@ -1026,12 +1021,7 @@ async def test_session_row_snapshot_isolates_all_mutable_metadata(
         session.created_at = 789
         session.updated_at = 999
         entity_data["model"]["id"] = "after"
-        if isinstance(session, (AgentSession, TeamSession)):
-            assert session.summary is not None
-            assert session.summary.topics is not None
-            session.summary.summary = "after"
-            session.summary.topics.append("after")
-        else:
+        if isinstance(session, WorkflowSession):
             session.workflow_name = "after"
         release_write.set()
         await save

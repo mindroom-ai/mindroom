@@ -827,7 +827,7 @@ agents:
 
 ### The check and its steps
 
-- `@automation(name, requires_file_memory=False)` marks a synchronous check; the name starts with a lowercase letter and continues with lowercase letters, digits, and `_`, must not be `prompt_curation` or `dreaming`, and must be unique across loaded plugins, or the later registration is ignored with a warning.
+- `@automation(name, requires_file_memory=False)` marks a synchronous check; the name starts with a lowercase letter and continues with lowercase letters, digits, and `_`, must not be `prompt_curation`, `dreaming`, or `exploration`, and must be unique across loaded plugins, or the later registration is ignored with a warning.
   Set `requires_file_memory=True` when the automation maintains file memory, so it never runs for an agent without the file backend.
 - The check returns `None` when there is nothing to do, which posts nothing and calls no model, or an `Ask(text, new_thread=..., then=...)` that the agent answers.
 - `then(config, thread_id, timed_out)` runs after that answer and returns the next `Ask` or a `Done(notice, resolve=..., on_loop=...)` that posts `notice` in the thread, marks the listed threads resolved, and runs `on_loop` on the event loop.

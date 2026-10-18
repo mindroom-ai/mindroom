@@ -25,10 +25,9 @@ from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
 )
-from mindroom.history.prompt_tokens import (
-    estimate_agent_static_tokens,
-)
-from mindroom.history.session_context import open_scope_session_context
+from mindroom.history.prompt_tokens import agent_static_token_estimator
+from mindroom.history.replay import is_compaction_summary
+from mindroom.history.session_context import open_resolved_scope_session_context, resolve_history_scope
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     update_scope_seen_event_ids,
@@ -56,6 +55,7 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _runtime_paths,
     _session,
+    seed_summary,
 )
 from tests.identity_helpers import persist_entity_accounts
 
@@ -277,10 +277,11 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
         )
 
     assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == estimate_agent_static_tokens(
+    assert mock_prepare.await_args.kwargs[
+        "resolved_inputs"
+    ].execution_plan.static_prompt_tokens == agent_static_token_estimator(
         live_agent,
-        "Current prompt",
-    )
+    ).estimate("Current prompt")
 
 
 @pytest.mark.asyncio
@@ -608,8 +609,8 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
     ]
 
     with (
-        open_scope_session_context(
-            agent=live_agent,
+        open_resolved_scope_session_context(
+            scope=resolve_history_scope(live_agent),
             agent_name="test_agent",
             session_id="session-1",
             runtime_paths=runtime_paths,
@@ -669,7 +670,7 @@ async def test_prepare_agent_and_prompt_keeps_matrix_current_sender_when_persist
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_outcomes_empty_when_no_compaction_occurred(
+async def test_prepare_agent_and_prompt_reports_no_compaction_when_none_occurred(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -696,7 +697,7 @@ async def test_prepare_agent_and_prompt_keeps_outcomes_empty_when_no_compaction_
         )
 
     prepared = prepared_run.prepared_history
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome == "none"
 
 
 @pytest.mark.asyncio
@@ -705,17 +706,9 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    seed_session(
-        storage,
-        _session(
-            "session-1",
-            runs=[
-                _completed_run("run-1"),
-                _completed_run("run-2"),
-            ],
-            summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
-        ),
-    )
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    seed_session(storage, session)
+    seed_summary(storage, session, HistoryScope(kind="agent", scope_id="test_agent"), "stored summary")
     model = RecordingModel(id="recording-model", provider="fake")
     agent = _agent(
         model=model,
@@ -726,13 +719,14 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
     response = await agent.arun("Current prompt", session_id="session-1")
 
     assert response.content == "ok"
-    assert [message.role for message in model.seen_messages[:2]] == ["user", "assistant"]
-    assert "stored summary" not in str(model.seen_messages)
-    assert [message.content for message in model.seen_messages[:2]] == [
+    assert is_compaction_summary(model.seen_messages[0])
+    assert "stored summary" in str(model.seen_messages[0].content)
+    assert [message.role for message in model.seen_messages[1:3]] == ["user", "assistant"]
+    assert [message.content for message in model.seen_messages[1:3]] == [
         "run-2 question",
         "run-2 answer",
     ]
-    assert [message.from_history for message in model.seen_messages[:2]] == [True, True]
+    assert [message.from_history for message in model.seen_messages[:3]] == [True, True, True]
     assert model.seen_messages[-1].role == "user"
     assert model.seen_messages[-1].content == "Current prompt"
 
@@ -750,7 +744,7 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
 
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_path: Path) -> None:
-    """Seen ids include an archive query, so both unseen-context passes read them in a worker thread."""
+    """Seen ids include a summary-row query, so both unseen-context passes read them in a worker thread."""
     config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
@@ -762,8 +756,8 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
         reading_threads.append(threading.get_ident())
         return read_scope_seen_event_ids(*args)  # type: ignore[arg-type]
 
-    with open_scope_session_context(
-        agent=live_agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(live_agent),
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -796,19 +790,16 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
 async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_context(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[_completed_run("run-1"), _completed_run("run-2")],
-        summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
-    )
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
     update_scope_seen_event_ids(session, HistoryScope(kind="agent", scope_id="test_agent"), ["event-1"])
     seed_session(storage, session)
+    seed_summary(storage, session, HistoryScope(kind="agent", scope_id="test_agent"), "stored summary")
 
     recording_model = RecordingModel(id="recording-model", provider="fake")
     live_agent = _agent(model=recording_model, db=storage, num_history_runs=1)
 
-    with open_scope_session_context(
-        agent=live_agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(live_agent),
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -847,9 +838,10 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     response = await agent.arun(prepared_run.run_input, session_id="session-1")
 
     assert response.content == "ok"
-    assert [message.role for message in recording_model.seen_messages[:2]] == ["user", "assistant"]
-    assert "stored summary" not in str(recording_model.seen_messages)
-    assert [message.content for message in recording_model.seen_messages[:2]] == [
+    assert is_compaction_summary(recording_model.seen_messages[0])
+    assert "stored summary" in str(recording_model.seen_messages[0].content)
+    assert [message.role for message in recording_model.seen_messages[1:3]] == ["user", "assistant"]
+    assert [message.content for message in recording_model.seen_messages[1:3]] == [
         "run-2 question",
         "run-2 answer",
     ]

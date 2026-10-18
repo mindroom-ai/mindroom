@@ -48,6 +48,11 @@ from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
 
 
+def _fake_mem0_llm() -> SimpleNamespace:
+    """Return a stand-in for Mem0's default Ollama LLM, whose client call MindRoom counts."""
+    return SimpleNamespace(config=SimpleNamespace(model="gemma4"), client=SimpleNamespace(chat=MagicMock()))
+
+
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
 
@@ -159,28 +164,43 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_temperature", "expected_top_p", "legacy_request_builder"),
+        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "legacy_request_builder"),
         [
-            ("gpt-6-astra", None, None, False),
-            (OPENAI_GPT_LUNA, None, None, False),
-            (OPENAI_GPT_SOL, None, None, False),
-            ("gpt-5.6-luna", 0.1, None, False),
-            ("gpt-5.6-terra", 0.1, None, False),
+            ("gpt-6-astra", None, None, False, False),
+            (OPENAI_GPT_LUNA, None, None, False, False),
+            (OPENAI_GPT_SOL, None, None, False, False),
+            ("gpt-5.6-luna", None, None, False, False),
+            ("gpt-5.6-terra", None, None, False, False),
+            ("gpt-5.4-mini", None, None, False, False),
+            ("gpt-5-mini", None, None, False, False),
+            ("gpt-5-2025-08-07", None, None, False, False),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.1, 0.8, False),
-            (OPENAI_GPT_SOL, None, None, True),
+            ("gpt-4", 0.1, 0.8, True, False),
+            (OPENAI_GPT_SOL, None, None, False, True),
         ],
-        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-4", "sol-legacy-mem0"],
+        ids=[
+            "astra",
+            "luna",
+            "sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.4-mini",
+            "gpt-5-mini",
+            "gpt-5-snapshot",
+            "gpt-4",
+            "sol-legacy-mem0",
+        ],
     )
-    async def test_mem0_openai_sampling_support_is_model_specific(
+    async def test_mem0_openai_request_parameters_are_model_specific(
         self,
         tmp_path: Path,
         model_id: str,
         expected_temperature: float | None,
         expected_top_p: float | None,
+        sends_max_tokens: bool,
         legacy_request_builder: bool,
     ) -> None:
-        """Memory extraction must omit only sampling controls rejected by its model."""
+        """Memory extraction omits for GPT-5 and later models what Mem0 omits for the reasoning models it knows."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="ollama",
@@ -234,6 +254,9 @@ class TestMemoryConfig:
         assert {name: request_params[name] for name in expected_sampling if name in request_params} == {
             name: value for name, value in expected_sampling.items() if value is not None
         }
+        assert ("max_tokens" in request_params) is sends_max_tokens
+        # A max_completion_tokens cap would also count reasoning tokens and could leave no answer.
+        assert "max_completion_tokens" not in request_params
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
@@ -755,7 +778,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(vector_store=object())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -784,7 +807,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        mock_from_config.return_value = SimpleNamespace(vector_store=object())
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
         install_running = threading.Event()
         finish_install = threading.Event()
 
@@ -834,7 +857,7 @@ class TestMemoryConfig:
             api_key="sk-test",
             openai_client=client,
         )
-        memory = SimpleNamespace(vector_store=object(), embedding_model=object())
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),
@@ -896,10 +919,21 @@ class TestMemoryConfig:
         assert memory.auto_flush.extractor.max_messages_per_flush == 12
         assert memory.auto_flush.extractor.max_chars_per_flush == 9000
 
-    def test_memory_auto_flush_default_interval_is_30_minutes(self) -> None:
-        """Auto-flush should default to a half-hour worker interval."""
+    def test_memory_auto_flush_default_interval_is_5_minutes(self) -> None:
+        """Without the reply path waking it, auto-flush passes every five minutes by default."""
         memory = MemoryConfig()
-        assert memory.auto_flush.flush_interval_seconds == 1800
+        assert memory.auto_flush.flush_interval_seconds == 300
+
+    def test_retired_auto_flush_fields_still_load(self) -> None:
+        """A config the dashboard saved with the retired dirty-queue fields loads, and a save drops them."""
+        memory = MemoryConfig.model_validate(
+            {
+                "backend": "file",
+                "auto_flush": {"enabled": True, "max_dirty_age_seconds": 600, "max_cross_session_reprioritize": 5},
+            },
+        )
+        assert memory.auto_flush.enabled is True
+        assert memory.model_dump(exclude_unset=True) == {"backend": "file", "auto_flush": {"enabled": True}}
 
     def test_memory_config_accepts_disabled_backend(self) -> None:
         """The memory config should accept disabled memory in object and shorthand form."""

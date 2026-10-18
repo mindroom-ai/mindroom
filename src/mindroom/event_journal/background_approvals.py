@@ -14,10 +14,12 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.tool_approval_grants import ApprovalGrantScope
+
     from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
     from .backend import Transaction
 
-from . import approval_card_state, reads
+from . import approval_card_state, approval_grants, reads
 
 __all__ = [
     "BackgroundApprovalDecision",
@@ -64,11 +66,17 @@ def reserve_delivery(
     call_id: str,
     expires_at_ns: int,
     card: ApprovalCardReservation,
+    grant_scope: ApprovalGrantScope | None = None,
 ) -> bool:
-    """Atomically reserve one exact detached call and its frozen card, which its caller verified names that call."""
+    """Atomically reserve one exact detached call and its frozen card, which its caller verified names that call.
+
+    With a grant scope, an active timed grant approves the call at once and publishes a receipt instead of the card.
+    """
     if card.tool_call_id != call_id:
         msg = f"Detached approval delivery {card.delivery_id!r} changed exact-call identity"
         raise ValueError(msg)
+    if grant_scope is not None:
+        approval_grants.lock(transaction, principal_id)
     epoch = transaction.fetchone(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
         (principal_id, room_id),
@@ -99,13 +107,24 @@ def reserve_delivery(
     )
     if inserted is None:
         return True
+    if grant_scope is not None:
+        card = approval_grants.reserve_identity(
+            transaction,
+            principal_id,
+            card,
+            grant_scope,
+            membership_epoch=membership_epoch,
+            target=(run_id, approval_card_state.DETACHED_GENERATION),
+        )
+        if approval_grants.apply_active(transaction, principal_id, card=card):
+            return True
     approval_card_state.reserve_delivery(
         transaction,
         principal_id,
         room_id=room_id,
         thread_id=thread_id,
         membership_epoch=membership_epoch,
-        identity=(run_id, -1, call_id),
+        identity=(run_id, approval_card_state.DETACHED_GENERATION, call_id),
         card=card,
     )
     return True
@@ -121,6 +140,7 @@ def reserve_script_delivery(
     call_id: str,
     expires_at_ns: int,
     card: ApprovalCardReservation,
+    grant_scope: ApprovalGrantScope | None = None,
 ) -> bool:
     """Atomically reserve one background-script call and the card that names it."""
     if background_identity({"content": card.payload}) != (run_id, call_id):
@@ -135,6 +155,7 @@ def reserve_script_delivery(
         call_id=call_id,
         expires_at_ns=expires_at_ns,
         card=card,
+        grant_scope=grant_scope,
     )
 
 

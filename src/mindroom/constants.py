@@ -20,6 +20,7 @@ from mindroom.atomic_file import atomic_write_bytes_at
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
+ROUTER_DISPLAY_NAME = "RouterAgent"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
@@ -1133,6 +1134,10 @@ ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
+# Run metadata key holding the trusted hook source of the message that started the run, such as an automation prompt.
+HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
+# Run metadata key holding the intent of the message that started the run, such as a background job follow-up.
+TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"

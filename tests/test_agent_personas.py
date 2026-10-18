@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.agent import _messages as agent_messages
 from agno.knowledge.knowledge import Knowledge
 from agno.models.message import Message
 from agno.run import RunContext
@@ -24,7 +25,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
 from mindroom.delegation.state import SubagentPersona
-from mindroom.history.archive import archive_runs
+from mindroom.history.replay import is_compaction_summary
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -32,6 +33,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import seed_session
+from tests.history_helpers import compact_runs
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_dynamic_toolkits import _base_config_data, _egress_broker_env, _validated_config
 from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
@@ -122,7 +124,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(tmp_p
 
 @pytest.mark.asyncio
 async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> None:
-    """A compacted session's summary reaches an authored child through the same prompt builder as every agent."""
+    """A compacted session's summary replays as the first history message, outside an authored child's prompt."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
     identity = build_execution_identity_from_runtime_context(runtime)
     old_run = RunOutput(
@@ -134,17 +136,8 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
     )
     storage = create_session_storage("helper", runtime.config, runtime.runtime_paths, identity)
     try:
-        seed_session(storage, AgentSession(session_id="session-1", agent_id="helper", runs=[old_run]))
-        archive_runs(
-            storage,
-            session_id="session-1",
-            scope_key=HistoryScope(kind="agent", scope_id="helper").key,
-            summary="EARLIER-WORK",
-            summary_model="summary-model",
-            runs=[old_run],
-            event_ids={},
-            seen_event_ids={},
-        )
+        session = seed_session(storage, AgentSession(session_id="session-1", agent_id="helper", runs=[old_run]))
+        compact_runs(storage, session, HistoryScope(kind="agent", scope_id="helper"), ["old-run"], "EARLIER-WORK")
     finally:
         storage.close()
 
@@ -166,11 +159,21 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
             scope_context=scope_context,
         )
         message = await prepared.agent.aget_system_message(scope_context.session, _run_context(), [])
+        run_messages = await agent_messages.aget_run_messages(
+            prepared.agent,
+            run_response=RunOutput(run_id="run-1", session_id="session-1"),
+            run_context=_run_context(),
+            input=[Message(role="user", content="task")],
+            session=scope_context.session,
+            add_history_to_context=prepared.agent.add_history_to_context,
+        )
 
     assert message is not None
-    content = str(message.content)
-    assert content.startswith("P\n")
-    assert content.count("<summary_of_previous_interactions>\nEARLIER-WORK\n</summary_of_previous_interactions>") == 1
+    assert str(message.content).startswith("P\n")
+    assert "EARLIER-WORK" not in str(message.content)
+    summaries = [message for message in run_messages.messages if is_compaction_summary(message)]
+    assert len(summaries) == 1
+    assert "EARLIER-WORK" in str(summaries[0].content)
 
 
 def test_persona_with_tools_hides_generated_functions_from_the_agent(tmp_path: Path) -> None:

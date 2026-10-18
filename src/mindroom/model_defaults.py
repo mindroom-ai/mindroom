@@ -52,12 +52,11 @@ __all__ = (
     "OPENAI_IMAGE",
     "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
     "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
-    "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
+    "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES",
     "OPENAI_REALTIME",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
-    "OPENAI_UNSUPPORTED_SAMPLING_CONTROLS",
     "OPENROUTER_BASE_URL_DEFAULT",
     "OPENROUTER_OPENAI_EMBEDDING_SMALL",
     "OPENROUTER_OPENAI_LUNA",
@@ -140,21 +139,9 @@ OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
 # The Decisions API serves only this model, so it does not follow the Luna default.
 OPENAI_DECISIONS_MODEL = "gpt-6-luna"
-# Chat Completions sampling controls each model rejects: GPT-6 Astra always rejects
-# both, GPT-6.1 Sol and GPT-6 Luna reject both at their default (non-`none`) reasoning effort,
-# and GPT-5.6 Terra and Luna reject top_p.
-OPENAI_UNSUPPORTED_SAMPLING_CONTROLS: Mapping[str, frozenset[str]] = MappingProxyType(
-    {
-        _OPENAI_GPT: frozenset({"temperature", "top_p"}),
-        OPENAI_GPT_SOL: frozenset({"temperature", "top_p"}),
-        OPENAI_GPT_LUNA: frozenset({"temperature", "top_p"}),
-        "gpt-5.6-terra": frozenset({"top_p"}),
-        "gpt-5.6-luna": frozenset({"top_p"}),
-    },
-)
-OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = tuple(
-    model for model, controls in OPENAI_UNSUPPORTED_SAMPLING_CONTROLS.items() if "temperature" in controls
-)
+# OpenAI model families whose models mostly reject sampling values other than their defaults, as gpt-5-mini, gpt-5.5,
+# and gpt-6-luna reject temperature 0.1; each user decides how it matches IDs and which parameters it drops.
+OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
 # Original detail preserves patch coverage on these models; the provider's
 # separate rejection limit and maximum pixel dimension still apply.
 OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES = ("gpt-6", "gpt-5.6")

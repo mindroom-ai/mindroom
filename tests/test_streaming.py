@@ -67,7 +67,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.final_delivery import StreamTransportOutcome
@@ -153,7 +153,7 @@ async def _run_stream(
     config: Config,
     response_stream: AsyncIterator[object],
     *,
-    visible_progress_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
@@ -360,8 +360,14 @@ async def test_deferred_placeholder_appears_once_approved(config: Config, *, app
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("accepted", [True, False])
 async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config, *, accepted: bool) -> None:
-    """Only acknowledged plain text reaches progress observers, never buffered text or trace details."""
+    """Only acknowledged text and the tool trace it was sent with reach observers, never buffered updates."""
     visible: list[str] = []
+    traces: list[tuple[ToolTraceEntry, ...]] = []
+
+    def note_progress(body: str, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        visible.append(body)
+        traces.append(tuple(tool_trace))
+
     entered = asyncio.Event()
     release = asyncio.Event()
     gateway = _FakeGateway()
@@ -381,9 +387,10 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
         target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        visible_progress_callback=visible.append,
+        visible_progress_callback=note_progress,
     )
-    streaming.tool_trace = [ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")]
+    sent_entry = ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")
+    streaming.tool_trace = [sent_entry]
     client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
     with patch("mindroom.streaming.send_message_result", new=delayed_send):
         delivery = asyncio.create_task(push_stream_chunk(streaming, "Published reply", client))
@@ -391,6 +398,7 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
             await entered.wait()
             assert visible == []
             streaming.accumulated_text += " buffered later"
+            streaming.tool_trace.append(ToolTraceEntry("tool_call_started", "shell", args_preview="buffered"))
             release.set()
             if accepted:
                 await delivery
@@ -403,6 +411,7 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
                 delivery.cancel()
                 await asyncio.gather(delivery, return_exceptions=True)
     assert visible == (["Published reply"] if accepted else [])
+    assert traces == ([(sent_entry,)] if accepted else [])
     if accepted:
         assert visible == [gateway.ops[0].content["body"]]
 
@@ -410,13 +419,15 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 async def test_stream_driver_publishes_only_visible_text_to_progress_callback(config: Config) -> None:
-    """The stream driver forwards its observer without forwarding rich tool arguments."""
+    """The stream driver forwards acknowledged text with the tool trace it was sent with."""
     visible: list[str] = []
+    traces: list[tuple[ToolTraceEntry, ...]] = []
     published = asyncio.Event()
     gateway = _FakeGateway()
 
-    def note_progress(text: str) -> None:
+    def note_progress(text: str, tool_trace: Sequence[ToolTraceEntry]) -> None:
         visible.append(text)
+        traces.append(tuple(tool_trace))
         published.set()
 
     async def stream() -> AsyncIterator[object]:
@@ -434,7 +445,27 @@ async def test_stream_driver_publishes_only_visible_text_to_progress_callback(co
     assert visible
     assert "I found the file" in visible[0]
     assert "read_file" in visible[0]
+    # Arguments travel only as trace data, which the mid-turn judge renders as tags.
     assert "private path" not in "\n".join(visible)
+    assert traces[0] == (ToolTraceEntry("tool_call_started", "read_file", args_preview="private path"),)
+
+
+@pytest.mark.asyncio
+async def test_hidden_tool_calls_publish_no_trace_to_progress_callback(config: Config) -> None:
+    """Hidden tool calls leave no markers, so marker-shaped agent text must not meet their trace."""
+    traces: list[tuple[ToolTraceEntry, ...]] = []
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        visible_progress_callback=lambda _body, trace: traces.append(tuple(trace)),
+        show_tool_calls=False,
+    )
+    streaming.tool_trace = [ToolTraceEntry("tool_call_started", "shell", args_preview="private")]
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+    with patch("mindroom.streaming.send_message_result", new=_FakeGateway().send):
+        await push_stream_chunk(streaming, "Example:\n\n🔧 `shell` [1]", client)
+    assert traces == [()]
 
 
 @pytest.mark.asyncio

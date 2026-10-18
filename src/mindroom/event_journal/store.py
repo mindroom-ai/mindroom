@@ -19,7 +19,7 @@ from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     RoomHistoryRecovery,
 )
-from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation  # noqa: TC001
+from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation, ApprovalGrantScope  # noqa: TC001
 
 from . import (
     approval_continuations,
@@ -1127,8 +1127,9 @@ class PrincipalStore:
         call_id: str,
         expires_at_ns: int,
         card: ApprovalCardReservation,
+        grant_scope: ApprovalGrantScope | None = None,
     ) -> bool:
-        """Atomically reserve one exact background-call approval card."""
+        """Atomically reserve one exact background-call approval card, or apply an active grant in its place."""
         return await self._backend.write(
             lambda transaction: background_approvals.reserve_script_delivery(
                 transaction,
@@ -1139,6 +1140,7 @@ class PrincipalStore:
                 call_id=call_id,
                 expires_at_ns=expires_at_ns,
                 card=card,
+                grant_scope=grant_scope,
             ),
         )
 

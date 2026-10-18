@@ -1,1257 +1,1081 @@
-"""Tests for background file-memory auto-flush state and batching."""
+"""The auto-flush worker turns the new finished turns of file-memory conversations into daily notes, once each."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import threading
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 import pytest
+from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
 
 import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
-from mindroom.memory import (
-    MemoryAutoFlushWorker,
-    add_agent_memory,
-    mark_auto_flush_dirty_session,
-    reprioritize_auto_flush_sessions,
-)
-from mindroom.memory.auto_flush import _build_existing_memory_context
+from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
+from mindroom.hooks import EnrichmentItem, render_enrichment_block
+from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
 from mindroom.memory.functions import append_agent_daily_memory
-from mindroom.session_storage.agent_storage import load_agent_session
+from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
+    build_requester_execution_identity,
     private_instance_scope_root_path,
     resolve_worker_key,
     tool_execution_identity,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
+    from mindroom.history.session_runs import RedactedEventIds
+
+T0 = 1_760_000_000
+ROOM = "!room:example.org"
+ALICE = "@alice:example.org"
+BOB = "@bob:example.org"
+
+
+def _thread(name: str, room: str = ROOM) -> str:
+    return f"{room}:${name}"
+
+
+def _config(tmp_path: Path, *, agents: dict[str, AgentConfig] | None = None, **auto_flush_settings: object) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
+    )
+    return bind_runtime_paths(
+        Config(
+            agents=agents or {"general": AgentConfig(display_name="General", role="General assistant", rooms=[])},
+            memory={"backend": "file", "auto_flush": {"enabled": True, "idle_seconds": 1, **auto_flush_settings}},
+        ),
+        runtime_paths,
+    )
+
+
+def _private_config(tmp_path: Path, **auto_flush_settings: object) -> Config:
+    agents = {
+        "mind": AgentConfig(
+            display_name="Mind",
+            role="Persistent private assistant",
+            rooms=[],
+            memory_backend="file",
+            private=AgentPrivateConfig(per="user", root="mind_data"),
+        ),
+    }
+    return _config(tmp_path, agents=agents, **auto_flush_settings)
+
+
+def _requester(config: Config, requester_id: str, agent: str = "mind") -> ToolExecutionIdentity:
+    return build_requester_execution_identity(
+        agent_name=agent,
+        runtime_paths=runtime_paths_for(config),
+        requester_id=requester_id,
+    )
+
+
+def _run(
+    run_id: str,
+    session_id: str,
+    created_at: int,
+    *,
+    status: RunStatus = RunStatus.completed,
+    hook_source: str | None = None,
+    messages: list[Message] | None = None,
+) -> RunOutput:
+    metadata: dict[str, object] = {
+        "room_id": session_id.rsplit(":$", 1)[0],
+        "requester_id": ALICE,
+        MATRIX_EVENT_ID_METADATA_KEY: f"$event-{run_id}",
+    }
+    if hook_source is not None:
+        metadata[HOOK_SOURCE_RUN_METADATA_KEY] = hook_source
+    return RunOutput(
+        run_id=run_id,
+        session_id=session_id,
+        agent_id="general",
+        created_at=created_at,
+        status=status,
+        metadata=metadata,
+        messages=messages
+        or [
+            Message(role="user", content=f"question {run_id}", created_at=created_at),
+            Message(role="assistant", content=f"answer {run_id}", created_at=created_at),
+        ],
+    )
+
+
+def _seed(
+    config: Config,
+    session_id: str,
+    runs: list[RunOutput],
+    *,
+    agent: str = "general",
+    identity: ToolExecutionIdentity | None = None,
+    updated_at: int | None = None,
+) -> None:
+    """Store a conversation, last updated a second after its newest run unless told otherwise."""
+    storage = create_session_storage(agent, config, runtime_paths_for(config), execution_identity=identity)
+    try:
+        for run in runs:
+            run.agent_id = agent
+        seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
+        newest = max((run.created_at or 0 for run in runs), default=T0)
+        with storage.db_engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+                (updated_at if updated_at is not None else newest + 1, session_id),
+            )
+    finally:
+        storage.close()
+
+
+async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+    del agent_name, room_id, event_ids
+    return frozenset()
 
 
 @dataclass
-class _FakeMessage:
-    role: str
-    content: str
+class _Clock:
+    now: float = T0
+
+    def __call__(self) -> float:
+        return self.now
 
 
 @dataclass
-class _FakeSession:
-    updated_at: int
-    messages: list[_FakeMessage]
+class _Extractor:
+    """Stands in for the extraction model, recording what each call was given."""
 
-    def get_chat_history(self) -> list[_FakeMessage]:
-        return self.messages
+    summary: str | None = "important decision"
+    error: Exception | None = None
+    clock: _Clock | None = None
+    # Seconds an extraction takes on the clock.
+    takes: float = 0
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    async def __call__(self, **kwargs: object) -> str | None:
+        self.calls.append(kwargs)
+        if self.clock is not None:
+            self.clock.now += self.takes
+        if self.error is not None:
+            raise self.error
+        return self.summary
+
+    def lines(self) -> list[list[str]]:
+        return [cast("list[str]", call["lines"]) for call in self.calls]
+
+
+def _lines(*run_ids: str) -> list[str]:
+    return [line for run_id in run_ids for line in (f"{ALICE}: question {run_id}", f"assistant: answer {run_id}")]
+
+
+def _worker(
+    config: Config,
+    clock: _Clock,
+    redacted_event_ids: RedactedEventIds = _no_redactions,
+) -> MemoryAutoFlushWorker:
+    return MemoryAutoFlushWorker(
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+        redacted_event_ids=redacted_event_ids,
+        clock=clock,
+    )
+
+
+def _notes(root: Path) -> list[str]:
+    """Return every daily-note entry under a workspace."""
+    return [
+        line
+        for path in sorted((root / "memory").rglob("*.md"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _general_notes(tmp_path: Path) -> list[str]:
+    return _notes(agent_workspace_root_path(tmp_path, "general"))
+
+
+def _entry(tmp_path: Path, session_id: str) -> dict[str, object]:
+    state = json.loads((tmp_path / "tracking" / "memory_auto_flush.json").read_text(encoding="utf-8"))
+    return next(conversations[session_id] for conversations in state["scopes"].values() if session_id in conversations)
 
 
 @pytest.fixture
-def config(tmp_path: Path) -> Config:
-    """Return a file-memory config with deterministic auto-flush limits."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    cfg = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    role="General assistant",
-                    rooms=[],
-                ),
-            },
-        ),
-        runtime_paths,
-    )
-    cfg.memory.backend = "file"
-    cfg.memory.auto_flush.enabled = True
-    cfg.memory.auto_flush.flush_interval_seconds = 1
-    cfg.memory.auto_flush.idle_seconds = 0
-    cfg.memory.auto_flush.batch.max_sessions_per_cycle = 1
-    cfg.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 1
-    cfg.memory.auto_flush.extractor.max_messages_per_flush = 5
-    cfg.memory.auto_flush.extractor.max_chars_per_flush = 1000
-    return cfg
+def extractor(monkeypatch: pytest.MonkeyPatch) -> _Extractor:
+    """Replace the extraction model call."""
+    fake = _Extractor()
+    monkeypatch.setattr(auto_flush, "_extract_memory_summary", fake)
+    return fake
 
 
-def _private_auto_flush_config(tmp_path: Path) -> Config:
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    cfg = bind_runtime_paths(
-        Config(
-            agents={
-                "mind": AgentConfig(
-                    display_name="Mind",
-                    role="Persistent private assistant",
-                    rooms=[],
-                    memory_backend="file",
-                    private=AgentPrivateConfig(per="user", root="mind_data"),
-                ),
-            },
-        ),
-        runtime_paths,
-    )
-    cfg.memory.backend = "file"
-    cfg.memory.auto_flush.enabled = True
-    cfg.memory.auto_flush.flush_interval_seconds = 1
-    cfg.memory.auto_flush.idle_seconds = 0
-    cfg.memory.auto_flush.batch.max_sessions_per_cycle = 1
-    cfg.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 1
-    cfg.memory.auto_flush.extractor.max_messages_per_flush = 5
-    cfg.memory.auto_flush.extractor.max_chars_per_flush = 1000
-    return cfg
-
-
-def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
-    """Dirty-state persistence should track and reprioritize agent sessions."""
-    storage_path = tmp_path
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s1",
-    )
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s2",
-    )
-
-    reprioritize_auto_flush_sessions(
-        storage_path,
-        config,
-        agent_name="general",
-        active_session_id="s1",
-    )
-
-    state_file = storage_path / "memory_flush_state.json"
-    payload = state_file.read_text(encoding="utf-8")
-    assert '"general:s1"' in payload
-    assert '"general:s2"' in payload
-    assert '"priority_boost_at"' in payload
-    assert '"room_id"' not in payload
-    assert '"thread_id"' not in payload
-
-
-def test_reprioritize_rewrites_legacy_location_fields_only(
-    tmp_path: Path,
+async def _started(
     config: Config,
-    monkeypatch: pytest.MonkeyPatch,
+    clock: _Clock | None = None,
+    redacted_event_ids: RedactedEventIds = _no_redactions,
+) -> MemoryAutoFlushWorker:
+    """Return a worker whose first pass ran at T0, which starts auto-flush, with its clock moved past every seeded turn."""
+    clock = _Clock() if clock is None else clock
+    worker = _worker(config, clock, redacted_event_ids)
+    await worker._run_cycle(config)
+    clock.now = T0 + 1000
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_the_first_pass_removes_the_old_queue_and_flushes_only_later_turns(
+    tmp_path: Path,
+    extractor: _Extractor,
 ) -> None:
-    """A public state mutation drops retired locations while preserving current flush history."""
-    state_file = tmp_path / "memory_flush_state.json"
-    state_file.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "sessions": {
-                    "general:s1": {
-                        "agent_name": "general",
-                        "session_id": "s1",
-                        "worker_key": None,
-                        "execution_identity": None,
-                        "room_id": "!legacy:example.org",
-                        "thread_id": "$legacy-thread",
-                        "dirty": True,
-                        "first_dirty_at": 100,
-                        "last_seen_at": 200,
-                        "last_session_updated_at": 190,
-                        "last_flushed_session_updated_at": 180,
-                        "next_attempt_at": 300,
-                        "consecutive_failures": 2,
-                        "priority_boost_at": None,
-                        "dirty_revision": 4,
-                        "flush_started_dirty_revision": 3,
-                    },
-                    "general:s2": {
-                        "agent_name": "general",
-                        "session_id": "s2",
-                        "worker_key": None,
-                        "execution_identity": None,
-                        "dirty": False,
-                        "first_dirty_at": 110,
-                        "last_seen_at": 210,
-                        "consecutive_failures": 0,
-                        "dirty_revision": 1,
-                    },
-                },
-            },
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr("mindroom.memory.auto_flush._now_ts", lambda: 500)
+    """Upgrading deletes the push-model queue, and a conversation's turns from before auto-flush started stay unflushed."""
+    config = _config(tmp_path)
+    (tmp_path / "memory_flush_state.json").write_text('{"version": 1, "sessions": {}}', encoding="utf-8")
+    (tmp_path / "memory_flush_state.json.tmp").write_text("{", encoding="utf-8")
+    session = _thread("t1")
+    old = _run("old", session, T0 - 50)
+    _seed(config, session, [old])
 
-    reprioritize_auto_flush_sessions(tmp_path, config, agent_name="general", active_session_id="s2")
+    worker = await _started(config)
 
-    persisted = json.loads(state_file.read_text(encoding="utf-8"))
-    assert persisted == {
-        "version": 1,
-        "sessions": {
-            "general:s1": {
-                "agent_name": "general",
-                "session_id": "s1",
-                "worker_key": None,
-                "execution_identity": None,
-                "dirty": True,
-                "first_dirty_at": 100,
-                "last_seen_at": 200,
-                "last_session_updated_at": 190,
-                "last_flushed_session_updated_at": 180,
-                "next_attempt_at": 300,
-                "consecutive_failures": 2,
-                "priority_boost_at": 500,
-                "dirty_revision": 4,
-                "flush_started_dirty_revision": 3,
-            },
-            "general:s2": {
-                "agent_name": "general",
-                "session_id": "s2",
-                "worker_key": None,
-                "execution_identity": None,
-                "dirty": False,
-                "first_dirty_at": 110,
-                "last_seen_at": 210,
-                "consecutive_failures": 0,
-                "dirty_revision": 1,
-            },
-        },
+    assert not (tmp_path / "memory_flush_state.json").exists()
+    assert not (tmp_path / "memory_flush_state.json.tmp").exists()
+    assert extractor.calls == []
+
+    _seed(config, session, [old, _run("new", session, T0 + 10)])
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("new")]
+    [note] = _general_notes(tmp_path)
+    assert note.startswith("- [id=")
+    assert note.endswith(f"] [auto_flush:{session}:new] important decision")
+
+
+@pytest.mark.asyncio
+async def test_each_private_instance_flushes_into_its_own_memory(tmp_path: Path, extractor: _Extractor) -> None:
+    """Every requester's private instance is its own scope, with its own identity, memory, and per-scope cap."""
+    config = _private_config(tmp_path, batch={"max_sessions_per_cycle": 2, "max_sessions_per_agent_per_cycle": 1})
+    worker = await _started(config)
+    alice, bob = _requester(config, ALICE), _requester(config, BOB)
+    # Instances share their agent's start, so one first listed long after it keeps every turn since.
+    _seed(config, _thread("a"), [_run("a1", _thread("a"), T0 + 10)], agent="mind", identity=alice)
+    _seed(config, _thread("b"), [_run("b1", _thread("b"), T0 + 10)], agent="mind", identity=bob)
+
+    await worker._run_cycle(config)
+
+    assert sorted(
+        cast("ToolExecutionIdentity", call["execution_identity"]).requester_id for call in extractor.calls
+    ) == [
+        ALICE,
+        BOB,
+    ]
+    for identity, run_id in ((alice, "a1"), (bob, "b1")):
+        worker_key = resolve_worker_key("user", identity, agent_name="mind")
+        assert worker_key is not None
+        [note] = _notes(private_instance_scope_root_path(tmp_path, worker_key) / "mind" / "mind_data")
+        assert f":{run_id}] important decision" in note
+
+
+@pytest.mark.asyncio
+async def test_an_agent_switched_to_file_memory_flushes_only_turns_since_the_previous_pass(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """An agent first seen after the start begins one pass before it was seen, so its older history is never flushed."""
+    agents = {
+        "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
+        "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
     }
+    config, clock = _config(tmp_path, agents=agents), _Clock()
+    worker = await _started(config, clock)
+    clock.now = T0 + 90 * 86_400
+    interval = config.memory.auto_flush.flush_interval_seconds
+    session = _thread("t1")
+    older = [_run(f"m{index}", session, T0 + 100 + index) for index in range(3)]
+    recent = _run("recent", session, int(clock.now) - interval // 2)
+    _seed(config, session, [*older, recent], agent="other", updated_at=int(clock.now) - 10)
+    stale = _thread("stale")
+    _seed(config, stale, [_run("s1", stale, T0 + 200)], agent="other")
+    config.agents["other"].memory_backend = "file"
 
-
-def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config) -> None:
-    """Auto-flush should track agents explicitly configured for file memory."""
-    storage_path = tmp_path
-    config.memory.backend = "mem0"
-    config.agents["general"].memory_backend = "file"
-
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s1",
-    )
-
-    payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    assert "general:s1" in payload["sessions"]
-
-
-def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config) -> None:
-    """Auto-flush should not track agents explicitly configured for Mem0."""
-    storage_path = tmp_path
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "mem0"
-
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s1",
-    )
-
-    assert not (storage_path / "memory_flush_state.json").exists()
-
-
-@pytest.mark.asyncio
-async def test_worker_respects_batch_limits(
-    tmp_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One cycle should process no more than configured batch size."""
-    storage_path = tmp_path
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s1",
-    )
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s2",
-    )
-
-    fake_session = _FakeSession(
-        updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this important decision")],
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.load_agent_session",
-        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-
-    writes: list[str] = []
-
-    def _fake_append_daily_memory(
-        content: str,
-        agent_name: str,
-        **_: object,
-    ) -> dict[str, str]:
-        writes.append(f"{agent_name}:{content}")
-        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=storage_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
     await worker._run_cycle(config)
 
-    assert len(writes) == 1
+    assert extractor.lines() == [_lines("recent")]
+    # A conversation last updated before the scope's start is not even read.
+    with pytest.raises(StopIteration):
+        _entry(tmp_path, stale)
 
 
 @pytest.mark.asyncio
-async def test_a_flush_mark_left_by_an_older_release_does_not_block_flushing(
-    tmp_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A session an older release left marked in flight after a crash is flushed after restart."""
-    storage_path = tmp_path
-    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
-    state_file = storage_path / "memory_flush_state.json"
-    payload = json.loads(state_file.read_text(encoding="utf-8"))
-    payload["sessions"]["general:s1"]["in_flight"] = True
-    state_file.write_text(json.dumps(payload), encoding="utf-8")
-    mark_auto_flush_dirty_session(storage_path, config, agent_name="general", session_id="s1")
+async def test_a_conversation_updated_in_the_start_second_is_flushed(tmp_path: Path, extractor: _Extractor) -> None:
+    """Update times are whole seconds, so a turn finished just after the start, in the same second, still counts."""
+    config, clock = _config(tmp_path), _Clock()
+    clock.now = T0 + 0.5
+    worker = _worker(config, clock)
+    await worker._run_cycle(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0)], updated_at=T0)
+    clock.now = T0 + 1000
 
-    fake_session = _FakeSession(
-        updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this important decision")],
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.load_agent_session",
-        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-    writes: list[str] = []
-
-    def _fake_append_daily_memory(content: str, agent_name: str, **_: object) -> dict[str, str]:
-        writes.append(f"{agent_name}:{content}")
-        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=storage_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
     await worker._run_cycle(config)
 
-    assert len(writes) == 1
+    assert extractor.lines() == [_lines("r1")]
 
 
 @pytest.mark.asyncio
-async def test_worker_session_load_does_not_block_the_event_loop(
+async def test_conversations_without_matrix_turns_leave_the_pass_to_others(
     tmp_path: Path,
-    config: Config,
+    extractor: _Extractor,
+) -> None:
+    """A conversation with nothing to flush, such as one through the OpenAI-compatible API, takes no place in a pass."""
+    config = _config(tmp_path, batch={"max_sessions_per_agent_per_cycle": 1})
+    worker = await _started(config)
+    for index in range(3):
+        api_session = f"api-{index}"
+        api_run = _run(f"x{index}", api_session, T0 + 10 + index)
+        cast("dict[str, object]", api_run.metadata).pop("room_id")
+        _seed(config, api_session, [api_run])
+    automation = _thread("automation")
+    _seed(config, automation, [_run("auto", automation, T0 + 20, hook_source="automation/daily")])
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 30)])
+
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r1")]
+    assert _entry(tmp_path, "api-0")["updated_at"] == T0 + 11
+
+
+@pytest.mark.asyncio
+async def test_an_agent_keeps_the_start_it_was_first_seen_with(tmp_path: Path, extractor: _Extractor) -> None:
+    """The start of a newly seen agent is saved, so a late next pass still flushes the turns made since it appeared."""
+    agents = {
+        "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
+        "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
+    }
+    config, clock = _config(tmp_path, agents=agents), _Clock()
+    worker = await _started(config, clock)
+    config.agents["other"].memory_backend = "file"
+    await worker._run_cycle(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, int(clock.now) + 10)], agent="other")
+
+    clock.now += 3 * config.memory.auto_flush.flush_interval_seconds
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r1")]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_failed_progress_write_never_writes_a_note_twice(
+    tmp_path: Path,
+    extractor: _Extractor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocked session read must run outside the worker's event loop."""
-    mark_auto_flush_dirty_session(
+    """A note written before its progress could be saved is found again, even when newer turns arrived since."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    first = _run("r1", session, T0 + 10)
+    _seed(config, session, [first])
+    real_write = auto_flush.write_json_file_durable
+    failed = False
+
+    def first_progress_write_fails(path: Path, payload: object, **kwargs: object) -> None:
+        nonlocal failed
+        if extractor.calls and not failed:
+            failed = True
+            msg = "disk full"
+            raise OSError(msg)
+        real_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(auto_flush, "write_json_file_durable", first_progress_write_fails)
+
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("r1")]
+    with pytest.raises(StopIteration):
+        _entry(tmp_path, session)
+
+    _seed(config, session, [first, _run("r2", session, T0 + 20)])
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r1"), _lines("r2")]
+    notes = _general_notes(tmp_path)
+    assert [note.split("] ", 1)[1] for note in notes] == [
+        f"[auto_flush:{session}:r1] important decision",
+        f"[auto_flush:{session}:r2] important decision",
+    ]
+    await worker._run_cycle(config)
+    assert len(extractor.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_automation_turns_are_skipped_while_other_turns_in_the_thread_are_flushed(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """An automation's maintenance turn is not memory; a person's turn or another hook's turn in the thread is."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(
+        config,
+        session,
+        [
+            _run("dream", session, T0 + 10, hook_source="automation/dreaming"),
+            _run("person", session, T0 + 20),
+            _run("digest", session, T0 + 30, hook_source="digest:message:received"),
+            _run("curate", session, T0 + 40, hook_source="automation/prompt_curation"),
+        ],
+    )
+
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("person", "digest")]
+
+    # A pass whose new turns are all automation turns moves past them without extracting.
+    only_automation = _thread("t2")
+    _seed(config, only_automation, [_run("weekly", only_automation, T0 + 50, hook_source="automation/weekly")])
+    await worker._run_cycle(config)
+    assert len(extractor.calls) == 1
+    assert _entry(tmp_path, only_automation)["marker"] == [T0 + 50, "weekly"]
+    assert _entry(tmp_path, session)["marker"] == [T0 + 40, "curate"]
+
+
+@pytest.mark.asyncio
+async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unbudgeted(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A turn derived from a redacted event is never flushed; an agent whose bot is not running waits, unbudgeted."""
+    agents = {
+        "general": AgentConfig(display_name="General", rooms=[]),
+        "other": AgentConfig(display_name="Other", rooms=[]),
+    }
+    config = _config(tmp_path, agents=agents, batch={"max_sessions_per_cycle": 1})
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del room_id, event_ids
+        return None if agent_name == "other" else frozenset({"$event-gone"})
+
+    worker = await _started(config, redacted_event_ids=redacted)
+    # The second pass starts with the second agent, whose bot cannot tell, so its waiting must leave budget.
+    waiting = _thread("w")
+    _seed(config, waiting, [_run("w1", waiting, T0 + 5)], agent="other")
+    session = _thread("t1")
+    _seed(config, session, [_run("gone", session, T0 + 10), _run("kept", session, T0 + 20)])
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("kept")]
+    assert _entry(tmp_path, session)["marker"] == [T0 + 20, "kept"]
+    with pytest.raises(StopIteration):
+        _entry(tmp_path, waiting)
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_whose_redactions_cannot_be_checked_backs_off_without_blocking_the_agent(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A failing redaction lookup backs off one conversation like a failed read, and the agent's others still flush."""
+    config, clock = _config(tmp_path, stale_ttl_seconds=3600), _Clock()
+    broken_room = "!broken:example.org"
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, event_ids
+        if room_id == broken_room:
+            msg = "journal read failed"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    worker = await _started(config, clock, redacted_event_ids=redacted)
+    broken = _thread("broken", broken_room)
+    _seed(config, broken, [_run("b1", broken, T0 + 5)])
+    cooldown = config.memory.auto_flush.retry_cooldown_seconds
+
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, broken)
+    assert (entry["failures"], entry["retry_at"]) == (1, clock.now + cooldown)
+
+    fine = _thread("fine")
+    _seed(config, fine, [_run("f1", fine, T0 + 10)])
+    clock.now += cooldown
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("f1")]
+    assert _entry(tmp_path, broken)["failures"] == 2
+
+    clock.now += 3600
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, broken)
+    assert (entry["failures"], entry["updated_at"]) == (0, T0 + 6)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_waiting_for_approval_holds_back_later_turns_until_it_finishes(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A paused turn finishes in place later, so it and the turns after it are flushed once, after it finishes."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    paused = _run("asks", session, T0 + 10, status=RunStatus.paused)
+    after = _run("after", session, T0 + 20)
+    _seed(config, session, [paused, after])
+
+    await worker._run_cycle(config)
+    assert extractor.calls == []
+
+    paused.status = RunStatus.completed
+    _seed(config, session, [paused, after], updated_at=T0 + 30)
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("asks", "after")]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_approval_expired_releases_the_turns_after_it_without_news(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """Once every approval a paused turn could get has expired, the conversation is read again and moves on."""
+    config, clock = _config(tmp_path), _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("asks", session, T0 + 10, status=RunStatus.paused), _run("after", session, T0 + 20)])
+
+    await worker._run_cycle(config)
+    assert extractor.calls == []
+
+    clock.now = T0 + 10 + config.tool_approval.timeout_days * 86_400 + 3600
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("after")]
+
+
+@pytest.mark.asyncio
+async def test_delegated_task_sessions_are_not_flushed(tmp_path: Path, extractor: _Extractor) -> None:
+    """A task another agent delegated is the delegating agent's conversation, not the delegate's."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    delegated = "delegate:other:general:abc"
+    _seed(config, delegated, [_run("task", f"{ROOM}:$x", T0 + 10)])
+
+    await worker._run_cycle(config)
+
+    assert extractor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_event_loop(
+    tmp_path: Path,
+    extractor: _Extractor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only conversations quiet for ``idle_seconds`` are decoded, and decoding never blocks the event loop."""
+    config, clock = _config(tmp_path, idle_seconds=120), _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 900)], updated_at=T0 + 990)
+    loop_thread = threading.get_ident()
+    reads: list[bool] = []
+    real_session_runs = auto_flush.session_runs
+
+    def session_runs(storage: object, session_id: str) -> list[RunOutput]:
+        reads.append(threading.get_ident() != loop_thread)
+        return real_session_runs(storage, session_id)
+
+    monkeypatch.setattr(auto_flush, "session_runs", session_runs)
+
+    await worker._run_cycle(config)
+    assert (reads, extractor.calls) == ([], [])
+
+    clock.now = T0 + 990 + 120
+    await worker._run_cycle(config)
+    assert reads == [True]
+    assert extractor.lines() == [_lines("r1")]
+
+
+@pytest.mark.asyncio
+async def test_a_zero_idle_time_still_waits_a_second(tmp_path: Path, extractor: _Extractor) -> None:
+    """A turn stored in the same second as a pass could share the update time the pass recorded, so it waits."""
+    config, clock = _config(tmp_path, idle_seconds=0), _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)], updated_at=int(clock.now))
+
+    await worker._run_cycle(config)
+    assert extractor.calls == []
+
+    clock.now += 1
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("r1")]
+
+
+@pytest.mark.asyncio
+async def test_a_long_backlog_is_flushed_oldest_first_over_passes(tmp_path: Path, extractor: _Extractor) -> None:
+    """Each pass extracts the oldest new turns that fit, so a backlog bigger than one extraction loses nothing."""
+    config = _config(tmp_path, extractor={"max_messages_per_flush": 4})
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(config, session, [_run(f"r{index}", session, T0 + index) for index in range(1, 6)])
+
+    for _ in range(4):
+        await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("r1", "r2"), _lines("r3", "r4"), _lines("r5")]
+    assert len(_general_notes(tmp_path)) == 3
+
+
+def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_path: Path) -> None:
+    """A single turn over the limits is sent alone with its newest lines, after any turns with nothing said."""
+    settings = _config(tmp_path, extractor={"max_messages_per_flush": 2}).memory.auto_flush
+    session = _thread("t1")
+    automation = _run("auto", session, T0 + 5, hook_source="automation/dreaming")
+    messages = [Message(role="user", content=f"part {index}") for index in range(4)]
+    long_turn, following = _run("long", session, T0 + 10, messages=messages), _run("next", session, T0 + 20)
+
+    assert auto_flush._next_batch([automation, long_turn, following], settings) == (
+        [automation, long_turn],
+        [f"{ALICE}: part 2", f"{ALICE}: part 3"],
+    )
+
+
+def test_each_turn_is_read_as_who_said_what() -> None:
+    """Each line names its sender; history replayed into a turn, system and tool messages, and blank text are left out."""
+    coalesced = "<messages>" + render_msg_tag(sender=BOB, body="Bob owns Atlas.") + "</messages>"
+    messages = [
+        Message(role="system", content="system prompt"),
+        Message(role="user", content="earlier question", from_history=True),
+        Message(role="user", content=coalesced),
+        Message(role="user", content="question   with\n spaces"),
+        Message(role="tool", content="tool output"),
+        Message(role="assistant", content="x" * 600),
+        Message(role="assistant", content="   "),
+    ]
+
+    lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
+
+    assert lines == [f"{BOB}: Bob owns Atlas.", f"{ALICE}: question with spaces", f"assistant: {'x' * 497}..."]
+
+
+def test_the_character_limit_bounds_each_extraction(tmp_path: Path) -> None:
+    """``max_chars_per_flush`` ends a batch, and a single turn over it keeps only its newest lines."""
+    settings = _config(tmp_path, extractor={"max_chars_per_flush": 30}).memory.auto_flush
+    session = _thread("t1")
+    first, second = _run("r1", session, T0 + 10), _run("r2", session, T0 + 20)
+
+    assert auto_flush._next_batch([first, second], settings) == ([first], ["assistant: answer r1"])
+
+
+@pytest.mark.asyncio
+async def test_failures_back_off_from_when_they_happen_and_are_given_up_after_the_stale_ttl(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """The cooldown doubles from each failure's end, and turns failing for ``stale_ttl_seconds`` are given up."""
+    config, clock = _config(tmp_path, stale_ttl_seconds=3600), _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
+    extractor.error, extractor.clock, extractor.takes = OSError("model unavailable"), clock, 5
+    cooldown = config.memory.auto_flush.retry_cooldown_seconds
+
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, session)
+    assert (entry["failures"], entry["failing_since"], entry["retry_at"]) == (1, T0 + 1005, T0 + 1005 + cooldown)
+
+    clock.now = T0 + 1005 + cooldown - 1
+    await worker._run_cycle(config)
+    assert len(extractor.calls) == 1
+
+    clock.now = T0 + 1005 + cooldown
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, session)
+    assert (entry["failures"], entry["retry_at"]) == (2, clock.now + 2 * cooldown)
+
+    clock.now = T0 + 1005 + 3600 - 5
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, session)
+    assert (entry["failures"], entry["marker"]) == (0, [T0 + 10, "r1"])
+    assert _general_notes(tmp_path) == []
+
+    clock.now += 10_000
+    await worker._run_cycle(config)
+    assert len(extractor.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A give-up skips the batch that kept failing, not the turns an unrecorded note already covers."""
+    config = _config(tmp_path, stale_ttl_seconds=3600, extractor={"max_messages_per_flush": 2})
+    clock = _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run(f"r{index}", session, T0 + 10 + index) for index in range(1, 4)])
+    append_agent_daily_memory(
+        f"[auto_flush:{session}:r1] written before its progress was saved",
+        "general",
         tmp_path,
         config,
-        agent_name="general",
-        session_id="s1",
+        runtime_paths_for(config),
     )
-    started = threading.Event()
-    loop_advanced = threading.Event()
-    release = threading.Event()
-    observed_progress = threading.Event()
+    extractor.error = OSError("model unavailable")
 
-    def _blocking_load(*_args: object, **_kwargs: object) -> _FakeSession:
-        started.set()
-        assert release.wait(timeout=5)
-        return _FakeSession(updated_at=100, messages=[])
+    await worker._run_cycle(config)
+    clock.now += 3600
+    await worker._run_cycle(config)
 
-    def _release_after_observing_loop() -> None:
-        assert started.wait(timeout=5)
-        if loop_advanced.wait(timeout=0.5):
-            observed_progress.set()
-        release.set()
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _blocking_load)
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    monkeypatch.setattr(worker, "_process_session_key", AsyncMock())
-    observer = threading.Thread(target=_release_after_observing_loop, name="auto-flush-loop-observer")
-    observer.start()
-    try:
-        task = asyncio.create_task(worker._run_cycle(config))
-        assert await asyncio.to_thread(started.wait, 5)
-        loop_advanced.set()
-        await task
-    finally:
-        release.set()
-        observer.join(timeout=5)
-
-    assert observed_progress.is_set(), "session read blocked the event loop"
-    assert not observer.is_alive()
+    assert extractor.lines() == [_lines("r2"), _lines("r2")]
+    assert _entry(tmp_path, session)["marker"] == [T0 + 12, "r2"]
+    extractor.error = None
+    await worker._run_cycle(config)
+    assert extractor.lines()[-1] == _lines("r3")
 
 
 @pytest.mark.asyncio
-async def test_worker_does_not_load_a_dirty_session_before_it_is_ready_to_flush(
-    tmp_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A selection pass must not decode a stored session until its entry is idle or old enough to flush."""
-    config.memory.auto_flush.idle_seconds = 120
-    now = 1_000
-    monkeypatch.setattr("mindroom.memory.auto_flush._now_ts", lambda: now)
-    mark_auto_flush_dirty_session(tmp_path, config, agent_name="general", session_id="s1")
-    loaded_session_ids: list[str] = []
+async def test_a_timed_out_extraction_backs_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An extraction over ``max_extraction_seconds`` is abandoned and retried after the cooldown."""
+    config = _config(tmp_path, extractor={"max_extraction_seconds": 1})
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
 
-    def _load_session(
-        _agent: str,
-        _config: object,
-        _runtime_paths: object,
-        session_id: str,
-        **_kwargs: object,
-    ) -> _FakeSession:
-        loaded_session_ids.append(session_id)
-        return _FakeSession(updated_at=100, messages=[])
+    async def slow(**_: object) -> str:
+        await asyncio.sleep(5)
+        return "too late"
 
-    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _load_session)
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    process_session_key = AsyncMock()
-    monkeypatch.setattr(worker, "_process_session_key", process_session_key)
+    monkeypatch.setattr(auto_flush, "_extract_memory_summary", slow)
 
     await worker._run_cycle(config)
 
-    assert loaded_session_ids == []
-    process_session_key.assert_not_awaited()
-
-    now += config.memory.auto_flush.idle_seconds
-    await worker._run_cycle(config)
-
-    assert loaded_session_ids == ["s1"]
-    process_session_key.assert_awaited_once_with(config, "general:s1")
+    assert _entry(tmp_path, session)["failures"] == 1
+    assert _general_notes(tmp_path) == []
 
 
 @pytest.mark.asyncio
-async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
+async def test_an_unreadable_conversation_backs_off_without_blocking_the_others(
     tmp_path: Path,
-    config: Config,
+    extractor: _Extractor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker-scoped flushes should reuse the canonical agent-owned memory path."""
+    """A conversation that cannot be read backs off, gives up until it changes, and the next one is still flushed."""
+    config, clock = _config(tmp_path, stale_ttl_seconds=3600), _Clock()
+    worker = await _started(config, clock)
+    broken, fine = _thread("broken"), _thread("fine")
+    _seed(config, broken, [_run("b1", broken, T0 + 10)])
+    _seed(config, fine, [_run("f1", fine, T0 + 20)])
+    real_session_runs = auto_flush.session_runs
+
+    def session_runs(storage: object, session_id: str) -> list[RunOutput]:
+        if session_id == broken:
+            msg = "session database is locked"
+            raise OSError(msg)
+        return real_session_runs(storage, session_id)
+
+    monkeypatch.setattr(auto_flush, "session_runs", session_runs)
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("f1")]
+    entry = _entry(tmp_path, broken)
+    cooldown = config.memory.auto_flush.retry_cooldown_seconds
+    assert (entry["failures"], entry["retry_at"], entry["updated_at"]) == (1, clock.now + cooldown, 0)
+
+    clock.now += 3600
+    await worker._run_cycle(config)
+    entry = _entry(tmp_path, broken)
+    assert (entry["failures"], entry["updated_at"]) == (0, T0 + 11)
+
+
+@pytest.mark.asyncio
+async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
+    tmp_path: Path,
+    extractor: _Extractor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass flushes at most its budget, at most the per-agent cap per agent, and starts with the next agent."""
+    agents = {
+        "general": AgentConfig(display_name="General", rooms=[]),
+        "other": AgentConfig(display_name="Other", rooms=[]),
+    }
+    config = _config(
+        tmp_path,
+        agents=agents,
+        batch={"max_sessions_per_cycle": 2, "max_sessions_per_agent_per_cycle": 1},
+    )
+    worker = await _started(config)
+    for name in ("g1", "g2", "g3"):
+        _seed(config, _thread(name), [_run(name, _thread(name), T0 + 10)])
+    for name in ("o1", "o2"):
+        _seed(config, _thread(name), [_run(name, _thread(name), T0 + 10)], agent="other")
+
+    await worker._run_cycle(config)
+    first = {call["agent_name"] for call in extractor.calls}
+    assert first == {"general", "other"}
+    assert len(extractor.calls) == 2
+
+    config.memory.auto_flush.batch.max_sessions_per_cycle = 1
+    config.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 3
+    listed: list[str] = []
+    real_updated_sessions = auto_flush.updated_sessions
+
+    def updated_sessions(storage: object, agent_name: str, *, since: int) -> list[tuple[str, int]]:
+        listed.append(agent_name)
+        return real_updated_sessions(storage, agent_name, since=since)
+
+    monkeypatch.setattr(auto_flush, "updated_sessions", updated_sessions)
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+    assert [call["agent_name"] for call in extractor.calls[2:]] == ["general", "other"]
+    # Once a pass has spent its budget, the agents after it are not even listed.
+    assert listed == ["general", "other"]
+
+
+@pytest.mark.asyncio
+async def test_no_reply_moves_on_without_extracting_the_same_turns_again(tmp_path: Path, extractor: _Extractor) -> None:
+    """When the model finds nothing durable, nothing is written and only later turns are read next time."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    first = _run("r1", session, T0 + 10)
+    _seed(config, session, [first])
+    extractor.summary = None
+
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("r1")]
+    assert _general_notes(tmp_path) == []
+
+    _seed(config, session, [first, _run("r2", session, T0 + 20)])
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("r1"), _lines("r2")]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_worker_mid_extraction_loses_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown cancels the worker; the conversation it was flushing is flushed by the next start."""
+    config, clock = _config(tmp_path), _Clock()
+    first_extractor = _Extractor()
+    monkeypatch.setattr(auto_flush, "_extract_memory_summary", first_extractor)
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
+    entered = asyncio.Event()
+
+    async def hangs(**_: object) -> str:
+        entered.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    monkeypatch.setattr(auto_flush, "_extract_memory_summary", hangs)
+    task = asyncio.create_task(worker.run())
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert _general_notes(tmp_path) == []
+
+    monkeypatch.setattr(auto_flush, "_extract_memory_summary", first_extractor)
+    await _worker(config, clock)._run_cycle(config)
+    assert first_extractor.lines() == [_lines("r1")]
+    assert len(_general_notes(tmp_path)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pass_does_not_end_the_worker(
+    tmp_path: Path,
+    extractor: _Extractor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass that fails, for example on an unreadable private-instance listing, is logged and the next one runs."""
+    config, clock = _config(tmp_path), _Clock()
+    config.memory.auto_flush.flush_interval_seconds = 0
+    worker = _worker(config, clock)
+    real_scopes = auto_flush._flush_scopes
+    passes = 0
+    second_pass = asyncio.Event()
+
+    def scopes(*args: object) -> object:
+        nonlocal passes
+        passes += 1
+        if passes == 1:
+            msg = "private instances could not be listed"
+            raise OSError(msg)
+        second_pass.set()
+        return real_scopes(*args)
+
+    monkeypatch.setattr(auto_flush, "_flush_scopes", scopes)
+    task = asyncio.create_task(worker.run())
+    await asyncio.wait_for(second_pass.wait(), timeout=10)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert passes >= 2
+    assert extractor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_progress_file_starts_over_without_flushing_history(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A corrupt progress file starts again from the current pass, so no earlier conversation is flushed."""
+    config, clock = _config(tmp_path), _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
+    (tmp_path / "tracking" / "memory_auto_flush.json").write_text("{", encoding="utf-8")
+
+    await worker._run_cycle(config)
+
+    assert extractor.calls == []
+    state = json.loads((tmp_path / "tracking" / "memory_auto_flush.json").read_text(encoding="utf-8"))
+    assert state["started_at"] == clock.now
+
+
+@pytest.mark.asyncio
+async def test_only_agents_whose_effective_backend_is_file_are_flushed(tmp_path: Path, extractor: _Extractor) -> None:
+    """A per-agent file backend is flushed under a global Mem0 default, and a per-agent Mem0 override is not."""
+    agents = {
+        "general": AgentConfig(display_name="General", rooms=[], memory_backend="file"),
+        "other": AgentConfig(display_name="Other", rooms=[], memory_backend="mem0"),
+    }
+    config = _config(tmp_path, agents=agents)
+    config.memory.backend = "mem0"
+    worker = await _started(config)
+    _seed(config, _thread("g"), [_run("g1", _thread("g"), T0 + 10)])
+    _seed(config, _thread("o"), [_run("o1", _thread("o"), T0 + 10)], agent="other")
+
+    await worker._run_cycle(config)
+
+    assert [call["agent_name"] for call in extractor.calls] == ["general"]
+    with pytest.raises(StopIteration):
+        _entry(tmp_path, _thread("o"))
+
+
+@pytest.mark.asyncio
+async def test_a_shared_agent_note_lands_in_its_canonical_workspace(tmp_path: Path, extractor: _Extractor) -> None:
+    """A shared agent's notes go to its workspace's daily file whatever its worker scope or memory.file.path."""
+    config = _config(tmp_path)
     config.agents["general"].worker_scope = "user"
     config.memory.file.path = str(tmp_path / "shared-memory")
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
 
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-
-    with tool_execution_identity(alice_identity):
-        mark_auto_flush_dirty_session(
-            tmp_path,
-            config,
-            agent_name="general",
-            session_id="session-alice",
-        )
-
-    fake_session = _FakeSession(
-        updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this shared agent detail")],
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.load_agent_session",
-        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
     await worker._run_cycle(config)
 
-    worker_daily_files = list(
-        (agent_workspace_root_path(tmp_path, "general") / "memory").rglob("*.md"),
-    )
-    assert len(worker_daily_files) == 1
-    assert "important decision" in worker_daily_files[0].read_text(encoding="utf-8")
-
+    assert [call["execution_identity"] for call in extractor.calls] == [None]
+    assert len(_general_notes(tmp_path)) == 1
     assert not list((tmp_path / "shared-memory").rglob("*.md"))
-    assert not list((tmp_path / "custom-agent-memory").rglob("*.md"))
 
 
 @pytest.mark.asyncio
-async def test_worker_flush_unscoped_uses_canonical_agent_workspace_memory_path(
+async def test_a_note_warms_the_semantic_index(
     tmp_path: Path,
-    config: Config,
+    extractor: _Extractor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unscoped flushes should write into the canonical shared workspace memory path."""
-    config.memory.file.path = str(tmp_path / "shared-memory")
-
-    fake_session = _FakeSession(
-        updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this important decision")],
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.load_agent_session",
-        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    wrote_memory = await worker._flush_session(
-        config,
-        agent_name="general",
-        session_id="session-general",
-    )
-
-    assert wrote_memory is True
-    canonical_daily_files = list((agent_workspace_root_path(tmp_path, "general") / "memory").rglob("*.md"))
-    assert len(canonical_daily_files) == 1
-    daily_content = canonical_daily_files[0].read_text(encoding="utf-8")
-    assert daily_content.startswith("- [id=m_")
-    assert "] [auto_flush:session-general:100] important decision\n" in daily_content
-    assert not list((tmp_path / "shared-memory").rglob("*.md"))
-    assert not list((tmp_path / "memory_files").rglob("*.md"))
-
-
-@pytest.mark.asyncio
-async def test_worker_daily_file_memory_schedules_semantic_refresh_when_semantic_search_enabled(
-    tmp_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Auto-flush writes should warm the semantic file-memory index in the background."""
+    """A written note schedules a background refresh of the agent's semantic file-memory index."""
+    config = _config(tmp_path)
     config.memory.search.mode = "semantic"
-    fake_session = _FakeSession(
-        updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this important decision")],
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.load_agent_session",
-        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-
-    scheduled: list[tuple[str, Config, object]] = []
+    scheduled: list[tuple[str, Config]] = []
 
     class FakeScheduler:
         def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
-            scheduled.append((base_id, kwargs["config"], kwargs["runtime_paths"]))
+            scheduled.append((base_id, cast("Config", kwargs["config"])))
 
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
 
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    wrote_memory = await worker._flush_session(
-        config,
-        agent_name="general",
-        session_id="session-general",
-    )
+    await worker._run_cycle(config)
 
+    [(base_id, scheduled_config)] = scheduled
     workspace = agent_workspace_root_path(tmp_path, "general")
-    assert wrote_memory is True
-    assert len(scheduled) == 1
-    base_id, scheduled_config, scheduled_runtime_paths = scheduled[0]
-    assert scheduled_runtime_paths == runtime_paths_for(config)
     assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
+    assert extractor.calls
 
 
 @pytest.mark.asyncio
-async def test_existing_memory_context_resolves_to_canonical_agent_memory_path(
-    tmp_path: Path,
-    config: Config,
-) -> None:
-    """Duplicate-avoidance context should reuse the canonical agent-owned memory path."""
+async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: _Extractor) -> None:
+    """The extractor sees the agent's canonical memories, from MEMORY.md and daily notes, to avoid repeating them."""
+    config = _config(tmp_path)
     config.agents["general"].worker_scope = "user"
-    config.memory.auto_flush.extractor.include_memory_context.memory_snippets = 5
     config.memory.auto_flush.extractor.include_memory_context.snippet_max_chars = 200
-
-    alice_identity = ToolExecutionIdentity(
+    alice = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
+        requester_id=ALICE,
+        room_id=ROOM,
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id="session-alice",
     )
-    with tool_execution_identity(alice_identity):
+    with tool_execution_identity(alice):
         await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config, runtime_paths_for(config))
-
     append_agent_daily_memory("Shared daily memory", "general", tmp_path, config, runtime_paths_for(config))
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
 
-    worker_context = await _build_existing_memory_context(
-        agent_name="general",
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-
-    assert "Alice-authored shared memory" in worker_context
-    assert "Shared daily memory" in worker_context
-
-
-async def _fake_extract_memory_summary(**_: object) -> str:
-    return "important decision"
-
-
-@pytest.mark.asyncio
-async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
-    tmp_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """New activity during a flush should keep the session dirty for a later pass."""
-    storage_path = tmp_path
-    session_updated_at = 100
-
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s1",
-    )
-
-    def _load_session(
-        _agent: str,
-        _config: object,
-        _runtime_paths: object,
-        _sid: str,
-        **_kwargs: object,
-    ) -> _FakeSession:
-        return _FakeSession(
-            updated_at=session_updated_at,
-            messages=[_FakeMessage(role="user", content="important detail")],
-        )
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _load_session)
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.append_agent_daily_memory",
-        lambda *_args, **_kwargs: {
-            "id": "m_test",
-            "memory": "important detail",
-            "user_id": "agent_general",
-        },
-    )
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=storage_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-
-    async def _fake_flush(
-        config: Config,
-        *,
-        agent_name: str,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> bool:
-        nonlocal session_updated_at
-        _ = execution_identity
-        session_updated_at = 200
-        mark_auto_flush_dirty_session(
-            storage_path,
-            config,
-            agent_name=agent_name,
-            session_id=session_id,
-        )
-        return True
-
-    monkeypatch.setattr(worker, "_flush_session", _fake_flush)
     await worker._run_cycle(config)
 
-    payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["general:s1"]
-    assert session_state["dirty"] is True
-    assert session_state["last_flushed_session_updated_at"] == 100
+    [call] = extractor.calls
+    context = cast("str", call["existing_context"])
+    assert "Alice-authored shared memory" in context
+    assert "Shared daily memory" in context
 
 
-@pytest.mark.asyncio
-async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
-    tmp_path: Path,
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """NO_REPLY flushes should clear dirty state unless new activity marked it dirty again."""
-    storage_path = tmp_path
-    session_updated_at = 100
+def test_credentials_are_removed_before_the_extractor() -> None:
+    """A token pasted into a conversation stays out of the extraction prompt and so out of daily memory."""
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    content = f"the deploy token is {token}\npassword: hunter2\nremember the deploy is Friday"
 
-    mark_auto_flush_dirty_session(
-        storage_path,
-        config,
-        agent_name="general",
-        session_id="s1",
+    text = "\n".join(
+        auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=[Message(role="user", content=content)])),
     )
 
-    def _load_session(
-        _agent: str,
-        _config: object,
-        _runtime_paths: object,
-        _sid: str,
-        **_kwargs: object,
-    ) -> _FakeSession:
-        return _FakeSession(
-            updated_at=session_updated_at,
-            messages=[_FakeMessage(role="user", content="no durable memory here")],
-        )
-
-    async def _fake_no_reply(**_: object) -> None:
-        nonlocal session_updated_at
-        # Simulate unrelated session timestamp movement during extractor execution.
-        session_updated_at = 200
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _load_session)
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_no_reply,
-    )
-    append_calls: list[str] = []
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.append_agent_daily_memory",
-        lambda *_args, **_kwargs: append_calls.append("called"),
-    )
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=storage_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    await worker._run_cycle(config)
-
-    payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["general:s1"]
-    assert session_state["dirty"] is False
-    assert session_state["last_flushed_session_updated_at"] == 100
-    assert session_state["last_session_updated_at"] == 200
-    assert append_calls == []
+    assert token not in text
+    assert "hunter2" not in text
+    # A secret on one line does not swallow the lines after it.
+    assert "remember the deploy is Friday" in text
 
 
-def test_mark_dirty_coalesces_shared_agent_sessions(tmp_path: Path, config: Config) -> None:
-    """Two runtimes touching the same agent session should share one auto-flush entry."""
-    config.agents["general"].worker_scope = "user"
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-bob",
-    )
+def test_context_that_hooks_attach_to_a_message_stays_out_of_the_extractor() -> None:
+    """A location a hook added to the prompt is MindRoom's, so it never reaches daily memory."""
+    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+    messages = [
+        Message(role="user", content=render_msg_tag(sender=ALICE, body=f"When does Atlas ship?\n\n{block}")),
+        Message(role="user", content=render_msg_tag(sender=ALICE, body=block)),
+    ]
 
-    with tool_execution_identity(alice_identity):
-        mark_auto_flush_dirty_session(
-            tmp_path,
-            config,
-            agent_name="general",
-            session_id="shared-session-id",
-        )
-    with tool_execution_identity(bob_identity):
-        mark_auto_flush_dirty_session(
-            tmp_path,
-            config,
-            agent_name="general",
-            session_id="shared-session-id",
-        )
+    lines = auto_flush._run_lines(_run("r1", _thread("t1"), T0 + 10, messages=messages))
 
-    payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    assert list(payload["sessions"]) == ["general:shared-session-id"]
+    assert lines == [f"{ALICE}: When does Atlas ship?"]
 
 
-def test_mark_dirty_separates_private_agent_sessions_by_requester_scope(tmp_path: Path) -> None:
-    """Private agents should keep one auto-flush entry per private requester scope."""
-    config = _private_auto_flush_config(tmp_path)
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-bob",
-    )
+def test_extractor_output_becomes_one_line_of_distinct_facts() -> None:
+    """List markers and repeats are dropped, and an answer of only the no-reply token means nothing to note."""
+    raw = "\n- Atlas ships Friday.\n* atlas ships friday.\n2. Priya owns QA.\nNO_REPLY\n\n"
 
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="!room:example.org:$thread",
-        execution_identity=alice_identity,
-    )
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="!room:example.org:$thread",
-        execution_identity=bob_identity,
-    )
-
-    payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    sessions = payload["sessions"]
-    assert len(sessions) == 2
-    worker_keys = {entry["worker_key"] for entry in sessions.values()}
-    assert worker_keys == {
-        resolve_worker_key("user", alice_identity, agent_name="mind"),
-        resolve_worker_key("user", bob_identity, agent_name="mind"),
-    }
-    requester_ids = {entry["execution_identity"]["requester_id"] for entry in sessions.values()}
-    assert requester_ids == {"@alice:example.org", "@bob:example.org"}
-
-
-@pytest.mark.asyncio
-async def test_worker_batch_limits_are_scoped_per_private_requester(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Private requester scopes should not share one per-agent flush budget bucket."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "mind": AgentConfig(
-                    display_name="Mind",
-                    role="Persistent private assistant",
-                    rooms=[],
-                    memory_backend="file",
-                    private=AgentPrivateConfig(per="user", root="mind_data"),
-                ),
-                "general": AgentConfig(
-                    display_name="General",
-                    role="General assistant",
-                    rooms=[],
-                    memory_backend="file",
-                ),
-            },
-        ),
-        runtime_paths,
-    )
-    config.memory.backend = "file"
-    config.memory.auto_flush.enabled = True
-    config.memory.auto_flush.flush_interval_seconds = 1
-    config.memory.auto_flush.idle_seconds = 0
-    config.memory.auto_flush.batch.max_sessions_per_cycle = 3
-    config.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 1
-    config.memory.auto_flush.extractor.max_messages_per_flush = 5
-    config.memory.auto_flush.extractor.max_chars_per_flush = 1000
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-bob",
-    )
-    fake_session = _FakeSession(
-        updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this important decision")],
-    )
-
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="session-alice",
-        execution_identity=alice_identity,
-    )
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="session-bob",
-        execution_identity=bob_identity,
-    )
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="general",
-        session_id="session-general",
-    )
-
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush.load_agent_session",
-        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
-    )
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-
-    writes: list[tuple[str, str | None]] = []
-
-    def _fake_append_daily_memory(
-        content: str,
-        agent_name: str,
-        execution_identity: ToolExecutionIdentity | None = None,
-        **_: object,
-    ) -> dict[str, str]:
-        writes.append((agent_name, execution_identity.requester_id if execution_identity is not None else None))
-        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    await worker._run_cycle(config)
-
-    assert len(writes) == 3
-    assert ("general", None) in writes
-    assert ("mind", "@alice:example.org") in writes
-    assert ("mind", "@bob:example.org") in writes
-
-
-def test_load_agent_session_passes_execution_identity_for_private_agents(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Private auto-flush session loads must reopen the scoped session storage explicitly."""
-    config = _private_auto_flush_config(tmp_path)
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-    captured: dict[str, object] = {}
-
-    class _DummyStorage:
-        closed = False
-
-        def get_session(self, session_id: str, _session_type: object) -> None:
-            captured["session_id"] = session_id
-
-        def close(self) -> None:
-            self.closed = True
-
-    def _fake_create_session_storage(
-        agent_name: str,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        *,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> _DummyStorage:
-        captured["agent_name"] = agent_name
-        captured["config"] = config
-        captured["runtime_paths"] = runtime_paths
-        captured["execution_identity"] = execution_identity
-        storage = _DummyStorage()
-        captured["storage"] = storage
-        return storage
-
-    monkeypatch.setattr("mindroom.session_storage.agent_storage.create_session_storage", _fake_create_session_storage)
-
-    assert (
-        load_agent_session(
-            "mind",
-            config,
-            runtime_paths_for(config),
-            "session-alice",
-            execution_identity=alice_identity,
-        )
-        is None
-    )
-    assert captured["execution_identity"] == alice_identity
-    assert captured["agent_name"] == "mind"
-    assert captured["session_id"] == "session-alice"
-    assert isinstance(captured["storage"], _DummyStorage)
-    assert captured["storage"].closed is True
-
-
-def test_load_agent_session_uses_canonical_session_helper(
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Auto-flush should not locally coerce raw Agno session payloads."""
-    storage = MagicMock()
-    sentinel = object()
-
-    def _fake_create_session_storage(*_args: object, **_kwargs: object) -> object:
-        return storage
-
-    monkeypatch.setattr("mindroom.session_storage.agent_storage.create_session_storage", _fake_create_session_storage)
-    monkeypatch.setattr(
-        "mindroom.session_storage.agent_storage.get_agent_session",
-        lambda actual_storage, session_id: (
-            sentinel if actual_storage is storage and session_id == "session-1" else None
-        ),
-        raising=False,
-    )
-
-    assert load_agent_session("general", config, runtime_paths_for(config), "session-1") is sentinel
-    storage.close.assert_called_once_with()
-
-
-def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path) -> None:
-    """Private auto-flush reprioritization must not cross requester boundaries."""
-    config = _private_auto_flush_config(tmp_path)
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-bob",
-    )
-
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="alice-active",
-        execution_identity=alice_identity,
-    )
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="alice-other",
-        execution_identity=alice_identity,
-    )
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="bob-other",
-        execution_identity=bob_identity,
-    )
-
-    reprioritize_auto_flush_sessions(
-        tmp_path,
-        config,
-        agent_name="mind",
-        active_session_id="alice-active",
-        execution_identity=alice_identity,
-    )
-
-    payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    sessions = payload["sessions"]
-    boosted_requesters = {
-        entry["execution_identity"]["requester_id"]
-        for entry in sessions.values()
-        if entry.get("priority_boost_at") is not None
-    }
-    assert boosted_requesters == {"@alice:example.org"}
-
-
-@pytest.mark.asyncio
-async def test_worker_removes_stale_private_entries_when_agent_becomes_shared(tmp_path: Path) -> None:
-    """Config reloads should drop persisted private dirty entries once the agent is no longer private."""
-    config = _private_auto_flush_config(tmp_path)
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="!room:example.org:$thread",
-        execution_identity=alice_identity,
-    )
-    config.agents["mind"].private = None
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    await worker._run_cycle(config)
-
-    payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    assert payload["sessions"] == {}
-
-
-@pytest.mark.asyncio
-async def test_worker_flush_private_agent_uses_persisted_private_scope(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Private auto-flush should rebind the persisted requester scope for memory writes."""
-    config = _private_auto_flush_config(tmp_path)
-    config.memory.search.mode = "semantic"
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-alice",
-    )
-    mark_auto_flush_dirty_session(
-        tmp_path,
-        config,
-        agent_name="mind",
-        session_id="!room:example.org:$thread",
-        execution_identity=alice_identity,
-    )
-
-    seen_execution_identities: list[ToolExecutionIdentity | None] = []
-    fake_session = _FakeSession(
-        updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this private detail")],
-    )
-
-    def _fake_load_session(
-        _agent: str,
-        _config: Config,
-        _runtime_paths: RuntimePaths,
-        _sid: str,
-        *,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> _FakeSession:
-        seen_execution_identities.append(execution_identity)
-        return fake_session
-
-    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _fake_load_session)
-    monkeypatch.setattr(
-        "mindroom.memory.auto_flush._extract_memory_summary",
-        _fake_extract_memory_summary,
-    )
-    scheduled_identities: list[object] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, _base_id: str, **kwargs: object) -> None:
-            scheduled_identities.append(kwargs["execution_identity"])
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
-
-    worker = MemoryAutoFlushWorker(
-        storage_path=tmp_path,
-        runtime_paths=runtime_paths_for(config),
-        config_provider=lambda: config,
-    )
-    await worker._run_cycle(config)
-
-    assert seen_execution_identities
-    assert all(identity == alice_identity for identity in seen_execution_identities)
-    assert scheduled_identities == [alice_identity]
-
-    worker_key = resolve_worker_key("user", alice_identity, agent_name="mind")
-    assert worker_key is not None
-    private_daily_files = list(
-        (private_instance_scope_root_path(tmp_path, worker_key) / "mind" / "mind_data" / "memory").rglob("*.md"),
-    )
-    assert len(private_daily_files) == 1
-    assert "important decision" in private_daily_files[0].read_text(encoding="utf-8")
+    assert auto_flush._sanitize_extractor_output(raw, "NO_REPLY") == "Atlas ships Friday. | Priya owns QA."
+    assert auto_flush._sanitize_extractor_output("  no_reply \n", "NO_REPLY") is None

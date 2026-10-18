@@ -2337,7 +2337,7 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
         if jobs_pending:
             await apply_config_change(
                 f"background_tool_jobs.{setting}",
-                True if setting == "enabled" else [],
+                True if setting == "enabled" else ["shell"],
                 runtime_paths,
             )
         if journal_pending:
@@ -2355,7 +2355,7 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
         saved = load_config(runtime_paths)
         assert saved.background_tool_jobs.enabled is (jobs_pending and setting == "enabled")
         assert saved.background_tool_jobs.exclude_toolkits == (
-            [] if jobs_pending and setting == "exclude_toolkits" else ["shell"]
+            ["shell"] if jobs_pending and setting == "exclude_toolkits" else []
         )
         assert saved.event_journal.backend == ("postgres" if journal_pending else "sqlite")
         assert saved.defaults.markdown is False

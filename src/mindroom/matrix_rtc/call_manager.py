@@ -58,6 +58,7 @@ from mindroom.matrix_rtc.call_session import (
 from mindroom.matrix_rtc.call_tools import (
     CallAgentTooling,
     build_call_tools,
+    call_helper_usage,
     matrix_message_available_during_call,
     record_call_token_usage,
     record_call_voice_usage,
@@ -109,6 +110,7 @@ if TYPE_CHECKING:
     from mindroom.matrix_rtc.focus import SfuGrant
     from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -1029,6 +1031,7 @@ class CallManager:
                     ),
                     on_stopped=lambda: self._finish_call(
                         transcript,
+                        execution_identity=tooling.execution_identity,
                         room_id=room_id,
                         requester_id=requester_id,
                         origin_context=origin_context,
@@ -1315,6 +1318,7 @@ class CallManager:
         self,
         transcript: CallTranscript,
         *,
+        execution_identity: ToolExecutionIdentity,
         room_id: str,
         requester_id: str,
         origin_context: CallOriginContext | None,
@@ -1325,7 +1329,8 @@ class CallManager:
         response admission closed, so it must never wait for the post.
         """
         ended_at = datetime.now(UTC)
-        await transcript.finalize(config=self._config, runtime_paths=self._runtime_paths)
+        with call_helper_usage(execution_identity, config=self._config, runtime_paths=self._runtime_paths):
+            await transcript.finalize(config=self._config, runtime_paths=self._runtime_paths)
         if origin_context is None or self._shutting_down:
             return
         task = asyncio.create_task(

@@ -116,12 +116,12 @@ class _MemoryAutoFlushBatchConfig(BaseModel):
     max_sessions_per_cycle: int = Field(
         default=10,
         ge=1,
-        description="Maximum sessions processed in one auto-flush loop iteration",
+        description="Maximum conversations flushed in one auto-flush pass, across all agents",
     )
     max_sessions_per_agent_per_cycle: int = Field(
         default=3,
         ge=1,
-        description="Maximum sessions per agent processed in one auto-flush loop iteration",
+        description="Maximum conversations of one agent or private instance flushed in one auto-flush pass",
     )
 
 
@@ -150,17 +150,17 @@ class _MemoryAutoFlushExtractorConfig(BaseModel):
     max_messages_per_flush: int = Field(
         default=20,
         ge=1,
-        description="Maximum session chat messages considered by one extraction job",
+        description="Maximum new messages read by one extraction job; a longer backlog is read over later passes",
     )
     max_chars_per_flush: int = Field(
         default=12000,
         ge=1,
-        description="Maximum message characters considered by one extraction job",
+        description="Maximum message characters read by one extraction job",
     )
     max_extraction_seconds: int = Field(
         default=30,
         ge=1,
-        description="Timeout for one extraction job before retrying in a later cycle",
+        description="Timeout for one extraction job before retrying in a later pass",
     )
     include_memory_context: _MemoryAutoFlushContextConfig = Field(
         default_factory=_MemoryAutoFlushContextConfig,
@@ -168,39 +168,34 @@ class _MemoryAutoFlushExtractorConfig(BaseModel):
     )
 
 
+# LEGACY_COMPAT: Retired push-model auto-flush settings.
+# Legacy format: memory.auto_flush.max_dirty_age_seconds and memory.auto_flush.max_cross_session_reprioritize, which the dashboard wrote on every save.
+# Last legacy release: v2026.10.335; replacement: v2026.10.336 flushes quiet conversations from stored sessions and removes both fields.
+# Handling: this model ignores unknown fields, so a config that still sets them loads unchanged and the next dashboard save drops them.
+# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
 class MemoryAutoFlushConfig(BaseModel):
     """Background memory auto-flush configuration."""
 
     enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
     flush_interval_seconds: int = Field(
-        default=1800,
+        default=300,
         ge=5,
-        description="Background auto-flush loop interval",
+        description="Time between auto-flush passes",
     )
     idle_seconds: int = Field(
         default=120,
         ge=0,
-        description="Session idle time before dirty session becomes flush-eligible",
-    )
-    max_dirty_age_seconds: int = Field(
-        default=600,
-        ge=1,
-        description="Force flush eligibility once a session remains dirty for this long",
+        description="How long a conversation must be quiet before its new turns are flushed",
     )
     stale_ttl_seconds: int = Field(
         default=86400,
         ge=60,
-        description="Drop stale flush-state entries older than this TTL",
-    )
-    max_cross_session_reprioritize: int = Field(
-        default=5,
-        ge=0,
-        description="Maximum same-agent dirty sessions reprioritized per incoming prompt",
+        description="Give up on turns whose flush has kept failing for this long",
     )
     retry_cooldown_seconds: int = Field(
         default=30,
         ge=1,
-        description="Cooldown before retrying a failed extraction attempt",
+        description="Cooldown before retrying a failed flush",
     )
     max_retry_cooldown_seconds: int = Field(
         default=300,

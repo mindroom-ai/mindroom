@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.tool_system.events import (
+    ToolTraceEntry,
+    build_tool_trace_content,
+    message_tool_trace,
+    renumbered_tool_trace,
+    strip_visible_tool_markers,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,8 +34,8 @@ _SEGMENT_TARGET_EDIT_BYTES = 22_000
 _SEGMENT_TARGET_ENCRYPTED_PLAINTEXT_BYTES = 30_000
 _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
-# Useful for rebuilding model context, but not part of the visible answer. A
-# long tool trace would otherwise push a segmentable response into a sidecar.
+# Rebuilt per segment after sizing (the tool trace) or not part of the visible
+# answer, so tool metadata can never split an answer or push it into a sidecar.
 _INTERNAL_STREAM_KEYS = frozenset({TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY})
 # Rebuilt per segment from the chunk it carries, or dropped as internal.
 _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
@@ -194,6 +201,39 @@ def _continuation_content(
     return _rich_text_content(source, body, relation=relation)
 
 
+def _shrinking_trace_slices(entries: list[ToolTraceEntry]) -> tuple[list[ToolTraceEntry], ...]:
+    """Return one segment's tool trace from fullest to leanest: all previews, inputs only, names only."""
+    without_outputs = [replace(entry, result_preview=None, truncated=True) for entry in entries]
+    names_only = [replace(entry, args_preview=None, result_preview=None, truncated=True) for entry in entries]
+    return (entries, without_outputs, names_only)
+
+
+def _with_tool_trace(
+    chunk: str,
+    trace: list[ToolTraceEntry],
+    build: Callable[[str], dict[str, Any]],
+    *,
+    target_bytes: int,
+    in_new_content: bool,
+) -> dict[str, Any]:
+    """Build one segment carrying only its own tool calls, trimmed to fit its budget.
+
+    Clients resolve marker ``[n]`` against the trace of the same event, so the
+    chunk's markers count from 1. The body alone already fits, and renumbering
+    never lengthens it, so tool data can only shed previews, never split the answer.
+    """
+    renumbered, entries = renumbered_tool_trace(chunk, trace)
+    segment = build(renumbered)
+    holder = segment["m.new_content"] if in_new_content else segment
+    for entries_slice in _shrinking_trace_slices(entries):
+        holder.update(build_tool_trace_content(entries_slice) or {})
+        if calculate_event_size(segment) <= target_bytes:
+            return segment
+        holder.pop(TOOL_TRACE_CONTENT_KEY, None)
+    # Without a trace, readers cannot tell the markers from typed text, so they go too.
+    return build(strip_visible_tool_markers(renumbered))
+
+
 def _segment_target_bytes(*, room_encrypted: bool, is_edit: bool) -> int:
     """Return a conservative per-event budget for one response segment."""
     budgets = {
@@ -350,8 +390,28 @@ def segment_matrix_content(
     )
     if chunks is None:
         return None
-    first = first_build(chunks[0])
-    continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
+    trace = message_tool_trace(source)
+    if trace:
+        first = _with_tool_trace(
+            chunks[0],
+            trace,
+            first_build,
+            target_bytes=first_target,
+            in_new_content=is_edit,
+        )
+        continuations = tuple(
+            _with_tool_trace(
+                chunk,
+                trace,
+                continuation_build,
+                target_bytes=continuation_target,
+                in_new_content=False,
+            )
+            for chunk in chunks[1:]
+        )
+    else:
+        first = first_build(chunks[0])
+        continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
     if calculate_event_size(first) > first_target or any(
         calculate_event_size(candidate) > continuation_target for candidate in continuations
     ):

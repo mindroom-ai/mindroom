@@ -51,7 +51,7 @@ uv run python -c "from mindroom.constants import matrix_state_file, resolve_runt
 ```
 
 This uses the same environment and `.env` selection as `mindroom run`, including `MINDROOM_CONFIG_PATH` and `MINDROOM_STORAGE_PATH`; if the backend uses `--config` or `--storage-path`, export the matching variable first, because a hardcoded `mindroom_data/matrix_state.yaml` only covers default storage beside the repository's config.
-For a full destructive reset of the local homeserver, read the `just local-matrix-reset` warning in `docs/dev/ops/README.md` first.
+For a full destructive reset of the local homeserver, read the `just local-matrix-reset` warning in `docs/dev/ops.md` first.
 
 ## Fast Path: Use Existing Repo Config
 

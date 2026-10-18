@@ -200,7 +200,6 @@ def _prepared_team_execution_context(
         replay_plan=replay_plan,
         unseen_event_ids=[],
         replays_persisted_history=replays_persisted_history,
-        compaction_outcomes=[],
         compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
         compaction_reply_outcome="none",
         prepared_context_tokens=prepared_context_tokens,
@@ -464,8 +463,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
-    assert "check_shell_command" in exposed_tool_names
-    assert "kill_shell_command" in exposed_tool_names
+    assert "read_file" in exposed_tool_names
 
 
 def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:
@@ -1041,6 +1039,7 @@ class TestChatCompletions:
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
+        assert mock_ai.call_args.kwargs["show_tool_calls"] is False
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""

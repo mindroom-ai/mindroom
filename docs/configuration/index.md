@@ -61,6 +61,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](agents.md#defaults) |
 | `memory` | Memory backends and embedder | [Memory](../memory.md) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](../knowledge.md) |
+| `knowledge_graph` | Graph of facts built from agents' conversations | [Knowledge Graph](../knowledge-graph.md) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](../mcp.md) |
 | `plugins` | Plugin loading | [Plugins](../plugins.md) |
 | `voice` | Speech-to-text for voice messages | [Voice](../voice.md) |

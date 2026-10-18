@@ -1,0 +1,251 @@
+"""Turn stored runs into graph episodes.
+
+Episodes come only from what was said and what tools returned, never from text the model writes for the graph.
+Each episode has one kind, because Graphiti records provenance per episode: ``conversation`` holds what people and the
+agent said, each line labeled with its speaker's one name, and ``tool_results`` holds what the tools the model chose
+returned. Each episode carries the agents and people it knows, whose names the extraction instructions list.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from functools import partial
+from typing import TYPE_CHECKING, Literal
+
+from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
+from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
+from mindroom.history.conversation_text import one_line, run_requester, utterances
+from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX, run_key
+from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
+from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    from agno.models.response import ToolExecution
+    from agno.run.agent import RunOutput
+
+    from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
+    from mindroom.knowledge_graph.names import EntityNames, KnownEntity
+
+type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
+type Progress = tuple[int, str, int]
+
+# The progress of a run that is fully covered, larger than any count of lines a split covers.
+RUN_DONE = 1 << 30
+
+# The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
+_GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
+# Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
+# in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
+# result no longer says which tool produced it, so it could be either.
+_PROSE_FUNCTIONS = (
+    "think",
+    "analyze",
+    "run_subagent",
+    "continue_subagent",
+    "run_workflow",
+    "get_workflow_run",
+    "claude_send",
+    "job",
+)
+_MAX_LISTED_CALLS = 20
+
+
+@dataclass(frozen=True)
+class RenderedEpisode:
+    """One episode, how far into its conversation it reaches, and whose turns it holds."""
+
+    episode: EpisodeInput
+    # `(created_at, run_id, lines)`: how many lines of its newest run it covers, or RUN_DONE once it covers them all.
+    progress: Progress
+    requester_id: str | None
+
+
+def is_evidence(execution: ToolExecution) -> bool:
+    """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
+    if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
+        return False
+    # A shell or `mindroom-agent` call can look the graph up too, and returns its facts as the command's output; the
+    # whole arguments are searched, since the rendered ones are clipped.
+    arguments = json.dumps(execution.tool_args or {}, default=str)
+    return not any(name in arguments for name in _GRAPH_FUNCTIONS)
+
+
+def classify_thread(runs: Sequence[RunOutput], automation_thread_ids: set[str]) -> _ThreadKind:
+    """Return what a thread is, from its session, its root run's trusted hook source, or the threads automations recorded."""
+    if not runs:
+        return "conversation"
+    root = min(runs, key=run_key)
+    if (root.session_id or "").startswith(DELEGATION_SESSION_PREFIX):
+        return "delegation"
+    metadata = root.metadata or {}
+    hook_source = metadata.get(HOOK_SOURCE_RUN_METADATA_KEY)
+    if hook_source == f"{AUTOMATION_HOOK_PREFIX}exploration":
+        return "exploration"
+    if isinstance(hook_source, str) and is_automation_hook_source(hook_source):
+        return "automation"
+    # LEGACY_COMPAT: Automation runs stored without their hook source.
+    # Legacy format: Run metadata had no `hook_source` key, so a stored automation run looks like a conversation.
+    # Last legacy release: v2026.10.315; replacement: the next release stores the trusted hook source on every run.
+    # Handling: A thread whose root was recorded in `tracking/automations/threads.json` counts as an automation thread.
+    # Coverage: tests/test_knowledge_graph_episodes.py::test_classify_thread_uses_the_root_hook_source_then_automation_threads.
+    if metadata.get("thread_id") in automation_thread_ids:
+        return "automation"
+    return "conversation"
+
+
+def render_episodes(
+    runs: Sequence[RunOutput],
+    *,
+    thread_kind: _ThreadKind,
+    episode_kind: EpisodeKind,
+    agent_name: str,
+    settings: KnowledgeGraphIngestConfig,
+    names: EntityNames,
+    display_names: Mapping[str, str],
+) -> list[RenderedEpisode]:
+    """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries.
+
+    ``names`` names each agent and person, so each speaks under one name and agents never as people, and
+    ``display_names`` holds each person's newest display name in the whole conversation, so a turn stored without one,
+    such as a stopped turn, names them as earlier turns did.
+    """
+    # Exploration and delegated prompts come from an agent, and their answers restate the tool results.
+    if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind in ("exploration", "delegation")):
+        return []
+    rendered: list[RenderedEpisode] = []
+    lines: list[str] = []
+    calls: list[str] = []
+    speakers: list[KnownEntity] = []
+    newest: RunOutput | None = None
+    progress: Progress | None = None
+
+    def flush() -> None:
+        if lines and newest is not None and progress is not None:
+            known = names.known_entities(agent_name, speakers)
+            episode = _episode(episode_kind, lines, newest, settings, calls, known)
+            rendered.append(RenderedEpisode(episode, progress, run_requester(newest)))
+        lines.clear()
+        calls.clear()
+        speakers.clear()
+
+    speaker = partial(names.speaker, display_names=display_names, own_agent=agent_name)
+    cap = settings.max_episode_chars
+    for run in sorted(runs, key=run_key):
+        items = _episode_items(run, episode_kind, settings, speaker)
+        if not items:
+            continue
+        # Runs stay whole where they fit and share an episode only with the same day and requester, so relative dates
+        # resolve against the right day and each episode's cost belongs to one person.
+        if (
+            lines
+            and newest is not None
+            and (
+                _size(lines) + _size([line for line, _, _ in items]) > cap
+                or _day(run) != _day(newest)
+                or run_requester(run) != run_requester(newest)
+            )
+        ):
+            flush()
+        for covered, (line, call, said_by) in enumerate(items):
+            # Only a run larger than the cap is split; each piece records how many of the run's lines it reaches, so
+            # pieces cut at another size after a settings change resume where the old ones stopped.
+            if lines and _size(lines) + len(line) + 1 > cap:
+                progress = (*run_key(run), covered)
+                flush()
+            lines.append(line)
+            if call is not None:
+                calls.append(call)
+            speakers.append(said_by)
+            newest = run
+        progress = (*run_key(run), RUN_DONE)
+    flush()
+    return rendered
+
+
+def newest_display_names(runs: Sequence[RunOutput]) -> dict[str, str]:
+    """Return the newest display name each sender's messages in ``runs`` carry."""
+    return {
+        said.sender: said.display_name
+        for run in sorted(runs, key=run_key)
+        for said in utterances(run)
+        if said.sender is not None and said.display_name is not None
+    }
+
+
+def _day(run: RunOutput) -> str:
+    return datetime.fromtimestamp(run.created_at or 0, UTC).date().isoformat()
+
+
+def _episode_items(
+    run: RunOutput,
+    episode_kind: EpisodeKind,
+    settings: KnowledgeGraphIngestConfig,
+    speaker: Callable[[str | None], KnownEntity],
+) -> list[tuple[str, str | None, KnownEntity]]:
+    """Return a run's lines of one kind with who said each or called its tool, and the call each tool result lists."""
+    if episode_kind == "conversation":
+        spoken = [(speaker(said.sender), said.unredacted) for said in utterances(run)]
+        # A speaker's name holds no colon, since Graphiti reads a speaker up to the first colon.
+        return [(f"{by.name}: {one_line(_clean(text, settings.max_episode_chars))}", None, by) for by, text in spoken]
+    executions = [execution for execution in run.tools or [] if is_evidence(execution)]
+    return [
+        (_tool_line(execution, settings), f"{execution.tool_name} {_digest(execution)}", speaker(None))
+        for execution in executions
+    ]
+
+
+def _episode(
+    kind: EpisodeKind,
+    lines: list[str],
+    last_run: RunOutput,
+    settings: KnowledgeGraphIngestConfig,
+    calls: Sequence[str],
+    known_entities: tuple[KnownEntity, ...],
+) -> EpisodeInput:
+    metadata = last_run.metadata or {}
+    description = f"{kind}: room {metadata.get('room_id')} thread {metadata.get('thread_id')}"
+    if calls:
+        listed = ", ".join(calls[:_MAX_LISTED_CALLS])
+        more = f" and {len(calls) - _MAX_LISTED_CALLS} more" if len(calls) > _MAX_LISTED_CALLS else ""
+        description = f"{description}; calls: {listed}{more}"
+    return EpisodeInput(
+        kind=kind,
+        name=f"{kind} {last_run.session_id} {last_run.run_id}",
+        body="\n".join(lines)[: settings.max_episode_chars],
+        source_description=description,
+        reference_time=datetime.fromtimestamp(last_run.created_at or 0, UTC),
+        known_entities=known_entities,
+    )
+
+
+def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
+    outcome = "error" if execution.tool_call_error else "result"
+    output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
+    # Clipped to half a result, so arguments and result together stay within an episode.
+    arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]
+    return f"call {execution.tool_name}({arguments}) {outcome}: {output}"
+
+
+def tool_arguments(execution: ToolExecution) -> str:
+    """Return a tool call's arguments as canonical JSON with credential-like values redacted."""
+    redacted = redact_sensitive_data(execution.tool_args or {}, max_string_length=500)
+    return json.dumps(redacted, sort_keys=True, default=str)
+
+
+def _digest(execution: ToolExecution) -> str:
+    return hashlib.sha256(tool_arguments(execution).encode()).hexdigest()[:12]
+
+
+def _clean(text: str, limit: int) -> str:
+    # Redaction scans a little past the limit, so a credential cut at the edge is still caught, and keeps its input
+    # under the redaction size limit.
+    return redact_sensitive_text(text.strip(), max_length=limit)
+
+
+def _size(lines: Sequence[str]) -> int:
+    return sum(len(line) + 1 for line in lines)

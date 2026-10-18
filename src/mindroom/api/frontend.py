@@ -71,6 +71,10 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
     if first_segment in _API_ROUTE_PREFIXES:
         raise HTTPException(status_code=404, detail="Not found")
 
+    # A disabled portal is absent for everyone, before any login redirect.
+    if first_segment == "connections" and not _connections_frontend_enabled(api_runtime_paths(request), path):
+        raise HTTPException(status_code=404, detail="Connections are not enabled")
+
     if not await request_has_frontend_access(request):
         target_path = sanitize_next_path(f"/{path}" if path else "/")
         login_redirect = login_redirect_for_request(request, next_path=target_path)
@@ -79,8 +83,6 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     runtime_paths = api_runtime_paths(request)
-    if first_segment == "connections" and not _connections_frontend_enabled(runtime_paths, path):
-        raise HTTPException(status_code=404, detail="Connections are not enabled")
     frontend_dir = ensure_frontend_dist_dir(runtime_paths)
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")

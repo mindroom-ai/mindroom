@@ -73,8 +73,12 @@ async def _run_silent_turn(
     collect_stream: bool,
     record_turn: bool = True,
     direct_stream: bool = False,
+    hold_probe: bool = False,
 ) -> _SilentTurn:
-    """Run one silent scheduled agent turn, through `ai_response` or the streaming entry a Matrix reply calls."""
+    """Run one silent scheduled agent turn, through `ai_response` or the streaming entry a Matrix reply calls.
+
+    ``hold_probe`` keeps the probe tool running until the runtime shuts down, so a released call returns its handle.
+    """
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
         agents={"leader": AgentConfig(display_name="Leader")},
@@ -90,6 +94,8 @@ async def _run_silent_turn(
 
     async def probe_tool() -> str:
         """Read evidence using the ordinary disabled execution path."""
+        if hold_probe:
+            await asyncio.Event().wait()
         return "Job evidence"
 
     model = DelegationModel(id="test", responses=responses)
@@ -234,6 +240,7 @@ async def test_a_turn_with_jobs_on_lets_a_managed_call_detach(
         enabled=True,
         collect_stream=collect_stream,
         direct_stream=direct_stream,
+        hold_probe=True,
     )
     [call] = [tool for tool in turn.trace if tool.tool_name == "probe_tool"]
     assert '"job_id"' in str(call.result_preview)

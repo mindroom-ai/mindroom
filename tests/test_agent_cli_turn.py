@@ -1,6 +1,6 @@
 """Queue admission and canonical nested shell progress in one real live turn."""
 
-# ruff: noqa: D103, ANN001, ANN003, ANN202, ARG001, PLR0915, ASYNC110
+# ruff: noqa: D103, ANN001, ANN202, ARG001, PLR0915, ASYNC110
 from __future__ import annotations
 
 import asyncio
@@ -43,6 +43,8 @@ from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
@@ -281,6 +283,105 @@ async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
     return receipt
 
 
+async def _start_call(owner: LiveTurnTools, toolkit: str, function: str, **arguments: object) -> None:
+    await owner.operation(
+        window=cli_window(),
+        operation=ToolCallOperation(
+            operation="tools.call",
+            call_id=uuid4(),
+            toolkit=toolkit,
+            function=function,
+            arguments=arguments,
+        ),
+    )
+
+
+async def _allow(key, arguments) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_a_command_waits_for_the_cli_calls_it_left_running(tmp_path: Path) -> None:
+    """A command's timeout stops its processes, not the agent's tool calls it started, which its shell call awaits."""
+    finished = asyncio.Event()
+
+    async def slow() -> str:
+        await asyncio.sleep(0.3)
+        finished.set()
+        return "slow done"
+
+    owner = await _native_owner(tmp_path, [slow], _allow)
+
+    async def command() -> str:
+        await _start_call(owner, "calls", "slow")
+        return "returned"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command) == "returned"
+    assert finished.is_set()
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_path: Path) -> None:
+    """A person's approval is never cut short by the timeout of the command that asked for the call."""
+    effects: list[str] = []
+
+    async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
+        await _start_call(owner, "actions", "action", value="sent")
+        # The CLI client reports the call as waiting and exits, well before the command's timeout.
+        return "waiting"
+
+    def action(value: str) -> str:
+        effects.append(value)
+        return value
+
+    function = Function.from_callable(action)
+    function.owning_toolkit = "actions"
+    function.requires_confirmation = True
+    catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command]), function])
+    catalog.run_response.agent_id = "helper"
+    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+
+    async def decide_later(paused):
+        # The person decides after the command's timeout has passed.
+        await asyncio.sleep(0.6)
+        requirement = paused.requirements[0]
+        requirement.confirm()
+        return (requirement,)
+
+    catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=decide_later)
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async def bash(command: str) -> str:
+        return command
+
+    provider = Function.from_callable(bash)
+    message = Message(
+        role="assistant",
+        tool_calls=[
+            {"id": "outer", "type": "function", "function": {"name": "bash", "arguments": '{"command":"work"}'}},
+        ],
+    )
+    async with response_cli_lifetime() as lifetime:
+        lifetime.bind_provider(owner.checkpoint, provider)
+        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": provider})
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            result = await owner.execute_bash(
+                ToolKey("shell", "run_shell_command"),
+                {"args": "work", "timeout": 0.2},
+                calls[0],
+            )
+    assert result == "waiting"
+    assert effects == ["sent"]
+    await owner.close()
+
+
 @pytest.mark.asyncio
 async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path: Path) -> None:
     """Media a failed command's CLI calls returned is dropped with it, not attached to the next command."""
@@ -393,6 +494,33 @@ async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp
         await first_task
 
     assert seen["first"] == "first"
+    await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_job", [False, True])
+async def test_a_cli_call_from_a_job_command_runs_as_part_of_that_job(tmp_path: Path, *, in_job: bool) -> None:
+    """A CLI call inherits whether its command runs as a job, so its own shell gets no default time limit there."""
+
+    async def owned() -> str:
+        return str(job_owns_execution())
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [owned], authorize)
+
+    async def command() -> str:
+        return (await _settled_receipt(owner, "owned"))["outcome"]
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        if in_job:
+            with job_control_context(JobControl()):
+                seen = await owner.run_native_shell(command)
+        else:
+            seen = await owner.run_native_shell(command)
+
+    assert seen == str(in_job)
     await owner.close()
 
 
@@ -588,6 +716,224 @@ async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("job_running", [False, True], ids=["no-job", "job-running"])
+async def test_response_lifetime_keeps_its_owner_until_its_background_jobs_settle(*, job_running: bool) -> None:
+    """A shell job that outlives its reply keeps the reply's CLI; the owner closes once the last job settles.
+
+    Only then does the ended lifetime forget its owner, which a context copied during the reply can outlive.
+    """
+    events = []
+
+    class Owner:
+        def bind_response_task(self, task):
+            pass
+
+        async def close(self) -> None:
+            events.append("close")
+
+    registry = TurnToolRegistry()
+    owner = Owner()
+    async with execution_resources() as resources:
+        job = resources.acquire() if job_running else None
+        async with response_cli_lifetime() as lifetime:
+            lifetime.register(owner, registry)
+        assert events == ([] if job_running else ["close"])
+        assert (lifetime.owner is owner) is job_running
+    assert events == ([] if job_running else ["close"])
+    if job is not None:
+        await job.release()
+    assert events == ["close"]
+    assert lifetime.owner is None
+
+
+@pytest.mark.asyncio
+async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Path) -> None:
+    """A shell job released from its reply keeps calling tools through the CLI until the job settles."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    reply_finished = asyncio.Event()
+    running = asyncio.Event()
+    statuses = []
+
+    async def command() -> str:
+        running.set()
+        await reply_finished.wait()
+        statuses.append((await _settled_receipt(owner, "ping"))["status"])
+        return "job done"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            job = resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                shell_job = asyncio.create_task(owner.run_native_shell(command))
+                await running.wait()
+                # Every reply attempt ends by retiring its catalog, as the response driver does.
+                await lifetime.retire_attempt()
+        reply_finished.set()
+        assert await shell_job == "job done"
+        assert statuses == ["completed"]
+        await job.release()
+
+    with pytest.raises(CliAuthenticationError):
+        await owner.operation(
+            window=None,
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="ping"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_shell_job_approved_after_its_reply_finished_still_calls_its_tools(tmp_path: Path) -> None:
+    """A job waiting for approval opens its shell window only after the reply ended, and its CLI still works."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+
+    async def command() -> str:
+        return str((await _settled_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            job = resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                # The reply ends while the job still waits for its approval, so no shell window is open yet.
+                await lifetime.retire_attempt()
+        assert await owner.run_native_shell(command) == "completed"
+        await job.release()
+
+
+@pytest.mark.asyncio
+async def test_a_second_shell_job_approved_after_the_first_ended_still_calls_its_tools(tmp_path: Path) -> None:
+    """One job's shell ending must not close the catalog a later-approved job of the same reply still needs."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    first_running = asyncio.Event()
+    first_may_end = asyncio.Event()
+
+    async def first() -> str:
+        first_running.set()
+        await first_may_end.wait()
+        return "first done"
+
+    async def second() -> str:
+        return str((await _settled_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            first_job, second_job = resources.acquire(), resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                first_task = asyncio.create_task(owner.run_native_shell(first))
+                await first_running.wait()
+                await lifetime.retire_attempt()
+        first_may_end.set()
+        assert await first_task == "first done"
+        await first_job.release()
+        # The second job was waiting for its approval and opens its shell only now.
+        assert await owner.run_native_shell(second) == "completed"
+        await second_job.release()
+
+
+@pytest.mark.asyncio
+async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog(tmp_path: Path) -> None:
+    """A retired attempt's catalog stays open for a running shell command and closes with the response's owner."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    old = owner.catalog
+    running = asyncio.Event()
+    rebuilt = asyncio.Event()
+
+    async def command() -> str:
+        running.set()
+        await rebuilt.wait()
+        return str((await _settled_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        window = asyncio.create_task(owner.run_native_shell(command))
+        await running.wait()
+        await owner.retire_binding()
+        assert (await owner.operation(window=None, operation=ToolListOperation(operation="tools.list")))["items"]
+        new = await _catalog(tmp_path, [Toolkit(name="calls", tools=[ping])])
+        new.run_response.agent_id = "helper"
+        new.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+        owner.bind_catalog(new)
+        rebuilt.set()
+        assert await window == "completed"
+
+    await owner.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        await old.bind(ToolKey("calls", "ping"))
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_native_shell_leaves_the_others_their_cli(tmp_path: Path) -> None:
+    """Cancelling one shell job stops its CLI calls only; a command still running keeps calling tools."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def hang() -> str:
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping, hang], authorize)
+    hanging = asyncio.Event()
+    first_cancelled = asyncio.Event()
+
+    async def first() -> str:
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="hang"),
+        )
+        hanging.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def second() -> str:
+        await first_cancelled.wait()
+        receipt = await _settled_receipt(owner, "ping")
+        return str(receipt["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        first_task = asyncio.create_task(owner.run_native_shell(first))
+        second_task = asyncio.create_task(owner.run_native_shell(second))
+        await hanging.wait()
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+        first_cancelled.set()
+        assert await second_task == "completed"
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_write_failure_prevents_shell_and_inner_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -624,11 +970,11 @@ async def test_write_failure_prevents_shell_and_inner_effects(
         ],
     )
 
-    def fail(**kwargs) -> Never:
+    def fail(*_args: object, **_kwargs: object) -> Never:
         msg = "database unavailable"
         raise OSError(msg)
 
-    monkeypatch.setattr(catalog.agent.db, "upsert_run", fail)
+    monkeypatch.setattr(catalog.agent.db, "save_run_row", fail)
     async with response_cli_lifetime() as lifetime:
         lifetime.bind_provider(owner.checkpoint, function)
         calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})

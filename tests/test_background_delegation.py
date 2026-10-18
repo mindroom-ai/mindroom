@@ -935,7 +935,7 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
             )
         assert result.status == RunStatus.completed
         content = next(message.content for message in result.messages if message.tool_call_id == "missing-call")
-        assert "not available in this conversation" in content
+        assert "No job with this ID is available to you in this conversation." in content
     finally:
         await runtime.shutdown()
         storage.close()
