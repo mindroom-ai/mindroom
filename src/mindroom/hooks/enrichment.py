@@ -13,7 +13,11 @@ if TYPE_CHECKING:
 
 _TRANSIENT_CONTEXT_OPEN = "<mindroom_transient_context>"
 _TRANSIENT_CONTEXT_CLOSE = "</mindroom_transient_context>"
-_ENRICHMENT_BLOCK = re.compile(r"\s*<mindroom_message_context>.*?</mindroom_message_context>\s*", re.DOTALL)
+# A block with the blank lines around it, but not the indentation of the text that follows.
+_ENRICHMENT_BLOCK = re.compile(
+    r"\s*<mindroom_message_context>.*?</mindroom_message_context>[ \t]*(?:\r?\n[ \t]*(?=\r?\n|\Z))*(?:\r?\n)?",
+    re.DOTALL,
+)
 
 
 def _render_items(items: Sequence[EnrichmentItem]) -> list[str]:
@@ -41,8 +45,14 @@ def render_enrichment_block(items: list[EnrichmentItem]) -> str:
 
 
 def strip_enrichment_blocks(text: str) -> str:
-    """Remove every block ``render_enrichment_block`` wrote, with the blank lines around it."""
-    return _ENRICHMENT_BLOCK.sub("\n\n", text).strip()
+    """Remove every block ``render_enrichment_block`` wrote, with the blank lines around it.
+
+    Text with no block comes back unchanged. Where a block sat between two pieces of text, one blank line joins them.
+    """
+    return _ENRICHMENT_BLOCK.sub(
+        lambda match: "\n\n" if match.start() > 0 and match.end() < len(text) else "",
+        text,
+    )
 
 
 def render_transient_context(parts: Sequence[str]) -> str:

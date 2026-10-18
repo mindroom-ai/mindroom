@@ -180,3 +180,11 @@ def test_a_message_holding_only_hook_context_is_not_an_utterance() -> None:
     run = _run(Message(role="user", content=render_msg_tag(sender="@alice:example.test", body=block)))
 
     assert [u for u in utterances(run) if u.kind == "said"] == []
+
+
+def test_a_message_without_hook_context_keeps_its_whitespace() -> None:
+    """Pasted code keeps its leading indentation and trailing newline."""
+    body = "    return 1\n"
+    run = _run(Message(role="user", content=render_msg_tag(sender="@alice:example.test", body=body)))
+
+    assert [u.unredacted for u in utterances(run) if u.kind == "said"] == [body]

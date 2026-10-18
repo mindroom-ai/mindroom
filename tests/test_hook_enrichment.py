@@ -64,3 +64,21 @@ def test_strip_enrichment_blocks_removes_every_block() -> None:
     assert strip_enrichment_blocks(text) == "When does Atlas ship?"
     assert strip_enrichment_blocks(f"{block}\n\nhi\n\n{block}") == "hi"
     assert strip_enrichment_blocks("no context") == "no context"
+
+
+def test_strip_enrichment_blocks_joins_the_text_around_a_block_with_one_blank_line() -> None:
+    """A block between two pieces of text leaves exactly one blank line between them."""
+    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+
+    assert strip_enrichment_blocks(f"a\n\n{block}\n\nb") == "a\n\nb"
+    assert strip_enrichment_blocks(f"a\n{block}\nb") == "a\n\nb"
+    assert strip_enrichment_blocks(f"{block}\n\n    indented") == "    indented"
+    assert strip_enrichment_blocks(f"  first\n\n{block}") == "  first"
+
+
+def test_strip_enrichment_blocks_leaves_text_without_a_block_byte_identical() -> None:
+    """Pasted code keeps its indentation and trailing newline when nothing was attached."""
+    text = "  def f():\n      return 1\n\n"
+
+    assert strip_enrichment_blocks(text) == text
+    assert strip_enrichment_blocks("") == ""
