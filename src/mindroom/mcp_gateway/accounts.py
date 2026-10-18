@@ -149,14 +149,11 @@ class GatewayAccounts:
     ) -> str | None:
         """Return the one active account whose email maps to this Matrix user; none or several match nothing."""
 
-        def read(connection: sqlite3.Connection) -> list[sqlite3.Row]:
-            return connection.execute("SELECT account_id, user_name FROM gateway_accounts WHERE active = 1").fetchall()
+        def read(connection: sqlite3.Connection) -> list[str]:
+            rows = connection.execute("SELECT account_id, user_name FROM gateway_accounts WHERE active = 1")
+            return [row["account_id"] for row in rows if matrix_user_id_for_email(row["user_name"]) == matrix_user_id]
 
-        matches = [
-            row["account_id"]
-            for row in await self.store.read(read)
-            if matrix_user_id_for_email(row["user_name"]) == matrix_user_id
-        ]
+        matches = await self.store.read(read)
         return matches[0] if len(matches) == 1 else None
 
     async def create(self, value: object) -> dict[str, Any]:

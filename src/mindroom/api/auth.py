@@ -38,6 +38,8 @@ from mindroom.tool_system.dependencies import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(tags=["auth"])
@@ -1072,26 +1074,34 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
     return auth_user
 
 
-def trusted_upstream_matrix_user_id_for_email(request: Request, email: str) -> str | None:
-    """Return the Matrix user a signed upstream login with this email becomes, or None when the email does not decide it.
+def trusted_upstream_email_to_matrix_user_id(request: Request) -> Callable[[str], str | None] | None:
+    """Return how a signed upstream login turns an email into its Matrix user, or None when the email does not decide it.
 
-    A configured Matrix ID header or signed claim takes precedence over the email template for upstream logins, so the
-    template alone then names no one.
+    A signed Matrix claim, or a Matrix ID header without strict JWT, takes precedence over the email template for
+    upstream logins, so the template alone then names no one.
     """
     settings = _request_auth_state(request).settings.trusted_upstream
     template = settings.email_to_matrix_user_id_template
+    email_domain = settings.email_domain
     if (
         not settings.enabled
         or template is None
-        or settings.matrix_user_id_header is not None
         or settings.jwt.matrix_user_id_claim is not None
+        or (settings.matrix_user_id_header is not None and not settings.jwt.require_jwt)
     ):
         return None
     try:
-        validate_email_to_matrix_mapping(template, settings.email_domain)
-        return matrix_user_id_from_email(email, template, settings.email_domain)
+        validate_email_to_matrix_mapping(template, email_domain)
     except ValueError:
         return None
+
+    def matrix_user_id(email: str) -> str | None:
+        try:
+            return matrix_user_id_from_email(email, template, email_domain)
+        except ValueError:
+            return None
+
+    return matrix_user_id
 
 
 async def require_personal_user(request: Request) -> dict[str, Any]:

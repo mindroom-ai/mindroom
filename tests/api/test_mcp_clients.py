@@ -132,44 +132,66 @@ def test_unavailable_mcp_account_preserves_connections_without_granting_access(
 
 
 @pytest.mark.parametrize(
-    ("mapped", "signed_matrix_claim", "accounts", "enabled"),
+    ("session_user", "env_change", "accounts", "enabled"),
     [
-        (True, False, ["alice@example.org"], True),
-        (False, False, ["alice@example.org"], False),
-        (True, False, ["alice@example.org", "alice@EXAMPLE.ORG"], False),
-        (True, True, ["alice@example.org"], False),
+        ("alice", "template", [("alice@example.org", True)], True),
+        ("bob", "template", [("alice@example.org", True)], False),
+        ("alice", "template", [("alice@example.org", False)], False),
+        ("alice", None, [("alice@example.org", True)], False),
+        ("alice", "template", [("alice@example.org", True), ("alice@EXAMPLE.ORG", True)], False),
+        ("alice", "template+signed-claim", [("alice@example.org", True)], False),
+        ("alice", "template+header", [("alice@example.org", True)], True),
     ],
-    ids=["mapped", "no-email-mapping", "ambiguous", "signed-matrix-claim-wins"],
+    ids=[
+        "mapped",
+        "other-user",
+        "inactive",
+        "no-email-mapping",
+        "ambiguous",
+        "signed-matrix-claim-wins",
+        "strict-jwt-header-must-agree",
+    ],
 )
 def test_portal_session_finds_the_account_its_email_mapping_names(
     gateway_app: FastAPI,
-    mapped: bool,
-    signed_matrix_claim: bool,
-    accounts: list[str],
+    session_user: str,
+    env_change: str | None,
+    accounts: list[tuple[str, bool]],
     enabled: bool,
 ) -> None:
     """A Chat-opened portal has no email, so the one account whose email maps to its Matrix user owns MCP access."""
     snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
     env = {**snapshot.runtime_paths.process_env, "MINDROOM_MCP_SCIM_TOKEN": SCIM_TOKEN}
-    if not signed_matrix_claim:
+    if env_change is None or "signed-claim" not in env_change:
         # Upstream logins take a signed Matrix claim over the email template, which then decides nothing.
         del env["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"]
-    if mapped:
+    if env_change is not None:
         env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
         env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"] = "example.org"
+    if env_change == "template+header":
+        # Under strict JWT a Matrix ID header must equal what the template gives, so the template still decides.
+        env["MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"] = "X-Trusted-Matrix-User"
     snapshot.runtime_paths = replace(snapshot.runtime_paths, process_env=env)
     gateway_app.include_router(connections.router)
     with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
-        for user_name in accounts:
+        for user_name, active in accounts:
             response = client.post(
                 SCIM,
                 headers={"Authorization": f"Bearer {SCIM_TOKEN}"},
-                json={"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": user_name, "active": True},
+                json={
+                    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+                    "userName": user_name,
+                    "active": active,
+                },
             )
             assert response.status_code == 201, response.text
-        client.cookies.set(CONNECTIONS_SESSION_COOKIE, issue_connections_session("@alice:example.org", now=time.time()))
+        client.cookies.set(
+            CONNECTIONS_SESSION_COOKIE,
+            issue_connections_session(f"@{session_user}:example.org", now=time.time()),
+        )
 
         selection = client.get("/api/connections/mcp/selection")
+        clients = client.get(CLIENTS)
         saved = client.post(
             "/api/connections/mcp/selection",
             headers={"Origin": ORIGIN},
@@ -179,6 +201,8 @@ def test_portal_session_finds_the_account_its_email_mapping_names(
     assert selection.status_code == 200, selection.text
     assert selection.json()["enabled"] is enabled
     assert ("unavailable_reason" in selection.json()) is not enabled
+    assert clients.status_code == 200, clients.text
+    assert clients.json()["enabled"] is enabled
     assert saved.status_code == (200 if enabled else 403), saved.text
 
 

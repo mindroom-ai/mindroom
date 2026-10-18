@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
-from mindroom.api.auth import trusted_upstream_matrix_user_id_for_email
+from mindroom.api.auth import trusted_upstream_email_to_matrix_user_id
 from mindroom.api.config_lifecycle import rebind_current_request_snapshot
 from mindroom.mcp_gateway.accounts import GatewayAccounts
 from mindroom.mcp_gateway.types import GatewayOwner
@@ -38,13 +37,12 @@ async def resolve_gateway_browser_owner(
         email = user.get("email")
         if isinstance(email, str):
             account_id = await accounts.resolve_active(email)
-        elif user.get("auth_source") == "matrix_openid":
+        elif user.get("auth_source") == "matrix_openid" and (
+            email_to_matrix_user_id := trusted_upstream_email_to_matrix_user_id(request)
+        ):
             # A portal opened from Chat proves only its Matrix user, so its account is the one whose email a signed
             # upstream login would map to that user.
-            account_id = await accounts.resolve_active_for_matrix_user(
-                user["matrix_user_id"],
-                partial(trusted_upstream_matrix_user_id_for_email, request),
-            )
+            account_id = await accounts.resolve_active_for_matrix_user(user["matrix_user_id"], email_to_matrix_user_id)
         if account_id is None:
             raise _GatewayAccountRequiredError
     snapshot = rebind_current_request_snapshot(request)
