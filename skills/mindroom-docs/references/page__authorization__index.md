@@ -3,9 +3,9 @@
 This page explains who may talk to agents, teams, and the router, who may administer MindRoom and manage credentials, and who may open the dashboard.
 Use it to give people access to an agent, to work out why an agent ignored someone, or to map bridged identities to one person.
 
-<video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%" poster="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-light="https://github.com/user-attachments/assets/83b9f414-40f7-4fe5-8f1d-62304b641b87" data-poster-dark="https://github.com/user-attachments/assets/d4b50091-0d28-4185-8ecb-3f2615542e74">
-  <source src="https://github.com/user-attachments/assets/83081f1a-9caf-476a-b147-3c5f93762471" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/5eb23908-4555-42ca-8b38-a2636097339b" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="New colleagues are invited to a room, and the agent answers everyone in it" style="width: 100%" poster="https://github.com/user-attachments/assets/c83e5858-2f58-4eca-add2-46aa6206f068" data-poster-light="https://github.com/user-attachments/assets/c83e5858-2f58-4eca-add2-46aa6206f068" data-poster-dark="https://github.com/user-attachments/assets/1616aa42-761f-4aa4-b8e8-f764b1e53851">
+  <source src="https://github.com/user-attachments/assets/2a040218-1a6d-4b3a-b79b-dd6cf33e8aa1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/fdb9b291-2c1a-4009-94ed-98dcaa17a4d8" type="video/mp4">
 </video>
 
 See also [Rooms & Spaces](https://docs.mindroom.chat/rooms/), [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), and [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/).

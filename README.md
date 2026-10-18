@@ -21,7 +21,7 @@ Open source under Apache 2.0 · Any model, local or cloud · Self-host the whole
 
 </div>
 
-https://github.com/user-attachments/assets/f8325b3c-7ed0-4cd7-bc77-0c4cd74f226e
+https://github.com/user-attachments/assets/4af40f51-26c3-4156-a2c3-97229be487eb
 
 MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
 Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
@@ -54,41 +54,41 @@ See [Quick start](#quick-start) for every way to run it.
 <table>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#ask-approve-done"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/5e389c59-c81a-4f70-9c5d-de7406ff95f4" /><img src="https://github.com/user-attachments/assets/bc6194b1-9398-47f5-b649-2ea17dbb6b9f" alt="A review dialog where the user approves an agent's calendar booking" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#ask-approve-done"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/257cb9c8-4eba-4d84-acb8-bb479447061e" /><img src="https://github.com/user-attachments/assets/e9b0ea84-95ba-47fd-a003-1797677ebbeb" alt="A review dialog where the user approves an agent's calendar booking" /></picture></a>
 <p><b>Approve before it acts</b><br />Actions you choose wait for your OK, with the exact arguments in view.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/635ce3ef-217d-494a-a8e5-01e3dd78454d" /><img src="https://github.com/user-attachments/assets/fbd1295d-025d-41d1-9ee8-0cc674706b98" alt="Three colleagues see the same agent thread side by side" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/01ebff92-101f-427b-a3dd-4a40a87e24a2" /><img src="https://github.com/user-attachments/assets/074870eb-88b1-48c5-9d2d-b67cdde852a4" alt="Three colleagues see the same agent thread side by side" /></picture></a>
 <p><b>The whole team, one thread</b><br />Colleagues share an agent in a thread and see every answer stream in live.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/7fc2bc01-1ec5-40d1-971f-5e6f33ba0f18" /><img src="https://github.com/user-attachments/assets/8eb3e6d8-8e9f-4ebb-a51b-bbb5913536e3" alt="Two agent canvases: a week grid of free meeting slots and a weekend trip planner with a budget" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/66318c0e-c060-4a48-aa0c-a874fcb99a6d" /><img src="https://github.com/user-attachments/assets/e2fcf3b5-7132-4e0f-9b12-a121602c4458" alt="Two agent canvases: a week grid of free meeting slots and a weekend trip planner with a budget" /></picture></a>
 <p><b>Canvases you can click</b><br />An agent lays out free slots or a trip budget beside the chat and acts on what you pick.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6ccc9db8-6155-4d50-ae60-f4e011d39617" /><img src="https://github.com/user-attachments/assets/c8492e0c-4864-4753-ad1b-4a7d66e70c91" alt="A data canvas with a fitted curve, its parameters, and one point left out" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ac61a345-d247-4183-8e21-daa93098a880" /><img src="https://github.com/user-attachments/assets/a12faf2f-f06a-490a-9b90-e1c71fc4cfaa" alt="A data canvas with a fitted curve, its parameters, and one point left out" /></picture></a>
 <p><b>Data you can explore</b><br />Leave a point out of a fit, then send the new result back to the agent.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ddf9402f-a451-4f50-b070-1b50aab739c8" /><img src="https://github.com/user-attachments/assets/6b7a2673-d9b9-446a-b9a7-4e4240241489" alt="The agent hands over the passkey step next to its browser on the order page" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/8026057f-d107-4c6d-85d7-afd9d5bc7733" /><img src="https://github.com/user-attachments/assets/7e9500cc-c265-43eb-84a2-952598d7e36a" alt="The agent hands over the passkey step next to its browser on the order page" /></picture></a>
 <p><b>It drives, you take the wheel</b><br />Watch an agent work in its own browser and take over when it needs your passkey.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#connect-once-then-just-ask"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/69f219b2-6fef-419c-9d3b-513aaa340b01" /><img src="https://github.com/user-attachments/assets/4f18f100-5ce8-46c4-a4bf-18be84fccb4f" alt="A thread answered from a wiki next to the connections page where the wiki account is connected" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#connect-once-then-just-ask"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/789958b9-d5df-45b6-861d-7e031b16587c" /><img src="https://github.com/user-attachments/assets/3747bbd9-dfcc-4939-ba4d-757ad078a780" alt="A thread answered from a wiki next to the connections page where the wiki account is connected" /></picture></a>
 <p><b>Connect once, then just ask</b><br />Connect an account once, and the agent answers from it from then on.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#lock-up-on-the-way-out"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/b35e6de5-09f6-4ae1-b8df-e9ad3e81987e" /><img src="https://github.com/user-attachments/assets/38b5676b-dedf-4bde-a6ba-fad3378d3c12" alt="Two phone screens: a voice note locks up the house, and another sets a reminder" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#lock-up-on-the-way-out"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/9cf6be39-c1ac-458f-8529-bfae69dba603" /><img src="https://github.com/user-attachments/assets/90ae138e-a481-4ccb-9002-5b0501bb1c81" alt="Two phone screens: a voice note locks up the house, and another sets a reminder" /></picture></a>
 <p><b>From your phone</b><br />One voice note locks up the house; another becomes a reminder.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#your-morning-already-handled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/a78ee8fb-0828-45bc-9cc4-08d4181d017b" /><img src="https://github.com/user-attachments/assets/1ae37f4e-63b9-4cb0-aefd-e0c2431b997a" alt="A scheduled morning brief with today's meetings and what needs attention" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#your-morning-already-handled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ecfdd313-e59a-43e7-b43d-926f03d25aea" /><img src="https://github.com/user-attachments/assets/40a4f918-a397-483e-91ea-b71b4feb27d6" alt="A scheduled morning brief with today's meetings and what needs attention" /></picture></a>
 <p><b>Your morning, already handled</b><br />A scheduled brief with today's meetings and what needs you.</p>
 </td>
 </tr>

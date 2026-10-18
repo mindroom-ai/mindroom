@@ -70,9 +70,9 @@ MindRoom runs the whole OAuth flow for OAuth-backed tools and MCP servers: conne
 Each connection is stored for one credential scope, so the right person's account is used for each agent.
 Providers, built in or from plugins, supply only provider-specific details such as endpoints, scopes, and client configuration.
 
-<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-light="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-dark="https://github.com/user-attachments/assets/9849b052-508e-409a-867c-cf155a640d31">
-  <source src="https://github.com/user-attachments/assets/c3a4166f-79a4-4ccb-a176-3a7c9922b828" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/62767b38-9729-4277-b615-e2b7b6863234" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/4b62a724-7e2f-4006-9ee3-e06befe6d640" data-poster-light="https://github.com/user-attachments/assets/4b62a724-7e2f-4006-9ee3-e06befe6d640" data-poster-dark="https://github.com/user-attachments/assets/f59cc3c4-22a0-42db-b66e-aaff6ddcc538">
+  <source src="https://github.com/user-attachments/assets/db7fdc52-4d3a-4856-9085-8c715b6da822" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/9fda7d77-dfce-403e-8d6d-748cae734d56" type="video/mp4">
 </video>
 
 ### Connect An Account
