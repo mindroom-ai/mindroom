@@ -104,7 +104,7 @@ Graphiti reads a type model's docstring as the type's description, so the docstr
 With `Entity` excluded, Graphiti removes it from the list of types the extractor is asked to choose from, and drops a node whose type id falls outside that list.
 Keeping paths and URLs out is what the docstrings and the instructions aim for, not something the exclusion guarantees, so each docstring says what does not belong to its type.
 When the edge extractor names an endpoint that is not in the extracted node list, Graphiti's `materialize_dangling_endpoint_node` saves it as a node labelled only `Entity` and never checks `excluded_entity_types` on that path; its own comment says this happens especially for value-like endpoints, for example `openclaw -> EDITED -> config.yaml`.
-Such untyped nodes can still appear, and cleaning them up belongs to the separate maintenance command.
+Such untyped nodes can still appear, and MindRoom does not clean them up yet.
 The instructions ask for one full name per entity, keep paths, source files, URLs, environment variables, configuration keys, commit hashes, branch names, command lines, and log files inside the facts that use them, and date each fact by when it happened or held rather than when it was discussed.
 They reach only the node and edge extraction prompts, not entity deduplication or summaries.
 Existing graphs keep their old nodes; only new episodes follow the types.

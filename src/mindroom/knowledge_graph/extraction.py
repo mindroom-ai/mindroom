@@ -3,8 +3,8 @@
 Graphiti reads each type model's docstring as the type's description, and with its generic ``Entity`` type excluded it
 asks the extractor to give every node one of these types or to leave it out. That steers the model; it is not a filter.
 An edge endpoint the model names without listing it as a node still becomes an untyped ``Entity`` node, because Graphiti
-never checks the exclusion for it, and cleaning those up is left to a separate maintenance command. This module imports
-only pydantic, so it loads without the optional Graphiti dependency.
+never checks the exclusion for it, and MindRoom does not clean such untyped entities up yet. This module imports only
+pydantic, so it loads without the optional Graphiti dependency.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class Document(BaseModel):
 
 
 class Account(BaseModel):
-    """A financial or online account, never a person's handle, Matrix ID, or email address, which name a Person."""
+    """A financial or online account, never a handle, Matrix ID, or email address, which names whoever it belongs to."""
 
 
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
