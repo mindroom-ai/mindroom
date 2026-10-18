@@ -1,9 +1,7 @@
-"""How the knowledge graph names the agents and people MindRoom knows.
+"""The one name each known agent and person has in the graph: as a speaker, in extraction instructions, and in lookups.
 
-Graphiti merges two entities on its own only when their names are equal, so each agent and person gets one name: the
-label of their lines in conversation episodes, the name the extraction instructions give with their other names, and the
-name a lookup of any of those names finds. A `knowledge_graph.aliases` entry gives an agent or person its name only
-through a stable ID it lists, a Matrix ID or an agent key, never through a display name, which anyone can take.
+Graphiti merges two entities on its own only when their names are equal. A `knowledge_graph.aliases` entry names an
+agent or person only through a Matrix ID or agent key it lists, never through a display name, which anyone can take.
 """
 
 from __future__ import annotations
@@ -21,26 +19,22 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 
-type _Kind = Literal["agent", "person"] | None
-
-
 @dataclass(frozen=True)
 class KnownEntity:
     """An agent, person, or configured name: the one name the graph uses for it and the other names it goes by."""
 
     name: str
     # None for a `knowledge_graph.aliases` entry that links no agent or person.
-    kind: _Kind
+    kind: Literal["agent", "person"] | None
     aliases: tuple[str, ...]
 
 
-def _known(name: str, kind: _Kind, aliases: Iterable[str]) -> KnownEntity:
+def _known(name: str, kind: Literal["agent", "person"] | None, aliases: Iterable[str]) -> KnownEntity:
     """Return an entity listing each alias once in any letter case, and not its own name."""
-    unique: dict[str, str] = {}
+    unique = {name.casefold(): name}
     for alias in aliases:
         unique.setdefault(alias.casefold(), alias)
-    unique.pop(name.casefold(), None)
-    return KnownEntity(name, kind, tuple(unique.values()))
+    return KnownEntity(name, kind, tuple(unique.values())[1:])
 
 
 def _localpart(matrix_id: str) -> str:
@@ -67,12 +61,10 @@ class EntityNames:
 
     # By config key.
     agents: dict[str, KnownEntity]
-    # The config key behind each prepared Matrix account.
-    agent_keys: Mapping[str, str]
     # By name; an entry that links an agent is that agent.
     entries: dict[str, KnownEntity]
-    # The entry each alias is listed under.
-    entry_of: dict[str, str]
+    # The agent or entry each agent Matrix ID and each listed alias stands for.
+    linked: dict[str, KnownEntity]
 
     def speaker(self, sender: str | None, display_name: str | None, own_agent: str) -> KnownEntity:
         """Return who said a message: the graph's own agent when ``sender`` is None, another agent, or a person.
@@ -81,11 +73,9 @@ class EntityNames:
         """
         if sender is None:
             return self.agents[own_agent]
-        if (key := self.agent_keys.get(sender)) is not None:
-            return self.agents[key]
+        if (linked := self.linked.get(sender)) is not None:
+            return linked
         localpart = _localpart(sender)
-        if (entry := self.entry_of.get(sender)) is not None:
-            return _known(entry, "person", [*self.entries[entry].aliases, localpart])
         return _known(_canonical_name(display_name, localpart), "person", [sender, localpart])
 
     def known_entities(self, own_agent: str, speakers: Iterable[KnownEntity]) -> tuple[KnownEntity, ...]:
@@ -107,9 +97,8 @@ class EntityNames:
 
     def canonical(self, name: str) -> str:
         """Return the one name of the entry or agent that is named or also called ``name``, in any letter case."""
-        wanted = name.casefold()
         for entity in (*self.entries.values(), *self.agents.values()):
-            if wanted in {other.casefold() for other in (entity.name, *entity.aliases)}:
+            if name.casefold() in {other.casefold() for other in (entity.name, *entity.aliases)}:
                 return entity.name
         return name
 
@@ -132,4 +121,5 @@ def entity_names(config: Config, agent_keys: Mapping[str, str]) -> EntityNames:
         agents[key] = _known(name, "agent", [*extra, key, *ids, *map(_localpart, ids)])
         if entry is not None:
             entries[entry.name] = agents[key]
-    return EntityNames(agents, agent_keys, entries, entry_of)
+    linked = {alias: entries[name] for alias, name in entry_of.items()}
+    return EntityNames(agents, entries, linked | {matrix_id: agents[key] for matrix_id, key in agent_keys.items()})

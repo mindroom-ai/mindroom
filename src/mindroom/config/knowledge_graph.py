@@ -59,10 +59,7 @@ class KnowledgeGraphConfig(BaseModel):
     )
     aliases: dict[str, list[str]] = Field(
         default_factory=dict,
-        description=(
-            "The one name the graph uses for a person, agent, or thing, mapped to the other names it goes by; "
-            "an alias that is a Matrix user ID or an agent or team key gives that person or agent this name"
-        ),
+        description="One name per person, agent, or thing, mapped to its other names, Matrix IDs, and agent keys",
     )
 
     @field_validator("aliases")

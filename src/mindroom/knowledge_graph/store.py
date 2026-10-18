@@ -69,7 +69,7 @@ class EpisodeInput:
     source_description: str
     reference_time: datetime
     # The agents and people the episode knows, whose names the extraction instructions list.
-    known_entities: tuple[KnownEntity, ...] = ()
+    known_entities: tuple[KnownEntity, ...]
 
 
 @dataclass(frozen=True)

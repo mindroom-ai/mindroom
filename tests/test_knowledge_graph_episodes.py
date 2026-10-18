@@ -176,7 +176,7 @@ def test_a_person_speaks_under_the_newest_display_name_they_used() -> None:
 def test_an_alias_entry_names_the_person_behind_a_matrix_id() -> None:
     """An entry listing a person's Matrix ID labels their lines with its name, whatever display name they use."""
     config = Config(
-        agents={"mind": AgentConfig(display_name="Mind")},
+        agents={"mind": AgentConfig(display_name="Mind"), "research": AgentConfig(display_name="Research Bot")},
         knowledge_graph={"aliases": {"Alice Vale": ["@alice:example.test", "Al"]}},
     )
     run = _run("r1", prompt=render_msg_tag(sender="@alice:example.test", display_name="Ally", body="Ship date?"))
