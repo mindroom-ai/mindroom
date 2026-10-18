@@ -132,7 +132,8 @@ def _finish(entry: _SessionState, updated_at: int, recheck_at: float) -> None:
 
 
 def _back_off(entry: _SessionState, now: float) -> None:
-    """Wait longer after each consecutive failure before trying the conversation again."""
+    """Count one more consecutive failure and wait longer before trying the conversation again."""
+    entry["failures"] += 1
     entry["retry_at"] = now + min(_FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1), _MAX_RETRY_SECONDS)
 
 
@@ -208,7 +209,8 @@ class KnowledgeGraphIngestionWorker:
                     await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
                     for session in due
                 ]
-                # A conversation whose agent is not running is looked at again later and spends none of the budget.
+                # A conversation whose agent is not running, or whose redaction check failed, is looked at again later
+                # and spends none of the budget.
                 budget -= sum(result is not None for result in results)
                 outcomes.extend(result for result in results if result is not None)
                 # A conversation's failure is saved with it, so health stays failing until it succeeds, even across
@@ -221,7 +223,8 @@ class KnowledgeGraphIngestionWorker:
                 _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
                 self._failing_graphs.add(scope.graph_name)
                 outcomes.append(False)
-        # Health reports a failure until a pass ingests something, nothing in it fails, and no failed episode waits.
+        # Health reports a failure until a pass ingests something, nothing in it fails, and no conversation's last
+        # attempt failed.
         if outcomes and all(outcomes) and not self._failing_graphs:
             record_knowledge_graph_failure(None)
 
@@ -265,9 +268,7 @@ class KnowledgeGraphIngestionWorker:
                         exc,
                         agent=scope.agent_name,
                     )
-                    entry = state["sessions"].setdefault(session_id, _new_session_state())
-                    entry["failures"] += 1
-                    _back_off(entry, now)
+                    _back_off(state["sessions"].setdefault(session_id, _new_session_state()), now)
                     changed = True
                     continue
                 if not runs:
@@ -307,9 +308,7 @@ class KnowledgeGraphIngestionWorker:
                 exc,
                 agent=scope.agent_name,
             )
-            entry = state["sessions"].setdefault(session.session_id, _new_session_state())
-            entry["failures"] += 1
-            _back_off(entry, now)
+            _back_off(state["sessions"].setdefault(session.session_id, _new_session_state()), now)
             await self._persist(scope.graph_name, state)
             return None
         if finished is None:
@@ -382,7 +381,6 @@ class KnowledgeGraphIngestionWorker:
             if entry["failing_piece"] != piece:
                 # The counts belong to one episode, so another kind's successes never reset them.
                 entry.update(failures=0, bad_outputs=0, failing_since=0, failing_piece=piece)
-            entry["failures"] += 1
             # Only output the model got wrong counts here; a setup error such as a bad embedder waits like an outage.
             entry["bad_outputs"] = entry["bad_outputs"] + 1 if isinstance(exc, UnusableExtractionError) else 0
             entry["failing_since"] = entry["failing_since"] or now

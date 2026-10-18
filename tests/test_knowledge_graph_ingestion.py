@@ -680,9 +680,33 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
         assert knowledge_graph_failure() is not None
 
         failing = False
+        # Fixed, it still waits out its retry before it is tried again.
+        await worker._run_cycle(config, now=T0 + 40)
+        assert store.sessions() == ["!room:x:$t2", "!room:x:$t3"]
         await worker._run_cycle(config, now=T0 + 100)
     assert store.sessions() == ["!room:x:$t2", "!room:x:$t3", "!room:x:$t1"]
     assert knowledge_graph_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_redaction_check_leaves_the_pass_to_other_agents(tmp_path: Path) -> None:
+    """A conversation whose redaction check fails takes no place in the pass, so the next agent is still ingested."""
+    config = _config(max_sessions_per_cycle=1)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$m1", ["rm1"])
+    _seed(config, paths, "!room:x:$p1", ["rp1"], agent="pal")
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del room_id, event_ids
+        if agent_name == "mind":
+            msg = "event journal unavailable"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$p1"]
 
 
 @pytest.mark.asyncio

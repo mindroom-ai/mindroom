@@ -78,4 +78,4 @@ Use a private agent when requesters must not see each other's facts.
 
 Extraction is reported as `knowledge_graph` in [usage tracking](https://docs.mindroom.chat/usage/#token-usage) and makes about 15 model calls per piece of a conversation.
 Each lookup makes one embedding request.
-When ingestion fails, `/api/health` includes a `knowledge_graph` block naming the kind of failure until a later pass succeeds with no failed episode still waiting for its retry, and the MindRoom log has the details.
+When ingestion fails, `/api/health` includes a `knowledge_graph` block naming the kind of failure until a later pass succeeds with no conversation still waiting to retry a failed attempt, and the MindRoom log has the details.
