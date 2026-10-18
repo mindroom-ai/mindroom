@@ -28,6 +28,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.error_handling import run_error_event_text
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
@@ -417,6 +418,12 @@ def authorize_delegation(  # noqa: PLR0911
             else "that agent is not allowed to reply to you"
         )
         return f"Cannot delegate to '{agent_name}': {reason}."
+    if active_config.agents[agent_name].private is not None and not is_access_checked_requester_id(
+        requester_id,
+        active_config,
+        runtime_paths,
+    ):
+        return f"Cannot delegate to '{agent_name}': a private agent runs only for a person or bot account."
 
     if depth >= MAX_DELEGATION_DEPTH:
         return "Cannot delegate: the maximum delegation depth was reached."
