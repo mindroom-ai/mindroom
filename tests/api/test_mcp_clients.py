@@ -197,6 +197,16 @@ def test_portal_session_finds_the_account_its_email_mapping_names(
     assert clients.status_code == 200, clients.text
     assert clients.json()["enabled"] is enabled
     assert saved.status_code == (200 if enabled else 403), saved.text
+    if enabled:
+        # The session also approves and revokes the account's MCP clients, as an upstream login with its email can.
+        token = _connect(managed_client, {})["access_token"]
+        assert _list(managed_client, token).status_code == 200
+        revoked = managed_client.post(f"{CLIENTS}/revoke-all", headers={"Origin": ORIGIN}, json={})
+        assert revoked.status_code == 200, revoked.text
+        assert _list(managed_client, token).status_code == 401
+    else:
+        _, consent_url = _authorize(managed_client)
+        assert managed_client.get(consent_url).status_code == 403
 
 
 def test_client_management_is_owner_scoped_and_preserves_other_client_access(
