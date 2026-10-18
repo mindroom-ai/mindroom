@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from mindroom.hooks import EnrichmentItem, render_enrichment_block, render_transient_context
 from mindroom.hooks.enrichment import is_transient_context, strip_enrichment_blocks
 
@@ -82,3 +86,42 @@ def test_strip_enrichment_blocks_leaves_text_without_a_block_byte_identical() ->
 
     assert strip_enrichment_blocks(text) == text
     assert strip_enrichment_blocks("") == ""
+
+
+def test_strip_enrichment_blocks_collapses_adjacent_blocks_to_one_blank_line() -> None:
+    """Blocks that follow one another leave one blank line between the text around them, not one per block."""
+    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+
+    assert strip_enrichment_blocks(f"a\n\n{block}\n\n{block}\n\nb") == "a\n\nb"
+    assert strip_enrichment_blocks(f"a{block}{block}b") == "a\n\nb"
+    assert strip_enrichment_blocks(f"{block}\n\n{block}") == ""
+    assert strip_enrichment_blocks(f"a\n\n{block}\n\nm\n\n{block}\n\nb") == "a\n\nm\n\nb"
+
+
+def test_strip_enrichment_blocks_keeps_an_unclosed_block() -> None:
+    """Text that opens a block and never closes it is not one of ours, so it stays."""
+    text = 'a\n\n<mindroom_message_context>\n<item key="location">'
+
+    assert strip_enrichment_blocks(text) == text
+
+
+_BLOCK = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+_LONG_TEXTS = {
+    "spaces": " " * 200_000,
+    "newlines": "\n" * 200_000,
+    "mixed": " \n\t" * 70_000,
+    "spaces-then-text": " " * 200_000 + "x",
+    "around-block": " " * 100_000 + "x" + " " * 100_000 + _BLOCK + "\n" * 100_000 + "y",
+    "block-then-spaces": _BLOCK + " " * 200_000 + "x",
+    "many-unclosed-openings": "<mindroom_message_context>" * 20_000,
+    "many-blocks": _BLOCK * 2_000,
+}
+
+
+@pytest.mark.parametrize("text", _LONG_TEXTS.values(), ids=_LONG_TEXTS)
+def test_strip_enrichment_blocks_is_linear_in_the_text_length(text: str) -> None:
+    """A long run of whitespace in a pasted message must not stall the readers that call this."""
+    started = time.perf_counter()
+    strip_enrichment_blocks(text)
+
+    assert time.perf_counter() - started < 1.0
