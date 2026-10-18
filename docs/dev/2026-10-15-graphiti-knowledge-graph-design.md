@@ -126,9 +126,12 @@ The speaker labels added entities of their own: Graphiti's message prompt always
 
 So each known agent and person has one name, which is both its speaker label and the name the extraction instructions give for its other names.
 An agent or team is named by its `display_name`, with its config key, Matrix ID, and localpart as its other names.
-A person is named by the newest display name their messages carry in the turns rendered together, else by their localpart, with their Matrix ID and localpart as their other names; display names are stored only in each message's `<msg>` envelope.
+A person is named by the newest display name their messages carry in all of the conversation's finished turns, not only the ones being added, else by their localpart, with their Matrix ID and localpart as their other names.
+Display names are stored only in each message's `<msg>` envelope, and a stopped turn's envelope has none, so reading only the new turns would rename a person in a later pass.
 A name keeps letters, digits, spaces, `.'-`, and a combining mark on a letter, because display names carry emoji and colons and Graphiti ends a speaker at the first colon.
-A `knowledge_graph.aliases` entry gives an agent or person its name only through a stable ID it lists, a Matrix ID or an agent or team key; its other aliases are plain names that the instructions list and `graph_entity` resolves.
+A `knowledge_graph.aliases` entry gives an agent or person its name only through a stable ID it lists, a Matrix user ID, which has a server part, or an agent or team key, in any letter case as validation compares aliases; its other aliases are plain names that the instructions list and `graph_entity` resolves.
+A linked person or agent keeps the other names it had without the entry (a listed Matrix ID's localpart, an agent's display name), so adding an entry never loses a name.
+Someone whose display name is an entry's name, without their Matrix ID in it, goes by their localpart, so they never merge into the entry's person.
 Each episode's instructions list the graph's own agent, the episode's speakers, and every entry, so people and things MindRoom has no account for get one name too.
 Entities that share a name are listed once, and an alias that another listed entity is named, or that two of them go by, is left out, so no listed name means two entities.
 `graph_entity` follows the same rule: an entry's or agent's own name wins over another entry's alias, so an entry that keeps a person apart from an agent with their display name never turns a lookup of the agent's name into the person.
@@ -141,9 +144,9 @@ Display names change and anyone can take one, so such an entry could reach the w
 Keeping labels, instructions, and lookups in agreement then took conflict rules (the first entry wins, names dropped per episode, conflicts detectable only while ingesting) that grew through four review rounds.
 Linking only by Matrix ID and agent key lets config validation check every link, and a display name then labels only the person who has it.
 Rejected: labeling speakers by Matrix ID, which makes the Matrix ID the entity, against the `Person` type's description.
-Rejected: remembering each person's display name across passes in the ingestion state, which adds state for a case one config line covers.
+Rejected: remembering each person's display name in the ingestion state, since the conversation's stored turns already hold it.
 
-Limitations: a person whose display name changes gets the new name in later episodes, and a message without a display name names its sender by localpart unless another of their messages in the same turns carried one.
+Limitations: a person whose display name changes gets the new name in later episodes, and a message without a display name names its sender by localpart unless another of their messages in the conversation carried one.
 Two people with one display name, or a person named like an agent, share an entity unless an entry names one of them through their Matrix ID.
 Every entry is in every episode's instructions, so a long list lengthens every extraction prompt.
 

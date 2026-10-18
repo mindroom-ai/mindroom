@@ -78,6 +78,7 @@ knowledge_graph:
 ```
 
 A Matrix ID or agent key in an entry gives that person or agent the entry's name everywhere, whatever display name they use; a display name never links an entry.
+Someone else whose display name is an entry's name goes by their username, so the two stay apart.
 Every other alias is a plain name that extraction maps to the entry's name and that `graph_entity` finds the entity by.
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
@@ -94,7 +95,7 @@ graph_entity("Project Atlas")
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
-A name listed in [`knowledge_graph.aliases`](#names), or an agent's key or Matrix ID, finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
+A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
 An agent reads only its own graph; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) has one graph per requester.
 
