@@ -463,8 +463,9 @@ async def compact_running_turn(
 ) -> CompactionOutcome:
     """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row with ``segment``.
 
-    Nothing is written until every chunk has been summarized. ``on_commit`` receives the summary once the row
-    is stored, even when the turn is cancelled meanwhile, so the turn's in-memory state always matches the log.
+    Nothing is written until every chunk has been summarized. Once the append starts, ``on_commit`` receives the
+    stored summary and the compaction is reported even when the turn is cancelled meanwhile, so the turn's
+    in-memory state always matches the log and a stored fold never reads as failed.
     Raises when the conversation changed since ``basis`` was read.
     """
     runs = [*basis.runs, *snapshots]
@@ -487,7 +488,7 @@ async def compact_running_turn(
     )
     summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
 
-    async def commit() -> bool:
+    async def commit_and_report() -> CompactionOutcome:
         appended = await asyncio.to_thread(
             append_fold,
             storage,
@@ -498,34 +499,31 @@ async def compact_running_turn(
             summary_model=_model_identifier(summarizer.model.model),
             segment=segment,
         )
-        if appended:
-            on_commit(summary)
-        return appended
+        if not appended:
+            msg = "The conversation changed during compaction."
+            raise RuntimeError(msg)
+        on_commit(summary)
+        outcome = CompactionOutcome(
+            mode="auto",
+            session_id=session.session_id,
+            scope=scope.key,
+            summary=summary,
+            summary_model=summarizer.model.name,
+            before_tokens=before_tokens,
+            after_tokens=estimate_text_tokens(summary),
+            window_tokens=replay_window_tokens or 0,
+            threshold_tokens=threshold_tokens or 0,
+            # The running turn counts once beside the stored runs it folded with.
+            runs_before=len(basis.runs) + 1,
+            runs_after=1,
+            compacted_run_count=len(basis.runs) + 1,
+            compacted_at=_iso_utc_now(),
+            history_budget_tokens=available_history_budget,
+        )
+        return await _report_committed(outcome, scope=scope, messages=messages, complete=complete)
 
-    if not await run_coroutine_until_complete(commit()):
-        msg = "The conversation changed during compaction."
-        raise RuntimeError(msg)
-    outcome = CompactionOutcome(
-        mode="auto",
-        session_id=session.session_id,
-        scope=scope.key,
-        summary=summary,
-        summary_model=summarizer.model.name,
-        before_tokens=before_tokens,
-        after_tokens=estimate_text_tokens(summary),
-        window_tokens=replay_window_tokens or 0,
-        threshold_tokens=threshold_tokens or 0,
-        # The running turn counts once beside the stored runs it folded with.
-        runs_before=len(basis.runs) + 1,
-        runs_after=1,
-        compacted_run_count=len(basis.runs) + 1,
-        compacted_at=_iso_utc_now(),
-        history_budget_tokens=available_history_budget,
-    )
-    # The fold is stored; finish reporting it before a stopped turn's cancellation lands.
-    return await run_coroutine_until_complete(
-        _report_committed(outcome, scope=scope, messages=messages, complete=complete),
-    )
+    # A stop that lands once the append started still lets a stored fold apply and report, so it never reads as failed.
+    return await run_coroutine_until_complete(commit_and_report())
 
 
 async def _report_committed(

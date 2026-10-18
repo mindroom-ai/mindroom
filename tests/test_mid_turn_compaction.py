@@ -37,7 +37,7 @@ from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner
-from mindroom.history import agno_compat_message_builder, mid_turn_compaction
+from mindroom.history import agno_compat_message_builder, compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
 from mindroom.history.replay import (
     compaction_summary_message,
@@ -2013,6 +2013,41 @@ async def test_stopping_the_turn_after_the_commit_still_reports_success(tmp_path
         await task
 
     assert [type(event) for event in lifecycle.events] == [CompactionLifecycleStart, CompactionOutcome]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_stopping_the_turn_while_the_fold_is_stored_still_reports_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop that lands while the row is being written still lets the stored fold apply and report success."""
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage)
+    lifecycle = RecordingCompactionLifecycle()
+    bind_compaction_lifecycle(agent, lifecycle)
+    loop = asyncio.get_running_loop()
+    appending = asyncio.Event()
+    release = threading.Event()
+    append_fold = compaction.append_fold
+
+    def held_append(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        loop.call_soon_threadsafe(appending.set)
+        assert release.wait(timeout=5)
+        return append_fold(*args, **kwargs)
+
+    monkeypatch.setattr(compaction, "append_fold", held_append)
+    task = asyncio.create_task(_run_in_session(agent, "Do the task"))
+    await asyncio.wait_for(appending.wait(), timeout=5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [type(event) for event in lifecycle.events] == [CompactionLifecycleStart, CompactionOutcome]
+    assert len(segments_of(storage, _SCOPE.key)) == 1
 
 
 def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
