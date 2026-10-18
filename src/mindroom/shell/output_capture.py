@@ -104,6 +104,14 @@ class ShellOutputCapture:
 
     def publish(self, return_code: int | None) -> str:
         """Revalidate and atomically publish using the shared output-file policy."""
+        receipt = self._publish_receipt(return_code)
+        if return_code and self.interruption is None:
+            # The receipt is all the caller sees, so a failed or killed command, saved or not, must say how it
+            # exited. A command its owner stopped, such as at its timeout, is explained by the interruption instead.
+            receipt["mindroom_tool_output"]["exit_code"] = return_code
+        return json.dumps(receipt)
+
+    def _publish_receipt(self, return_code: int | None) -> dict[str, dict[str, object]]:
         # Keep the supervisor's ordinary startup independent of Agno imports.
         from mindroom.tool_system.output_files import (  # noqa: PLC0415
             ToolOutputFilePolicy,
@@ -127,7 +135,7 @@ class ShellOutputCapture:
                 or "Shell command or output capture was interrupted; no complete output file was saved."
             )
         if error is not None:
-            return json.dumps({"mindroom_tool_output": {"status": "error", "error": error}})
+            return {"mindroom_tool_output": {"status": "error", "error": error}}
         assert return_code is not None
         try:
             request = prepare_tool_output_file(
@@ -139,7 +147,7 @@ class ShellOutputCapture:
                 output_path=self.destination.path,
             )
             if isinstance(request, dict):
-                return json.dumps(request)
+                return cast("dict[str, dict[str, object]]", request)
             output = (
                 selected.read()
                 if selected is not None
@@ -147,17 +155,9 @@ class ShellOutputCapture:
             )
             if self.cwd is not None:
                 output = f"[cwd: {self.cwd}]\n{output}"
-            receipt = cast("dict[str, dict[str, object]]", finalize_tool_output_file(request, output))
-            if return_code:
-                # The receipt is all the caller sees, so it must not read as a successful command.
-                receipt["mindroom_tool_output"]["exit_code"] = return_code
-            return json.dumps(receipt)
+            return cast("dict[str, dict[str, object]]", finalize_tool_output_file(request, output))
         except OSError:
-            return json.dumps(
-                {
-                    "mindroom_tool_output": {"status": "error", "error": "Failed to publish complete shell output."},
-                },
-            )
+            return {"mindroom_tool_output": {"status": "error", "error": "Failed to publish complete shell output."}}
 
     def close(self) -> None:
         """Release unlinked capture files on completion, cancellation, or eviction."""

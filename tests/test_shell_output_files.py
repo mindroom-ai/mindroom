@@ -198,6 +198,59 @@ async def test_capture_limit_rejects_incomplete_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("shell_toolkit")
+async def test_capture_limit_error_keeps_the_exit_code(tmp_path: Path) -> None:
+    """A failed command whose output is over the cap saves no file but still reports how it exited."""
+    tool = shell_tools()(
+        base_dir=tmp_path,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={},
+        ),
+    )
+    wrap_toolkit_for_output_files(tool, ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=60000))
+    destination = tmp_path / "existing.txt"
+    destination.write_text("keep existing")
+    result = await FunctionCall(
+        function=tool.async_functions["run_shell_command"],
+        arguments={
+            "args": "awk 'BEGIN { for(i=0;i<10000;i++) print \"too-much-output\" }'; exit 3",
+            "mindroom_output_path": "existing.txt",
+        },
+    ).aexecute()
+
+    assert json.loads(str(result.result)) == {
+        "mindroom_tool_output": {
+            "status": "error",
+            "error": "Redirected shell output exceeds the 60000 byte limit.",
+            "exit_code": 3,
+        },
+    }
+    assert destination.read_text() == "keep existing"
+
+
+@pytest.mark.asyncio
+async def test_a_killed_command_reports_its_signal_exit_code(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+    """A command killed by a signal, such as the OOM killer's SIGKILL, saves no file but reports its exit code."""
+    destination = tmp_path / "killed.txt"
+    destination.write_text("keep existing")
+    result = await FunctionCall(
+        function=shell_toolkit.async_functions["run_shell_command"],
+        arguments={"args": "echo building; kill -KILL $$", "mindroom_output_path": "killed.txt"},
+    ).aexecute()
+
+    assert json.loads(str(result.result)) == {
+        "mindroom_tool_output": {
+            "status": "error",
+            "error": "Shell command or output capture was interrupted; no complete output file was saved.",
+            "exit_code": -9,
+        },
+    }
+    assert destination.read_text() == "keep existing"
+
+
+@pytest.mark.asyncio
 async def test_publication_rechecks_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """Replacing a destination parent with an escaping symlink while running cannot write outside the workspace."""
     parent = tmp_path / "reports"
