@@ -159,11 +159,12 @@ bot_accounts:
 
 ## Dashboard configuration
 
-Dashboard access follows deployment authentication, not the Matrix `administrators` list.
+Dashboard access follows deployment authentication; the Matrix `administrators` list matters only in the cases noted below.
 
 - Standalone: `MINDROOM_API_KEY` protects the dashboard and its API; without it, access is unauthenticated, so set it before exposing an instance beyond a trusted local network.
 - Hosted (Supabase): the user's platform sign-in is validated, and the instance owner account is enforced when configured.
 - [Trusted upstream auth](deployment/trusted-upstream-auth.md): every gateway-authenticated user may change configuration unless Connections is enabled, which adds an `administrators` check; see its [Security Boundary](deployment/trusted-upstream-auth.md#security-boundary).
+- [Matrix sign-in from MindRoom Chat](deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat): with the Connections portal enabled, a user in `administrators` who opens Connections from Chat also reaches the dashboard without the API key, but only when the homeserver binds OpenID tokens to this deployment; everyone else keeps the authentication above.
 
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so dashboard requests made with the API key act as the owner's Matrix identity for credential management.
 Browser changes made with a dashboard sign-in or trusted upstream identity must come from the dashboard's own origin; see [Browser Mutation Protection](deployment/trusted-upstream-auth.md#browser-mutation-protection).
@@ -179,7 +180,7 @@ Pages from any other origin fail with `Origin '<origin>' is not allowed without 
 A reverse proxy in front of an unauthenticated dashboard or `/v1` API must pass the browser's `Host` header through unchanged, for example nginx `proxy_set_header Host $host;` or Apache `ProxyPreserveHost On`.
 A proxy that rewrites `Host` to its upstream address, as nginx `proxy_pass` and Apache `mod_proxy` do by default, makes every request look addressed to an IP address and disables this protection; in that case set `MINDROOM_API_KEY`, and `OPENAI_COMPAT_API_KEYS` for `/v1`.
 
-These host checks do not apply to requests authenticated by an API key, a platform session, or trusted upstream auth, or to routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
+These host checks do not apply to requests authenticated by an API key, a platform session, trusted upstream auth, or a Connections session that may open the dashboard, or to routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 
 ## Platform and credential authority
 

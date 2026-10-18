@@ -173,7 +173,7 @@ The session lasts one hour.
 A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
 
-A session authenticates only these paths:
+Apart from the dashboard rule below, a session authenticates only these paths:
 
 - `/connections` and its sub-paths.
 - `/api/connections` and its sub-paths.

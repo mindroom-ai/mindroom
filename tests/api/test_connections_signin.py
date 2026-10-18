@@ -199,9 +199,8 @@ def test_dashboard_bit_needs_public_url(signin: dict[str, Any]) -> None:
     """Without MINDROOM_PUBLIC_URL no audience was sent, so the token was never bound to this deployment."""
     _with_admin(signin, MINDROOM_PUBLIC_URL="")
     signin["binds"].return_value = True
-    sign_in(signin["client"], "alice")
-    session = _session_of(signin["client"])
-    assert session is None or session.dashboard is False
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", False)
 
 
 def test_binding_probe_runs_only_for_administrators(signin: dict[str, Any]) -> None:
