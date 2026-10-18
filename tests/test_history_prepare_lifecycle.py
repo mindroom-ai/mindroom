@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -1639,6 +1639,15 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
+    flag_at_failure_notice: list[bool] = []
+
+    @dataclass
+    class _FlagAtFailure(RecordingCompactionLifecycle):
+        async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
+            stored = get_agent_session(storage, "session-1")
+            assert stored is not None
+            flag_at_failure_notice.append(read_scope_state(stored, scope).force_compact_before_next_run)
+            await super().complete_failure(event)
 
     with (
         patch(
@@ -1660,7 +1669,11 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
             execution_identity=None,
             storage=storage,
             session=session,
+            compaction_lifecycle=_FlagAtFailure(),
         )
+
+    # The failed manual request is cleared before its failure notice, so a reply cannot retry it.
+    assert flag_at_failure_notice == [False]
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None

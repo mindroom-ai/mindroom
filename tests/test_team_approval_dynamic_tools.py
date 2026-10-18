@@ -424,7 +424,6 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
             config=config,
             execution_identity=identity,
             team_name="research",
-            scope=history_scope,
             create_session_if_missing=True,
         ) as scope:
             assert scope is not None

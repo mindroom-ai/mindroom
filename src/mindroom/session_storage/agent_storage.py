@@ -86,7 +86,7 @@ def save_compaction_usage(
     requester_id: str | None,
     model: Model,
     usage: MessageMetrics,
-    initial_session: AgentSession | TeamSession | None = None,
+    initial_session: AgentSession | TeamSession | None,
 ) -> None:
     """Persist one summary response's returned counters independently of conversation changes."""
     metrics = usage.to_dict()

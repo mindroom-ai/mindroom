@@ -675,7 +675,7 @@ async def summarize_run_locally(
         scope=scope,
         on_usage=on_usage,
     )
-    summary, _served_by = await summarize_runs(summarizer, previous_summary, snapshots)
+    summary, _ = await summarize_runs(summarizer, previous_summary, snapshots)
     return summary
 
 
