@@ -63,20 +63,24 @@ class EntityNames:
     agents: dict[str, KnownEntity]
     # By name; an entry that links an agent is that agent.
     entries: dict[str, KnownEntity]
-    # The agent or entry each agent Matrix ID and each listed alias stands for.
+    # The agent or entry each agent Matrix ID and each listed alias stands for, in lower case.
     linked: dict[str, KnownEntity]
 
-    def speaker(self, sender: str | None, display_name: str | None, own_agent: str) -> KnownEntity:
+    def speaker(self, sender: str | None, display_names: Mapping[str, str], own_agent: str) -> KnownEntity:
         """Return who said a message: the graph's own agent when ``sender`` is None, another agent, or a person.
 
-        A person is named by the entry listing their Matrix ID, else by ``display_name``, else by their localpart.
+        A person is named by the entry listing their Matrix ID, else by their display name in ``display_names``, else by
+        their localpart, which also names someone whose display name is an entry's name, since anyone can take one.
         """
         if sender is None:
             return self.agents[own_agent]
-        if (linked := self.linked.get(sender)) is not None:
+        if (linked := self.linked.get(sender.casefold())) is not None:
             return linked
         localpart = _localpart(sender)
-        return _known(_canonical_name(display_name, localpart), "person", [sender, localpart])
+        name = _canonical_name(display_names.get(sender), localpart)
+        if any(name.casefold() == entry.casefold() for entry in self.entries):
+            name = localpart
+        return _known(name, "person", [sender, localpart])
 
     def known_entities(self, own_agent: str, speakers: Iterable[KnownEntity]) -> tuple[KnownEntity, ...]:
         """Return what an episode knows: the graph's own agent, its speakers, and every entry, one entity per name.
@@ -107,23 +111,32 @@ class EntityNames:
         return next(named, None) or next(called, name)
 
 
+def _entry(name: str, aliases: list[str]) -> KnownEntity:
+    """Return an entry, a person when it lists a Matrix user ID, which has a server part, also called its localpart."""
+    ids = [alias for alias in aliases if alias.startswith("@") and ":" in alias]
+    return _known(name, "person" if ids else None, [*aliases, *map(_localpart, ids)])
+
+
 def entity_names(config: Config, agent_keys: Mapping[str, str]) -> EntityNames:
     """Return how ``config``'s agents, entries, and people are named; ``agent_keys`` maps agent Matrix IDs to keys."""
     configured = config.knowledge_graph.aliases
-    entry_of = {alias: name for name, aliases in configured.items() for alias in aliases}
-    entries = {
-        name: _known(name, "person" if any(alias.startswith("@") for alias in aliases) else None, aliases)
-        for name, aliases in configured.items()
-    }
+    # Aliases are unique in any letter case, so identities link in any letter case too.
+    entry_of = {alias.casefold(): name for name, aliases in configured.items() for alias in aliases}
+    entries = {name: _entry(name, aliases) for name, aliases in configured.items()}
     agents: dict[str, KnownEntity] = {}
     for key in [*config.agents, *config.teams, ROUTER_AGENT_NAME]:
         display_name = ROUTER_DISPLAY_NAME if key == ROUTER_AGENT_NAME else config.entity_display_name(key)
+        shown = _canonical_name(display_name, key)
         ids = [matrix_id for matrix_id, owner in agent_keys.items() if owner == key]
         # An entry listing the agent's key or Matrix ID names it, and then stands for the agent.
-        entry = next((entries[entry_of[identity]] for identity in (key, *ids) if identity in entry_of), None)
-        name, extra = (entry.name, entry.aliases) if entry else (_canonical_name(display_name, key), ())
-        agents[key] = _known(name, "agent", [*extra, key, *ids, *map(_localpart, ids)])
-        if entry is not None:
-            entries[entry.name] = agents[key]
-    linked = {alias: entries[name] for alias, name in entry_of.items()}
-    return EntityNames(agents, entries, linked | {matrix_id: agents[key] for matrix_id, key in agent_keys.items()})
+        linked = [entries[entry_of[identity.casefold()]] for identity in (key, *ids) if identity.casefold() in entry_of]
+        name, extra = (linked[0].name, linked[0].aliases) if linked else (shown, ())
+        agents[key] = _known(name, "agent", [*extra, shown, key, *ids, *map(_localpart, ids)])
+        if linked:
+            entries[name] = agents[key]
+    by_id = {alias: entries[name] for alias, name in entry_of.items()}
+    return EntityNames(
+        agents,
+        entries,
+        by_id | {matrix_id.casefold(): agents[key] for matrix_id, key in agent_keys.items()},
+    )

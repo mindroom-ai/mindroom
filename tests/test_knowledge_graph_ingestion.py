@@ -29,6 +29,7 @@ from mindroom.knowledge_graph.store import (
     knowledge_graph_failure,
     record_knowledge_graph_failure,
 )
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import seed_session
 
@@ -463,6 +464,33 @@ async def test_a_new_graph_skips_turns_older_than_the_backfill_window(tmp_path: 
     await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
 
     assert _answers(store) == ["Mind: answer new"]
+
+
+@pytest.mark.asyncio
+async def test_a_later_pass_names_a_person_as_their_earlier_turns_did(tmp_path: Path) -> None:
+    """A turn stored without a display name, such as a stopped one, names its sender as the conversation did before."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+
+    def tagged(runs: list[RunOutput]) -> None:
+        for run in runs:
+            display_name = "Alice Example" if run.run_id == "r1" else None
+            body = f"question {run.run_id}"
+            run.messages[0].content = render_msg_tag(sender="@alice:x", display_name=display_name, body=body)
+
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    _edit_runs(config, paths, "!room:x:$t1", tagged)
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
+    _edit_runs(config, paths, "!room:x:$t1", tagged)
+    await worker._run_cycle(config, now=T0 + 20)
+
+    conversations = [episode for _, episode, _ in store.episodes if episode.kind == "conversation"]
+    assert [episode.body.splitlines()[0] for episode in conversations] == [
+        "Alice Example: question r1",
+        "Alice Example: question r2",
+    ]
+    assert [entity.name for entity in conversations[-1].known_entities] == ["Mind", "Alice Example"]
 
 
 @pytest.mark.asyncio

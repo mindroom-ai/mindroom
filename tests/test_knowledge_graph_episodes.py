@@ -15,7 +15,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
-from mindroom.knowledge_graph.episodes import RUN_DONE, RenderedEpisode, classify_thread, render_episodes
+from mindroom.knowledge_graph.episodes import (
+    RUN_DONE,
+    RenderedEpisode,
+    classify_thread,
+    newest_display_names,
+    render_episodes,
+)
 from mindroom.knowledge_graph.names import entity_names
 from mindroom.prompt_message_tags import render_msg_tag
 
@@ -86,6 +92,7 @@ def _render(
         agent_name="mind",
         settings=settings,
         names=NAMES,
+        display_names=newest_display_names(runs),
     )
 
 
@@ -188,6 +195,7 @@ def test_an_alias_entry_names_the_person_behind_a_matrix_id() -> None:
         agent_name="mind",
         settings=SETTINGS,
         names=entity_names(config, AGENTS),
+        display_names=newest_display_names([run]),
     )
 
     assert rendered.episode.body.splitlines() == ["Alice Vale: Ship date?", "Mind: Atlas ships Friday."]

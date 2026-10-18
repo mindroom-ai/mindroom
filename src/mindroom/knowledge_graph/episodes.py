@@ -12,6 +12,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
@@ -22,7 +23,7 @@ from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput
@@ -105,10 +106,13 @@ def render_episodes(
     agent_name: str,
     settings: KnowledgeGraphIngestConfig,
     names: EntityNames,
+    display_names: Mapping[str, str],
 ) -> list[RenderedEpisode]:
     """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries.
 
-    ``names`` names each agent and person, so each speaks under one name and agents never as people.
+    ``names`` names each agent and person, so each speaks under one name and agents never as people, and
+    ``display_names`` holds each person's newest display name in the whole conversation, so a turn stored without one,
+    such as a stopped turn, names them as earlier turns did.
     """
     # Exploration and delegated prompts come from an agent, and their answers restate the tool results.
     if thread_kind == "automation" or (episode_kind == "conversation" and thread_kind in ("exploration", "delegation")):
@@ -129,10 +133,9 @@ def render_episodes(
         calls.clear()
         speakers.clear()
 
-    ordered = sorted(runs, key=run_key)
-    speaker = _speakers(ordered if episode_kind == "conversation" else [], names, agent_name)
+    speaker = partial(names.speaker, display_names=display_names, own_agent=agent_name)
     cap = settings.max_episode_chars
-    for run in ordered:
+    for run in sorted(runs, key=run_key):
         items = _episode_items(run, episode_kind, settings, speaker)
         if not items:
             continue
@@ -164,11 +167,14 @@ def render_episodes(
     return rendered
 
 
-def _speakers(runs: Sequence[RunOutput], names: EntityNames, agent_name: str) -> Callable[[str | None], KnownEntity]:
-    """Return who sent a message, naming a person by the newest display name their messages in ``runs`` carry."""
-    named = [said for run in runs for said in utterances(run) if said.sender and said.display_name]
-    display_names: dict[str | None, str | None] = {said.sender: said.display_name for said in named}
-    return lambda sender: names.speaker(sender, display_names.get(sender), agent_name)
+def newest_display_names(runs: Sequence[RunOutput]) -> dict[str, str]:
+    """Return the newest display name each sender's messages in ``runs`` carry."""
+    return {
+        said.sender: said.display_name
+        for run in sorted(runs, key=run_key)
+        for said in utterances(run)
+        if said.sender is not None and said.display_name is not None
+    }
 
 
 def _day(run: RunOutput) -> str:

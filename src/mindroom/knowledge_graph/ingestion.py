@@ -22,6 +22,7 @@ from mindroom.knowledge_graph.episodes import (
     Progress,
     RenderedEpisode,
     classify_thread,
+    newest_display_names,
     render_episodes,
 )
 from mindroom.knowledge_graph.names import entity_names
@@ -325,6 +326,8 @@ class KnowledgeGraphIngestionWorker:
                 cutoff=state["started_at"] - settings.backfill_days * _DAY_SECONDS,
             )
         thread_kind = classify_thread(session.runs, automation_thread_ids)
+        # From every finished turn, not only the new ones, so a person keeps their name in a turn stored without it.
+        display_names = await asyncio.to_thread(newest_display_names, finished)
         clean = True
         added = 0
         for kind in _EPISODE_KINDS:
@@ -340,6 +343,7 @@ class KnowledgeGraphIngestionWorker:
                 agent_name=scope.agent_name,
                 settings=settings,
                 names=names,
+                display_names=display_names,
             )
             for rendered in episodes:
                 if marker is not None and rendered.progress <= marker:
