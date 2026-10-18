@@ -401,7 +401,6 @@ def test_session_creation_binds_openid_to_the_configured_public_url(gateway: Gat
     """A binding homeserver gets the normalized MINDROOM_PUBLIC_URL origin, and a token for another origin is refused."""
     client, peer, app = gateway
     _set_public_url(app, "https://Mindroom.Example.org:443/some/path")
-    peer.advertise_audience = True
     peer.expected_audience = "https://elsewhere.example.org"
     response = create(client)
     assert response.status_code == 401
@@ -415,32 +414,17 @@ def test_session_creation_never_takes_the_audience_from_the_host_header(gateway:
     """A replaying backend controls `Host`, so a binding homeserver still sees the configured origin."""
     client, peer, app = gateway
     _set_public_url(app, "https://mindroom.example.org")
-    peer.advertise_audience = True
     peer.expected_audience = "https://mindroom.example.org"
     assert create(client, headers={"Host": "evil.example.org"}).status_code == 200
     assert peer.userinfo_audiences == ["https://mindroom.example.org"]
 
 
 @pytest.mark.parametrize("public_url", [None, "mindroom.example.org"])
-def test_session_creation_with_binding_requires_a_valid_public_url(
+def test_session_creation_sends_no_audience_without_a_usable_public_url(
     gateway: Gateway,
     public_url: str | None,
 ) -> None:
-    """Binding active and no usable MINDROOM_PUBLIC_URL is a 503 that never reaches userinfo."""
-    client, peer, app = gateway
-    if public_url is not None:
-        _set_public_url(app, public_url)
-    peer.advertise_audience = True
-    response = create(client)
-    assert response.status_code == 503
-    assert "MINDROOM_PUBLIC_URL" in response.json()["detail"]
-    assert "openid-secret" not in response.text
-    assert peer.userinfo_audiences == []
-
-
-@pytest.mark.parametrize("public_url", [None, "mindroom.example.org"])
-def test_session_creation_without_binding_ignores_the_public_url(gateway: Gateway, public_url: str | None) -> None:
-    """A homeserver that cannot bind tokens keeps the unbound verification, whatever MINDROOM_PUBLIC_URL holds."""
+    """Without a usable MINDROOM_PUBLIC_URL no audience is sent, and a homeserver that binds no tokens still verifies."""
     client, peer, app = gateway
     if public_url is not None:
         _set_public_url(app, public_url)

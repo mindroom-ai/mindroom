@@ -33,10 +33,6 @@ class ComputerPeer:
     generation: int = 0
     openid_status: int = 200
     openid_subject: str = "@alice:example.org"
-    # `/versions` advertises the audience feature when True; any other status models a homeserver without usable `/versions`.
-    advertise_audience: bool = False
-    versions_status: int = 200
-    versions_calls: int = 0
     # When set, userinfo answers 401 unless the query names exactly this audience.
     expected_audience: str | None = None
     userinfo_audiences: list[str | None] = field(default_factory=list)
@@ -63,12 +59,6 @@ class ComputerPeer:
         except ComputerControlError:
             return web.Response(status=409)
         return web.json_response(status)
-
-    async def versions(self, request: web.Request) -> web.Response:  # noqa: ARG002
-        """Advertise the audience-bound OpenID feature the way MindRoom's Tuwunel fork does."""
-        self.versions_calls += 1
-        features = {"io.mindroom.openid_audience": True} if self.advertise_audience else {}
-        return web.json_response({"versions": ["v1.11"], "unstable_features": features}, status=self.versions_status)
 
     async def openid(self, request: web.Request) -> web.Response:
         """Verify an isolated short-lived token through the actual HTTP verifier."""
@@ -118,7 +108,6 @@ def computer_app(peer: ComputerPeer, tmp_path: Path) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         upstream = web.Application()
-        upstream.router.add_get("/_matrix/client/versions", peer.versions)
         upstream.router.add_get("/_matrix/federation/v1/openid/userinfo", peer.openid)
         upstream.router.add_get("/computer/stream", peer.stream)
         upstream.router.add_route("*", "/computer{tail:.*}", peer.http)

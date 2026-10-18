@@ -7606,7 +7606,6 @@ path = "mindroom.matrix_openid"
 depends_on = [
     "mindroom.bounded_bytes",
     "mindroom.constants",
-    "mindroom.logging_config",
     "mindroom.origins",
     "mindroom.requester_identity",
 ]

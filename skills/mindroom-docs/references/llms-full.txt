@@ -14487,7 +14487,7 @@ The portal asks the window that opened it for a Matrix OpenID token over `postMe
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
-When the homeserver advertises `io.mindroom.openid_audience`, MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, and the homeserver accepts only a token that Chat requested for that origin.
+MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL` as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
 MindRoom then sets the `__Host-mindroom_connections_session` cookie.
 The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`.
 The cookie is browser-wide, so a second sign-in in another tab replaces it.
@@ -19183,8 +19183,9 @@ Sign-in works as follows:
 If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 The request-by-request exchange is described in [Connections portal sign-in](https://docs.mindroom.chat/architecture/security-posture/#connections-portal-sign-in).
 
-With a binding homeserver, MindRoom requires `MINDROOM_PUBLIC_URL` and binds tokens to its normalized origin (lowercase scheme and host, no path, no default port).
-MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header; without a valid `MINDROOM_PUBLIC_URL`, sign-in answers 503.
+MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience.
+A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
+MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 until `MINDROOM_PUBLIC_URL` is set.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
 On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
 Roll out in this order: first MindRoom backends, then MindRoom Chat clients including the iOS app, and only then the homeserver release that binds tokens.
@@ -19273,7 +19274,7 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `404 Connections are not enabled` | Set `MINDROOM_CONNECTIONS_AGENT` |
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, and fix any invalid entry because one disables the whole list |
-| `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again |
+| `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
 | `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
 | `403 Connections require a configured private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent` |
 | `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |

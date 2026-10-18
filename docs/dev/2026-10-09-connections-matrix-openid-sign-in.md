@@ -39,9 +39,11 @@ MindRoom's Tuwunel fork (mindroom-ai/mindroom-tuwunel#105, behind its `mindroom_
 | unbound | A | 401 |
 | unbound | none | 200 |
 
-Chat requests a bound token by posting `{"io.mindroom.audience": "<backend origin>"}` to `request_token`, and the homeserver advertises `io.mindroom.openid_audience` in `unstable_features` while binding is on.
+Chat requests a bound token by posting `{"io.mindroom.audience": "<backend origin>"}` to `request_token`.
 MindRoom takes the audience only from `MINDROOM_PUBLIC_URL`, never from the request, because a replaying backend controls the `Host` header.
 Unbound tokens keep working for Element Call, LiveKit, provisioning pairing, and stock homeservers.
+MindRoom sends the audience on every verification instead of first checking the homeserver's `io.mindroom.openid_audience` capability, because the fork ignores it while binding is off and Synapse and upstream Tuwunel ignore unknown userinfo parameters.
+Rejected: probing `/versions` and caching the answer, the first version, which needed a retry for a stale cache and guarded only against a homeserver that refuses unknown parameters.
 The rollout order is an operator constraint and lives in [Matrix sign-in from MindRoom Chat](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat).
 
 ## Limitations

@@ -647,10 +647,9 @@ def test_portal_flow_callback_rejects_dashboard_login_only(signin: dict[str, Any
 
 @pytest.fixture
 def binding_homeserver(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> Iterator[ComputerPeer]:
-    """Verify tokens for real against a fake homeserver that binds OpenID tokens, served from a thread."""
-    peer = ComputerPeer(advertise_audience=True)
+    """Verify tokens for real against a fake homeserver that can bind OpenID tokens, served from a thread."""
+    peer = ComputerPeer()
     upstream = web.Application()
-    upstream.router.add_get("/_matrix/client/versions", peer.versions)
     upstream.router.add_get("/_matrix/federation/v1/openid/userinfo", peer.openid)
     runner = web.AppRunner(upstream, access_log=None)
     loop = asyncio.new_event_loop()
@@ -686,11 +685,14 @@ def test_sign_in_binds_the_token_to_the_configured_origin_not_the_host_header(
     assert binding_homeserver.userinfo_audiences == [PORTAL_ORIGIN]
 
 
-def test_sign_in_with_binding_requires_the_public_url(signin: dict[str, Any], binding_homeserver: ComputerPeer) -> None:
-    """Without MINDROOM_PUBLIC_URL the origin of the request is never trusted as the audience."""
+def test_sign_in_never_takes_the_audience_from_the_request(
+    signin: dict[str, Any],
+    binding_homeserver: ComputerPeer,
+) -> None:
+    """Without MINDROOM_PUBLIC_URL no audience is sent, so a token bound to the portal's origin is refused."""
+    binding_homeserver.expected_audience = PORTAL_ORIGIN
     _serve(signin, MINDROOM_PUBLIC_URL="")
     response = sign_in(signin["client"], "openid-secret")
-    assert response.status_code == 503
-    assert response.json() == {"detail": "Set MINDROOM_PUBLIC_URL to verify bound Matrix OpenID tokens."}
+    assert response.status_code == 401
     assert "set-cookie" not in response.headers
-    assert binding_homeserver.userinfo_audiences == []
+    assert binding_homeserver.userinfo_audiences == [None]

@@ -168,7 +168,7 @@ The portal asks the window that opened it for a Matrix OpenID token over `postMe
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
-When the homeserver advertises `io.mindroom.openid_audience`, MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, and the homeserver accepts only a token that Chat requested for that origin.
+MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL` as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
 MindRoom then sets the `__Host-mindroom_connections_session` cookie.
 The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`.
 The cookie is browser-wide, so a second sign-in in another tab replaces it.
