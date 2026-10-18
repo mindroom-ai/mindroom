@@ -218,7 +218,8 @@ async def compact_scope_history(
 ) -> CompactionOutcome | None:
     """Compact one scope by appending summary rows that fold its oldest runs, chunk by chunk.
 
-    ``progress`` receives each persisted chunk's progress and ``complete`` the outcome after the last stored chunk.
+    ``progress`` receives the progress after each stored chunk that leaves runs to replay, and ``complete`` the
+    outcome after the last stored chunk.
     """
     history_settings = summarizer.history_settings
     visible_runs = scope_visible_runs(session, scope)
