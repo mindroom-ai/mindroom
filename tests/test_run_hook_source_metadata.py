@@ -1,4 +1,4 @@
-"""Stored runs record the trusted hook source and the intent of the message that started them."""
+"""Stored runs record the trusted hook source and the intent of the message that started them, and where it was sent."""
 
 from __future__ import annotations
 
@@ -80,3 +80,25 @@ async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: P
     metadata = build.call_args.kwargs["matrix_run_metadata"]
     assert metadata[TURN_INTENT_RUN_METADATA_KEY] == TurnIntent.JOB_FOLLOW_UP
     assert metadata[HOOK_SOURCE_RUN_METADATA_KEY] == "automation/exploration"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["_process_and_respond", "_process_and_respond_streaming"])
+async def test_a_turn_stopped_before_its_run_starts_keeps_its_room(tmp_path: Path, method: str) -> None:
+    """The turn recorder starts with the turn's room and thread, so a turn that fails while it prepares names them."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    build_recorder = runner._build_turn_recorder
+    recorders = []
+
+    def build_then_stop(**kwargs: object) -> None:
+        recorders.append(build_recorder(**kwargs))
+        raise _BuiltRecorder
+
+    with (
+        patch.object(runner, "_build_turn_recorder", side_effect=build_then_stop),
+        pytest.raises(_BuiltRecorder),
+    ):
+        await getattr(runner, method)(_request(None, TurnIntent.USER_MESSAGE))
+
+    metadata = recorders[0].run_metadata
+    assert (metadata["room_id"], metadata["thread_id"]) == ("!room:localhost", "$thread")
