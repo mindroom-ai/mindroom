@@ -128,14 +128,6 @@ def classify_compaction_decision(  # noqa: PLR0911
     return decision(mode="none", reason="within_hard_budget", fitted_replay_tokens=current_history_tokens)
 
 
-def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) -> str | None:
-    """Return the user-facing error for an unavailable manual compaction request."""
-    description = describe_compaction_unavailability(plan)
-    if description is None:
-        return None
-    return f"Error: Compaction is unavailable for this scope because {description}."
-
-
 def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> str | None:
     """Return a short description for one unavailable text-compaction reason."""
     reason = plan.unavailable_reason
