@@ -816,65 +816,58 @@ def finalize_history_preparation(
                 reason=description,
             )
 
-    if prepared_scope_history.scope is None or prepared_scope_history.session is None:
-        replay_plan = configured_replay_plan(
-            history_settings=resolved_inputs.history_settings,
-            estimated_tokens=0,
-        )
-        prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
-        if pipeline_timing is not None:
-            pipeline_timing.mark("replay_plan_ready")
-            pipeline_timing.note(
-                compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
-                prepared_context_tokens=prepared_context_tokens,
-                fitted_replay_tokens=replay_plan.estimated_tokens,
-            )
-        return PreparedHistoryState(
-            compaction_outcomes=prepared_scope_history.compaction_outcomes,
-            replay_plan=replay_plan,
-            replays_persisted_history=False,
-            compaction_decision=prepared_scope_history.compaction_decision,
-            compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
-            prepared_context_tokens=prepared_context_tokens,
-        )
-
-    current_history_tokens = estimate_prompt_visible_history_tokens(
-        session=prepared_scope_history.session,
-        scope=prepared_scope_history.scope,
-        history_settings=resolved_inputs.history_settings,
-        native_route=native_history_route(prepared_scope_history.native_model),
-        replay_model=prepared_scope_history.native_model,
+    history_settings = resolved_inputs.history_settings
+    session, scope, native_model = (
+        prepared_scope_history.session,
+        prepared_scope_history.scope,
+        prepared_scope_history.native_model,
     )
-    if history_budget is not None and current_history_tokens > history_budget:
-        # Never trim a native checkpoint by run/message count. Fall back to the
-        # existing canonical guard if the final dynamic prompt exhausts its room.
-        if prepared_scope_history.native_model is not None:
-            prepared_scope_history.native_model.configure_native_compaction(threshold=None)
-        current_history_tokens = estimate_prompt_visible_history_tokens(
-            session=prepared_scope_history.session,
-            scope=prepared_scope_history.scope,
-            history_settings=resolved_inputs.history_settings,
-            replay_model=prepared_scope_history.native_model,
-        )
-    if history_budget is not None:
-        replay_plan = plan_replay_that_fits(
-            session=prepared_scope_history.session,
-            scope=prepared_scope_history.scope,
-            history_settings=resolved_inputs.history_settings,
-            available_history_budget=history_budget,
-            current_history_tokens=current_history_tokens,
-            replay_model=prepared_scope_history.native_model,
-        )
-        log_replay_plan(
-            replay_plan=replay_plan,
-            scope=prepared_scope_history.scope,
-            available_history_budget=history_budget,
-            current_history_tokens=current_history_tokens,
-        )
+    if scope is None or session is None:
+        replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
+        replays_persisted_history = False
     else:
-        replay_plan = configured_replay_plan(
-            history_settings=resolved_inputs.history_settings,
-            estimated_tokens=current_history_tokens,
+        current_history_tokens = estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+            native_route=native_history_route(native_model),
+            replay_model=native_model,
+        )
+        if history_budget is not None and current_history_tokens > history_budget:
+            # Never trim a native checkpoint by run/message count. Fall back to the
+            # existing canonical guard if the final dynamic prompt exhausts its room.
+            if native_model is not None:
+                native_model.configure_native_compaction(threshold=None)
+            current_history_tokens = estimate_prompt_visible_history_tokens(
+                session=session,
+                scope=scope,
+                history_settings=history_settings,
+                replay_model=native_model,
+            )
+        if history_budget is not None:
+            replay_plan = plan_replay_that_fits(
+                session=session,
+                scope=scope,
+                history_settings=history_settings,
+                available_history_budget=history_budget,
+                current_history_tokens=current_history_tokens,
+                replay_model=native_model,
+            )
+            log_replay_plan(
+                replay_plan=replay_plan,
+                scope=scope,
+                available_history_budget=history_budget,
+                current_history_tokens=current_history_tokens,
+            )
+        else:
+            replay_plan = configured_replay_plan(
+                history_settings=history_settings,
+                estimated_tokens=current_history_tokens,
+            )
+        replays_persisted_history = has_effective_persisted_replay(
+            session=session,
+            scope=scope,
+            replay_plan=replay_plan,
         )
 
     prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
@@ -888,11 +881,7 @@ def finalize_history_preparation(
     return PreparedHistoryState(
         compaction_outcomes=prepared_scope_history.compaction_outcomes,
         replay_plan=replay_plan,
-        replays_persisted_history=has_effective_persisted_replay(
-            session=prepared_scope_history.session,
-            scope=prepared_scope_history.scope,
-            replay_plan=replay_plan,
-        ),
+        replays_persisted_history=replays_persisted_history,
         compaction_decision=prepared_scope_history.compaction_decision,
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
