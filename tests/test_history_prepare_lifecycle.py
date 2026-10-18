@@ -1968,6 +1968,11 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
         ),
         # A compaction after that request folded runs it held; whole-second stamps cannot order a same-second one.
         pytest.param(
+            {"input_tokens": 8_000, "created_at": _SUMMARY_WRITTEN_AT - 1},
+            {"folded_run_ids": ("run-0",)},
+            id="summary-after-the-request",
+        ),
+        pytest.param(
             {"input_tokens": 8_000, "created_at": _SUMMARY_WRITTEN_AT},
             {"folded_run_ids": ("run-0",)},
             id="summary-in-the-same-second",

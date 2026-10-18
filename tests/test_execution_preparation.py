@@ -12,6 +12,7 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
+from agno.team import Team
 from agno.tools.function import Function
 
 from mindroom import execution_preparation
@@ -39,6 +40,7 @@ from mindroom.execution_preparation import (
     _build_unseen_context_messages,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
+    _prepare_bound_team_execution_context,
     _prepare_execution_context_common,
     _prepared_history_with_scheduled_limit,
     _PreparedExecutionContext,
@@ -47,7 +49,7 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
 )
 from mindroom.history.policy import resolve_history_execution_plan
-from mindroom.history.prompt_tokens import agent_static_token_estimator
+from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
     HistoryPolicy,
@@ -697,6 +699,43 @@ async def test_prepare_agent_execution_context_reuses_function_schema_processing
     )
     assert preparation_process_entrypoint_calls == 1
     assert prepare_scope_history.await_count == 1
+    non_prompt_tokens = agent_static_token_estimator(agent).non_prompt_tokens()
+    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == non_prompt_tokens
+
+
+@pytest.mark.asyncio
+async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_share(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Team history sized from the previous request takes off only the static estimate's system prompt and tools."""
+    member = Agent(id="test_agent", name="Test Agent", model=FakeModel(id="fake-model", provider="fake"))
+    team = Team(id="team_test", name="Test Team", members=[member], model=FakeModel(id="fake-model", provider="fake"))
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    prepare_bound_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", prepare_bound_scope_history)
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
+    )
+
+    await _prepare_bound_team_execution_context(
+        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+        scope_context=None,
+        agents=[member],
+        team=team,
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        team_name=None,
+        active_model_name=None,
+        active_context_window=None,
+    )
+
+    kwargs = prepare_bound_scope_history.await_args.kwargs
+    assert kwargs["non_prompt_tokens"] == team_static_token_estimator(team).non_prompt_tokens()
 
 
 @pytest.mark.asyncio
