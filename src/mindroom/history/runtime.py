@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.compaction import (
+    ConversationChangedError,
     SummaryModel,
     compact_running_turn,
     compact_scope_history,
@@ -556,12 +557,14 @@ async def _run_scope_compaction_with_lifecycle(
             await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
         raise
     except Exception as error:
-        _clear_forced_compaction_after_failure(
-            storage=storage,
-            session=session,
-            scope=scope,
-            state=state,
-        )
+        # A request the conversation outran stays, so the next reply compacts what the conversation holds then.
+        if not isinstance(error, ConversationChangedError):
+            _clear_forced_compaction_after_failure(
+                storage=storage,
+                session=session,
+                scope=scope,
+                state=state,
+            )
         status = _compaction_failure_status(error)
         await lifecycle.complete_failure(_failure_event(status, str(error) or type(error).__name__))
         logger.exception(

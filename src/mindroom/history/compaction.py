@@ -388,7 +388,7 @@ async def _rewrite_working_session_for_compaction(
             ),
         )
         if basis is None:
-            _log_conversation_changed(persisted_session.session_id, scope, total_compacted_run_count)
+            _stop_for_changed_conversation(session_id, scope, total_compacted_run_count)
             break
         summary_input, included_runs = await asyncio.to_thread(
             build_summary_input,
@@ -446,7 +446,7 @@ async def _rewrite_working_session_for_compaction(
             ),
         )
         if not appended:
-            _log_conversation_changed(session_id, scope, total_compacted_run_count)
+            _stop_for_changed_conversation(session_id, scope, total_compacted_run_count)
             break
         final_summary_text = generated_summary.summary
         working_session.summary = chunk_summary
@@ -487,8 +487,18 @@ async def _rewrite_working_session_for_compaction(
     )
 
 
-def _log_conversation_changed(session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
-    # Another writer changed this scope's history since the session loaded; earlier chunks stand.
+class ConversationChangedError(RuntimeError):
+    """Another writer changed a scope's history after compaction read it, so compaction stored nothing."""
+
+    def __init__(self) -> None:
+        super().__init__("The conversation changed during compaction.")
+
+
+def _stop_for_changed_conversation(session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
+    """Stop compacting after another writer changed the scope's history; with nothing stored yet, compaction failed."""
+    if compacted_run_count == 0:
+        raise ConversationChangedError
+    # Earlier chunks stand.
     logger.warning(
         "Compaction stopped because the conversation changed",
         session_id=session_id,
@@ -640,8 +650,7 @@ async def compact_running_turn(
         return appended
 
     if not await run_coroutine_until_complete(commit()):
-        msg = "The conversation changed during compaction."
-        raise RuntimeError(msg)
+        raise ConversationChangedError
     after_tokens = estimate_text_tokens(summary)
     outcome = CompactionOutcome(
         mode="auto",
