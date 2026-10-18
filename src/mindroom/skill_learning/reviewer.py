@@ -263,9 +263,10 @@ async def _replay(
     )
     if session is None:
         return None
+    messages = await asyncio.to_thread(conversation_messages, session)
     transcript = await asyncio.to_thread(
         render_transcript,
-        conversation_messages(session),
+        messages,
         summary=session.summary.summary if session.summary is not None else None,
         budget_chars=_review_input_budget_tokens(config, model_name) * _CHARS_PER_TOKEN // _CONVERSATION_BUDGET_SHARE,
     )

@@ -113,6 +113,8 @@ def _run(
     created_at: int,
     status: RunStatus = RunStatus.completed,
     agent: str = "mind",
+    *,
+    matrix: bool = True,
 ) -> RunOutput:
     return RunOutput(
         run_id=run_id,
@@ -129,7 +131,8 @@ def _run(
             ),
         ],
         metadata={
-            "room_id": "!room:x",
+            # A turn through the OpenAI-compatible API names no room, so it is not a Matrix turn.
+            **({"room_id": "!room:x"} if matrix else {}),
             "thread_id": session_id.rsplit(":", 1)[-1],
             "requester_id": "@alice:x",
             MATRIX_EVENT_ID_METADATA_KEY: f"$event-{run_id}",
@@ -152,6 +155,7 @@ def _seed(
     updated_at: int | None = None,
     agent: str = "mind",
     spacing: int = 1,
+    matrix: bool = True,
 ) -> None:
     """Store a conversation whose runs start at ``at``, ``spacing`` seconds apart, last updated after its last run."""
     storage = create_session_storage(agent, config, paths, execution_identity=None)
@@ -163,6 +167,7 @@ def _seed(
                 at + index * spacing,
                 RunStatus.paused if run_id in paused else RunStatus.completed,
                 agent,
+                matrix=matrix,
             )
             for index, run_id in enumerate(run_ids)
         ]
@@ -598,6 +603,138 @@ async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_conversation_whose_redactions_cannot_be_checked_does_not_block_the_agents_others(
+    tmp_path: Path,
+) -> None:
+    """A failing redaction lookup is reported for its conversation, and the agent's later conversations are added."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["b1"], at=T0 - 5)
+    _seed(config, paths, "!room:x:$t2", ["g1"])
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, room_id
+        if "$event-b1" in event_ids:
+            msg = "event journal unavailable"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$t2"]
+    assert knowledge_graph_failure() is not None
+    # Once the lookup works again, the conversation is added after its retry wait.
+    await _worker(config, paths, store)._run_cycle(config, now=T0 + 100)
+    assert store.sessions() == ["!room:x:$t2", "!room:x:$t1"]
+
+
+@pytest.mark.asyncio
+async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_path: Path) -> None:
+    """A conversation with nothing to ingest, such as one through the OpenAI-compatible API, leaves the pass to others."""
+    config, paths, store = _config(max_sessions_per_cycle=1), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "api-1", ["x1"], at=T0 - 5, matrix=False)
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    assert store.sessions() == ["!room:x:$t1"]
+
+    # A pass that only sees such a conversation still records it, so it is not read again until it changes.
+    _seed(config, paths, "api-2", ["x2"], at=T0 + 15, matrix=False)
+    await worker._run_cycle(config, now=T0 + 20)
+    with patch.object(ingestion, "session_runs", wraps=ingestion.session_runs) as read:
+        await worker._run_cycle(config, now=T0 + 30)
+    read.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["redaction check", "unreadable"])
+async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_path: Path, failure: str) -> None:
+    """A pass that adds others but never reaches a failed conversation, waiting for its retry, keeps health failing."""
+    config, paths, store = _config(max_sessions_per_cycle=1), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["a1"], at=T0 - 5)
+    _seed(config, paths, "!room:x:$t2", ["b1"])
+    failing = True
+    real = ingestion.session_runs
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, room_id
+        if failure == "redaction check" and failing and "$event-a1" in event_ids:
+            msg = "event journal unavailable"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    def runs(storage: object, session_id: str) -> list[RunOutput]:
+        if failure == "unreadable" and failing and session_id == "!room:x:$t1":
+            msg = "corrupt session row"
+            raise ValueError(msg)
+        return real(storage, session_id)
+
+    worker = _worker(config, paths, store, redacted)
+    with patch.object(ingestion, "session_runs", runs):
+        await worker._run_cycle(config, now=T0 + 10)
+        # A new turn sorts the failed conversation last, so the next passes spend their budget before reaching it.
+        _seed(config, paths, "!room:x:$t1", ["a1", "a2"], at=T0 - 5, updated_at=T0 + 25)
+        _seed(config, paths, "!room:x:$t3", ["c1"], at=T0 + 12)
+        for now in (T0 + 30, T0 + 31):
+            await worker._run_cycle(config, now=now)
+        assert store.sessions() == ["!room:x:$t2", "!room:x:$t3"]
+        assert knowledge_graph_failure() is not None
+
+        failing = False
+        # Fixed, it still waits out its retry before it is tried again.
+        await worker._run_cycle(config, now=T0 + 40)
+        assert store.sessions() == ["!room:x:$t2", "!room:x:$t3"]
+        await worker._run_cycle(config, now=T0 + 100)
+    assert store.sessions() == ["!room:x:$t2", "!room:x:$t3", "!room:x:$t1"]
+    assert knowledge_graph_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_redaction_check_leaves_the_pass_to_other_agents(tmp_path: Path) -> None:
+    """A conversation whose redaction check fails takes no place in the pass, so the next agent is still ingested."""
+    config = _config(max_sessions_per_cycle=1)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$m1", ["rm1"])
+    _seed(config, paths, "!room:x:$p1", ["rp1"], agent="pal")
+
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del room_id, event_ids
+        if agent_name == "mind":
+            msg = "event journal unavailable"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$p1"]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_failed_keeps_health_failing_while_passes_do_not_reach_it(tmp_path: Path) -> None:
+    """Another agent's clean passes do not clear the failure of an agent whose conversations could not be listed."""
+    config = _config(max_sessions_per_cycle=1)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    for thread in ("$m1", "$m2", "$m3"):
+        _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"])
+    real = ingestion.updated_sessions
+
+    def listed(storage: object, agent_name: str, *, since: int) -> list[tuple[str, int]]:
+        if agent_name == "pal":
+            msg = "unreadable session store"
+            raise ValueError(msg)
+        return real(storage, agent_name, since=since)
+
+    worker = _worker(config, paths, store)
+    with patch.object(ingestion, "updated_sessions", listed):
+        for now in (T0 + 10, T0 + 11, T0 + 12):
+            await worker._run_cycle(config, now=now)
+
+    assert len(store.sessions()) == 3
+    assert knowledge_graph_failure() is not None
+
+
+@pytest.mark.asyncio
 async def test_a_busy_agent_does_not_take_every_pass(tmp_path: Path) -> None:
     """Passes take turns starting with each agent, so one with a long backlog cannot starve the others."""
     config = _config(max_sessions_per_cycle=1)
@@ -661,6 +798,39 @@ async def test_health_keeps_failing_while_a_conversation_waits_to_retry(tmp_path
 
     assert store.sessions() == ["!room:x:$good"]
     assert knowledge_graph_failure() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failing_conversation_left_without_matrix_turns_stops_keeping_health_failing(tmp_path: Path) -> None:
+    """A conversation whose failing turn is gone has nothing left to retry, so the next clean pass clears health."""
+    config, paths = _config(), _paths(tmp_path)
+    store = _FakeStore(failing={"!room:x:$t1"})
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    assert knowledge_graph_failure() is not None
+
+    _seed(config, paths, "!room:x:$t1", ["r1"], updated_at=T0 + 4000, matrix=False)
+    await worker._run_cycle(config, now=T0 + 5000)
+
+    assert store.episodes == []
+    assert knowledge_graph_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_first_recorded_empty_still_starts_after_the_backfill_window(tmp_path: Path) -> None:
+    """Turns from before a new graph's backfill window stay out, even when their conversation was first seen empty."""
+    config, paths, store = _config(backfill_days=0), _paths(tmp_path), _FakeStore()
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+    # A turn that has not finished, such as one still running when the graph started, is not a Matrix turn yet.
+    _seed(config, paths, "!room:x:$t1", ["old"], at=T0 + 5, updated_at=T0 + 20, matrix=False)
+    await worker._run_cycle(config, now=T0 + 30)
+
+    _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 + 5, spacing=35)
+    await worker._run_cycle(config, now=T0 + 60)
+
+    assert _answers(store) == ["agent mind: answer new"]
 
 
 @pytest.mark.asyncio

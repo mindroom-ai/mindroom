@@ -89,6 +89,22 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutput
 
 
+def _hold_job_outcomes(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Hold every job's outcome until the returned event is set, so a released call returns its handle first.
+
+    A job that finished before its caller's wait looked would return its result inline instead.
+    """
+    reply_returned = threading.Event()
+    encode = agno_execution.encode_result_payload
+
+    def held(payload: ToolResultPayload) -> dict[str, object]:
+        assert reply_returned.wait(JOB_TEST_TIMEOUT)
+        return encode(payload)
+
+    monkeypatch.setattr(agno_execution, "encode_result_payload", held)
+    return reply_returned
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["state", "stream", "control"])
 async def test_large_outcome_encoding_leaves_event_loop_free(
@@ -228,10 +244,12 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
 @pytest.mark.parametrize(("managed", "background_after"), [(False, None), (True, None), (True, 0)])
 async def test_registered_sync_tool_completes_through_sdk_dispatch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     managed: bool,
     background_after: float | None,
 ) -> None:
     """The registered sync hook bridge must not give its job a foreign-loop completion task."""
+    reply_returned = _hold_job_outcomes(monkeypatch) if background_after == 0 else threading.Event()
     (tmp_path / "input.txt").write_text("registered sync result\n")
     paths = _runtime_paths(tmp_path)
     config = Config(
@@ -275,6 +293,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
                 if managed:
                     jobs = await runtime.list_jobs(owner=owner, depth=0)
                     assert len(jobs) == 1
+                    reply_returned.set()
                     waited = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
                     assert waited.job.status == "completed", waited.job.result
                     assert "registered sync result" in waited.job.result
@@ -289,8 +308,13 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("managed", [False, True])
-async def test_failed_shell_command_states_exit_code_inline_and_as_job(tmp_path: Path, managed: bool) -> None:
+async def test_failed_shell_command_states_exit_code_inline_and_as_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    managed: bool,
+) -> None:
     """A non-zero exit is the command's returned result, so its job completes; its exit code leads the summary."""
+    reply_returned = _hold_job_outcomes(monkeypatch) if managed else threading.Event()
     paths = _runtime_paths(tmp_path)
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
@@ -336,6 +360,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(tmp_path:
                     assert tool.result.splitlines() == expected
                     return
                 job_id = json.loads(tool.result)["job_id"]
+                reply_returned.set()
                 waited = await asyncio.wait_for(runtime.wait(job_id, owner=owner, depth=0), JOB_TEST_TIMEOUT)
                 listed = job_summary(waited.job)
                 assert listed["status"] == "completed"
@@ -1361,8 +1386,13 @@ async def test_a_call_that_ran_never_reads_as_one_that_did_not(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["waited", "released", "stopped"])
-async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path, case: str) -> None:
+async def test_reply_records_a_managed_call_before_its_job_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
     """A restart's account names a job's call as it names an inline one, and a Stop committed first refuses it."""
+    reply_returned = _hold_job_outcomes(monkeypatch) if case == "released" else threading.Event()
     ran: list[str] = []
 
     async def write_note(text: str) -> str:
@@ -1405,6 +1435,7 @@ async def test_reply_records_a_managed_call_before_its_job_starts(tmp_path: Path
         if case == "released":
             handle = json.loads(str(result))
             assert handle["tool"] == "write_note"
+            reply_returned.set()
             await wait_for_status(runtime, handle["job_id"], "completed")
         else:
             assert result == "noted hello"

@@ -3341,10 +3341,10 @@ visibility = ["mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory.auto_flush"
 depends_on = [
-    "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.durable_write",
     "mindroom.helper_usage",
+    "mindroom.history.conversation_text",
     "mindroom.history.session_runs",
     "mindroom.session_storage.agent_storage",
     "mindroom.logging_config",
@@ -7554,6 +7554,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.knowledge_graph.episodes",
+    "mindroom.memory.auto_flush",
     "mindroom.skill_learning.transcript",
 ]
 
@@ -8964,7 +8965,6 @@ visibility = [
     "mindroom.knowledge_graph.episodes",
     "mindroom.automations.exploration",
     "mindroom.history.conversation_text",
-    "mindroom.memory.auto_flush",
 ]
 
 [[modules]]
