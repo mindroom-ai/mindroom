@@ -1011,7 +1011,6 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
     # The summary model's 32,000 window, half of it reserved, minus prompt overhead and a 10% margin.
     assert execution_plan.summary_input_budget_tokens == 10_800
     assert execution_plan.replay_window_tokens == 20_000
-    assert execution_plan.summary_input_budget_tokens is not None
     assert execution_plan.trigger_threshold_tokens == 16_000
     assert execution_plan.replay_budget_tokens == 8_000
     assert execution_plan.hard_replay_budget_tokens == 8_000

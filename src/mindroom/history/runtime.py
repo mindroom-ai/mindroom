@@ -174,7 +174,7 @@ def note_prepared_history_timing(
 def _clear_forced_compaction_after_failure(
     *,
     storage: BaseDb,
-    session: AgentSession | TeamSession | None,
+    session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
 ) -> None:
@@ -186,7 +186,7 @@ def _clear_forced_compaction_after_failure(
     compaction.py), which refuses to clear when a concurrent write moved the
     durable row, so a fresh manual request placed mid-run survives.
     """
-    if session is None or not state.force_compact_before_next_run:
+    if not state.force_compact_before_next_run:
         return
     update_scope_state_on_latest(
         storage,

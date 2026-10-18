@@ -213,7 +213,7 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    replay_model: NativeCompactionModel | None = None,
+    replay_model: NativeCompactionModel | None,
 ) -> CompactionOutcome | None:
     """Compact one scope by appending summary rows that fold its oldest runs, chunk by chunk.
 

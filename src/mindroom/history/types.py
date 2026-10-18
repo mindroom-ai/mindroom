@@ -13,7 +13,7 @@ _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
-_CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
+_CompactionLifecycleStatus = Literal["failed", "timeout"]
 CompactionAvailabilityReason = Literal[
     "no_context_window",
     "non_positive_summary_input_budget",

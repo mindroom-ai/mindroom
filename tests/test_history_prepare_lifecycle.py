@@ -236,7 +236,6 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
             compaction_lifecycle=lifecycle,
         )
 
-    assert prepared.compaction_reply_outcome == "success"
     assert completed_outcome(lifecycle).lifecycle_notice_event_id == "$compaction"
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_reply_outcome == "success"
