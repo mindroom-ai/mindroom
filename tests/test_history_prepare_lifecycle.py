@@ -29,7 +29,11 @@ from mindroom.history.runtime import (
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
-from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    open_resolved_scope_session_context,
+    resolve_history_scope,
+)
 from mindroom.history.storage import (
     read_scope_state,
     set_force_compaction_state,
@@ -81,8 +85,8 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
     config, runtime_paths = _make_config(tmp_path)
     agent = _agent()
     agent.team_id = "team-123"
-    with open_scope_session_context(
-        agent=agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(agent),
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,

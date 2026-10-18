@@ -25,7 +25,11 @@ from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history.manual import request_compaction_before_next_reply
-from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    open_resolved_scope_session_context,
+    resolve_history_scope,
+)
 from mindroom.history.storage import read_scope_state, set_force_compaction_state
 from mindroom.history.types import (
     CompactionLifecycleStart,
@@ -149,8 +153,8 @@ def _open_scope_context(
     execution_identity: ToolExecutionIdentity | None = None,
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext]:
-    with open_scope_session_context(
-        agent=agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(agent),
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -308,7 +312,7 @@ async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path:
     )
 
     with patch(
-        "mindroom.history.manual.open_scope_session_context",
+        "mindroom.history.manual.open_resolved_scope_session_context",
         return_value=_patched_scope_context(scope_context),
     ):
         result = await tool.compact_context(agent=_agent())
@@ -337,7 +341,7 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
     )
 
     with patch(
-        "mindroom.history.manual.open_scope_session_context",
+        "mindroom.history.manual.open_resolved_scope_session_context",
         return_value=_patched_scope_context(scope_context),
     ):
         result = await tool.compact_context(agent=_agent())

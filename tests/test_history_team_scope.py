@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import (
     ScopeSessionContext,
     open_bound_scope_session_context,
+    open_resolved_scope_session_context,
     resolve_bound_team_scope_context,
 )
 from mindroom.history.types import (
@@ -150,6 +152,44 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
     assert team_static_token_estimator(team).estimate("Current prompt") == expected_static_prompt_tokens
     assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == expected_static_prompt_tokens
+
+
+def test_scope_session_context_closes_its_storage_on_exit_and_on_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    closed: list[object] = []
+    monkeypatch.setattr("mindroom.history.session_context.close_execution_storage", closed.append)
+
+    def open_context() -> AbstractContextManager[ScopeSessionContext | None]:
+        return open_resolved_scope_session_context(
+            agent_name="test_agent",
+            scope=HistoryScope(kind="team", scope_id="team-1"),
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        )
+
+    with open_context() as scope_context:
+        assert scope_context is not None
+        assert closed == []
+    assert closed == [scope_context.storage]
+    opened: list[ScopeSessionContext] = []
+
+    def fail_inside() -> None:
+        with open_context() as failed_context:
+            assert failed_context is not None
+            opened.append(failed_context)
+            message = "reply failed"
+            raise RuntimeError(message)
+
+    with pytest.raises(RuntimeError, match="reply failed"):
+        fail_inside()
+    assert closed == [scope_context.storage, opened[0].storage]
+    for storage in (scope_context.storage, opened[0].storage):
+        storage.close()
 
 
 def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path) -> None:

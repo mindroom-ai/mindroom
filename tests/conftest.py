@@ -107,7 +107,11 @@ from mindroom.history.runtime import (
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
-from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context, resolve_history_scope
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    open_resolved_scope_session_context,
+    resolve_history_scope,
+)
 from mindroom.history.types import (
     CompactionLifecycle,
     HistoryScope,
@@ -559,8 +563,7 @@ async def prepare_history_for_run_for_test(
         )
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     else:
-        with open_scope_session_context(
-            agent=agent,
+        with open_resolved_scope_session_context(
             agent_name=agent_name,
             session_id=session_id,
             runtime_paths=runtime_paths,

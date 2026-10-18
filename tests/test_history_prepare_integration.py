@@ -27,7 +27,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history.prompt_tokens import agent_static_token_estimator
 from mindroom.history.replay import is_compaction_summary
-from mindroom.history.session_context import open_scope_session_context
+from mindroom.history.session_context import open_resolved_scope_session_context, resolve_history_scope
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     update_scope_seen_event_ids,
@@ -607,8 +607,8 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
     ]
 
     with (
-        open_scope_session_context(
-            agent=live_agent,
+        open_resolved_scope_session_context(
+            scope=resolve_history_scope(live_agent),
             agent_name="test_agent",
             session_id="session-1",
             runtime_paths=runtime_paths,
@@ -754,8 +754,8 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
         reading_threads.append(threading.get_ident())
         return read_scope_seen_event_ids(*args)  # type: ignore[arg-type]
 
-    with open_scope_session_context(
-        agent=live_agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(live_agent),
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -796,8 +796,8 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     recording_model = RecordingModel(id="recording-model", provider="fake")
     live_agent = _agent(model=recording_model, db=storage, num_history_runs=1)
 
-    with open_scope_session_context(
-        agent=live_agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(live_agent),
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,

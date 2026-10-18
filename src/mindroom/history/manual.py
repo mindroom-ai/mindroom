@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
-from mindroom.history.session_context import open_scope_session_context
+from mindroom.history.session_context import open_resolved_scope_session_context, resolve_history_scope
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, set_force_compaction_state
 from mindroom.logging_config import get_logger
 
@@ -48,8 +48,8 @@ def request_compaction_before_next_reply(
     if session_id is None:
         return _ManualCompactionRequestResult("Error: No active session available. Cannot determine session.")
 
-    with open_scope_session_context(
-        agent=agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(agent),
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
