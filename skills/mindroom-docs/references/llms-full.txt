@@ -14232,7 +14232,7 @@ Standalone installs identify the dashboard user through `MINDROOM_OWNER_USER_ID`
 Room-independent access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply, because a browser request has no current room or team.
 Managing a personal connection grants no general dashboard access and no authority over shared credentials.
 With the Connections portal enabled, eligible users manage their connections there, and under trusted upstream auth ordinary dashboard routes require administrator authority.
-A portal session from Matrix sign-in covers only the portal, the OAuth callback for flows it starts, and the OAuth success page, so it never reaches dashboard routes.
+A portal session from Matrix sign-in covers the portal, the OAuth callback for flows it starts, and the OAuth success page, and reaches dashboard routes only for an administrator whose token the homeserver bound to this deployment ([Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat)).
 Unauthorized connect, authorize, status, disconnect, and callback requests return HTTP 403 before any credential is exposed or changed.
 See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-credential-authority) for administrators and credential managers.
 
@@ -14750,7 +14750,6 @@ Under binding, a token that verified with this deployment's audience was request
 MindRoom verifies the token a second time after reading `/versions`, because `/versions` shows only the setting after the first verification: if binding came on in between, the second verification refuses the unbound token, and if it went off, the first one already proved the token bound to this deployment.
 The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.
 Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
-Signing out of the dashboard deletes the cookie.
 
 ## Known gaps
 
@@ -19395,7 +19394,7 @@ agents:
 Users sign in to the portal in one of two ways, and both can be enabled together:
 
 - **Trusted upstream:** [strict JWT mode](#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
-- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway and leaves dashboard authentication unchanged.
+- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway, and the dashboard keeps its own authentication except for administrators on a homeserver that binds tokens.
 
 Portal API requests without a valid sign-in return `401`.
 Connect and disconnect requests also require `MINDROOM_PUBLIC_URL`, or the request URL when unset, to be an HTTPS origin, and the browser's `Origin` header to match it.
@@ -19474,7 +19473,6 @@ Without binding, a token could have been replayed from another deployment on the
 So the session reaches the dashboard only when it was started while the homeserver bound tokens and `MINDROOM_PUBLIC_URL` was set, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
 The Connections header links the dashboard for administrators only.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
-Signing out of the dashboard also ends this session.
 Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 `GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
 

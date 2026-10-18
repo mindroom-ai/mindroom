@@ -36,6 +36,11 @@ class MatrixOpenIDError(Exception):
         super().__init__(detail)
 
 
+def openid_audience(paths: RuntimePaths) -> str | None:
+    """Return the audience MindRoom asks the homeserver to enforce: the normalized origin of `MINDROOM_PUBLIC_URL`."""
+    return normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL"))
+
+
 async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
     """Verify only at the configured homeserver with no redirects or URL logging.
 
@@ -48,7 +53,7 @@ async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) ->
         raise MatrixOpenIDError(401, "OpenID server does not match the configured Matrix server.")
     url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/federation/v1/openid/userinfo"
     params = {"access_token": token.access_token}
-    audience = normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL"))
+    audience = openid_audience(paths)
     if audience is not None:
         params[_AUDIENCE_PARAM] = audience
     try:

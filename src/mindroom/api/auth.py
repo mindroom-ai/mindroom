@@ -1293,9 +1293,8 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
 
 @router.delete("/api/auth/session", include_in_schema=False)
 async def clear_auth_session(response: Response) -> dict[str, bool]:
-    """Clear the standalone dashboard auth cookie and the portal session that may have opened the dashboard."""
+    """Clear the standalone dashboard auth cookie."""
     response.delete_cookie(key=_STANDALONE_AUTH_COOKIE_NAME, path="/")
-    response.delete_cookie(key=CONNECTIONS_SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
     return {"success": True}
 
 

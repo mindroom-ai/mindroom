@@ -28,9 +28,10 @@ from mindroom.matrix_openid import (
     MatrixOpenIDError,
     MatrixOpenIDToken,
     homeserver_binds_openid_audience,
+    openid_audience,
     verify_matrix_openid,
 )
-from mindroom.origins import allowed_client_origins, normalized_origin
+from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV
 
 if TYPE_CHECKING:
@@ -100,10 +101,7 @@ async def _dashboard_allowed(
     homeserver. `/versions` shows only that binding was on after the first verification, so the token is verified
     again afterwards: a binding switch between the requests cannot then pass an unbound token in either direction.
     """
-    if (
-        not is_administrator(matrix_user_id, snapshot)
-        or normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL")) is None
-    ):
+    if not is_administrator(matrix_user_id, snapshot) or openid_audience(paths) is None:
         return False
     if not await homeserver_binds_openid_audience(paths):
         return False

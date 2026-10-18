@@ -182,7 +182,6 @@ Under binding, a token that verified with this deployment's audience was request
 MindRoom verifies the token a second time after reading `/versions`, because `/versions` shows only the setting after the first verification: if binding came on in between, the second verification refuses the unbound token, and if it went off, the first one already proved the token bound to this deployment.
 The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.
 Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
-Signing out of the dashboard deletes the cookie.
 
 ## Known gaps
 

@@ -106,7 +106,7 @@ agents:
 Users sign in to the portal in one of two ways, and both can be enabled together:
 
 - **Trusted upstream:** [strict JWT mode](#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
-- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway and leaves dashboard authentication unchanged.
+- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway, and the dashboard keeps its own authentication except for administrators on a homeserver that binds tokens.
 
 Portal API requests without a valid sign-in return `401`.
 Connect and disconnect requests also require `MINDROOM_PUBLIC_URL`, or the request URL when unset, to be an HTTPS origin, and the browser's `Origin` header to match it.
@@ -185,7 +185,6 @@ Without binding, a token could have been replayed from another deployment on the
 So the session reaches the dashboard only when it was started while the homeserver bound tokens and `MINDROOM_PUBLIC_URL` was set, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
 The Connections header links the dashboard for administrators only.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
-Signing out of the dashboard also ends this session.
 Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 `GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
 

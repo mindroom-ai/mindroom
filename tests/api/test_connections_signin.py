@@ -511,7 +511,7 @@ def test_dashboard_session_ignored_in_platform_mode(signin: dict[str, Any], monk
 
 
 def test_dashboard_session_cannot_finish_api_key_started_flow(signin: dict[str, Any]) -> None:
-    """A flow started with the API key finishes only as the API-key identity, even beside an admin session."""
+    """A flow started with the API key cannot be finished by an administrator's dashboard session."""
     dashboard = _dashboard_client()
     state = _dashboard_connect_state(dashboard)
     portal = _admin_dashboard_client(signin)
@@ -535,18 +535,6 @@ def test_dashboard_session_mutation_requires_same_origin(signin: dict[str, Any])
     connect = partial(client.post, "/api/oauth/google_drive/connect", params={"agent_name": "personal"})
     assert connect(headers={"Origin": "https://evil.example"}).status_code == 403
     assert connect(headers={"Origin": PORTAL_ORIGIN}).status_code == 200
-
-
-def test_dashboard_sign_out_clears_portal_session(signin: dict[str, Any]) -> None:
-    """Signing out of the dashboard also ends the portal session that opened it."""
-    client = _admin_dashboard_client(signin)
-    response = client.delete("/api/auth/session", headers={"Origin": PORTAL_ORIGIN})
-    assert response.status_code == 200
-    cleared = response.headers.get_list("set-cookie")
-    assert any(cookie.startswith("mindroom_api_key=") for cookie in cleared)
-    assert any(cookie.startswith(f"{CONNECTIONS_SESSION_COOKIE}=") and "Secure" in cookie for cookie in cleared)
-    assert client.get("/api/connections/session").status_code == 401
-    assert client.get("/api/config/agents").status_code == 401
 
 
 @pytest.mark.parametrize(
