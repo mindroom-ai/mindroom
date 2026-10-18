@@ -104,13 +104,6 @@ async def _dial(
     return reader, writer
 
 
-def _lookup_finished(lookup_slots: asyncio.Semaphore, lookup: asyncio.Future[list[_IPAddress]]) -> None:
-    lookup_slots.release()
-    if not lookup.cancelled():
-        # The connection that asked may have stopped waiting for the answer.
-        lookup.exception()
-
-
 async def open_upstream(
     host: str,
     port: int,
@@ -122,7 +115,7 @@ async def open_upstream(
     """Open a validated TCP connection to an upstream host.
 
     Resolution runs on the broker's lookup threads, holding one of
-    `lookup_slots` until its thread returns. The connection
+    `lookup_slots` while it resolves. The connection
     dials the validated IP address (never the hostname again), trying addresses
     in order with a 1s per-attempt timeout except the last, all within the
     policy's connect_timeout. When the policy names an operator proxy for the
@@ -137,22 +130,19 @@ async def open_upstream(
         ssl.SSLError: TLS handshake failed (when ssl_context is provided).
 
     """
-    await lookup_slots.acquire()
-    lookup = asyncio.get_running_loop().run_in_executor(
-        _LOOKUP_EXECUTOR,
-        partial(
-            validated_connect_addresses,
-            host,
-            port=port,
-            allow_private_networks=policy.allow_private_networks,
-            allow_loopback=policy.allow_loopback,
-            private_networks=policy.private_networks,
-        ),
-    )
-    lookup.add_done_callback(partial(_lookup_finished, lookup_slots))
     try:
-        # A resolver can outlive the connection waiting on it; the slot stays taken until the lookup ends.
-        addresses = await asyncio.shield(lookup)
+        async with lookup_slots:
+            addresses = await asyncio.get_running_loop().run_in_executor(
+                _LOOKUP_EXECUTOR,
+                partial(
+                    validated_connect_addresses,
+                    host,
+                    port=port,
+                    allow_private_networks=policy.allow_private_networks,
+                    allow_loopback=policy.allow_loopback,
+                    private_networks=policy.private_networks,
+                ),
+            )
     except ServerFetchUrlError as exc:
         # An unresolvable name is a failed connect, not a policy refusal.
         if exc.reason == "dns_resolution_failed":
