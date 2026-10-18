@@ -23,7 +23,7 @@ from mindroom.api.connections_session_cookie import (
     issue_connections_session,
     read_connections_session,
 )
-from mindroom.matrix_openid import MatrixOpenIDError, verify_matrix_openid
+from mindroom.matrix_openid import MatrixOpenIDError, homeserver_binds_openid_audience, verify_matrix_openid
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
     _trusted_upstream_jwks,
@@ -861,3 +861,53 @@ def test_sign_in_never_takes_the_audience_from_the_request(
     assert response.status_code == 401
     assert "set-cookie" not in response.headers
     assert binding_homeserver.userinfo_audiences == [None]
+
+
+def test_binding_switched_on_during_sign_in_grants_no_dashboard(
+    signin: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unbound token verified just before the homeserver starts binding never becomes a dashboard session.
+
+    The fake homeserver accepts the unbound token while binding is off and switches binding on as `/versions` is read,
+    which is the replay window a separate capability check alone would leave open.
+    """
+    binding = {"on": False}
+
+    async def userinfo(request: web.Request) -> web.Response:
+        if binding["on"] and request.query.get("io.mindroom.audience") is not None:
+            return web.json_response({"errcode": "M_UNKNOWN_TOKEN"}, status=401)
+        return web.json_response({"sub": "@alice:example.org"})
+
+    async def versions(_request: web.Request) -> web.Response:
+        binding["on"] = True
+        return web.json_response({"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": True}})
+
+    upstream = web.Application()
+    upstream.router.add_get("/_matrix/federation/v1/openid/userinfo", userinfo)
+    upstream.router.add_get("/_matrix/client/versions", versions)
+    runner = web.AppRunner(upstream, access_log=None)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    def run(coroutine: Coroutine[Any, Any, Any]) -> None:
+        asyncio.run_coroutine_threadsafe(coroutine, loop).result(timeout=10)
+
+    run(runner.setup())
+    run(web.TCPSite(runner, "127.0.0.1", 0).start())
+    try:
+        monkeypatch.setattr(connections_session, "verify_matrix_openid", verify_matrix_openid)
+        monkeypatch.setattr(connections_session, "homeserver_binds_openid_audience", homeserver_binds_openid_audience)
+        homeserver = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        _with_admin(signin, MATRIX_HOMESERVER=homeserver, MATRIX_SERVER_NAME="example.org")
+
+        assert sign_in(signin["client"], "alice").status_code == 200
+        assert binding["on"] is True
+        assert _session_of(signin["client"]) == ("@alice:example.org", False)
+        assert signin["client"].get("/api/config/agents").status_code == 401
+    finally:
+        run(runner.cleanup())
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=10)
+        loop.close()

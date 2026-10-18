@@ -88,6 +88,31 @@ def _portal_paths(request: Request) -> RuntimePaths:
 _PortalPaths = Annotated[RuntimePaths, Depends(_portal_paths)]
 
 
+async def _dashboard_allowed(
+    openid_token: MatrixOpenIDToken,
+    matrix_user_id: str,
+    snapshot: config_lifecycle.ApiSnapshot,
+    paths: RuntimePaths,
+) -> bool:
+    """Return whether this sign-in may open the dashboard: an administrator whose token is bound to this deployment.
+
+    The dashboard is full control, and an unbound token could have been replayed from another deployment on the same
+    homeserver. `/versions` shows only that binding was on after the first verification, so the token is verified
+    again afterwards: a binding switch between the requests cannot then pass an unbound token in either direction.
+    """
+    if (
+        not is_administrator(matrix_user_id, snapshot)
+        or normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL")) is None
+    ):
+        return False
+    if not await homeserver_binds_openid_audience(paths):
+        return False
+    try:
+        return await verify_matrix_openid(openid_token, paths) == matrix_user_id
+    except MatrixOpenIDError:
+        return False
+
+
 @router.post("")
 async def sign_in(body: _SignIn, request: Request, response: Response, paths: _PortalPaths) -> _SignedIn:
     """Trust a Matrix OpenID token only from an allowlisted Chat origin, then start a portal session."""
@@ -105,14 +130,11 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     user = resolve_connection_user(snapshot, matrix_user_id, membership_index=app_state.agent_reply_memberships)
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
-    # The dashboard is full control, so only an administrator whose token the homeserver bound to this
-    # deployment's origin may open it; an unbound token could have been replayed from another deployment.
-    dashboard = (
-        is_administrator(matrix_user_id, snapshot)
-        and normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL")) is not None
-        and await homeserver_binds_openid_audience(paths)
+    token = issue_connections_session(
+        matrix_user_id,
+        now=time.time(),
+        dashboard=await _dashboard_allowed(body.openid_token, matrix_user_id, snapshot, paths),
     )
-    token = issue_connections_session(matrix_user_id, now=time.time(), dashboard=dashboard)
     response.headers.update(CONNECTIONS_HEADERS)
     response.set_cookie(
         CONNECTIONS_SESSION_COOKIE,
