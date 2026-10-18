@@ -130,7 +130,7 @@ Graphiti's separate node and edge extraction, the path `add_episode` uses, links
 ### Graphs are filled side by side, each one episode at a time, without waiting while a backlog remains
 
 The first build on a deployment with four graphs took 37.6 hours, 85% of it extracting one episode after another across all graphs (a median of 60 seconds and about 23 model calls each) and 15% waiting between passes.
-Graphs can share the Graphiti client because Graphiti 0.31 gives each `add_episode` call its own database handle; earlier versions switched the shared client's database, which corrupted concurrent graphs ([graphiti#1676](https://github.com/getzep/graphiti/issues/1676), fixed by [graphiti#1699](https://github.com/getzep/graphiti/pull/1699)).
+Graphs can share the Graphiti client because the pinned Graphiti gives each `add_episode` call its own database handle; versions before that fix switched the shared client's database, which corrupted concurrent graphs ([graphiti#1676](https://github.com/getzep/graphiti/issues/1676), fixed by [graphiti#1699](https://github.com/getzep/graphiti/pull/1699)).
 Rejected: several episodes of one graph at once, because Graphiti resolves an episode's entities and facts against what its graph already holds, so two episodes extracted together can each create the same person; Graphiti's bulk import, which uses other prompts and previous-episode context and has not been evaluated; and a separate loop per graph, which would stop a long backlog from delaying other graphs' passes but adds lifecycle machinery while the graph with the longest backlog bounds a build either way.
 
 ## Ingestion invariants
@@ -180,7 +180,7 @@ Rejected: several episodes of one graph at once, because Graphiti resolves an ep
 
 - Redacting or deleting a message does not remove facts already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
 - A config reload that changes the embedder during a pass can add that pass's remaining episodes to the old graph.
-- A pass waits for its slowest graph, so while one graph works through a long backlog, new turns in the others wait up to that graph's share of the pass.
+- A pass waits for its slowest graph, so while one graph works through a long backlog, new turns in the others wait until that pass finishes, including any graphs still waiting for a free place.
 - Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.
 
 ## Open questions

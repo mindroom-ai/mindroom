@@ -407,8 +407,11 @@ async def test_one_failing_agent_does_not_stop_the_others(tmp_path: Path) -> Non
             raise OSError(msg)
         return real(agent_name, *args, **kwargs)
 
+    worker = _worker(config, paths, store)
     with patch.object(ingestion, "create_session_storage", storage):
-        await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+        await worker._run_cycle(config, now=T0 + 10)
+        # A pass that only fails to list adds nothing, so the worker waits instead of retrying at once.
+        assert await worker._run_cycle(config, now=T0 + 20) is False
 
     assert store.sessions() == ["!room:x:$t1"]
     assert "OSError" in (knowledge_graph_failure() or "")
