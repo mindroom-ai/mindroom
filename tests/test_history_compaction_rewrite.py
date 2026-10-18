@@ -734,8 +734,13 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
 
 
 @pytest.mark.asyncio
-async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(tmp_path: Path) -> None:
-    """Every text compaction chunk should expose raw messages before persistence."""
+@pytest.mark.parametrize("second_chunk_stored", [True, False])
+async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
+    tmp_path: Path,
+    *,
+    second_chunk_stored: bool,
+) -> None:
+    """Every chunk exposes its raw messages before it is stored; compaction:after sees only the stored chunks'."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -815,12 +820,21 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         session_id="session-1",
     )
 
+    appended: list[bool] = []
+
+    def append_chunk(*args: object, **kwargs: object) -> bool:
+        # The second chunk can lose its compare-and-append to a concurrent writer.
+        stored = append_compaction_chunk(*args, **kwargs) if second_chunk_stored or not appended else False
+        appended.append(stored)
+        return stored
+
     with (
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
+        patch("mindroom.history.compaction.append_compaction_chunk", new=append_chunk),
     ):
         outcome = await compact_scope_history(
             storage=storage,
@@ -834,13 +848,16 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             threshold_tokens=1,
             progress=None,
             complete=_reported,
+            replay_model=None,
         )
 
     assert outcome is not None
+    assert appended == [True, second_chunk_stored]
+    stored_messages = ["u" * 200, "a" * 200, "v" * 200, "b" * 200] if second_chunk_stored else ["u" * 200, "a" * 200]
     assert observed == [
         ("compaction:before", ["run-1", "run-2"], ["u" * 200, "a" * 200]),
         ("compaction:before", ["run-2"], ["v" * 200, "b" * 200]),
-        ("compaction:after", [], ["u" * 200, "a" * 200, "v" * 200, "b" * 200]),
+        ("compaction:after", [] if second_chunk_stored else ["run-2"], stored_messages),
     ]
 
 
@@ -1597,6 +1614,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
             threshold_tokens=None,
             progress=None,
             complete=_reported,
+            replay_model=None,
         )
 
     assert outcome is None
@@ -1692,6 +1710,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             threshold_tokens=1,
             progress=None,
             complete=_reported,
+            replay_model=None,
         )
 
     assert outcome is not None
