@@ -14,6 +14,7 @@ from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
+from mindroom.hooks.enrichment import strip_enrichment_blocks
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
 
@@ -48,6 +49,20 @@ def run_requester(run: RunOutput | TeamRunOutput) -> str | None:
     return requester if isinstance(requester, str) else None
 
 
+def _prompt_utterances(message: Message, content: str, requester: str, *, mindroom_wrote: bool) -> list[Utterance]:
+    """Split a user message into its tagged messages, leaving out empty ones."""
+    found: list[Utterance] = []
+    for sender, body in parse_msg_tags(content, default_sender=requester):
+        if mindroom_wrote:
+            utterance = Utterance("runtime", None, body, message)
+        else:
+            # Context a hook attached to the message is MindRoom's, not the sender's words.
+            utterance = Utterance("said", sender, strip_enrichment_blocks(body), message)
+        if utterance.unredacted.strip():
+            found.append(utterance)
+    return found
+
+
 def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> list[Utterance]:
     """Return what was said in one stored turn, oldest first.
 
@@ -72,13 +87,7 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
             continue
         mindroom_wrote = runtime_prompt or is_queued_notice_message(message)
         if message.role == "user" and (agent_work or not mindroom_wrote):
-            said.extend(
-                Utterance("runtime", None, body, message)
-                if mindroom_wrote
-                else Utterance("said", sender, body, message)
-                for sender, body in parse_msg_tags(content, default_sender=requester)
-                if body.strip()
-            )
+            said.extend(_prompt_utterances(message, content, requester, mindroom_wrote=mindroom_wrote))
         elif message.role == "assistant" and keeps_reply and (content.strip() or (agent_work and message.tool_calls)):
             said.append(Utterance("reply", None, content, message))
         elif message.role == "tool" and agent_work:

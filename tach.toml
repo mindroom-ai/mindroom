@@ -7535,6 +7535,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_visibility",
+    "mindroom.hooks.enrichment",
     "mindroom.prompt_message_tags",
     "mindroom.turn_origin",
 ]

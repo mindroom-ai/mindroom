@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 
 _TRANSIENT_CONTEXT_OPEN = "<mindroom_transient_context>"
 _TRANSIENT_CONTEXT_CLOSE = "</mindroom_transient_context>"
+_ENRICHMENT_BLOCK = re.compile(r"\s*<mindroom_message_context>.*?</mindroom_message_context>\s*", re.DOTALL)
 
 
 def _render_items(items: Sequence[EnrichmentItem]) -> list[str]:
@@ -36,6 +38,11 @@ def render_enrichment_block(items: list[EnrichmentItem]) -> str:
         return ""
     rendered_items = _render_items(items)
     return "<mindroom_message_context>\n" + "\n".join(rendered_items) + "\n</mindroom_message_context>"
+
+
+def strip_enrichment_blocks(text: str) -> str:
+    """Remove every block ``render_enrichment_block`` wrote, with the blank lines around it."""
+    return _ENRICHMENT_BLOCK.sub("\n\n", text).strip()
 
 
 def render_transient_context(parts: Sequence[str]) -> str:

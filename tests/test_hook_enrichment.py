@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from mindroom.hooks import EnrichmentItem, render_enrichment_block, render_transient_context
-from mindroom.hooks.enrichment import is_transient_context
+from mindroom.hooks.enrichment import is_transient_context, strip_enrichment_blocks
 
 
 def test_render_enrichment_block_is_stable() -> None:
@@ -54,3 +54,13 @@ def test_render_transient_context_wraps_nonempty_parts() -> None:
     assert rendered == ("<mindroom_transient_context>\nmemory\n\nenrichment\n</mindroom_transient_context>")
     assert is_transient_context(rendered) is True
     assert render_transient_context(()) == ""
+
+
+def test_strip_enrichment_blocks_removes_every_block() -> None:
+    """Every rendered block goes, with the blank lines around it, and plain text is untouched."""
+    block = render_enrichment_block([EnrichmentItem(key="location", text="latitude: 47.6")])
+    text = f"When does Atlas ship?\n\n{block}"
+
+    assert strip_enrichment_blocks(text) == "When does Atlas ship?"
+    assert strip_enrichment_blocks(f"{block}\n\nhi\n\n{block}") == "hi"
+    assert strip_enrichment_blocks("no context") == "no context"
