@@ -170,7 +170,7 @@ class _MemoryAutoFlushExtractorConfig(BaseModel):
 
 # LEGACY_COMPAT: Retired push-model auto-flush settings.
 # Legacy format: memory.auto_flush.max_dirty_age_seconds and memory.auto_flush.max_cross_session_reprioritize, which the dashboard wrote on every save.
-# Last legacy release: v2026.10.340; replacement: v2026.10.341 flushes quiet conversations from stored sessions and removes both fields.
+# Last legacy release: v2026.10.335; replacement: v2026.10.336 flushes quiet conversations from stored sessions and removes both fields.
 # Handling: this model ignores unknown fields, so a config that still sets them loads unchanged and the next dashboard save drops them.
 # Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
 class MemoryAutoFlushConfig(BaseModel):
