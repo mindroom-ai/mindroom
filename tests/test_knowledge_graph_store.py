@@ -214,13 +214,16 @@ async def _seed_entity(
     summary: str = "",
     facts: int = 0,
     name_embedding: list[float] | None = None,
+    created_at: datetime | None = None,
 ) -> None:
-    """Store an entity with ``facts`` edges to other new entities, and optionally a chosen name embedding."""
+    """Store an entity with ``facts`` edges to other new entities, and optionally a chosen name embedding and age."""
 
     async def seed() -> None:
         graphiti = await graph_store._graphiti_client()
         driver = graphiti.driver.clone(database=scope.graph_name)
         node = EntityNode(name=name, group_id=scope.graph_name, summary=summary)
+        if created_at is not None:
+            node.created_at = created_at
         if name_embedding is None:
             await node.generate_name_embedding(graphiti.embedder)
         else:
@@ -246,17 +249,17 @@ async def _seed_entity(
     await graph_store._run(seed())
 
 
-async def _top_search_hit(graph_store: GraphitiStore, scope: GraphScope, query: str) -> str:
-    """The name Graphiti's hybrid search ranks first, which is what a lookup used before it tried exact names."""
+async def _search_ranking(graph_store: GraphitiStore, scope: GraphScope, query: str) -> list[str]:
+    """The names Graphiti's hybrid search ranks for ``query``, best first, as a lookup without an exact name sees them."""
 
-    async def search() -> str:
+    async def search() -> list[str]:
         graphiti = await graph_store._graphiti_client()
         results = await graphiti.search_(
             query,
-            config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": 1}),
+            config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": 5}),
             group_ids=[scope.graph_name],
         )
-        return results.nodes[0].name
+        return [node.name for node in results.nodes]
 
     return await graph_store._run(search())
 
@@ -272,7 +275,7 @@ async def test_entity_prefers_an_exact_name_over_a_better_search_hit(store: Grap
     )
     # The exact entity's name embedding points away from the query, as a real embedding can for a bare first name.
     await _seed_entity(store, ALPHA, "Marcella", summary="A person.", facts=3, name_embedding=[1.0] * 32)
-    assert await _top_search_hit(store, ALPHA, "marcella") == "Marcella - Individual"
+    assert (await _search_ranking(store, ALPHA, "marcella"))[0] == "Marcella - Individual"
 
     entity = await store.entity(ALPHA, "marcella")
 
@@ -298,6 +301,23 @@ async def test_entity_with_several_exact_names_picks_the_one_with_most_facts(sto
 
 
 @pytest.mark.asyncio
+async def test_entity_with_equally_many_facts_picks_the_oldest(store: GraphitiStore) -> None:
+    """Exact names with the same number of facts resolve to the oldest entity, whatever order they were stored in."""
+    await _seed_entity(store, ALPHA, "MARCELLA", summary="Stored first, created later.", facts=2, created_at=MAR)
+    await _seed_entity(store, ALPHA, "marcella", summary="Stored second, created earlier.", facts=2, created_at=JAN)
+    await _seed_entity(store, BETA, "MARCELLA", summary="Stored first, created earlier.", facts=2, created_at=JAN)
+    await _seed_entity(store, BETA, "marcella", summary="Stored second, created later.", facts=2, created_at=MAR)
+
+    stored_second = await store.entity(ALPHA, "Marcella")
+    stored_first = await store.entity(BETA, "Marcella")
+
+    assert stored_second is not None
+    assert stored_second.summary == "Stored second, created earlier."
+    assert stored_first is not None
+    assert stored_first.summary == "Stored first, created earlier."
+
+
+@pytest.mark.asyncio
 async def test_entity_without_exact_match_lists_other_close_matches(store: GraphitiStore) -> None:
     """With no exact name, the best search hit is the entity and the next hits are listed as other close matches."""
     for name in ("Atlas dashboard v2", "Atlas Labs", "Project dashboard"):
@@ -306,8 +326,10 @@ async def test_entity_without_exact_match_lists_other_close_matches(store: Graph
     entity = await store.entity(ALPHA, "Atlas dashboard")
 
     assert entity is not None
-    assert entity.name == "Atlas dashboard v2"
-    assert sorted(entity.others) == ["Atlas Labs", "Project dashboard"]
+    ranking = await _search_ranking(store, ALPHA, "Atlas dashboard")
+    assert ranking[0] == "Atlas dashboard v2"
+    assert sorted(ranking) == ["Atlas Labs", "Atlas dashboard v2", "Project dashboard"]
+    assert [entity.name, *entity.others] == ranking
 
 
 def _holds_embedding(value: object) -> bool:
@@ -336,12 +358,18 @@ async def test_lookups_do_not_read_embeddings_back(store: GraphitiStore) -> None
 
     with patch.object(AsyncGraph, "query", recording_query):
         facts = await store.search_facts(ALPHA, "who leads Project Atlas", limit=5)
-        entity = await store.entity(ALPHA, "Alice")
+        # An exact name loads the entity by its uuid; any other text goes through Graphiti's node search.
+        exact = await store.entity(ALPHA, "Alice")
+        before_fuzzy = len(rows)
+        fuzzy = await store.entity(ALPHA, "Atlas")
 
     assert [fact.fact for fact in facts] == ["Alice leads Project Atlas"]
-    assert entity is not None
-    assert [fact.fact for fact in entity.facts] == ["Alice leads Project Atlas"]
-    assert rows
+    assert exact is not None
+    assert [fact.fact for fact in exact.facts] == ["Alice leads Project Atlas"]
+    assert fuzzy is not None
+    assert fuzzy.name == "Project Atlas"
+    assert before_fuzzy
+    assert len(rows) > before_fuzzy
     assert not any(rows)
 
 

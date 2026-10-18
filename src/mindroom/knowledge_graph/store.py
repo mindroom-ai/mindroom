@@ -45,11 +45,13 @@ _MAX_ENTITY_FACTS = 30
 # Entities a fuzzy lookup considers: the best hit is the answer and the rest are named as other close matches.
 _ENTITY_CANDIDATES = 5
 # FalkorDB's Cypher has no case-insensitive regex, so names are compared lowercased. Among several exact matches the
-# one with the most facts wins, because a duplicate extracted once has few.
+# one with the most facts wins, because a duplicate extracted once has few; the oldest, then the lowest uuid, settles a
+# tie so the same name always finds the same entity.
 _EXACT_ENTITY_QUERY = """
 MATCH (n:Entity) WHERE toLower(n.name) = toLower($name)
 OPTIONAL MATCH (n)-[r:RELATES_TO]-()
-RETURN n.uuid AS uuid, count(r) AS facts ORDER BY facts DESC LIMIT 1
+RETURN n.uuid AS uuid, n.created_at AS created_at, count(r) AS facts
+ORDER BY facts DESC, created_at, uuid LIMIT 1
 """
 
 

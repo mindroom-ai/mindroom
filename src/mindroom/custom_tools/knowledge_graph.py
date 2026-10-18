@@ -106,7 +106,7 @@ class KnowledgeGraphTools(Toolkit):
         if entity is None:
             return f"No entity matches {text!r}."
         facts = "\n".join(_render_fact(fact) for fact in entity.facts) or "No facts yet."
-        text = f"{entity.name}: {entity.summary}\n{facts}"
+        rendered = f"{entity.name}: {entity.summary}\n{facts}"
         if entity.others:
-            text += f"\nOther close matches: {', '.join(entity.others)}"
-        return text
+            rendered += f"\nOther close matches: {', '.join(entity.others)}"
+        return rendered
