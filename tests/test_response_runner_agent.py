@@ -3390,11 +3390,12 @@ class TestAdaptiveResponse(AgentBotTestBase):
         if streaming and action == "respond":
             # Hold the answer until the approved reply's placeholder reached the room.
             placeholder_sent = asyncio.Event()
+            unique_room_send = bot.client.room_send.side_effect
 
             async def room_send(**kwargs: Any) -> MagicMock:  # noqa: ANN401
                 if kwargs["content"].get("body") == "Thinking...":
                     placeholder_sent.set()
-                return _room_send_response("$response")
+                return unique_room_send(**kwargs)
 
             bot.client.room_send.side_effect = room_send
             answer_stream = model.ainvoke_stream
