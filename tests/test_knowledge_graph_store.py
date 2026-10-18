@@ -270,17 +270,17 @@ async def test_entity_prefers_an_exact_name_over_a_better_search_hit(store: Grap
     await _seed_entity(
         store,
         ALPHA,
-        "Marcella - Individual",
-        summary="Marcella marcella marcella investment account",
+        "Dana - Brokerage",
+        summary="Dana dana dana brokerage account",
     )
     # The exact entity's name embedding points away from the query, as a real embedding can for a bare first name.
-    await _seed_entity(store, ALPHA, "Marcella", summary="A person.", facts=3, name_embedding=[1.0] * 32)
-    assert (await _search_ranking(store, ALPHA, "marcella"))[0] == "Marcella - Individual"
+    await _seed_entity(store, ALPHA, "Dana", summary="A person.", facts=3, name_embedding=[1.0] * 32)
+    assert (await _search_ranking(store, ALPHA, "dana"))[0] == "Dana - Brokerage"
 
-    entity = await store.entity(ALPHA, "marcella")
+    entity = await store.entity(ALPHA, "dana")
 
     assert entity is not None
-    assert entity.name == "Marcella"
+    assert entity.name == "Dana"
     assert entity.summary == "A person."
     assert len(entity.facts) == 3
     assert entity.others == []
@@ -289,11 +289,11 @@ async def test_entity_prefers_an_exact_name_over_a_better_search_hit(store: Grap
 @pytest.mark.asyncio
 async def test_entity_with_several_exact_names_picks_the_one_with_most_facts(store: GraphitiStore) -> None:
     """Names that differ only in case are all exact matches, and the entity with the most facts wins."""
-    await _seed_entity(store, ALPHA, "marcella", summary="A stray duplicate.", facts=1)
-    await _seed_entity(store, ALPHA, "Marcella", summary="A person.", facts=3)
-    await _seed_entity(store, ALPHA, "MARCELLA", summary="Another duplicate.")
+    await _seed_entity(store, ALPHA, "dana", summary="A stray duplicate.", facts=1)
+    await _seed_entity(store, ALPHA, "Dana", summary="A person.", facts=3)
+    await _seed_entity(store, ALPHA, "DANA", summary="Another duplicate.")
 
-    entity = await store.entity(ALPHA, "Marcella")
+    entity = await store.entity(ALPHA, "Dana")
 
     assert entity is not None
     assert entity.summary == "A person."
@@ -303,13 +303,13 @@ async def test_entity_with_several_exact_names_picks_the_one_with_most_facts(sto
 @pytest.mark.asyncio
 async def test_entity_with_equally_many_facts_picks_the_oldest(store: GraphitiStore) -> None:
     """Exact names with the same number of facts resolve to the oldest entity, whatever order they were stored in."""
-    await _seed_entity(store, ALPHA, "MARCELLA", summary="Stored first, created later.", facts=2, created_at=MAR)
-    await _seed_entity(store, ALPHA, "marcella", summary="Stored second, created earlier.", facts=2, created_at=JAN)
-    await _seed_entity(store, BETA, "MARCELLA", summary="Stored first, created earlier.", facts=2, created_at=JAN)
-    await _seed_entity(store, BETA, "marcella", summary="Stored second, created later.", facts=2, created_at=MAR)
+    await _seed_entity(store, ALPHA, "DANA", summary="Stored first, created later.", facts=2, created_at=MAR)
+    await _seed_entity(store, ALPHA, "dana", summary="Stored second, created earlier.", facts=2, created_at=JAN)
+    await _seed_entity(store, BETA, "DANA", summary="Stored first, created earlier.", facts=2, created_at=JAN)
+    await _seed_entity(store, BETA, "dana", summary="Stored second, created later.", facts=2, created_at=MAR)
 
-    stored_second = await store.entity(ALPHA, "Marcella")
-    stored_first = await store.entity(BETA, "Marcella")
+    stored_second = await store.entity(ALPHA, "Dana")
+    stored_first = await store.entity(BETA, "Dana")
 
     assert stored_second is not None
     assert stored_second.summary == "Stored second, created earlier."

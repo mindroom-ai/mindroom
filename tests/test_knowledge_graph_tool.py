@@ -62,12 +62,12 @@ class _Store:
         self.queries.append((scope.graph_name, name, 0))
         if name == "Alice":
             return _GraphEntity(name="Alice", summary="Alice leads Atlas.", facts=[FACT], others=[])
-        if name == "Marce":
+        if name == "Dan":
             return _GraphEntity(
-                name="Marcella",
+                name="Dana",
                 summary="A person.",
                 facts=[],
-                others=["Marcella Holm", "Marcella's workspace"],
+                others=["Dana Whitfield", "Dana's workspace"],
             )
         return None
 
@@ -138,10 +138,10 @@ async def test_graph_entity_shows_other_close_matches(tmp_path: Path) -> None:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     tools = KnowledgeGraphTools("mind", _config(), paths, None)
 
-    fuzzy = await tools.graph_entity("Marce")
+    fuzzy = await tools.graph_entity("Dan")
     exact = await tools.graph_entity("Alice")
 
-    assert fuzzy.endswith("\nOther close matches: Marcella Holm, Marcella's workspace")
+    assert fuzzy.endswith("\nOther close matches: Dana Whitfield, Dana's workspace")
     assert "Other close matches" not in exact
 
 
