@@ -30,6 +30,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import (
+    read_chunk_basis,
     read_scope_state,
     set_force_compaction_state,
 )
@@ -1685,8 +1686,12 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
 
 
 @pytest.mark.asyncio
-async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_requested(tmp_path: Path) -> None:
-    """A redaction landing during the summary call voids the chunk; the notice names the race and the request stays."""
+@pytest.mark.parametrize("race", ["before_summary", "during_summary"])
+async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_requested(
+    tmp_path: Path,
+    race: str,
+) -> None:
+    """A redaction landing before or during the summary call voids the chunk; the notice names it and the request stays."""
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -1699,8 +1704,14 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
+    def basis_after_a_redaction_cuts_a_run(*args: object, **kwargs: object) -> object:
+        if race == "before_summary":
+            storage.delete_runs(["run-1"])
+        return read_chunk_basis(*args, **kwargs)
+
     async def summary_while_a_redaction_cuts_a_run(**_kwargs: object) -> SessionSummary:
-        storage.delete_runs(["run-1"])
+        if race == "during_summary":
+            storage.delete_runs(["run-1"])
         return SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
 
     with (
@@ -1708,6 +1719,7 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
             "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
+        patch("mindroom.history.compaction.read_chunk_basis", new=basis_after_a_redaction_cuts_a_run),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_while_a_redaction_cuts_a_run),
     ):
         prepared = await prepare_history_for_run_for_test(
