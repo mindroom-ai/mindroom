@@ -1,4 +1,4 @@
-"""Stored turns become conversation text one way: who said what, runtime prompts left out, credentials removed."""
+"""Stored turns are read one way: which turns and messages count, who said each, and prompts MindRoom wrote left out."""
 
 from __future__ import annotations
 
