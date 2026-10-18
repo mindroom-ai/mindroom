@@ -26,7 +26,7 @@ class _Span:
     registered: list[asyncio.Task[None]] = field(default_factory=list)
     stop_buttons: list[str] = field(default_factory=list)
     button_shown: asyncio.Event = field(default_factory=asyncio.Event)
-    # The event the reply shows once its attempt sends one.
+    # The event the reply shows: one it adopted, or the first its attempt sends.
     event_id: str | None = None
     shown: asyncio.Event = field(default_factory=asyncio.Event)
     # How many attempts still wait for the reply to show an event.
@@ -170,11 +170,12 @@ async def test_response_attempt_adds_the_reply_stop_button_for_online_user(
     """Online users get the reply span's Stop button on the attempt's message."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, span = _runner(show_stop_button=True)
+    span.show("$thinking")
     is_user_online = AsyncMock(return_value=True)
     monkeypatch.setattr(response_attempt_module, "is_user_online", is_user_online)
 
     async def response_function(_message_id: str | None) -> None:
-        return None
+        await asyncio.wait_for(span.button_shown.wait(), timeout=5)
 
     await runner.run(
         ResponseAttemptRequest(
@@ -208,6 +209,7 @@ async def test_a_stop_button_failure_cancels_the_attempt_before_it_propagates(
     """A failure recording the Stop button must not leave generation running after its span ends."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, span = _runner(show_stop_button=True)
+    span.show("$thinking")
     monkeypatch.setattr(response_attempt_module, "is_user_online", AsyncMock(return_value=True))
     generating = asyncio.Event()
     attempt_tasks: list[asyncio.Task[None] | None] = []
@@ -247,6 +249,8 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task(existing_event_id
     """
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, span = _runner()
+    if existing_event_id is not None:
+        span.show(existing_event_id)
     inner_started = asyncio.Event()
     inner_cancel_args: list[tuple[object, ...]] = []
     cancellation_reasons: list[str] = []
@@ -391,6 +395,7 @@ async def test_process_shutdown_during_stop_button_setup_still_owns_child(
     """Cancellation during presence setup must not orphan the already-started response."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, span = _runner(show_stop_button=True)
+    span.show("$existing")
     child_started = asyncio.Event()
     child_cancelled = asyncio.Event()
     presence_started = asyncio.Event()

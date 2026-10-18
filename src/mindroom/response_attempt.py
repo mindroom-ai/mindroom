@@ -161,17 +161,20 @@ class ResponseAttemptRunner:
             message_id = request.existing_event_id
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
             request.span.register(task)
+            # Whether the attempt had ended before it was awaited, so awaiting it raised the attempt's own outcome.
+            ended_before_awaited = False
             try:
-                button_event_id = message_id
-                if button_event_id is None:
-                    button_event_id = await self._reply_event_while_running(request, task)
+                button_event_id = await self._reply_event_while_running(request, task)
                 if button_event_id is not None:
                     await self._add_stop_button(request, button_event_id)
 
+                ended_before_awaited = task.done()
                 await asyncio.shield(task)
             except asyncio.CancelledError as caught_cancellation:
                 cancellation = caught_cancellation
-                if task.done() and task.cancelled():
+                # Only the first read of a cancelled task's outcome keeps its provenance, so read it here only when
+                # awaiting the attempt did not already raise it.
+                if task.done() and task.cancelled() and not ended_before_awaited:
                     try:
                         task.result()
                     except asyncio.CancelledError as child_cancellation:
@@ -204,11 +207,12 @@ class ResponseAttemptRunner:
         request: ResponseAttemptRequest,
         task: asyncio.Task[None],
     ) -> str | None:
-        """Wait for the reply's first event in the room while the attempt runs, for an attempt that sends it itself.
+        """Return the reply's event once it shows one while the attempt runs, which the Stop button goes on.
 
-        A reply without a placeholder, such as an adaptive participation reply,
-        shows nothing until its stream sends its first event; an attempt that
-        ends first leaves no running reply for a Stop button.
+        That is the placeholder or earlier answer the attempt adopted, or else
+        the first event the attempt sends itself: a reply without a placeholder,
+        such as an adaptive participation reply, shows nothing until its stream
+        sends something. An attempt that ends first leaves nothing to stop.
         """
         shown = asyncio.create_task(request.span.reply_event())
         try:
