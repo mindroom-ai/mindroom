@@ -586,4 +586,4 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
     assert kwargs["previous_episode_uuids"] == []
     assert kwargs["entity_types"] is ENTITY_TYPES
     assert kwargs["excluded_entity_types"] == ["Entity"]
-    assert kwargs["custom_extraction_instructions"] == f"{extraction_instructions('')}\nFocus on lab equipment."
+    assert kwargs["custom_extraction_instructions"] == extraction_instructions("Focus on lab equipment.")

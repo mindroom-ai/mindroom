@@ -47,20 +47,14 @@ def test_graphiti_prompt_lists_exactly_the_types_with_their_docstrings_and_no_en
     ] == [(type_id, name, model.__doc__) for type_id, (name, model) in enumerate(ENTITY_TYPES.items())]
 
 
-def test_instructions_keep_paths_and_urls_out_and_date_by_occurrence() -> None:
-    """Paths and URLs belong inside facts, and a fact is dated by when it held, not when it was discussed."""
+def test_instructions_keep_paths_and_an_assistants_own_activity_out() -> None:
+    """Paths and URLs belong inside facts, dated by when they held; an assistant's lookups stay out, its effects stay in."""
     text = extraction_instructions("")
-    for word in ("file paths", "URLs", "environment variables", "commit hashes", "branch names"):
-        assert word in text
-    assert "when it happened" in text
-
-
-def test_instructions_keep_an_assistants_own_activity_out() -> None:
-    """What an assistant reports is kept about its subjects, its lookups and task counts are left out, and its effects stay."""
-    text = extraction_instructions("")
+    for phrase in ("file paths", "URLs", "environment variables", "commit hashes", "branch names", "when it happened"):
+        assert phrase in text
     assert "`agent <name>`" in text
-    for word in ("lookups", "access", "configuration", "counts", "listing returned", "changed things for others"):
-        assert word in text
+    for phrase in ("lookups", "access", "configuration", "counts", "listing returned", "changed things for others"):
+        assert phrase in text
 
 
 def test_configured_instructions_follow_the_built_in_ones() -> None:

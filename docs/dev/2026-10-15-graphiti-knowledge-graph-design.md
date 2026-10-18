@@ -102,7 +102,7 @@ Graphiti needs structured output; small local models may fail extraction, which 
 ### Entity types tell extraction what an entity is
 
 Graphiti's default extraction creates an entity for anything noun-like, and the real openclaw graph shows the result: 2,097 of its 8,627 entities have no facts, and file paths (`/home/basnijholt/.mindroom-chat/config.yaml`), source files (`compaction.py`), memory notes (`memory/2026-04-05.md`), URLs, and a `capacitor://` link became entities.
-`knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and built-in extraction instructions, followed by any `knowledge_graph.extraction_instructions` the operator sets.
+`knowledge_graph/extraction.py` therefore gives `add_episode` nine field-less entity types (`Person`, `Agent`, `Organization`, `Location`, `Event`, `Project`, `Product`, `Document`, `Account`), `excluded_entity_types=["Entity"]`, and built-in extraction instructions.
 Graphiti reads a type model's docstring as the type's description, so the docstrings are what the extractor sees: a handle, Matrix ID, or email address names whoever it belongs to and is never an entity of its own, and a `Document` is never a file path.
 With `Entity` excluded, Graphiti removes it from the list of types the extractor is asked to choose from, and drops a node whose type id falls outside that list.
 Keeping paths and URLs out is what the docstrings and the instructions aim for, not something the exclusion guarantees, so each docstring says what does not belong to its type.
@@ -110,6 +110,12 @@ When the edge extractor names an endpoint that is not in the extracted node list
 Such untyped nodes can still appear, and MindRoom does not clean them up yet.
 The instructions ask for one full name per entity, keep paths, source files, URLs, environment variables, configuration keys, commit hashes, branch names, command lines, and log files inside the facts that use them, and date each fact by when it happened or held rather than when it was discussed.
 They reach only the node and edge extraction prompts, not entity deduplication or summaries.
+Existing graphs keep their old nodes; only new episodes follow the types.
+The accepted costs are a longer prompt and coverage: anything outside the nine types (pets, illnesses, foods, hobbies, topics) gets no node, and a fact that needs it as an endpoint is dropped, or becomes an untyped dangling node as above.
+
+Rejected: fields on the type models.
+Graphiti makes an extra model call to fill the fields of every node whose type has any, which would raise the cost of each episode, and a field named like one of `EntityNode`'s own (`name`, `summary`, `attributes`, and others) raises `EntityTypeValidationError`.
+Types are labels here, not a schema.
 
 ### An assistant's own activity is not knowledge
 
@@ -119,13 +125,7 @@ Operator text is appended rather than replacing the built-in instructions, so an
 The wording was chosen on synthetic episodes about a fictional lab, extracted through the real store with each candidate; the scoring checks keywords for wanted facts and noise patterns, and the episodes were written alongside the wording, so the results show direction rather than held-out accuracy.
 Against the previous instructions, noise fell from 27% to 4% of facts on `gpt-6-luna` and from 36% to 5% on `gpt-6.1-sol`, with as many other facts as before.
 Rejected: forbidding every assistant action (it also dropped facts like a filed issue), adding "plans" and an `Account` description that excludes an assistant's own account (more lost facts, no less noise), and asking the model to connect single-subject facts to an event or document (it did not recover them).
-Graphiti's separate node and edge extraction, the path `add_episode` uses, links two distinct entities, so a status the assistant reports about a single subject with no other entity named can be dropped where the previous instructions kept it by linking it to the agent; this showed mostly on `gpt-6.1-sol`.
-Existing graphs keep their old nodes; only new episodes follow the types.
-The accepted costs are a longer prompt and coverage: anything outside the nine types (pets, illnesses, foods, hobbies, topics) gets no node, and a fact that needs it as an endpoint is dropped, or becomes an untyped dangling node as above.
-
-Rejected: fields on the type models.
-Graphiti makes an extra model call to fill the fields of every node whose type has any, which would raise the cost of each episode, and a field named like one of `EntityNode`'s own (`name`, `summary`, `attributes`, and others) raises `EntityTypeValidationError`.
-Types are labels here, not a schema.
+Graphiti's separate node and edge extraction, the path `add_episode` uses, links two distinct entities, so a status the assistant reports about a single subject with no other entity named can be dropped where the previous instructions kept it by linking it to the agent; this showed on both models, and target coverage fell from 85% to 83% on `gpt-6-luna` and from 81% to 75% on `gpt-6.1-sol`.
 
 ## Ingestion invariants
 
