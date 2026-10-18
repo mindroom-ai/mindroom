@@ -123,7 +123,7 @@ The portal never shows tokens, model configuration, generic credential editing, 
 When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
 Users choose the agents and tools the optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#choose-exposed-agents-and-tools) exposes on the same page.
 Matrix sign-in users have no email, so when MCP accounts are [SCIM-provisioned](https://docs.mindroom.chat/deployment/mcp-gateway/#managed-account-provisioning), that section uses the one active account whose `userName` maps to the signed-in Matrix user through `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` and `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN`, the mapping a trusted upstream sign-in with that email uses.
-Without that mapping, or when more than one active account maps to the same Matrix user, it still needs trusted upstream sign-in.
+Without that mapping, when `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` or `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` is set (either takes precedence over the template), or when more than one active account maps to the same Matrix user, it still needs trusted upstream sign-in.
 
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
 Exclude `/connections` from the other application's service-worker navigation fallback.

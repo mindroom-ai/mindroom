@@ -1073,10 +1073,19 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
 
 
 def trusted_upstream_matrix_user_id_for_email(request: Request, email: str) -> str | None:
-    """Return the Matrix user a signed upstream login with this email becomes, or None when logins map no emails."""
+    """Return the Matrix user a signed upstream login with this email becomes, or None when the email does not decide it.
+
+    A configured Matrix ID header or signed claim takes precedence over the email template for upstream logins, so the
+    template alone then names no one.
+    """
     settings = _request_auth_state(request).settings.trusted_upstream
     template = settings.email_to_matrix_user_id_template
-    if not settings.enabled or template is None:
+    if (
+        not settings.enabled
+        or template is None
+        or settings.matrix_user_id_header is not None
+        or settings.jwt.matrix_user_id_claim is not None
+    ):
         return None
     try:
         validate_email_to_matrix_mapping(template, settings.email_domain)

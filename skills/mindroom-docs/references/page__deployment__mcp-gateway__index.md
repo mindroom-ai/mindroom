@@ -77,7 +77,8 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
-[Matrix sign-in](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat) sessions carry no email, so with managed account provisioning those users see that notice and cannot approve MCP clients; they need trusted upstream sign-in for the MCP controls and consent.
+[Matrix sign-in](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat) sessions carry no email, so with managed account provisioning they reach the MCP controls and consent through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
+Without such a template, when a trusted upstream Matrix ID header or signed claim is configured, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for the MCP controls and consent.
 
 ## Route browser and machine traffic
 

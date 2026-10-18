@@ -132,23 +132,28 @@ def test_unavailable_mcp_account_preserves_connections_without_granting_access(
 
 
 @pytest.mark.parametrize(
-    ("mapped", "accounts", "enabled"),
+    ("mapped", "signed_matrix_claim", "accounts", "enabled"),
     [
-        (True, ["alice@example.org"], True),
-        (False, ["alice@example.org"], False),
-        (True, ["alice@example.org", "alice@EXAMPLE.ORG"], False),
+        (True, False, ["alice@example.org"], True),
+        (False, False, ["alice@example.org"], False),
+        (True, False, ["alice@example.org", "alice@EXAMPLE.ORG"], False),
+        (True, True, ["alice@example.org"], False),
     ],
-    ids=["mapped", "no-email-mapping", "ambiguous"],
+    ids=["mapped", "no-email-mapping", "ambiguous", "signed-matrix-claim-wins"],
 )
 def test_portal_session_finds_the_account_its_email_mapping_names(
     gateway_app: FastAPI,
     mapped: bool,
+    signed_matrix_claim: bool,
     accounts: list[str],
     enabled: bool,
 ) -> None:
     """A Chat-opened portal has no email, so the one account whose email maps to its Matrix user owns MCP access."""
     snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
     env = {**snapshot.runtime_paths.process_env, "MINDROOM_MCP_SCIM_TOKEN": SCIM_TOKEN}
+    if not signed_matrix_claim:
+        # Upstream logins take a signed Matrix claim over the email template, which then decides nothing.
+        del env["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"]
     if mapped:
         env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
         env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"] = "example.org"
@@ -165,10 +170,16 @@ def test_portal_session_finds_the_account_its_email_mapping_names(
         client.cookies.set(CONNECTIONS_SESSION_COOKIE, issue_connections_session("@alice:example.org", now=time.time()))
 
         selection = client.get("/api/connections/mcp/selection")
+        saved = client.post(
+            "/api/connections/mcp/selection",
+            headers={"Origin": ORIGIN},
+            json={"agents": {"personal": None}},
+        )
 
     assert selection.status_code == 200, selection.text
     assert selection.json()["enabled"] is enabled
     assert ("unavailable_reason" in selection.json()) is not enabled
+    assert saved.status_code == (200 if enabled else 403), saved.text
 
 
 def test_client_management_is_owner_scoped_and_preserves_other_client_access(
