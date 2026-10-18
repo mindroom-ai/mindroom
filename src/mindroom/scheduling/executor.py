@@ -12,6 +12,7 @@ from mindroom.constants import (
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
+    SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
 )
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
@@ -128,6 +129,8 @@ async def _build_scheduled_failure_content(
         body=error_message,
         thread_event_id=target.resolved_thread_id,
         latest_thread_event_id=latest_thread_event_id,
+        # It echoes the task description, which may name agents.
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
 
 

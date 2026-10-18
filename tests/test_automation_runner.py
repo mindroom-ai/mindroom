@@ -29,6 +29,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     SCHEDULED_MODEL_KEY,
+    SKIP_MENTIONS_KEY,
     primary_records_dir,
     resolve_runtime_paths,
 )
@@ -208,7 +209,7 @@ async def test_the_finished_response_triggers_verify_and_a_notice_in_the_prompt_
             "body": "Prompt maintenance changed nothing; the files stay at 1286 tokens.",
             "thread_id": "$event1",
             "source_hook": "automation/prompt_curation",
-            "extra_content": None,
+            "extra_content": {SKIP_MENTIONS_KEY: True},
             "trigger_dispatch": False,
         },
     ]

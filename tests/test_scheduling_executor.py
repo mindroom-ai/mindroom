@@ -17,6 +17,7 @@ from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
+    SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
 )
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
@@ -541,3 +542,23 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     assert content["body"].startswith("❌ Recurring task failed: executor test task")
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_failure_notice_wakes_no_agent_its_description_mentions() -> None:
+    """The notice echoes the task description, so agents ignore any mention in it."""
+    workflow = _workflow("Recurring job")
+
+    with patch(
+        "mindroom.matrix.client_delivery.send_message_outcome",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
+    ) as mock_send:
+        await send_scheduled_failure_notice(
+            AsyncMock(),
+            workflow,
+            MessageTarget.for_scheduled_task(workflow),
+            "❌ Scheduled task failed: ask @research\nError: boom",
+            _conversation_reader(latest_thread_event_id="$latest"),
+        )
+
+    assert mock_send.await_args.args[2][SKIP_MENTIONS_KEY] is True

@@ -28,7 +28,13 @@ from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationCo
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import create_background_task
 from mindroom.config.automations import PluginAutomation
-from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, primary_records_dir
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_MODEL_KEY,
+    SKIP_MENTIONS_KEY,
+    primary_records_dir,
+)
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.personal_room_store import personal_room_record_path, read_personal_room
@@ -385,8 +391,8 @@ class AutomationRunner:
                 self._release(chain.instance)
 
     async def _notify(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str | None, text: str) -> None:
-        """Post ``text`` without mentioning the agent, so it starts no run."""
-        await bot._hook_send_message(chain.room_id, text, thread_id, chain.hook_source)
+        """Post ``text`` as a notice whose mentions no agent acts on, so it starts no run."""
+        await bot._hook_send_message(chain.room_id, text, thread_id, chain.hook_source, {SKIP_MENTIONS_KEY: True})
 
     async def _post(
         self,
