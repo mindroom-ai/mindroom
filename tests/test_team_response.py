@@ -1917,6 +1917,7 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
     )
     assert captured_prompts == [
         ("Analyze this.", None),
+        ("Analyze this.", None),
         ("assistant: \n\nPrevious team reply\n\nAnalyze this.", None),
     ]
 

@@ -29,7 +29,6 @@ from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
     has_effective_persisted_replay,
-    history_skip_roles,
     log_replay_plan,
     plan_replay_that_fits,
     scope_visible_runs,
@@ -307,7 +306,7 @@ async def prepare_scope_history(
     agent: Agent,
     agent_name: str,
     resolved_inputs: HistoryPreparationInputs,
-    current_prompt_tokens: int,
+    non_prompt_tokens: int,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None = None,
@@ -317,11 +316,7 @@ async def prepare_scope_history(
     active_model: Model | None = None,
     allow_native_compaction: bool = True,
 ) -> PreparedScopeHistory:
-    """Prepare durable scope history before final replay planning.
-
-    ``current_prompt_tokens`` is the share of the plan's static prompt estimate that this reply's prompt and
-    unseen context take, which no earlier request held.
-    """
+    """Prepare durable scope history before final replay planning."""
     resolved_scope = scope or resolve_history_scope(agent)
     model = active_model if active_model is not None else agent.model
     configure_native = partial(
@@ -379,14 +374,13 @@ async def prepare_scope_history(
             config=config,
             model=model,
             replay_model=native_model,
-            current_prompt_tokens=current_prompt_tokens,
+            non_prompt_tokens=non_prompt_tokens,
         )
         if native_route is None and visible_runs
         else None
     )
     # The provider's count only ever raises the estimate, so a count that misses replayed content cannot hide it.
     current_history_tokens = max(estimated_history_tokens, reported_history_tokens or 0)
-    history_tokens_source = "reported_usage" if current_history_tokens > estimated_history_tokens else "estimate"
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -403,7 +397,6 @@ async def prepare_scope_history(
         replay_window=execution_plan.replay_window_tokens,
         static_prompt_tokens=execution_plan.static_prompt_tokens,
         current_tokens=current_history_tokens,
-        current_tokens_source=history_tokens_source,
         estimated_tokens=estimated_history_tokens,
         force=state.force_compact_before_next_run,
         compaction_decision=compaction_decision.mode,
@@ -416,7 +409,6 @@ async def prepare_scope_history(
             compaction_decision=compaction_decision.mode,
             compaction_reason=compaction_decision.reason,
             compaction_current_history_tokens=current_history_tokens,
-            compaction_current_history_tokens_source=history_tokens_source,
             compaction_trigger_budget_tokens=compaction_decision.trigger_budget_tokens,
             compaction_hard_budget_tokens=compaction_decision.hard_budget_tokens,
             compaction_fitted_replay_tokens=compaction_decision.fitted_replay_tokens,
@@ -497,19 +489,17 @@ def _reported_history_tokens(
     config: Config,
     model: Model | None,
     replay_model: NativeCompactionModel | None,
-    current_prompt_tokens: int,
+    non_prompt_tokens: int,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
 
     That request held the system prompt, the tools, and all the history this reply replays except the answer.
-    The replay budgets are what remains after the plan's static estimate of the system prompt, tools, and this
-    reply's prompt, so taking that estimate's system prompt and tools share off converts the count to their units.
+    The replay budgets are what the window leaves after the static estimate, so taking off that estimate's system
+    prompt and tools share, ``non_prompt_tokens``, converts the count to their units.
     """
     history_settings = resolved_inputs.history_settings
-    static_prompt_tokens = resolved_inputs.execution_plan.static_prompt_tokens
     if (
         model is None
-        or static_prompt_tokens is None
         # Replay limits drop the oldest content as runs accrue, so that request held more than will replay.
         or history_settings.policy.mode != "all"
         or history_settings.max_tool_calls_from_history is not None
@@ -517,10 +507,7 @@ def _reported_history_tokens(
         or (latest_run.model, latest_run.model_provider) != (model.id, model.provider)
     ):
         return None
-    skip_roles = history_skip_roles(history_settings)
-    messages = [
-        message for message in latest_run.messages or [] if not message.from_history and message.role not in skip_roles
-    ]
+    messages = [message for message in latest_run.messages or [] if not message.from_history]
     anchor = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "assistant"), None)
     # History replay drops or bounds media that request carried in full.
     if anchor is None or any(
@@ -544,7 +531,7 @@ def _reported_history_tokens(
     if reported is None:
         return None
     newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=replay_model)
-    return reported + newer_tokens - (static_prompt_tokens - current_prompt_tokens)
+    return reported + newer_tokens - non_prompt_tokens
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
@@ -944,7 +931,7 @@ async def prepare_bound_scope_history(
     runtime_paths: RuntimePaths,
     config: Config,
     static_prompt_tokens: int,
-    current_prompt_tokens: int,
+    non_prompt_tokens: int,
     scope_context: ScopeSessionContext | None = None,
     team_name: str | None = None,
     active_model_name: str | None = None,
@@ -999,7 +986,7 @@ async def prepare_bound_scope_history(
         pipeline_timing=pipeline_timing,
         active_model=team.model,
         allow_native_compaction=allow_native_compaction,
-        current_prompt_tokens=current_prompt_tokens,
+        non_prompt_tokens=non_prompt_tokens,
     )
 
 

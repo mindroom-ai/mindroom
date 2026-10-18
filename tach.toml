@@ -2519,7 +2519,6 @@ depends_on = [
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
-    "mindroom.token_budget",
     "mindroom.tool_system.events",
 ]
 

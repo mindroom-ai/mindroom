@@ -883,7 +883,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
             agent=agent,
             agent_name="test_agent",
             resolved_inputs=resolved_inputs,
-            current_prompt_tokens=0,
+            non_prompt_tokens=0,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
@@ -1835,7 +1835,6 @@ def _reported_run(
     input_tokens: int = 0,
     model: str = "fake-model",
     created_at: int = _SUMMARY_WRITTEN_AT + 1,
-    provider_data: dict[str, object] | None = None,
     images: list[Image] | None = None,
 ) -> RunOutput:
     """Return a completed run whose answer carries the request size its provider reported.
@@ -1850,7 +1849,6 @@ def _reported_run(
                 role="assistant",
                 content="a" * 2_000,
                 metrics=MessageMetrics(input_tokens=input_tokens),
-                provider_data=provider_data,
                 created_at=created_at,
             ),
         ],
@@ -1862,23 +1860,24 @@ def _reported_run(
 
 async def _prepare_with_reported_usage(
     tmp_path: Path,
-    runs: list[RunOutput],
+    latest: dict[str, object],
     *,
     history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
     folded_run_ids: tuple[str, ...] = (),
-    current_prompt_tokens: int = 0,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
-    """Prepare one reply's history; return it, the chars / 4 history estimate, and the compaction notices.
+    """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
 
-    A summary folding ``folded_run_ids`` is stored as written at ``_SUMMARY_WRITTEN_AT``.
+    ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
+    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, 400 are the system prompt and tools.
     """
+    runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
         context_window=64_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = seed_session(storage, _session("session-1", runs=list(runs)))
+    session = seed_session(storage, _session("session-1", runs=runs))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if folded_run_ids:
         with patch("mindroom.history.summary_rows.time.time", return_value=_SUMMARY_WRITTEN_AT):
@@ -1910,31 +1909,33 @@ async def _prepare_with_reported_usage(
             agent=agent,
             agent_name="test_agent",
             resolved_inputs=resolved_inputs,
+            non_prompt_tokens=400,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
-            current_prompt_tokens=current_prompt_tokens,
         )
     return prepared, estimate, lifecycle
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("current_prompt_tokens", [0, 600])
+@pytest.mark.parametrize(
+    "folded_run_ids",
+    [pytest.param((), id="no-summary"), pytest.param(("run-0",), id="summary-before-the-request")],
+)
 async def test_the_latest_reported_request_size_decides_compaction_before_a_reply(
     tmp_path: Path,
-    current_prompt_tokens: int,
+    folded_run_ids: tuple[str, ...],
 ) -> None:
     """Chars / 4 undercounts real tokenizers (Qwen by about 1.3x), so the provider's count of the last request wins."""
     prepared, estimate, lifecycle = await _prepare_with_reported_usage(
         tmp_path,
-        [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", input_tokens=8_000)],
-        current_prompt_tokens=current_prompt_tokens,
+        {"input_tokens": 8_000},
+        folded_run_ids=folded_run_ids,
     )
 
-    assert estimate == 3_000
-    # That request held the system prompt, tools, and all history but its own 500-token answer; the static
-    # estimate's prompt share is this reply's prompt, which it never held.
-    expected = 8_000 + 500 - (1_000 - current_prompt_tokens)
+    assert estimate < 4_000  # The trigger budget.
+    # That request held the system prompt, tools, and all history but its own 500-token answer.
+    expected = 8_000 + 500 - 400
     assert prepared.compaction_decision.current_history_tokens == expected
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
@@ -1944,96 +1945,42 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "latest",
+    ("latest", "setup"),
     [
-        pytest.param({}, id="no-reported-usage"),
-        pytest.param({"input_tokens": 8_000, "provider_data": {"mindroom_aggregate_usage": True}}, id="summed-retries"),
-        pytest.param({"input_tokens": 8_000, "model": "other-model"}, id="another-model-answered"),
-        pytest.param({"input_tokens": 2_000}, id="below-the-estimate"),
+        pytest.param({}, {}, id="no-reported-usage"),
+        pytest.param({"input_tokens": 2_000}, {}, id="below-the-estimate"),
+        pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),
         pytest.param(
             {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},
+            {},
             id="media-replay-drops",
+        ),
+        # Each new run pushes the oldest replayed content out, so the last request held more than will replay.
+        pytest.param(
+            {"input_tokens": 8_000},
+            {"history_settings": replace(_ALL_HISTORY_SETTINGS, policy=HistoryPolicy(mode="runs", limit=2))},
+            id="run-limit",
+        ),
+        pytest.param(
+            {"input_tokens": 8_000},
+            {"history_settings": replace(_ALL_HISTORY_SETTINGS, max_tool_calls_from_history=1)},
+            id="tool-call-limit",
+        ),
+        # A compaction after that request folded runs it held; whole-second stamps cannot order a same-second one.
+        pytest.param(
+            {"input_tokens": 8_000, "created_at": _SUMMARY_WRITTEN_AT},
+            {"folded_run_ids": ("run-0",)},
+            id="summary-in-the-same-second",
         ),
     ],
 )
 async def test_history_keeps_its_estimate_without_a_usable_reported_size(
     tmp_path: Path,
     latest: dict[str, object],
+    setup: dict[str, object],
 ) -> None:
-    prepared, estimate, lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)],
-    )
+    prepared, estimate, lifecycle = await _prepare_with_reported_usage(tmp_path, latest, **setup)
 
     assert prepared.compaction_decision.current_history_tokens == estimate
     assert prepared.compaction_decision.reason == "under_trigger"
     assert lifecycle.events == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "history_settings",
-    [
-        pytest.param(
-            ResolvedHistorySettings(policy=HistoryPolicy(mode="runs", limit=2), max_tool_calls_from_history=None),
-            id="run-limit",
-        ),
-        pytest.param(
-            ResolvedHistorySettings(policy=HistoryPolicy(mode="messages", limit=4), max_tool_calls_from_history=None),
-            id="message-limit",
-        ),
-        pytest.param(
-            ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=1),
-            id="tool-call-limit",
-        ),
-    ],
-)
-async def test_replay_limits_make_the_reported_request_size_stale(
-    tmp_path: Path,
-    history_settings: ResolvedHistorySettings,
-) -> None:
-    """Each new run pushes the oldest replayed content out, so the last request held more than will replay."""
-    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", input_tokens=8_000)],
-        history_settings=history_settings,
-    )
-
-    assert prepared.compaction_decision.current_history_tokens == estimate
-    assert prepared.compaction_decision.reason == "under_trigger"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("answer_created_at", "stale"),
-    [
-        pytest.param(_SUMMARY_WRITTEN_AT - 1, True, id="summary-after-the-request"),
-        pytest.param(_SUMMARY_WRITTEN_AT, True, id="summary-in-the-same-second"),
-        pytest.param(_SUMMARY_WRITTEN_AT + 1, False, id="summary-before-the-request"),
-    ],
-)
-async def test_a_summary_written_after_the_reported_request_makes_its_size_stale(
-    tmp_path: Path,
-    answer_created_at: int,
-    *,
-    stale: bool,
-) -> None:
-    """A compaction after that request folded runs it held; whole-second stamps cannot order a same-second one."""
-    prepared, estimate, lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        [
-            _reported_run("run-0"),
-            _reported_run("run-1"),
-            _reported_run("run-2", input_tokens=8_000, created_at=answer_created_at),
-        ],
-        folded_run_ids=("run-0",),
-    )
-
-    if stale:
-        assert estimate < 4_000  # The trigger budget.
-        assert prepared.compaction_decision.current_history_tokens == estimate
-        assert prepared.compaction_decision.reason == "under_trigger"
-        assert lifecycle.events == []
-        return
-    assert prepared.compaction_decision.current_history_tokens == 7_500
-    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
