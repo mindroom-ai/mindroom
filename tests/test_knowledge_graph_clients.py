@@ -22,6 +22,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.knowledge_graph import clients
 from mindroom.knowledge_graph.clients import MindRoomEmbedder, MindRoomLLMClient, UnusedCrossEncoder
+from mindroom.knowledge_graph.store import UnusableExtractionError
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
 from tests.conftest import FakeModel
 
@@ -60,7 +61,7 @@ async def test_llm_client_returns_structured_output_and_records_usage(tmp_path: 
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     model = _JsonModel(id="luna", provider="test", answer=json.dumps({"names": ["Alice", "Project Atlas"]}))
-    client = MindRoomLLMClient(lambda: config, paths)
+    client = MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())
     record = AsyncMock()
     messages = [
         GraphitiMessage(role="system", content="Extract entities."),
@@ -93,7 +94,7 @@ async def test_llm_client_without_usage_target_records_nothing(tmp_path: Path) -
         patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
         patch.object(clients, "record_helper_usage", record),
     ):
-        await MindRoomLLMClient(lambda: config, paths)._generate_response(
+        await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
             [Message(role="user", content="x")],
             _Entities,
         )
@@ -121,7 +122,7 @@ async def test_llm_client_reports_the_providers_error(tmp_path: Path) -> None:
         patch("mindroom.providers.model_loading.get_model_instance", return_value=_FailingModel(id="luna")),
         pytest.raises(RuntimeError, match="invalid api key"),
     ):
-        await MindRoomLLMClient(lambda: config, paths)._generate_response(
+        await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
             [GraphitiMessage(role="user", content="x")],
             _Entities,
         )
@@ -138,10 +139,62 @@ async def test_llm_client_rejects_output_of_the_wrong_shape(tmp_path: Path, answ
         patch("mindroom.providers.model_loading.get_model_instance", return_value=_JsonModel(id="luna", answer=answer)),
         pytest.raises(ValueError, match="knowledge graph extraction"),
     ):
-        await MindRoomLLMClient(lambda: config, paths)._generate_response(
+        await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
             [GraphitiMessage(role="user", content="x")],
             _Entities,
         )
+
+
+@dataclass
+class _LoopRecordingModel(_JsonModel):
+    """Records the event loop each request runs on."""
+
+    loops: list[asyncio.AbstractEventLoop] = field(default_factory=list)
+
+    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
+        self.loops.append(asyncio.get_running_loop())
+        return await super().ainvoke(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_extraction_runs_on_the_runtime_loop(tmp_path: Path) -> None:
+    """Graphiti calls from its own loop, but the model runs on the runtime loop that owns the providers' HTTP clients."""
+    config = _config()
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    runtime_loop = asyncio.get_running_loop()
+    model = _LoopRecordingModel(id="luna", provider="test", answer=json.dumps({"names": ["Alice"]}))
+    record = AsyncMock()
+    target = UsageTarget(agent_name="mind", session_id="!room:x:$thread", execution_identity=None)
+    client = MindRoomLLMClient(lambda: config, paths, runtime_loop)
+
+    async def from_graph_loop() -> dict[str, object]:
+        with usage_target(target):
+            return await client._generate_response([GraphitiMessage(role="user", content="x")], _Entities)
+
+    with (
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch.object(clients, "record_helper_usage", record),
+    ):
+        result = await asyncio.to_thread(asyncio.run, from_graph_loop())
+
+    assert result == {"names": ["Alice"]}
+    assert model.loops == [runtime_loop]
+    assert record.await_args.kwargs["owner"].session_id == "!room:x:$thread"
+
+
+@pytest.mark.asyncio
+async def test_unusable_extraction_crosses_back_to_the_caller(tmp_path: Path) -> None:
+    """Output the model got wrong reaches Graphiti's loop as the error ingestion counts toward dropping the episode."""
+    config = _config()
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    client = MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())
+    call = client._generate_response([GraphitiMessage(role="user", content="x")], _Entities)
+
+    with (
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=_JsonModel(id="luna", answer="no")),
+        pytest.raises(UnusableExtractionError),
+    ):
+        await asyncio.to_thread(asyncio.run, call)
 
 
 class _Embedder:

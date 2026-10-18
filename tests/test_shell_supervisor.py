@@ -226,12 +226,11 @@ async def test_a_supervised_run_relays_its_progress_before_its_result(monkeypatc
 
 @pytest.mark.asyncio
 async def test_run_nonzero_exit_returns_stderr() -> None:
-    """Non-zero exits should surface stderr as an error message."""
+    """Non-zero exits should surface their exit code and stderr."""
     registry: dict[str, ProcessRecord] = {}
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["bash", "-c", "echo oops >&2; exit 1"])
-        assert result.startswith("Error:")
-        assert "oops" in result
+        assert result == "Exit code 1\nStderr:\noops"
 
 
 @pytest.mark.asyncio
@@ -526,7 +525,7 @@ async def test_script_shim_removes_capability_file_when_source_validation_fails(
         timeout=30,
     )
 
-    assert result.message.startswith("Error:")
+    assert result.message.startswith("Exit code 1\n")
     assert not token_path.exists()
 
 
@@ -555,7 +554,7 @@ async def test_script_shim_rejects_missing_workspace_root(tmp_path: Path) -> Non
         timeout=30,
     )
 
-    assert result.message.startswith("Error:")
+    assert result.message.startswith("Exit code 1\n")
     assert "MINDROOM_SCRIPT_WORKSPACE_ROOT must be set" in result.message
     assert token_path.exists()
 
@@ -586,7 +585,7 @@ async def test_script_shim_removes_oversized_capability_file(tmp_path: Path) -> 
         timeout=30,
     )
 
-    assert result.message.startswith("Error:")
+    assert result.message.startswith("Exit code 1\n")
     assert not token_path.exists()
 
 
@@ -618,7 +617,7 @@ async def test_script_shim_unlinks_rejected_token_symlink_without_deleting_targe
         timeout=30,
     )
 
-    assert result.message.startswith("Error:")
+    assert result.message.startswith("Exit code 1\n")
     assert not token_path.exists()
     assert outside_token.read_text(encoding="utf-8") == "raw-secret"
 

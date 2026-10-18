@@ -58,7 +58,7 @@ from mindroom.tool_jobs.results import (
     encode_tool_result,
     read_result_payload,
 )
-from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_jobs.runtime import JobAccessError, job_summary, register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -283,6 +283,66 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
                     assert "registered sync result" in tool.result
                 else:
                     assert json.loads(tool.result)["job_id"] == jobs[0].job_id
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_failed_shell_command_states_exit_code_inline_and_as_job(tmp_path: Path, managed: bool) -> None:
+    """A non-zero exit is the command's returned result, so its job completes; its exit code leads the summary."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
+    )
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = await tool_job_runtime(tmp_path)
+    if managed:
+        pin_background_tool_jobs(context.config, paths)
+        register_background_runtime(paths, runtime)
+    toolkit = get_tool_by_name(
+        "shell",
+        paths,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
+    prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
+    bind_toolkit_authority(toolkit, authored_name="shell")
+    arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}
+    if managed:
+        arguments["background_after"] = 0
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("run_shell_command", "shell-call", **arguments)]),
+            ModelResponse(content="done"),
+        ],
+    )
+    if managed:
+        install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[toolkit])
+    expected = [f"[cwd: {tmp_path}]", "Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                response = await agent.arun("run the command", session_id=context.session_id)
+                assert response.tools is not None
+                tool = response.tools[0]
+                if not managed:
+                    assert not tool.tool_call_error, tool.result
+                    assert tool.result.splitlines() == expected
+                    return
+                job_id = json.loads(tool.result)["job_id"]
+                waited = await asyncio.wait_for(runtime.wait(job_id, owner=owner, depth=0), JOB_TEST_TIMEOUT)
+                listed = job_summary(waited.job)
+                assert listed["status"] == "completed"
+                assert listed["summary"].splitlines()[:2] == expected[:2]
+                payload = await read_result_payload(runtime, waited.job)
+                assert payload.error is None
+                assert str(payload.value).splitlines() == expected
     finally:
         await runtime.shutdown()
 

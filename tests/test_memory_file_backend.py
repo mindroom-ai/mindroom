@@ -71,8 +71,6 @@ def append_agent_daily_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ):
     return memory_functions.append_agent_daily_memory(
         content,
@@ -81,7 +79,6 @@ def append_agent_daily_memory(
         config,
         runtime_paths_for(config),
         get_tool_execution_identity(),
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
 
@@ -110,8 +107,6 @@ async def list_all_agent_memories(
     storage_path: Path,
     config: Config,
     limit: int = 100,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ):
     return await public_list_all_agent_memories(
         agent_name,
@@ -120,7 +115,6 @@ async def list_all_agent_memories(
         runtime_paths_for(config),
         limit,
         get_tool_execution_identity(),
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
 

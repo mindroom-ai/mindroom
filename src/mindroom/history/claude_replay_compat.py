@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY
+from mindroom.history.run_visibility import is_queued_notice_message
 
 if TYPE_CHECKING:
     from agno.models.message import Message
@@ -18,12 +18,7 @@ def strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
     """Strip stale Anthropic thinking replay fields from completed turns."""
     last_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
-        provider_data = messages[i].provider_data
-        is_queued_notice = isinstance(provider_data, dict) and provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
-            True,
-            "persisted",
-        )
-        if messages[i].role == "user" and not is_queued_notice:
+        if messages[i].role == "user" and not is_queued_notice_message(messages[i]):
             last_user_idx = i
             break
     if last_user_idx < 0:

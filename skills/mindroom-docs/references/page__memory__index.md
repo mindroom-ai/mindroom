@@ -237,25 +237,28 @@ To give each requester their own file memory from one agent definition, combine 
 
 ## File Auto-Flush Worker
 
-Auto-flush periodically turns recent conversation in file-backed agents into durable memories.
-It applies only to agents whose effective backend is `file`.
+Auto-flush periodically turns the new turns of file-backed agents' conversations into durable memories.
+It applies only to agents whose effective backend is `file`, including each requester's private instance.
 
-1. Each turn marks its session as having unsaved conversation.
-2. A background worker picks eligible sessions in bounded batches.
-3. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts.
-4. When the model answers with the `no_reply_token`, nothing is written.
-5. Results are appended to `memory/YYYY-MM-DD.md`.
+1. Every `flush_interval_seconds`, a background worker looks for conversations with new finished turns that have been quiet for `idle_seconds`.
+2. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
+3. When the model answers with the `no_reply_token`, nothing is written.
+4. Results are appended to `memory/YYYY-MM-DD.md`, and a retry never appends the same result twice.
 
-Turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start are not auto-flushed.
+Compacted turns and voice-call turns are included.
+Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start, tasks another agent delegated, team conversations, and conversations through the OpenAI-compatible API.
+A message redacted before its turn is flushed stays out of memory, and so does the turn that read it.
+A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
+An agent switched to `file` memory later starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it, and its private instances, including new ones, keep all their turns since then.
 
 ```yaml
 memory:
   backend: file
   auto_flush:
     enabled: true
-    flush_interval_seconds: 1800
+    flush_interval_seconds: 300
     idle_seconds: 120
-    max_dirty_age_seconds: 600
     batch:
       max_sessions_per_cycle: 10
     extractor:
@@ -265,19 +268,17 @@ memory:
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Turn on auto-flush |
-| `flush_interval_seconds` | `1800` (min 5) | Time between worker cycles |
-| `idle_seconds` | `120` (min 0) | Session idle time before it becomes eligible |
-| `max_dirty_age_seconds` | `600` (min 1) | Make a session eligible after this long with unsaved conversation, even if still active |
-| `stale_ttl_seconds` | `86400` (min 60) | Forget pending sessions older than this |
-| `max_cross_session_reprioritize` | `5` (min 0) | Other pending sessions of the same agent moved up the queue when a new message arrives |
-| `retry_cooldown_seconds` | `30` (min 1) | Wait before retrying a failed extraction |
+| `flush_interval_seconds` | `300` (min 5) | Time between worker passes |
+| `idle_seconds` | `120` (min 0) | How long a conversation must be quiet before its new turns are flushed |
+| `stale_ttl_seconds` | `86400` (min 60) | Give up on turns whose flush has kept failing for this long |
+| `retry_cooldown_seconds` | `30` (min 1) | Wait before retrying a failed flush |
 | `max_retry_cooldown_seconds` | `300` (min 1) | Upper bound for the growing retry wait |
-| `batch.max_sessions_per_cycle` | `10` (min 1) | Sessions processed per cycle |
-| `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Sessions per agent processed per cycle |
+| `batch.max_sessions_per_cycle` | `10` (min 1) | Conversations flushed per pass, across all agents |
+| `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Conversations flushed per pass for one agent or private instance |
 | `extractor.no_reply_token` | `NO_REPLY` | Reply meaning nothing should be saved |
-| `extractor.max_messages_per_flush` | `20` (min 1) | Messages considered per extraction |
-| `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters considered per extraction |
-| `extractor.max_extraction_seconds` | `30` (min 1) | Timeout for one extraction, retried in a later cycle |
+| `extractor.max_messages_per_flush` | `20` (min 1) | New messages read per extraction; a longer backlog is read over later passes |
+| `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters read per extraction |
+| `extractor.max_extraction_seconds` | `30` (min 1) | Timeout for one extraction, retried in a later pass |
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 

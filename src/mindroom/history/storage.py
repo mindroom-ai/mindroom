@@ -408,7 +408,7 @@ def _remove_redacted_event_from_history(
         )
         if result is None:
             return False
-        if legacy_event_ids is not None and result.removed_loaded_holder:
+        if legacy_event_ids is not None and result == "loaded":
             summary_rows.retire(storage, session_id=session.session_id, scope_key=scope.key)
     target_session = _latest_persisted_session(storage, session)
     _replace_scope_seen_event_ids(target_session, scope, set())
@@ -532,7 +532,7 @@ def update_scope_state_on_latest(
 
 
 @dataclass(frozen=True)
-class ChunkBasis:
+class _ChunkBasis:
     """What one compaction chunk's summary is built on: the latest summary row and the candidate runs, as read."""
 
     based_on: int | None
@@ -546,7 +546,7 @@ def read_chunk_basis(
     run_ids: Sequence[str],
     *,
     previous_summary: str | None,
-) -> ChunkBasis | None:
+) -> _ChunkBasis | None:
     """Read what a chunk folding some of ``run_ids`` after ``previous_summary`` builds on, before its summary call.
 
     The chunk summarizes the session as it was loaded, so this returns ``None`` when the stored history has
@@ -557,7 +557,7 @@ def read_chunk_basis(
     latest_summary = (latest.summary or "").strip() or None if latest is not None else None
     if latest_summary != previous_summary or {run.run_id for run in covered if run.visible} != set(run_ids):
         return None
-    return ChunkBasis(based_on=latest.id if latest is not None else None, covered=covered)
+    return _ChunkBasis(based_on=latest.id if latest is not None else None, covered=covered)
 
 
 def append_compaction_chunk(
@@ -565,7 +565,7 @@ def append_compaction_chunk(
     storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
-    basis: ChunkBasis,
+    basis: _ChunkBasis,
     included_run_ids: Collection[str],
     summary: SessionSummary,
     summary_model: str,

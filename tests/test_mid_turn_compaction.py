@@ -35,12 +35,12 @@ from mindroom.agno_compat_model_hooks import install_request_preparation
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
-from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import agno_compat_message_builder, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
 from mindroom.history.replay import compaction_summary_message, estimate_request_messages_tokens, is_compaction_summary
+from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import (
     new_scope_session,
     read_scope_state,

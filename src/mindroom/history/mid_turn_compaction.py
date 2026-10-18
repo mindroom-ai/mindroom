@@ -28,7 +28,6 @@ from agno.session.summary import SessionSummary
 
 from mindroom.agno_compat_model_hooks import install_request_preparation
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.constants import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.agno_compat_message_builder import built_request_session
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
@@ -40,6 +39,7 @@ from mindroom.history.replay import (
     estimate_request_messages_tokens,
     is_compaction_summary,
 )
+from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
     compact_scope_mid_turn,
     resolve_agent_preparation_inputs,
@@ -544,7 +544,7 @@ def _layout(messages: list[Message], run_response: RunOutput | TeamRunOutput, *,
     previous: str | None = None
     for exchange in _exchanges(messages[leading:]):
         head = exchange[0]
-        if head is prompt or not head.add_to_agent_memory or (_is_queued_notice(head) and not head.from_history):
+        if head is prompt or not head.add_to_agent_memory or (is_queued_notice_message(head) and not head.from_history):
             kept.extend(exchange)
         elif is_compaction_summary(head) and not head.from_history and not scoped:
             previous = compaction_summary_text(head)
@@ -597,14 +597,10 @@ def _current_prompt(messages: Sequence[Message], run_response: RunOutput | TeamR
             and not message.from_history
             and message.add_to_agent_memory
             and not is_compaction_summary(message)
-            and not _is_queued_notice(message)
+            and not is_queued_notice_message(message)
         ),
         None,
     )
-
-
-def _is_queued_notice(message: Message) -> bool:
-    return isinstance(message.provider_data, dict) and bool(message.provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY))
 
 
 def _snapshots(

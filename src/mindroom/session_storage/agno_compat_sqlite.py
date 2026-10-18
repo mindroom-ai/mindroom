@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import json
 import time
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -29,7 +28,7 @@ from mindroom.history.summary_rows_schema import (
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import Collection
 
     from agno.db.sqlite import SqliteDb
     from agno.run.agent import RunOutput
@@ -244,15 +243,12 @@ def upsert_run_at_end(
     return outcome
 
 
-@contextmanager
-def run_deletion_transaction(db: SqliteDb) -> Iterator[tuple[Session, Table | None]]:
-    """Run the owner's run deletion inside one transaction on the private runs table."""
-    runs_table = _existing_table(db, "runs")
-    with db.Session() as session, session.begin():
-        yield session, runs_table
-
-
-_ID_CHUNK_SIZE = 500
+def delete_runs(db: SqliteDb, run_ids: Collection[str]) -> None:
+    """Delete ``run_ids`` with their member runs in one transaction on the private runs table."""
+    runs = _existing_table(db, "runs")
+    if runs is not None:
+        with db.db_engine.begin() as connection:
+            delete_run_subtrees(connection, quote_identifier(runs.name), run_ids, session_id=None)
 
 
 def delete_run_subtrees(
@@ -269,26 +265,20 @@ def delete_run_subtrees(
     """
     scope, scope_parameters = ("session_id = ? AND ", (session_id,)) if session_id is not None else ("", ())
     found = {run_id for run_id in run_ids if run_id}
-    frontier = sorted(found)
+    frontier = found
     while frontier:
-        chunk, frontier = frontier[:_ID_CHUNK_SIZE], frontier[_ID_CHUNK_SIZE:]
-        children = [
+        frontier = {
             run_id
             for (run_id,) in connection.exec_driver_sql(
-                f"SELECT run_id FROM {runs} WHERE {scope}parent_run_id IN ({', '.join('?' for _ in chunk)})",  # noqa: S608
-                (*scope_parameters, *chunk),
+                f"SELECT run_id FROM {runs} WHERE {scope}parent_run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
+                (*scope_parameters, json.dumps(sorted(frontier))),
             )
-            if run_id not in found
-        ]
-        found.update(children)
-        frontier.extend(children)
-    ordered = sorted(found)
-    for start in range(0, len(ordered), _ID_CHUNK_SIZE):
-        chunk = ordered[start : start + _ID_CHUNK_SIZE]
-        connection.exec_driver_sql(
-            f"DELETE FROM {runs} WHERE {scope}run_id IN ({', '.join('?' for _ in chunk)})",  # noqa: S608
-            (*scope_parameters, *chunk),
-        )
+        } - found
+        found |= frontier
+    connection.exec_driver_sql(
+        f"DELETE FROM {runs} WHERE {scope}run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
+        (*scope_parameters, json.dumps(sorted(found))),
+    )
     return found
 
 
@@ -410,16 +400,14 @@ def _folded_message_ids(
 ) -> dict[str, set[str]]:
     """Return, for each of ``run_ids`` that folded mid-turn, the ids of the messages its segments hold."""
     folded: dict[str, set[str]] = {}
-    for start in range(0, len(run_ids), _ID_CHUNK_SIZE):
-        chunk = run_ids[start : start + _ID_CHUNK_SIZE]
-        for run_id, message_id in connection.exec_driver_sql(
-            f"SELECT row.segment_run_id, json_extract(message.value, '$.id') FROM {summaries} AS row, "  # noqa: S608
-            "json_each(row.segment, '$.messages') AS message WHERE row.session_id = ? "
-            f"AND row.segment_run_id IN ({', '.join('?' for _ in chunk)})",
-            (session_id, *chunk),
-        ):
-            if isinstance(message_id, str):
-                folded.setdefault(run_id, set()).add(message_id)
+    for run_id, message_id in connection.exec_driver_sql(
+        f"SELECT row.segment_run_id, json_extract(message.value, '$.id') FROM {summaries} AS row, "  # noqa: S608
+        "json_each(row.segment, '$.messages') AS message WHERE row.session_id = ? "
+        "AND row.segment_run_id IN (SELECT value FROM json_each(?))",
+        (session_id, json.dumps(run_ids)),
+    ):
+        if isinstance(message_id, str):
+            folded.setdefault(run_id, set()).add(message_id)
     return folded
 
 

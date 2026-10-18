@@ -1701,6 +1701,20 @@ def test_docker_workers_run_with_read_only_root_filesystem(
     assert fake_client.containers.run_calls[1]["read_only"] is True
 
 
+def test_docker_workers_keep_the_image_init_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the image command is replaced, so the image's tini entrypoint stays PID 1 and reaps orphaned children."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    assert run_call["command"] == ["/app/run-sandbox-runner.sh"]
+    assert "entrypoint" not in run_call
+
+
 def test_docker_workers_run_under_the_configured_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

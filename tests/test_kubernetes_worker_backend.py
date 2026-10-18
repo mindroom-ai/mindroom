@@ -1020,6 +1020,21 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     }
 
 
+def test_kubernetes_worker_runs_the_sandbox_runner_under_tini(tmp_path: Path) -> None:
+    """A container command replaces the image entrypoint, so tini must stay PID 1 to reap orphaned command children."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
+    assert container["command"] == ["tini", "--", "/app/run-sandbox-runner.sh"]
+
+
 def test_kubernetes_worker_tmp_has_an_eviction_size_limit(tmp_path: Path) -> None:
     """Tool code writing past 1 GiB to /tmp gets its own pod evicted instead of filling the node's ephemeral storage."""
     backend, apps_api, _core_api = _backend(

@@ -171,8 +171,10 @@ Matrix sync callback
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
+| `memory/auto_flush.py` | Background passes that turn file-memory agents' new finished turns into daily notes, with per-conversation progress below `tracking/` |
 | `knowledge/file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
+| `history/conversation_text.py` | What stored turns said, for background model calls: which turns and messages count and who said each |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
@@ -186,7 +188,6 @@ Matrix sync callback
 | `knowledge_graph/usage.py` | Which conversation an extraction call's tokens are charged to |
 | `knowledge_graph/embedded_server.py` | The embedded FalkorDB server MindRoom starts, stops, and recovers after a crash |
 | `knowledge_graph/episodes.py` | Stored runs rendered as `conversation` and `tool_results` episodes, and thread classification |
-| `knowledge_graph/session_runs.py` | Finished and approval-waiting Matrix turns of a conversation, live and compacted |
 | `knowledge_graph/ingestion.py` | Background ingestion passes with per-kind markers, backoff, and dropped episodes |
 | `knowledge_graph/runtime.py` | Starts and stops the store and ingestion worker as agents enable the graph |
 | `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model and ingestion settings |
@@ -223,6 +224,7 @@ Matrix sync callback
 | `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
+| `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |

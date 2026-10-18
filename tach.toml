@@ -984,7 +984,7 @@ visibility = [
     "mindroom.skill_learning.runner",
     "mindroom.tool_jobs.consumption",
     "mindroom.knowledge_graph.clients",
-    "mindroom.knowledge_graph.session_runs",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.ingestion",
     "mindroom.automations.exploration",
     "mindroom.memory._mem0_backend",
@@ -1133,6 +1133,9 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
+    "mindroom.history.conversation_text",
+    "mindroom.history.claude_replay_compat",
+    "mindroom.history.mid_turn_compaction",
 ]
 
 [[modules]]
@@ -2665,10 +2668,10 @@ visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.ai",
     "mindroom.history.turn_recorder",
-    "mindroom.knowledge_graph.episodes",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
+    "mindroom.history.conversation_text",
 ]
 
 [[modules]]
@@ -3299,7 +3302,7 @@ visibility = [
     "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
-    "mindroom.knowledge_graph.episodes",
+    "mindroom.history.conversation_text",
 ]
 
 [[modules]]
@@ -3338,15 +3341,26 @@ visibility = ["mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory.auto_flush"
 depends_on = [
+    "mindroom.automations.steps",
+    "mindroom.constants",
+    "mindroom.durable_write",
     "mindroom.helper_usage",
+    "mindroom.history.session_runs",
     "mindroom.session_storage.agent_storage",
     "mindroom.logging_config",
     "mindroom.memory._prompting",
     "mindroom.memory.functions",
+    "mindroom.memory.legacy_auto_flush",
     "mindroom.providers.model_loading",
+    "mindroom.requester_identity",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
 ]
+
+[[modules]]
+path = "mindroom.memory.legacy_auto_flush"
+depends_on = []
+visibility = ["mindroom.memory.auto_flush"]
 
 [[modules]]
 path = "mindroom.memory.functions"
@@ -6164,11 +6178,9 @@ expose = [
     "delete_agent_memory",
     "get_agent_memory",
     "list_all_agent_memories",
-    "mark_auto_flush_dirty_session",
     "read_scope_memory_files",
     "redact_memory_text",
     "refresh_agent_memory_search",
-    "reprioritize_auto_flush_sessions",
     "search_agent_memories",
     "store_conversation_memory",
     "strip_user_turn_time_prefix",
@@ -7466,7 +7478,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.history.claude_replay_compat"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.history.run_visibility"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 
 [[modules]]
@@ -7528,6 +7540,21 @@ visibility = [
     "mindroom.teams",
     "mindroom.delegation.recovery",
     "mindroom.history.mid_turn_compaction",
+]
+
+[[modules]]
+path = "mindroom.history.conversation_text"
+depends_on = [
+    "mindroom.automations.steps",
+    "mindroom.constants",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.run_visibility",
+    "mindroom.prompt_message_tags",
+    "mindroom.turn_origin",
+]
+visibility = [
+    "mindroom.knowledge_graph.episodes",
+    "mindroom.skill_learning.transcript",
 ]
 
 [[modules]]
@@ -8018,7 +8045,7 @@ expose = [
     "remove_default_pragmas",
     "owned_table",
     "upsert_run_at_end",
-    "run_deletion_transaction",
+    "delete_runs",
     "delete_run_subtrees",
     "read_session",
     "cached_run_counts",
@@ -8936,6 +8963,8 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.knowledge_graph.episodes",
     "mindroom.automations.exploration",
+    "mindroom.history.conversation_text",
+    "mindroom.memory.auto_flush",
 ]
 
 [[modules]]
@@ -9004,7 +9033,7 @@ visibility = ["mindroom.skill_learning.runner", "mindroom.skill_learning.tools"]
 
 [[modules]]
 path = "mindroom.skill_learning.transcript"
-depends_on = ["mindroom.history.run_visibility"]
+depends_on = ["mindroom.history.conversation_text", "mindroom.history.run_visibility"]
 visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.runner"]
 
 [[modules]]
@@ -9144,20 +9173,23 @@ path = "mindroom.knowledge_graph.episodes"
 depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
-    "mindroom.history.interrupted_replay",
+    "mindroom.history.conversation_text",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.store",
-    "mindroom.prompt_message_tags",
     "mindroom.redaction",
 ]
 
 [[modules]]
-path = "mindroom.knowledge_graph.session_runs"
+path = "mindroom.history.session_runs"
 depends_on = [
     "mindroom.history.storage",
-    "mindroom.knowledge_graph.episodes",
-    "mindroom.session_storage.agent_storage",
 ]
-visibility = ["mindroom.automations.exploration", "mindroom.knowledge_graph.ingestion"]
+visibility = [
+    "mindroom.automations.exploration",
+    "mindroom.knowledge_graph.episodes",
+    "mindroom.knowledge_graph.ingestion",
+    "mindroom.memory.auto_flush",
+]
 
 [[modules]]
 path = "mindroom.knowledge_graph.ingestion"
@@ -9165,10 +9197,9 @@ depends_on = [
     "mindroom.automations.threads",
     "mindroom.durable_write",
     "mindroom.entity_resolution",
-    "mindroom.history.storage",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.scope",
-    "mindroom.knowledge_graph.session_runs",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",
     "mindroom.logging_config",
@@ -9202,9 +9233,9 @@ depends_on = [
     "mindroom.automations.threads",
     "mindroom.config.automations",
     "mindroom.durable_write",
+    "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.ingestion",
-    "mindroom.knowledge_graph.session_runs",
     "mindroom.session_storage.agent_storage",
 ]
 visibility = ["mindroom.automations.registry"]
@@ -9220,6 +9251,7 @@ depends_on = [
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.policy",
     "mindroom.history.replay",
+    "mindroom.history.run_visibility",
     "mindroom.history.summary_rows",
     "mindroom.history.runtime",
     "mindroom.history.session_context",

@@ -977,11 +977,11 @@ async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJ
 
 
 @pytest.mark.asyncio
-async def test_edit_pruning_follows_a_redaction_rollback(
+async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_summary(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """A rollback that restores the edited turn's compacted run happens before pruning, not after."""
+    """Editing a folded turn while a later folded turn is redacted cuts both runs and the summary that folded them."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$a")
     scope = HistoryScope(kind="agent", scope_id="agent")
 

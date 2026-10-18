@@ -66,6 +66,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
@@ -171,6 +172,7 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch
 from tests.approval_continuation_helpers import (
     approval_continuation,
@@ -2787,7 +2789,7 @@ async def test_approval_pause_keeps_the_reply_correlation_when_the_request_names
 
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
-async def test_agent_continuation_executes_real_agno_confirmation(
+async def test_agent_continuation_executes_real_agno_confirmation(  # noqa: PLR0915
     tmp_path: Path,
     approved: bool,
     reason: str | None,
@@ -2799,6 +2801,8 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         "room_id": "!room:localhost",
         "thread_id": "$thread",
         "correlation_id": "approval-metadata",
+        # A job follow-up that waits for approval is still one when it resumes.
+        TURN_INTENT_RUN_METADATA_KEY: TurnIntent.JOB_FOLLOW_UP.value,
     }
 
     def run_shell_command(args: list[str], run_context: RunContext) -> str:
@@ -2931,6 +2935,9 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
     assert register_notice.call_args.kwargs["entity_name"] == "general"
     assert callable(register_notice.call_args.kwargs["storage_factory"])
+    stored = cast("AgentSession", agent.db.get_session(session_id="session-1", session_type=SessionType.AGENT))
+    assert stored.runs is not None
+    assert stored.runs[-1].metadata == original_metadata
 
 
 @pytest.mark.parametrize(
@@ -9305,23 +9312,19 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
     ],
 )
 def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
-    """A maintenance turn, such as an unreviewed memory proposal, never reaches auto-flush; other turns do."""
+    """A maintenance turn, such as an unreviewed memory proposal, never reaches Mem0; other turns do."""
     runner = ResponseRunner(deps=MagicMock())
-    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "file"
+    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "mem0"
 
-    with patch("mindroom.response_runner.mark_auto_flush_dirty_session") as mark_dirty:
-        queue = runner._memory_persistence(
-            agent_name="mind",
-            session_id="session",
-            execution_identity=MagicMock(),
-            prompt="Consolidate memory",
-            thread_history=(),
-            user_id=None,
-            hook_source=hook_source,
-            origin=message_origin(),
-        )
-        if queue is not None:
-            queue()
+    queue = runner._memory_persistence(
+        agent_name="mind",
+        session_id="session",
+        execution_identity=MagicMock(),
+        prompt="Consolidate memory",
+        thread_history=(),
+        user_id=None,
+        hook_source=hook_source,
+        origin=message_origin(),
+    )
 
     assert (queue is not None) is flushed
-    assert mark_dirty.called is flushed

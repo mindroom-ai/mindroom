@@ -1,4 +1,4 @@
-"""Graphiti's model, embedder, and reranker clients, backed by MindRoom's own model and embedder construction.
+"""Graphiti's model, embedder, reranker, and database clients; the model and embedder use MindRoom's own construction.
 
 Every provider, credential rule, and base URL MindRoom supports then works for extraction without a second provider
 mapping, and each extraction call is an Agno run whose tokens are recorded like other helper work.
@@ -16,6 +16,7 @@ from agno.agent import Agent
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.run.base import RunStatus
 from graphiti_core.cross_encoder.client import CrossEncoderClient
+from graphiti_core.driver.falkordb_driver import FalkorDriver
 from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.llm_client.client import LLMClient
 from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, ModelSize
@@ -23,7 +24,7 @@ from pydantic import BaseModel
 
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_cardinality_mismatch
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
-from mindroom.knowledge_graph.store import UnusableExtractionError
+from mindroom.knowledge_graph.store import UnusableExtractionError, run_on_loop
 from mindroom.knowledge_graph.usage import current_usage_target
 from mindroom.providers import model_loading
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from agno.knowledge.embedder.base import Embedder
+    from graphiti_core.driver.driver import GraphDriver
     from graphiti_core.prompts.models import Message
 
     from mindroom.config.main import Config
@@ -40,15 +42,35 @@ if TYPE_CHECKING:
 # Requests in flight at once for an embedder that embeds one text per request.
 _EMBED_CONCURRENCY = 8
 
+# Graphiti's FalkorDB searches return every entity's and fact's embedding and then discard it.
+# Reason: the entity and fact return clauses select `properties(n)` and `properties(e)`, which include
+# `name_embedding` and `fact_embedding`, and building the records pops them unused. With 3072-dimension embeddings
+# the reply parsing took about 15 ms of event loop time per returned row, so ingestion stalled every agent's replies.
+# Upstream issue: https://github.com/getzep/graphiti/issues/2021
+# Upstream PR: https://github.com/getzep/graphiti/pull/2022 (https://github.com/getzep/graphiti/pull/1234 only adds
+# an opt-in lightweight mode to `get_by_group_ids`).
+# Remove when: the pinned Graphiti's FalkorDB searches no longer read embeddings back.
+# Coverage: tests/test_knowledge_graph_store.py::test_lookups_do_not_read_embeddings_back
+_WITHOUT_EMBEDDINGS = (
+    ("properties(n)", "n {.*, name_embedding: NULL}"),
+    ("properties(e)", "e {.*, fact_embedding: NULL}"),
+)
+
 
 class MindRoomLLMClient(LLMClient):
     """Run Graphiti's extraction prompts on the ``knowledge_graph.model`` entry with structured output."""
 
-    def __init__(self, config_provider: Callable[[], Config], runtime_paths: RuntimePaths) -> None:
+    def __init__(
+        self,
+        config_provider: Callable[[], Config],
+        runtime_paths: RuntimePaths,
+        runtime_loop: asyncio.AbstractEventLoop,
+    ) -> None:
         # The model is read from config on every call; Graphiti uses its own copy only as a cache key, and caching is off.
         super().__init__(None)
         self._config_provider = config_provider
         self._runtime_paths = runtime_paths
+        self._runtime_loop = runtime_loop
 
     async def _generate_response(
         self,
@@ -61,6 +83,11 @@ class MindRoomLLMClient(LLMClient):
     ) -> dict[str, Any]:
         # The configured model entry decides its output limit, and one model serves every prompt.
         del max_tokens, model_size, model
+        # Graphiti calls from the knowledge graph loop, but model providers share HTTP clients bound to the runtime loop
+        # (the Codex and Kimi providers use Agno's global async client), so the extraction itself runs there.
+        return await run_on_loop(self._runtime_loop, self._extract(messages, response_model))
+
+    async def _extract(self, messages: list[Message], response_model: type[BaseModel] | None) -> dict[str, Any]:
         config = self._config_provider()
         model_name = config.knowledge_graph.model
         if model_name is None:
@@ -171,3 +198,21 @@ class UnusedCrossEncoder(CrossEncoderClient):
         del query, passages
         msg = "The knowledge graph searches without a cross-encoder"
         raise RuntimeError(msg)
+
+
+class MindRoomFalkorDriver(FalkorDriver):
+    """Graphiti's FalkorDB driver, with the embeddings its searches discard replaced by null in each query."""
+
+    async def execute_query(self, cypher_query_: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Run Graphiti's query without reading entity and fact embeddings back."""
+        for selected, projected in _WITHOUT_EMBEDDINGS:
+            cypher_query_ = cypher_query_.replace(selected, projected)
+        return await super().execute_query(cypher_query_, **kwargs)
+
+    def clone(self, database: str) -> GraphDriver:
+        """Address another graph over the same connection; Graphiti's own clone would build a plain driver."""
+        if database == self._database:
+            return self
+        if database == self.default_group_id:
+            return MindRoomFalkorDriver(falkor_db=self.client)
+        return MindRoomFalkorDriver(falkor_db=self.client, database=database)

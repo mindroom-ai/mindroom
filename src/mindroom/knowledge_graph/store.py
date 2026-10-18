@@ -9,15 +9,18 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import threading
+from contextvars import copy_context
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge_graph.usage import usage_target
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Coroutine, Sequence
+    from concurrent.futures import Future as ConcurrentFuture
     from datetime import datetime
 
     from graphiti_core import Graphiti
@@ -191,20 +194,90 @@ async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[Graph
     ]
 
 
-class GraphitiStore:
-    """Own one Graphiti client over the embedded database, rebuilt when the embedder settings change."""
+async def run_on_loop[T](loop: asyncio.AbstractEventLoop, coroutine: Coroutine[Any, Any, T]) -> T:
+    """Await ``coroutine`` on ``loop`` with the caller's context variables; cancelling the caller cancels it."""
+    if loop is asyncio.get_running_loop():
+        return await coroutine
+    future = cast("ConcurrentFuture[T]", copy_context().run(asyncio.run_coroutine_threadsafe, coroutine, loop))
+    try:
+        return await asyncio.wrap_future(future)
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        # The work was cancelled on its own loop, for example by closing the store, not by this caller; a caller
+        # such as an agent's tool call must see an ordinary failure rather than its own turn being cancelled.
+        msg = "The work was cancelled on the other event loop"
+        raise RuntimeError(msg) from None
 
-    def __init__(self, config_provider: Callable[[], Config], runtime_paths: RuntimePaths) -> None:
+
+class _GraphLoop:
+    """The thread and event loop every Graphiti and FalkorDB call runs on.
+
+    Graphiti spends hundreds of milliseconds of Python per episode on parsing and deduplication, which stalled every
+    agent's replies while it shared the runtime loop. On its own thread it only competes for the GIL, which the
+    interpreter hands over every few milliseconds.
+    """
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._serve, name="mindroom-knowledge-graph", daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    async def stop(self) -> None:
+        """Cancel the work still on the loop, then stop it and wait for its thread."""
+        await run_on_loop(self.loop, _cancel_other_tasks())
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        await asyncio.to_thread(self._thread.join)
+        self.loop.close()
+
+
+async def _cancel_other_tasks() -> None:
+    current = asyncio.current_task()
+    tasks = [task for task in asyncio.all_tasks() if task is not current]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class GraphitiStore:
+    """Own one Graphiti client over the embedded database, rebuilt when the embedder settings change.
+
+    The client, its database connection, and the embedded server live on the store's graph loop; the public methods
+    run their work there and return the result to the caller's loop.
+    """
+
+    def __init__(
+        self,
+        config_provider: Callable[[], Config],
+        runtime_paths: RuntimePaths,
+        runtime_loop: asyncio.AbstractEventLoop,
+    ) -> None:
         self._config_provider = config_provider
         self._runtime_paths = runtime_paths
-        self._lock = asyncio.Lock()
+        # The runtime's loop, which extraction calls go back to; taken from the owner, not from whoever calls first.
+        self._runtime_loop = runtime_loop
+        self._graph_loop: _GraphLoop | None = None
+        self._lock: asyncio.Lock | None = None
         self._graphiti: Graphiti | None = None
         self._signature: str | None = None
         self._embedded_server: EmbeddedServer | None = None
 
+    async def _run[T](self, coroutine: Coroutine[Any, Any, T]) -> T:
+        """Run ``coroutine`` on the graph loop, starting it on first use."""
+        if self._graph_loop is None:
+            self._graph_loop = _GraphLoop()
+            self._lock = asyncio.Lock()
+        return await run_on_loop(self._graph_loop.loop, coroutine)
+
     async def _graphiti_client(self) -> Graphiti:
         config = self._config_provider()
         signature = embedder_client_signature(config, self._runtime_paths)
+        assert self._lock is not None, "the client is only used on the graph loop"
         async with self._lock:
             # A server that died, for example from running out of memory, is replaced rather than failing every call.
             server_alive = self._embedded_server is not None and self._embedded_server.process.returncode is None
@@ -221,10 +294,10 @@ class GraphitiStore:
         # why-lazy: Graphiti, FalkorDB, and the embedded server are optional and load only for graph-enabled runtimes.
         from falkordb.asyncio import FalkorDB  # noqa: PLC0415
         from graphiti_core import Graphiti  # noqa: PLC0415
-        from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: PLC0415
 
         from mindroom.knowledge_graph.clients import (  # noqa: PLC0415
             MindRoomEmbedder,
+            MindRoomFalkorDriver,
             MindRoomLLMClient,
             UnusedCrossEncoder,
         )
@@ -234,16 +307,27 @@ class GraphitiStore:
         embedder = await asyncio.to_thread(create_configured_embedder, config, self._runtime_paths)
         server = await start_embedded_server(self._runtime_paths.storage_root / "knowledge_graph")
         self._embedded_server = server
-        driver = FalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
+        driver = MindRoomFalkorDriver(falkor_db=FalkorDB(unix_socket_path=server.socket_path))
         return Graphiti(
             graph_driver=driver,
-            llm_client=MindRoomLLMClient(self._config_provider, self._runtime_paths),
+            llm_client=MindRoomLLMClient(self._config_provider, self._runtime_paths, self._runtime_loop),
             embedder=MindRoomEmbedder(embedder),
             cross_encoder=UnusedCrossEncoder(),
         )
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
         """Extract an episode into the scope's graph, charging extraction to ``usage``."""
+        await self._run(self._add_episode(scope, episode, usage))
+
+    async def search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:
+        """Return the scope's facts most relevant to ``query``, without an LLM call."""
+        return await self._run(self._search_facts(scope, query, limit))
+
+    async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
+        """Return the scope's entity best matching ``name`` with the facts that touch it."""
+        return await self._run(self._entity(scope, name))
+
+    async def _add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
         # The client installs and imports Graphiti first, so the imports below find it loaded.
         graphiti = await self._graphiti_client()
         from graphiti_core.nodes import EpisodeType  # noqa: PLC0415
@@ -261,8 +345,7 @@ class GraphitiStore:
                 previous_episode_uuids=[],
             )
 
-    async def search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:
-        """Return the scope's facts most relevant to ``query``, without an LLM call."""
+    async def _search_facts(self, scope: GraphScope, query: str, limit: int) -> list[GraphFact]:
         graphiti = await self._graphiti_client()
         from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF  # noqa: PLC0415
 
@@ -273,8 +356,7 @@ class GraphitiStore:
         )
         return await _facts(graphiti.driver.clone(database=scope.graph_name), results.edges)
 
-    async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
-        """Return the scope's entity best matching ``name`` with the facts that touch it."""
+    async def _entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
         graphiti = await self._graphiti_client()
         from graphiti_core.edges import EntityEdge  # noqa: PLC0415
         from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF  # noqa: PLC0415
@@ -298,7 +380,17 @@ class GraphitiStore:
         )
 
     async def close(self) -> None:
-        """Close the client and stop the embedded database server."""
+        """Close the client, stop the embedded database server, and stop the graph loop."""
+        graph_loop, self._graph_loop = self._graph_loop, None
+        if graph_loop is None:
+            return
+        try:
+            await run_on_loop(graph_loop.loop, self._close_on_graph_loop())
+        finally:
+            await graph_loop.stop()
+
+    async def _close_on_graph_loop(self) -> None:
+        assert self._lock is not None, "the client is only used on the graph loop"
         async with self._lock:
             await self._close_unlocked()
 

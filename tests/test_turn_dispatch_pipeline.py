@@ -681,7 +681,6 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 _prepare_memory_and_model_context=_prepare_memory_and_model_context,
-                reprioritize_auto_flush_sessions=MagicMock(),
                 apply_post_response_effects=AsyncMock(),
             ),
         ):

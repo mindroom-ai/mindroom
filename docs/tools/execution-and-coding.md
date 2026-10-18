@@ -129,12 +129,14 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, stderr is returned with stdout.
-With `mindroom_output_path`, the complete output is saved to that file instead.
+The tool returns the last `tail` lines of stdout (default 100), capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and stderr under `Stderr:`.
+With a working directory, the returned output and any saved file start with a `[cwd: <dir>]` line.
+With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 
 A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
 Without `timeout`, a call that runs as a [background job](agent-orchestration.md#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
+A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
 For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](../deployment/sandbox-proxy.md#stopping-and-background-commands).
 
