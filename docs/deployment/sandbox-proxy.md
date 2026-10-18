@@ -49,7 +49,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
     networks:
       - mindroom-network
 
@@ -124,7 +124,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
 mindroom run
 ```
 

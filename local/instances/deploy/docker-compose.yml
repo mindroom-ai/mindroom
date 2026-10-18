@@ -25,7 +25,7 @@ services:
       # deploy.py generates the token; without one the runner rejects every request.
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
       - HOME=/app
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
       - MINDROOM_PUBLIC_URL=${MINDROOM_PUBLIC_URL:-https://${INSTANCE_DOMAIN}}
