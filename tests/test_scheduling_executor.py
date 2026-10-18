@@ -520,7 +520,7 @@ async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
-    """Runner failure notices follow the workflow thread and reply to its latest event."""
+    """Runner failure notices follow the workflow thread, reply to its latest event, and wake no agent they name."""
     workflow = _workflow("Recurring job")
     target = MessageTarget.for_scheduled_task(workflow)
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
@@ -542,23 +542,4 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     assert content["body"].startswith("❌ Recurring task failed: executor test task")
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-
-
-@pytest.mark.asyncio
-async def test_scheduled_failure_notice_wakes_no_agent_its_description_mentions() -> None:
-    """The notice echoes the task description, so agents ignore any mention in it."""
-    workflow = _workflow("Recurring job")
-
-    with patch(
-        "mindroom.matrix.client_delivery.send_message_outcome",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
-    ) as mock_send:
-        await send_scheduled_failure_notice(
-            AsyncMock(),
-            workflow,
-            MessageTarget.for_scheduled_task(workflow),
-            "❌ Scheduled task failed: ask @research\nError: boom",
-            _conversation_reader(latest_thread_event_id="$latest"),
-        )
-
-    assert mock_send.await_args.args[2][SKIP_MENTIONS_KEY] is True
+    assert content[SKIP_MENTIONS_KEY] is True

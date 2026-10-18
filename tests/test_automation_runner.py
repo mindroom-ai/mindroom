@@ -33,11 +33,14 @@ from mindroom.constants import (
     primary_records_dir,
     resolve_runtime_paths,
 )
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.hooks.sender import send_hook_message
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, delivered_matrix_side_effect
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -445,6 +448,53 @@ async def test_a_check_that_cannot_read_its_files_posts_a_visible_notice(tmp_pat
     assert notice["thread_id"] is None
     assert notice["trigger_dispatch"] is False
     assert ("mind", None) not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_a_notice_echoing_an_agent_mention_is_posted_with_mentions_ignored(tmp_path: Path) -> None:
+    """A notice can repeat text that names an agent, so the posted message tells agents to ignore its mentions."""
+    config, paths, runner, bot = _setup(tmp_path)
+    persist_entity_accounts(config, paths)
+    await _tick(runner, NOON)
+
+    def unreadable(_ctx: AutomationContext) -> Ask | None:
+        msg = "ask @mind about MEMORY.md"
+        raise ValueError(msg)
+
+    async def post(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Post through the real hook sender, as the agent bot does."""
+        reader = AsyncMock()
+        return await send_hook_message(
+            bot.client,
+            config,
+            paths,
+            room_id,
+            body,
+            thread_id,
+            source_hook,
+            extra_content,
+            conversation_reader=reader,
+        )
+
+    _use_check(runner, unreadable)
+    with (
+        patch.object(bot, "_hook_send_message", new=post),
+        patch(
+            "mindroom.hooks.sender.send_matrix_message",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
+        ) as send,
+    ):
+        await _tick(runner, DAY_LATER)
+
+    content = send.await_args.args[2]
+    assert content["m.mentions"] == {"user_ids": [entity_identity_registry(config, paths).current_id("mind").full_id]}
+    assert content[SKIP_MENTIONS_KEY] is True
 
 
 @pytest.mark.asyncio
