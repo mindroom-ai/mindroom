@@ -118,6 +118,8 @@ Native compaction also requires compaction to be enabled, replay of all history 
 An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the hard budget uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
+Each time the provider compacts, MindRoom logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's estimated size (`checkpoint_tokens`).
+The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch pipeline timing` cover text compaction only.
 
 ### Manual compaction
 

@@ -20,6 +20,7 @@ from agno.models.response import ModelResponse
 from agno.session.summary import SessionSummary
 from agno.team import Team
 from PIL import Image as PillowImage
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
@@ -35,7 +36,7 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
-from mindroom.native_compaction import record_native_checkpoint
+from mindroom.native_compaction import checkpoint_estimated_tokens, record_native_checkpoint
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
@@ -1083,3 +1084,30 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> 
     )
 
     assert with_summary == without_summary
+
+
+@pytest.mark.parametrize(
+    ("items", "logged"),
+    [
+        ([{"type": "compaction", "content": "provider checkpoint"}, {"type": "text", "text": "Done"}], True),
+        ([{"type": "compaction", "content": None}, {"type": "text", "text": "Done"}], False),
+        ([{"type": "text", "text": "Done"}], False),
+    ],
+)
+def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]], *, logged: bool) -> None:
+    """Only a response that carries a real checkpoint reports that the provider compacted."""
+    model = MindRoomAnthropicClaude(id="claude-sonnet-4-6")
+    model.configure_native_compaction(threshold=60_000)
+    assert model.native_compaction is not None
+
+    with capture_logs() as logs:
+        record_native_checkpoint(ModelResponse(content="Done"), items, model.native_compaction)
+
+    events = [log for log in logs if log["event"] == "Native compaction checkpoint"]
+    expected = {
+        "event": "Native compaction checkpoint",
+        "log_level": "info",
+        "threshold_tokens": 60_000,
+        "checkpoint_tokens": checkpoint_estimated_tokens(items[:1]),
+    }
+    assert events == ([expected] if logged else [])
