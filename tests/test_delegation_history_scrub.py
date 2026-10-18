@@ -6,17 +6,22 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
+from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
+from agno.session.team import TeamSession
+from agno.team import Team
 
 from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.delegation.execution import drive_delegations, persist_delegation_state
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -110,7 +115,53 @@ async def test_delegating_run_is_stored_without_replayed_history(
         assert DELEGATION_STATE_KEY in stored.metadata
         stored_history = [m.content for m in stored.messages or [] if m.from_history]
         assert stored_history == []
+        own_turn = [m.content for m in stored.messages or [] if m.role in {"user", "assistant"}]
+        assert own_turn[0] == "Delegate"
+        assert own_turn[-1] == "Parent done"
         resumed_history = [m.content for m in parent.model.seen_messages if m.from_history]
         assert resumed_history == ["Hello", "Hi there"], "the resumed request still replays prior turns"
     finally:
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_delegating_team_run_is_stored_without_replayed_history(tmp_path: Path) -> None:
+    """A team parent's row gets the team's scrub; its own turn and member runs stay, and the live run is untouched."""
+    db = SqliteDb(db_file=str(tmp_path / "team.db"))
+    team = Team(
+        id="team",
+        name="team",
+        members=[Agent(id="member", name="member")],
+        db=db,
+        store_history_messages=False,
+    )
+    member_run = RunOutput(
+        run_id="member-run",
+        agent_id="member",
+        session_id="s1",
+        parent_run_id="team-run",
+        status=RunStatus.completed,
+        messages=[Message(role="user", content="member task")],
+    )
+    response = TeamRunOutput(
+        run_id="team-run",
+        team_id="team",
+        session_id="s1",
+        user_id="@alice:example.org",
+        status=RunStatus.paused,
+        messages=[
+            Message(role="user", content="Hello", from_history=True),
+            Message(role="assistant", content="Hi there", from_history=True),
+            Message(role="user", content="Delegate"),
+        ],
+        member_responses=[member_run],
+    )
+    db.upsert_session(TeamSession(session_id="s1", team_id="team", user_id="@alice:example.org"))
+
+    await persist_delegation_state(team, response, DelegationState())
+
+    stored = db.get_run("team-run")
+    assert isinstance(stored, TeamRunOutput)
+    assert [m.content for m in stored.messages or []] == ["Delegate"]
+    assert [m.content for m in stored.member_responses[0].messages or []] == ["member task"]
+    assert [m.content for m in response.messages or [] if m.from_history] == ["Hello", "Hi there"]
