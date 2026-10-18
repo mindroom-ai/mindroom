@@ -139,6 +139,7 @@ def test_unavailable_mcp_account_preserves_connections_without_granting_access(
         ("alice", "template", [{"active": False}], False),
         ("alice", None, [{}], False),
         ("alice", "template", [{}, {"domain": "EXAMPLE.ORG"}], False),
+        ("alice", "template", [{"user": "Alice"}], False),
         ("alice", "template+signed-claim", [{}], False),
         ("alice", "template+header", [{}], True),
     ],
@@ -148,6 +149,7 @@ def test_unavailable_mcp_account_preserves_connections_without_granting_access(
         "inactive",
         "no-email-mapping",
         "ambiguous",
+        "localpart-case",
         "signed-matrix-claim-wins",
         "strict-jwt-header-must-agree",
     ],
@@ -175,7 +177,7 @@ def test_portal_session_finds_the_account_its_email_mapping_names(
     snapshot.runtime_paths = replace(snapshot.runtime_paths, process_env=env)
     gateway_app.include_router(connections.router)
     for account in accounts:
-        _provision(managed_client, "alice", **account)
+        _provision(managed_client, **{"user": "alice", **account})
     managed_client.cookies.set(
         CONNECTIONS_SESSION_COOKIE,
         issue_connections_session(f"@{session_user}:example.org", now=time.time()),
