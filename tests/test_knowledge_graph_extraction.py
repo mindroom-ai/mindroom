@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import re
 
-from mindroom.knowledge_graph.extraction import (
-    ENTITY_TYPES,
-    EXCLUDED_ENTITY_TYPES,
-    extraction_instructions,
-)
+from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
 
 
 def test_every_entity_type_has_a_description_and_no_fields() -> None:
@@ -53,22 +49,22 @@ def test_graphiti_prompt_lists_exactly_the_types_with_their_docstrings_and_no_en
 
 def test_instructions_keep_paths_and_urls_out_and_date_by_occurrence() -> None:
     """Paths and URLs belong inside facts, and a fact is dated by when it held, not when it was discussed."""
-    text = extraction_instructions(None)
+    text = extraction_instructions("")
     for word in ("file paths", "URLs", "environment variables", "commit hashes", "branch names"):
         assert word in text
     assert "when it happened" in text
 
 
 def test_instructions_keep_an_assistants_own_activity_out() -> None:
-    """What an assistant reports is kept about its subjects, and its own actions, access, and task counts are left out."""
-    text = extraction_instructions(None)
+    """What an assistant reports is kept about its subjects, its lookups and task counts are left out, and its effects stay."""
+    text = extraction_instructions("")
     assert "`agent <name>`" in text
-    for word in ("actions", "access", "configuration", "counts", "listing returned"):
+    for word in ("lookups", "access", "configuration", "counts", "listing returned", "changed things for others"):
         assert word in text
 
 
 def test_configured_instructions_follow_the_built_in_ones() -> None:
     """An operator's instructions add to the built-in ones, and blank text adds nothing."""
-    built_in = extraction_instructions(None)
+    built_in = extraction_instructions("")
     assert extraction_instructions("  \n") == built_in
     assert extraction_instructions("  Focus on lab equipment.\n") == f"{built_in}\nFocus on lab equipment."

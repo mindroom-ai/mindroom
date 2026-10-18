@@ -9125,7 +9125,7 @@ visibility = [
 # Knowledge graph: one store per runtime, fed by background ingestion and read by the knowledge_graph tool.
 [[modules]]
 path = "mindroom.config.knowledge_graph"
-depends_on = []
+depends_on = ["mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.knowledge_graph"

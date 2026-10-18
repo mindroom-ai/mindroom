@@ -571,8 +571,10 @@ async def test_the_embedder_is_built_off_the_event_loop(store: GraphitiStore) ->
 async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) -> None:
     """Graphiti otherwise adds the graph's last ten episodes, from any conversation, to every extraction prompt.
 
-    The episode is extracted into the entity types, with the generic type excluded and the instructions added.
+    The episode is extracted into the entity types, with the generic type excluded and the configured instructions
+    following the built-in ones.
     """
+    store._config_provider().knowledge_graph.extraction_instructions = "Focus on lab equipment."
     graphiti = await store._run(store._graphiti_client())
     episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
 
@@ -584,21 +586,4 @@ async def test_extraction_sends_only_the_episode_itself(store: GraphitiStore) ->
     assert kwargs["previous_episode_uuids"] == []
     assert kwargs["entity_types"] is ENTITY_TYPES
     assert kwargs["excluded_entity_types"] == ["Entity"]
-    assert kwargs["custom_extraction_instructions"] == extraction_instructions(None)
-
-
-@pytest.mark.asyncio
-async def test_configured_extraction_instructions_reach_graphiti(store: GraphitiStore) -> None:
-    """Instructions set in the config are added to the built-in ones for every extraction."""
-    store._config_provider().knowledge_graph.extraction_instructions = "Focus on lab equipment."
-    graphiti = await store._run(store._graphiti_client())
-    episode = EpisodeInput("conversation", "conversation", "person @alice (x): hi", "conversation: room !r", JAN)
-
-    with patch.object(graphiti, "add_episode", AsyncMock()) as add:
-        await store.add_episode(ALPHA, episode, UsageTarget("mind", "!r:$t", None))
-
-    assert add.await_args is not None
-    assert (
-        add.await_args.kwargs["custom_extraction_instructions"]
-        == f"{extraction_instructions(None)}\nFocus on lab equipment."
-    )
+    assert kwargs["custom_extraction_instructions"] == f"{extraction_instructions('')}\nFocus on lab equipment."

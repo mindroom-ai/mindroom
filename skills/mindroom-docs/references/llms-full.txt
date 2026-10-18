@@ -3913,7 +3913,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | Field | Default | Description |
 |---|---|---|
 | `knowledge_graph.model` | none | A key of `models` that extracts entities and facts; required once any agent enables the graph |
-| `knowledge_graph.extraction_instructions` | none | Your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards |
+| `knowledge_graph.extraction_instructions` | empty | Text with your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards |
 | `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time between ingestion passes |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations added per pass, across all graphs; the rest wait for the next |
@@ -3936,7 +3936,7 @@ Credential-like values are removed on a best-effort basis before anything is sen
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
 Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, to leave out what fits none of them, and to keep file paths, URLs, and the like inside the facts that mention them, so pets, foods, hobbies, and topics get no entity of their own.
-It records what the agent reports as facts about their subjects, and leaves out the agent's own activity, such as what it searched, read, saved, or can access, and the counts and progress of its own tasks.
+It records what the agent reports as facts about their subjects and leaves out the agent's own lookups and housekeeping, such as what it searched, read, or saved, and the counts and progress of its own tasks; what the agent did for others, such as filing an issue or sending a message, is kept.
 This steers the model rather than filtering its output, so an occasional untyped entity, such as a file that only a fact names, or an activity fact can still appear.
 
 Each fact keeps its sources: `conversation` means someone said it, `tool_results` means it came from a tool call, its arguments or what it returned.
