@@ -522,7 +522,10 @@ async def compact_running_turn(
         compacted_at=_iso_utc_now(),
         history_budget_tokens=available_history_budget,
     )
-    return await _report_committed(outcome, scope=scope, messages=messages, complete=complete)
+    # The fold is stored; finish reporting it before a stopped turn's cancellation lands.
+    return await run_coroutine_until_complete(
+        _report_committed(outcome, scope=scope, messages=messages, complete=complete),
+    )
 
 
 async def _report_committed(
