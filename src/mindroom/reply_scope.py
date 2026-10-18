@@ -82,6 +82,12 @@ class SpanHandle:
     # The span's last direct progress edit that Matrix accepted and no durable
     # write has recorded yet.
     unconfirmed_progress: rl.ProgressConfirmation | None = None
+    # Set once the reply shows an event in the room, which the span's Stop button goes on.
+    reply_shown: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Know from the start whether the claimed reply already shows an event."""
+        self.note_reply(self.reply)
 
     @property
     def exited(self) -> bool:
@@ -98,11 +104,17 @@ class SpanHandle:
         """Return the reply this span writes."""
         return self.reply.reply_id
 
+    def note_reply(self, reply: rl.Reply) -> None:
+        """Remember the reply as last committed or read."""
+        self.reply = reply
+        if reply.event_id is not None:
+            self.reply_shown.set()
+
     def note(self, applied: AppliedTransition) -> None:
         """Remember what a committed transition left, for later renders."""
         transition = applied.transition
         if transition.reply is not None and transition.reply.reply_id == self.reply.reply_id:
-            self.reply = transition.reply
+            self.note_reply(transition.reply)
         for span in transition.spans:
             if span.span_id == self.span.span_id:
                 self.span = span

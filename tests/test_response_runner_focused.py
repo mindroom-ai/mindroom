@@ -5400,6 +5400,7 @@ async def test_user_stop_mid_generation_cancels_the_span_task() -> None:
                 span=SpanAttempt(
                     register=lambda task: spans.register("span-1", task),
                     add_stop_button=AsyncMock(),
+                    reply_event=AsyncMock(),
                 ),
                 existing_event_id="$placeholder",
                 on_cancelled=cancel_reasons.append,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -25,12 +25,35 @@ class _Span:
 
     registered: list[asyncio.Task[None]] = field(default_factory=list)
     stop_buttons: list[str] = field(default_factory=list)
+    button_shown: asyncio.Event = field(default_factory=asyncio.Event)
+    # The event the reply shows once its attempt sends one.
+    event_id: str | None = None
+    shown: asyncio.Event = field(default_factory=asyncio.Event)
+    # How many attempts still wait for the reply to show an event.
+    waiting: int = 0
 
     def attempt(self) -> SpanAttempt:
-        return SpanAttempt(register=self.registered.append, add_stop_button=self._add_stop_button)
+        return SpanAttempt(
+            register=self.registered.append,
+            add_stop_button=self._add_stop_button,
+            reply_event=self._reply_event,
+        )
+
+    def show(self, event_id: str) -> None:
+        self.event_id = event_id
+        self.shown.set()
 
     async def _add_stop_button(self, message_id: str) -> None:
         self.stop_buttons.append(message_id)
+        self.button_shown.set()
+
+    async def _reply_event(self) -> str | None:
+        self.waiting += 1
+        try:
+            await self.shown.wait()
+        finally:
+            self.waiting -= 1
+        return self.event_id
 
 
 def _runner(*, show_stop_button: bool = False) -> tuple[ResponseAttemptRunner, _Span]:
@@ -100,6 +123,44 @@ async def test_response_attempt_without_visible_message_registers_its_task_witho
     assert seen_message_ids == [None]
     assert span.registered == attempt_tasks
     assert span.stop_buttons == []
+    # Once its cancellation runs, nothing waits for an event the ended attempt never showed.
+    await asyncio.sleep(0)
+    assert span.waiting == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown_while_running", [True, False])
+async def test_response_attempt_adds_the_stop_button_on_the_first_event_its_running_reply_shows(
+    monkeypatch: pytest.MonkeyPatch,
+    shown_while_running: bool,
+) -> None:
+    """A reply without a placeholder gets its Stop button on the first event its attempt sends, unless that ended it.
+
+    An approved participation reply shows its first streamed text while its
+    attempt still runs; a blocking answer is the reply's first event and the
+    attempt's last act, which leaves nothing for a Stop button to stop.
+    """
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, span = _runner(show_stop_button=True)
+    monkeypatch.setattr(response_attempt_module, "is_user_online", AsyncMock(return_value=True))
+
+    async def response_function(message_id: str | None) -> None:
+        assert message_id is None
+        span.show("$first")
+        if shown_while_running:
+            # The stream goes on after its first event.
+            await asyncio.wait_for(span.button_shown.wait(), timeout=5)
+
+    await runner.run(
+        ResponseAttemptRequest(
+            target=target,
+            response_function=response_function,
+            span=span.attempt(),
+            user_id="@user:localhost",
+        ),
+    )
+
+    assert span.stop_buttons == (["$first"] if shown_while_running else [])
 
 
 @pytest.mark.asyncio
@@ -166,7 +227,7 @@ async def test_a_stop_button_failure_cancels_the_attempt_before_it_propagates(
             ResponseAttemptRequest(
                 target=target,
                 response_function=response_function,
-                span=SpanAttempt(register=span.registered.append, add_stop_button=failing_stop_button),
+                span=replace(span.attempt(), add_stop_button=failing_stop_button),
                 existing_event_id="$thinking",
                 user_id="@user:localhost",
             ),
@@ -178,8 +239,12 @@ async def test_a_stop_button_failure_cancels_the_attempt_before_it_propagates(
 
 
 @pytest.mark.asyncio
-async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
-    """Cancelling the awaiting chain must cancel the attempt task with the same provenance."""
+@pytest.mark.parametrize("existing_event_id", ["$existing", None])
+async def test_outer_cancellation_is_forwarded_to_attempt_task(existing_event_id: str | None) -> None:
+    """Cancelling the awaiting chain must cancel the attempt task with the same provenance.
+
+    That holds too while the attempt still waits for its reply's first event.
+    """
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, span = _runner()
     inner_started = asyncio.Event()
@@ -200,7 +265,7 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
                 target=target,
                 response_function=response_function,
                 span=span.attempt(),
-                existing_event_id="$existing",
+                existing_event_id=existing_event_id,
                 on_cancelled=cancellation_reasons.append,
             ),
         ),
@@ -211,6 +276,7 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
 
     assert cancellation_reasons == ["sync_restart_cancelled"]
     assert inner_cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]
+    assert span.waiting == 0
 
 
 @pytest.mark.asyncio

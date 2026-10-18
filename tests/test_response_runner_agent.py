@@ -3320,7 +3320,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         backend: str,
         reaction: str | None,
     ) -> None:
-        """A silent decision must not send placeholders, typing, or retry notices."""
+        """A silent decision must not send placeholders, typing, retry notices, or a Stop button."""
         config = self._config_for_storage(tmp_path)
         # Keep background summaries out of foreground participation call counts.
         config.defaults.thread_summary_first_threshold = 100
@@ -3328,7 +3328,9 @@ class TestAdaptiveResponse(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.client.room_send.return_value = _room_send_response("$response")
+        unique_room_send_responses(bot.client, prefix="$response")
+        # The requester is online, so a running reply shows its Stop button.
+        monkeypatch.setattr("mindroom.response_attempt.is_user_online", AsyncMock(return_value=True))
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         model = ParticipationModel(
             asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
@@ -3439,9 +3441,24 @@ class TestAdaptiveResponse(AgentBotTestBase):
             result = None
         assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
         assert thread_summary.await_count == (1 if action == "respond" else 0)
-        bodies = [call.kwargs["content"].get("body", "") for call in bot.client.room_send.await_args_list]
+        sends = bot.client.room_send.await_args_list
+        bodies = [call.kwargs["content"].get("body", "") for call in sends]
+        stop_buttons = [
+            (f"$response{index}", call.kwargs["content"]["m.relates_to"]["event_id"])
+            for index, call in enumerate(sends, start=1)
+            if call.kwargs["message_type"] == "m.reaction" and call.kwargs["content"]["m.relates_to"]["key"] == "🛑"
+        ]
         reactions = [
-            call.kwargs for call in bot.client.room_send.await_args_list if call.kwargs["message_type"] == "m.reaction"
+            call.kwargs
+            for call in sends
+            if call.kwargs["message_type"] == "m.reaction" and call.kwargs["content"]["m.relates_to"]["key"] != "🛑"
+        ]
+        # The approved reply's first streamed event carries its Stop button until the reply ends. A blocking
+        # answer is the reply's first event and ends the reply at once, leaving nothing to stop.
+        streamed_answer = action == "respond" and streaming
+        assert [target for _button, target in stop_buttons] == (["$response1"] if streamed_answer else [])
+        assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [
+            button for button, _target in stop_buttons
         ]
         if action == "stay_silent" and reaction is not None:
             assert len(reactions) == 1
@@ -3469,7 +3486,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 0 if action == "compression_failure" or (backend != "model" and action != "decision_failure") else 1
             )
         else:
-            assert result == "$response"
+            assert result == "$response1"
             assert any("Useful answer" in body for body in bodies)
             assert source_settled == []
             assert len(model.requests) == (1 if backend != "model" else 2)

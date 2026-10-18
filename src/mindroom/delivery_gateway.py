@@ -1250,7 +1250,7 @@ class DeliveryGateway:
             # The reply's create bound its event when Matrix acknowledged it; the span reads it from here on.
             reply = await self.deps.outbox.replies.load(write.reply_id)
             if reply is not None:
-                write.handle.reply = reply
+                write.handle.note_reply(reply)
         if requested is not None and requested.event_id == delivery.event_id:
             return requested
         return DeliveredMatrixEvent(event_id=delivery.event_id, content_sent=content)
@@ -1315,7 +1315,7 @@ class DeliveryGateway:
         while True:
             reply = await self.deps.outbox.replies.load(handle.reply_id)
             assert reply is not None, "a span's reply exists while the span ends"
-            handle.reply = reply
+            handle.note_reply(reply)
             if reply.unapplied_stop and handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
                 # A Stop committed before this span ended; its note is the cancellation.
                 state, note = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)
@@ -1564,6 +1564,9 @@ class DeliveryGateway:
         """Show the Stop button on a span's reply, best effort, and record it on the reply."""
         if handle.reply.stop_button_event_id is not None:
             # An earlier span of the reply already shows one.
+            return
+        if not handle.reply.running:
+            # The reply ended before its button was sent; one sent as it ends is queued for removal below.
             return
         button_event_id = await send_stop_button(self._ready_client(), handle.reply.room_id, event_id)
         if button_event_id is None:

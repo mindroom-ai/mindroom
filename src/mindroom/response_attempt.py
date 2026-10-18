@@ -44,6 +44,8 @@ class SpanAttempt:
     register: Callable[[asyncio.Task[None]], None]
     # Shows the Stop button on the reply's event, best effort.
     add_stop_button: Callable[[str], Awaitable[None]]
+    # Returns the reply's event once the reply shows one in the room.
+    reply_event: Callable[[], Coroutine[Any, Any, str | None]]
 
 
 @dataclass(frozen=True)
@@ -160,8 +162,11 @@ class ResponseAttemptRunner:
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
             request.span.register(task)
             try:
-                if message_id is not None:
-                    await self._add_stop_button(request, message_id)
+                button_event_id = message_id
+                if button_event_id is None:
+                    button_event_id = await self._reply_event_while_running(request, task)
+                if button_event_id is not None:
+                    await self._add_stop_button(request, button_event_id)
 
                 await asyncio.shield(task)
             except asyncio.CancelledError as caught_cancellation:
@@ -193,6 +198,24 @@ class ResponseAttemptRunner:
                 # running after its span ends, where a Stop no longer reaches it.
                 await self._forward_cancel_to_attempt_task(task, asyncio.CancelledError())
                 raise
+
+    async def _reply_event_while_running(
+        self,
+        request: ResponseAttemptRequest,
+        task: asyncio.Task[None],
+    ) -> str | None:
+        """Wait for the reply's first event in the room while the attempt runs, for an attempt that sends it itself.
+
+        A reply without a placeholder, such as an adaptive participation reply,
+        shows nothing until its stream sends its first event; an attempt that
+        ends first leaves no running reply for a Stop button.
+        """
+        shown = asyncio.create_task(request.span.reply_event())
+        try:
+            await asyncio.wait((task, shown), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            shown.cancel()
+        return None if task.done() else shown.result()
 
     async def _add_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> None:
         """Show the Stop button on the reply's event when wanted; the reply records it and redacts it."""

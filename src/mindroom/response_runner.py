@@ -1873,7 +1873,7 @@ class ResponseRunner:
             return
         reply = await handle.runtime.store.replies.load(handle.reply_id)
         assert reply is not None
-        handle.reply = reply
+        handle.note_reply(reply)
         await self.deps.delivery_gateway.end_reply_span(
             handle,
             pause_decision(
@@ -5167,9 +5167,14 @@ class ResponseRunner:
             spans.register(handle.span_id, task)
             spans.update_run_id(handle.span_id, run_id)
 
+        async def reply_event() -> str | None:
+            await handle.reply_shown.wait()
+            return handle.reply.event_id
+
         return SpanAttempt(
             register=register,
             add_stop_button=lambda message_id: self.deps.delivery_gateway.add_reply_stop_button(handle, message_id),
+            reply_event=reply_event,
         )
 
     @staticmethod

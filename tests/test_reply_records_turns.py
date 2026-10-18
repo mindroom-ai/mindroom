@@ -1663,6 +1663,36 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
     assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]
 
 
+async def test_a_stop_button_decided_after_its_reply_ended_is_never_sent(tmp_path: Path) -> None:
+    """A presence check that outlasts a short answer leaves no button to send and then redact."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def online_once_answered(*_args: object, **_kwargs: object) -> bool:
+        # The answer's final edit goes out while the presence check runs.
+        while "An answer." not in _sent_bodies(bot):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        return True
+
+    with (
+        patch("mindroom.response_attempt.is_user_online", new=online_once_answered),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="An answer."),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await runner.generate_response(_plain_request(_target()))
+    assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert _sent_bodies(bot) == ["Thinking...", "An answer."]
+    assert reply.stop_button_event_id is None
+    assert reply.redaction_pending == ()
+    bot.client.room_redact.assert_not_awaited()
+
+
 async def test_a_stopped_regeneration_that_wrote_nothing_removes_its_button_as_it_ends(tmp_path: Path) -> None:
     """A Stop that restores the old answer without a write still removes the regeneration's Stop button at once."""
     bot = await _streaming_bot(tmp_path)
