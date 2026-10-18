@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from html import escape
@@ -77,9 +76,7 @@ def build_summary_input(
     token_estimator: Callable[[str], int] = estimate_compaction_input_tokens,
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     """Fit prior summary and ordered runs into one serialized summary request."""
-    summary_block = ""
-    if previous_summary is not None and previous_summary.strip():
-        summary_block = _previous_summary_block(previous_summary)
+    summary_block = _previous_summary_block(previous_summary)
 
     empty_input = _compose_summary_input(summary_block, "")
     remaining = max_input_tokens - token_estimator(empty_input) - _WRAPPER_OVERHEAD_TOKENS
@@ -127,9 +124,7 @@ def _build_oversized_summary_input(
     max_input_tokens: int,
     token_estimator: Callable[[str], int],
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
-    summary_block = (
-        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
-    )
+    summary_block = _previous_summary_block(previous_summary)
     if not compacted_runs:
         return summary_block, []
     first_run = compacted_runs[0]
@@ -137,7 +132,7 @@ def _build_oversized_summary_input(
         first_run,
         index=0,
         history_settings=history_settings,
-        max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block, token_estimator),
+        max_tokens=max_input_tokens - token_estimator(_compose_summary_input(summary_block, "")),
         token_estimator=token_estimator,
     )
     if oversized_excerpt is None:
@@ -160,9 +155,7 @@ def minimum_summary_input_tokens(
     wrapper overhead covers the builder's own envelope accounting and
     tokenizer boundary effects.
     """
-    summary_block = (
-        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
-    )
+    summary_block = _previous_summary_block(previous_summary)
     minimal_excerpt = _serialize_run_excerpt(first_run, index=0, blocks=(), content_budget_chars=0)
     return token_estimator(_compose_summary_input(summary_block, minimal_excerpt)) + _WRAPPER_OVERHEAD_TOKENS
 
@@ -267,14 +260,6 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
     return f"{text[: max_chars - 1].rstrip()}…"
 
 
-def _remaining_excerpt_budget(
-    max_input_tokens: int,
-    summary_block: str,
-    token_estimator: Callable[[str], int],
-) -> int:
-    return max_input_tokens - token_estimator(_compose_summary_input(summary_block, ""))
-
-
 def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     parts: list[str] = []
     if summary_block:
@@ -283,7 +268,9 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     return "\n\n".join(parts)
 
 
-def _previous_summary_block(summary: str) -> str:
+def _previous_summary_block(summary: str | None) -> str:
+    if summary is None or not summary.strip():
+        return ""
     return f"<previous_summary>\n{_escape_xml_content(summary)}\n</previous_summary>"
 
 
