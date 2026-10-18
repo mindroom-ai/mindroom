@@ -518,7 +518,7 @@ Rules:
 - Keep retained wording stable when practical, but condense it when needed.
 - Preserve exact technical details only while they remain load-bearing, including file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, and error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
-- In Next Steps, list first whatever the user is still waiting for, such as an unanswered question or an unsent result or report, ahead of the agent's own bookkeeping such as notes, logs, or snapshots.
+- In Next Steps, put the work the user is still waiting for, such as an unanswered question or an unsent result or report, before the agent's own bookkeeping (notes, logs, snapshots), keeping any steps that work depends on ahead of it.
 - Do not invent facts.
 - If a section has no content, write `None.`
 
