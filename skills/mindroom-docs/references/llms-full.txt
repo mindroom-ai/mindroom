@@ -3961,6 +3961,7 @@ knowledge_graph:
 
 A Matrix ID or agent key in an entry gives that person or agent the entry's name everywhere, whatever display name they use; a display name never links an entry.
 Someone else whose display name is an entry's name goes by their username, so the two stay apart.
+A username that an entry or agent is already named gets its homeserver added, such as `alice example.org`.
 Every other alias is a plain name that extraction maps to the entry's name and that `graph_entity` finds the entity by.
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.

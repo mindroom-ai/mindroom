@@ -173,3 +173,25 @@ def test_an_agent_key_links_an_entry_in_any_letter_case_and_the_agent_keeps_its_
     lookout = KnownEntity("Lookout", "agent", ("Scout", "Scout Bot", "@mindroom_scout:example.test", "mindroom_scout"))
     assert names.speaker(None, {}, "scout") == lookout
     assert names.canonical("scout bot") == "Lookout"
+
+
+def test_a_username_an_entry_or_agent_is_named_gets_its_server() -> None:
+    """Usernames repeat across homeservers, so a fallback username that names an entry or agent adds its server.
+
+    The label stays free of colons, and a person whose name collides with nothing keeps their display name or username.
+    """
+    names = _names({"Alice": ["@alice:home.test"]})
+
+    home = names.speaker("@alice:home.test", {}, "mind")
+    work = names.speaker("@alice:work.test", {"@alice:work.test": "Alice"}, "mind")
+
+    assert names.speaker("@alice:work.test", {}, "mind") == work
+    assert work == KnownEntity("alice work.test", "person", ("@alice:work.test", "alice"))
+    assert names.known_entities("mind", [home, work])[1:] == (
+        KnownEntity("Alice", "person", ("@alice:home.test",)),
+        KnownEntity("alice work.test", "person", ("@alice:work.test",)),
+    )
+    assert names.speaker("@mind:example.test", {}, "mind").name == "mind example.test"
+    assert names.speaker("@alice:work.test:8448", {}, "mind").name == "alice work.test 8448"
+    assert names.speaker("@bob:work.test", {"@bob:work.test": "Bob"}, "mind").name == "Bob"
+    assert names.speaker("@bob:work.test", {}, "mind").name == "bob"

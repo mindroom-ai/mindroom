@@ -132,6 +132,7 @@ A name keeps letters, digits, spaces, `.'-`, and a combining mark on a letter, b
 A `knowledge_graph.aliases` entry gives an agent or person its name only through a stable ID it lists, a Matrix user ID, which has a server part, or an agent or team key, in any letter case as validation compares aliases; its other aliases are plain names that the instructions list and `graph_entity` resolves.
 A linked person or agent keeps the other names it had without the entry (a listed Matrix ID's localpart, an agent's display name), so adding an entry never loses a name.
 Someone whose display name is an entry's name, without their Matrix ID in it, goes by their localpart, so they never merge into the entry's person.
+Localparts repeat across federated homeservers, so a localpart that an entry or agent is named gets the server added, without a colon (`alice work.example`).
 Each episode's instructions list the graph's own agent, the episode's speakers, and every entry, so people and things MindRoom has no account for get one name too.
 Entities that share a name are listed once, and an alias that another listed entity is named, or that two of them go by, is left out, so no listed name means two entities.
 `graph_entity` follows the same rule: an entry's or agent's own name wins over another entry's alias, so an entry that keeps a person apart from an agent with their display name never turns a lookup of the agent's name into the person.

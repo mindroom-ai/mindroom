@@ -71,15 +71,20 @@ class EntityNames:
 
         A person is named by the entry listing their Matrix ID, else by their display name in ``display_names``, else by
         their localpart, which also names someone whose display name is an entry's name, since anyone can take one.
+        Usernames repeat across homeservers, so a localpart that an entry or agent is named gets the server too.
         """
         if sender is None:
             return self.agents[own_agent]
         if (linked := self.linked.get(sender.casefold())) is not None:
             return linked
-        localpart = _localpart(sender)
+        localpart, _, server = sender.removeprefix("@").partition(":")
+        taken = {entity.name.casefold() for entity in (*self.entries.values(), *self.agents.values())}
         name = _canonical_name(display_names.get(sender), localpart)
-        if any(name.casefold() == entry.casefold() for entry in self.entries):
+        if name.casefold() in {entry.casefold() for entry in self.entries}:
             name = localpart
+        if name == localpart and localpart.casefold() in taken:
+            # Cleaned like a display name, so a server's port adds no colon.
+            name = _canonical_name(f"{localpart} {server}", localpart)
         return _known(name, "person", [sender, localpart])
 
     def known_entities(self, own_agent: str, speakers: Iterable[KnownEntity]) -> tuple[KnownEntity, ...]:
