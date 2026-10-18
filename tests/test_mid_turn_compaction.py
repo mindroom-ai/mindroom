@@ -1069,6 +1069,26 @@ async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls
 
 
 @pytest.mark.asyncio
+async def test_scoped_summary_usage_is_recorded_in_the_scope_storage(
+    tmp_path: Path,
+    summary_calls: _SummaryCalls,
+) -> None:
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    assert isinstance(storage, SqliteDb)
+    try:
+        await _run_in_session(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+
+        with storage.db_engine.begin() as connection:
+            rows = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
+    finally:
+        storage.close()
+
+    summaries = [json.loads(row) for row in rows if json.loads(row).get("kind") == "compaction_summary"]
+    assert len(summaries) == len(summary_calls.inputs) >= 1
+
+
+@pytest.mark.asyncio
 async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     tmp_path: Path,
     summary_calls: _SummaryCalls,

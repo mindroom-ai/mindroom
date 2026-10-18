@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from agno.db.sqlite import SqliteDb
@@ -28,8 +29,10 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
+from tests.conftest import prepare_history_for_run_for_test
 from tests.history_helpers import (
     RecordingModel,
+    _agent,
     _completed_run,
     _forced_compaction_context,
     _reported,
@@ -191,7 +194,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
 async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
     """An OpenAI-compatible request has no Matrix conversation, so its summary is charged to the API requester."""
     session = _session("session", runs=[_completed_run("original")])
-    config, paths, storage, scope, _context = _forced_compaction_context(tmp_path, session=session)
+    config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
     model = _SummaryModel(
         id="summary-model",
         provider="test-provider",
@@ -211,31 +214,23 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
         budget_monitor=None,
     )
     try:
-        with detached_requester_context(authority):
-            assert (
-                await compact_scope_history(
-                    storage=storage,
-                    session=session,
-                    scope=scope,
-                    state=HistoryScopeState(force_compact_before_next_run=True),
-                    summarizer=_summarizer(
-                        model,
-                        10_000,
-                        name="summary",
-                        timeout_seconds=10,
-                        scope=scope,
-                        prompt="Summarize.",
-                        on_response=scope_usage_recorder(storage, session.session_id),
-                    ),
-                    available_history_budget=None,
-                    replay_window_tokens=None,
-                    threshold_tokens=None,
-                    before_tokens=0,
-                    progress=None,
-                    complete=_reported,
-                )
-                is not None
+        # Through the production preparation path, which wires the summary's usage recorder.
+        with (
+            detached_requester_context(authority),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        ):
+            prepared = await prepare_history_for_run_for_test(
+                agent=_agent(db=storage),
+                agent_name="test_agent",
+                full_prompt="Current prompt",
+                session_id="session",
+                runtime_paths=paths,
+                config=config,
+                execution_identity=None,
+                storage=storage,
+                session=session,
             )
+        assert prepared.compaction_reply_outcome == "success"
 
         report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
         assert report.request_breakdown is not None
