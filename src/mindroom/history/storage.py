@@ -77,19 +77,18 @@ async def record_summary_usage(
     storage: BaseDb,
     session_id: str,
     requester_id: str | None,
+    initial_session: AgentSession | TeamSession | None = None,
 ) -> None:
     """Record returned counters even when the summary is rejected or later cancelled."""
-    if response.response_usage is None:
-        return
     await run_blocking_until_complete(
         partial(
             save_compaction_usage,
             storage,
             session_id=session_id,
             requester_id=requester_id,
-            model_provider=model.get_provider(),
-            model=model.id,
-            metrics=response.response_usage.to_dict(),
+            model=model,
+            response=response,
+            initial_session=initial_session,
         ),
     )
 

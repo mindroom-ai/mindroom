@@ -27,7 +27,6 @@ from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
 
 from mindroom.agno_compat_model_hooks import install_request_preparation
-from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.agno_compat_message_builder import built_request_session
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
@@ -49,7 +48,7 @@ from mindroom.history.runtime import (
     summarize_run_locally,
 )
 from mindroom.history.session_context import resolve_target_history_scope
-from mindroom.history.storage import new_scope_session, read_fold_basis
+from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids
 from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
@@ -687,40 +686,38 @@ def _summary_usage_recorder(
 ) -> Callable[[Model, ModelResponse], Awaitable[None]] | None:
     """Record each summary response under the reply's usage owner, else in the target's own session storage."""
     owner = get_helper_usage_owner()
-    storage = binding.target.db if isinstance(binding.target.db, BaseDb) else None
-    if owner is None and (storage is None or not run_response.session_id):
-        logger.warning("Mid-turn summary usage has no storage owner", run_id=run_response.run_id)
-        return None
+    if owner is not None:
 
-    async def record(model: Model, response: ModelResponse) -> None:
-        if response.response_usage is None:
-            return
-        save = partial(
-            save_compaction_usage,
-            requester_id=run_response.user_id,
-            model_provider=model.get_provider(),
-            model=model.id,
-            metrics=response.response_usage.to_dict(),
-        )
-        if owner is not None:
+        async def record_for_owner(model: Model, response: ModelResponse) -> None:
             await run_session_storage_operation(
                 owner.storage_factory,
-                partial(save, session_id=owner.session_id, initial_session=owner.initial_session),
+                partial(
+                    save_compaction_usage,
+                    session_id=owner.session_id,
+                    requester_id=run_response.user_id,
+                    model=model,
+                    response=response,
+                    initial_session=owner.initial_session,
+                ),
             )
-            return
-        assert storage is not None
-        assert run_response.session_id is not None
+
+        return record_for_owner
+    storage = binding.target.db
+    if not isinstance(storage, BaseDb) or not run_response.session_id:
+        logger.warning("Mid-turn summary usage has no storage owner", run_id=run_response.run_id)
+        return None
+    return partial(
+        record_summary_usage,
+        storage=storage,
+        session_id=run_response.session_id,
+        requester_id=run_response.user_id,
         # The run's own session row may not exist yet while its first turn is still running.
-        initial_session = new_scope_session(
+        initial_session=new_scope_session(
             session_id=run_response.session_id,
             scope_id=binding.target.id or "",
             is_team=isinstance(run_response, TeamRunOutput),
-        )
-        await run_blocking_until_complete(
-            partial(save, storage, session_id=run_response.session_id, initial_session=initial_session),
-        )
-
-    return record
+        ),
+    )
 
 
 def _rewrite(messages: list[Message], layout: _Layout, summary_message: Message) -> None:

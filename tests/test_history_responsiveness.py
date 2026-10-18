@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
@@ -13,9 +14,10 @@ from agno.session.summary import SessionSummary
 
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.execution_preparation import _finalize_prepared_history
-from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry, compact_scope_history
+from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
 from mindroom.history.runtime import (
     PreparedScopeHistory,
+    _compact_before_reply,
     _run_scope_compaction_with_lifecycle,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
@@ -28,7 +30,14 @@ from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import FakeModel, seed_session
-from tests.history_helpers import _ALL_HISTORY_SETTINGS, _agent, _completed_run, _make_config, _session
+from tests.history_helpers import (
+    _agent,
+    _completed_run,
+    _make_config,
+    _reported,
+    _session,
+    _summarizer,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,13 +130,13 @@ async def test_history_sizing_allows_loop_progress(
                 session=session,
                 scope=scope,
                 state=HistoryScopeState(force_compact_before_next_run=True),
-                history_settings=_ALL_HISTORY_SETTINGS,
+                summarizer=_summarizer(FakeModel(id="summary", provider="fake"), 1000, name="summary"),
                 available_history_budget=1000,
-                summary_model=SummaryModel(FakeModel(id="summary", provider="fake"), "summary", 1000),
+                before_tokens=0,
                 replay_window_tokens=2000,
                 threshold_tokens=1000,
-                summary_prompt="Summarize",
-                summary_timeout_seconds=30,
+                progress=None,
+                complete=_reported,
                 replay_model=model,
             )
             assert outcome is not None
@@ -186,13 +195,13 @@ async def test_history_storage_work_allows_loop_progress(
             session=session,
             scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
-            history_settings=_ALL_HISTORY_SETTINGS,
+            summarizer=_summarizer(FakeModel(id="summary", provider="fake"), 1000, name="summary"),
             available_history_budget=1000,
-            summary_model=SummaryModel(FakeModel(id="summary", provider="fake"), "summary", 1000),
+            before_tokens=0,
             replay_window_tokens=2000,
             threshold_tokens=1000,
-            summary_prompt="Summarize",
-            summary_timeout_seconds=30,
+            progress=None,
+            complete=_reported,
             replay_model=model,
         )
         assert outcome is not None
@@ -309,18 +318,26 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     task = asyncio.create_task(
         _run_scope_compaction_with_lifecycle(
             mode="manual",
-            storage=storage,
-            session=session,
+            session_id=session.session_id,
             scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            state=HistoryScopeState(force_compact_before_next_run=True),
-            resolved_inputs=resolved,
+            execution_plan=resolved.execution_plan,
             history_budget=1000,
             current_history_tokens=11,
             runs_before=1,
-            config=config,
-            runtime_paths=paths,
             compaction_lifecycle=lifecycle,
-            replay_model=model,
+            compact=partial(
+                _compact_before_reply,
+                storage=storage,
+                session=session,
+                scope=HistoryScope(kind="agent", scope_id="test_agent"),
+                state=HistoryScopeState(force_compact_before_next_run=True),
+                resolved_inputs=resolved,
+                history_budget=1000,
+                before_tokens=11,
+                replay_model=model,
+                config=config,
+                runtime_paths=paths,
+            ),
         ),
     )
     try:
@@ -463,21 +480,22 @@ async def test_summary_retry_sizing_allows_loop_progress(
         responses.insert(0, CompactionSummaryOutputLimitError("Output limit reached"))
     generate = AsyncMock(side_effect=responses)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
-    run = _completed_run("run", messages=[Message(role="user", content="Hello")])
-    primary = SummaryModel(FakeModel(id="primary", provider="fake"), "primary", 10000)
+    # A shrink retry needs an input large enough to halve.
+    run = _completed_run(
+        "run",
+        messages=[Message(role="user", content="Hello " * 8000 if retry == "shrink" else "Hello")],
+    )
     fallback = SummaryModel(FakeModel(id="fallback", provider="fake"), "fallback", 1000)
-    result = await _generate_compaction_summary_with_retry(
-        summary_model=primary,
-        previous_summary=None,
-        compactable_runs=[run],
-        initial_summary_input="Hello " * 8000 if retry == "shrink" else "Hello",
-        initial_included_runs=[run],
-        session_id="session",
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=_ALL_HISTORY_SETTINGS,
-        summary_prompt="Summarize",
-        timeout_seconds=30,
-        fallback_model=fallback if retry == "fallback" else None,
+    result = await _summarize_chunk(
+        _summarizer(
+            FakeModel(id="primary", provider="fake"),
+            10000,
+            name="primary",
+            fallback=fallback if retry == "fallback" else None,
+            session_id="session",
+        ),
+        None,
+        [run],
     )
     assert result.summary == summary
     assert generate.await_count == (1 if retry == "none" else 2)

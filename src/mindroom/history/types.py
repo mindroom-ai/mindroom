@@ -170,7 +170,6 @@ class CompactionLifecycleStart:
 class CompactionLifecycleProgress:
     """Visible lifecycle progress payload emitted after persisted compaction chunks."""
 
-    notice_event_id: str | None
     mode: _CompactionMode
     session_id: str
     scope: str
@@ -183,6 +182,7 @@ class CompactionLifecycleProgress:
     runs_remaining: int
     threshold_tokens: int | None = None
     duration_ms: int | None = None
+    notice_event_id: str | None = None
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized progress metadata for Matrix compaction messages."""

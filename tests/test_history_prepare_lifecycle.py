@@ -315,7 +315,7 @@ async def test_prepare_history_for_run_compaction_failure_notice_redacts_credent
             "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
-        patch("mindroom.history.runtime._run_scope_compaction", new=AsyncMock(side_effect=error)),
+        patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=error)),
     ):
         await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
@@ -365,7 +365,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
             "mindroom.providers.model_loading.get_model_instance",
             return_value=FakeModel(id="summary-model", provider="fake"),
         ),
-        patch("mindroom.history.runtime._run_scope_compaction", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=asyncio.CancelledError)),
         pytest.raises(asyncio.CancelledError),
     ):
         await prepare_history_for_run_for_test(

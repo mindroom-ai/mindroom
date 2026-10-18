@@ -59,7 +59,6 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
-from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
@@ -85,18 +84,18 @@ from tests.history_helpers import (  # noqa: F401
     _hook_runtime_context,
     _make_config,
     _plugin,
+    _reported,
     _session,
+    _summarizer,
     folded_run_ids,
     summary_rows_of,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from agno.db.base import BaseDb
     from agno.session.agent import AgentSession
 
-    from mindroom.history.compaction import _CompactionRewriteResult
+    from mindroom.history.compaction import _CompactionRewriteResult, _SummaryChunk
 
 
 async def _rewrite_single_run(
@@ -109,42 +108,39 @@ async def _rewrite_single_run(
     fallback_summary_model: FakeModel | None = None,
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
-    progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    served_models: list[str] | None = None,
 ) -> _CompactionRewriteResult | None:
     # Compaction folds runs of a stored conversation.
     seed_session(storage, working_session)
+
+    async def after_persist(chunk: _SummaryChunk, _compacted_run_count: int, _runs_remaining: int) -> None:
+        if served_models is not None:
+            served_models.append(chunk.summarizer.model.name)
+
     return await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
-        summary_model=SummaryModel(
-            summary_model or FakeModel(id="summary-model", provider="fake"),
-            "summary-model",
-            summary_input_budget,
-        ),
-        fallback_summary_model=(
-            SummaryModel(
-                fallback_summary_model,
-                fallback_summary_model_name or "fallback-model",
-                fallback_summary_input_budget if fallback_summary_input_budget is not None else summary_input_budget,
-            )
-            if fallback_summary_model is not None
-            else None
-        ),
-        session_id=working_session.session_id,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        state=HistoryScopeState(force_compact_before_next_run=True),
-        history_settings=_ALL_HISTORY_SETTINGS,
-        available_history_budget=None,
-        selected_run_ids=selected_run_ids,
-        before_tokens=0,
-        runs_before=len(working_session.runs or []),
-        threshold_tokens=None,
-        summary_prompt=COMPACTION_SUMMARY_PROMPT,
-        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-        lifecycle_notice_event_id=None,
-        progress_callback=progress_callback,
-        collect_compaction_hook_messages=False,
+        summarizer=_summarizer(
+            summary_model,
+            summary_input_budget,
+            fallback=(
+                SummaryModel(
+                    fallback_summary_model,
+                    fallback_summary_model_name or "fallback-model",
+                    fallback_summary_input_budget
+                    if fallback_summary_input_budget is not None
+                    else summary_input_budget,
+                )
+                if fallback_summary_model is not None
+                else None
+            ),
+            session_id=working_session.session_id,
+        ),
+        runs=[run for run in working_session.runs or [] if run.run_id in selected_run_ids],
+        before_persist=AsyncMock(),
+        after_persist=after_persist,
     )
 
 
@@ -334,10 +330,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
         ],
     )
     retry_sleep = AsyncMock()
-    progress_events: list[CompactionLifecycleProgress] = []
-
-    async def record_progress(event: CompactionLifecycleProgress) -> None:
-        progress_events.append(event)
+    served_models: list[str] = []
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
@@ -355,7 +348,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
             summary_model=primary,
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
-            progress_callback=record_progress,
+            served_models=served_models,
         )
 
     assert rewrite_result is not None
@@ -378,7 +371,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     assert rewrite_result.compacted_run_count == 2
     assert rewrite_result.served_by.model is fallback
     assert rewrite_result.served_by.name == "fallback-model"
-    assert [event.summary_model for event in progress_events] == ["fallback-model"]
+    assert served_models == ["fallback-model", "fallback-model"]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
@@ -831,17 +824,13 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             session=session,
             scope=scope,
             state=HistoryScopeState(),
-            history_settings=history_settings,
+            summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
             available_history_budget=1,
-            summary_model=SummaryModel(
-                FakeModel(id="summary-model", provider="fake"),
-                "summary-model",
-                summary_input_budget,
-            ),
+            before_tokens=2,
             replay_window_tokens=16_000,
             threshold_tokens=1,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            progress=None,
+            complete=_reported,
         )
 
     assert outcome is not None
@@ -1553,28 +1542,11 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
-            summary_model=SummaryModel(
-                FakeModel(id="summary-model", provider="fake"),
-                "summary-model",
-                summary_input_budget,
-            ),
-            session_id="session-1",
             scope=scope,
-            state=HistoryScopeState(),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
-            available_history_budget=1,
-            selected_run_ids=("run-1", "run-2"),
-            before_tokens=0,
-            runs_before=2,
-            threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-            lifecycle_notice_event_id=None,
-            progress_callback=None,
-            collect_compaction_hook_messages=False,
+            summarizer=_summarizer(input_budget_tokens=summary_input_budget),
+            runs=list(working_session.runs or []),
+            before_persist=AsyncMock(),
+            after_persist=AsyncMock(),
         )
     assert rewrite_result is not None
     assert rewrite_result.compacted_run_count == 1
@@ -1613,18 +1585,15 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
         outcome = await compact_scope_history(
             storage=storage,
             session=working_session,
-            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 16_000),
+            summarizer=_summarizer(),
             scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
             available_history_budget=1,
+            before_tokens=2,
             replay_window_tokens=64_000,
             threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            progress=None,
+            complete=_reported,
         )
 
     assert outcome is None
@@ -1713,20 +1682,13 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             session=session,
             scope=scope,
             state=HistoryScopeState(),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
+            summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             available_history_budget=1,
-            summary_model=SummaryModel(
-                FakeModel(id="summary-model", provider="fake"),
-                "summary-model",
-                summary_input_budget,
-            ),
+            before_tokens=2,
             replay_window_tokens=16_000,
             threshold_tokens=1,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            progress=None,
+            complete=_reported,
         )
 
     assert outcome is not None
@@ -1813,28 +1775,26 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         outcome = await compact_scope_history(
             storage=storage,
             session=working_session,
-            summary_model=SummaryModel(
-                FakeModel(id="summary-model", provider="fake"),
-                "summary-model",
-                summary_input_budget,
-            ),
+            summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
             scope=scope,
             state=HistoryScopeState(),
-            history_settings=history_settings,
             available_history_budget=1,
+            before_tokens=estimate_prompt_visible_history_tokens(
+                session=working_session,
+                scope=scope,
+                history_settings=history_settings,
+                replay_model=replay_model,
+            ),
             replay_window_tokens=None,
             threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-            lifecycle_notice_event_id="$notice",
-            progress_callback=record_progress,
+            progress=record_progress,
+            complete=_reported,
             replay_model=replay_model,
         )
 
     assert outcome is not None
     assert outcome.compacted_run_count == 2
     assert len(progress_events) == 1
-    assert progress_events[0].notice_event_id == "$notice"
     assert progress_events[0].mode == "auto"
     assert progress_events[0].session_id == "session-1"
     assert progress_events[0].scope == "agent:test_agent"
@@ -1877,24 +1837,19 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
     )
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
-        summary = await summarize_runs(
-            summary_model=SummaryModel(model=primary, name="summary-model", input_budget_tokens=6_000),
-            fallback_summary_model=SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
-            previous_summary=None,
-            runs=runs,
-            session_id="session-1",
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
+        summary, served_by = await summarize_runs(
+            _summarizer(
+                primary,
+                6_000,
+                fallback=SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
+                timeout_seconds=30,
             ),
-            summary_prompt="Summarize.",
-            timeout_seconds=30,
-            on_response=None,
+            None,
+            runs,
         )
 
-    assert summary.summary == "merged summary"
-    assert summary.served_by.name == "fallback-model"
+    assert summary == "merged summary"
+    assert served_by.model.name == "fallback-model"
     assert [call.kwargs["model"] for call in summary_mock.await_args_list] == [primary, fallback, fallback]
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     assert "RUN1-MARKER" in summary_inputs[1]
