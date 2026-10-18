@@ -192,7 +192,7 @@ Matrix sync callback
 | `knowledge_graph/extraction.py` | What Graphiti is told when it extracts an episode: the entity types, the built-in extraction instructions, and any configured ones |
 | `knowledge_graph/embedded_server.py` | The embedded FalkorDB server MindRoom starts, stops, and recovers after a crash |
 | `knowledge_graph/episodes.py` | Stored runs rendered as `conversation` and `tool_results` episodes, and thread classification |
-| `knowledge_graph/ingestion.py` | Background ingestion passes with per-kind markers, backoff, and dropped episodes |
+| `knowledge_graph/ingestion.py` | Background ingestion passes over several graphs at once, with per-kind markers, backoff, and dropped episodes |
 | `knowledge_graph/runtime.py` | Starts and stops the store and ingestion worker as agents enable the graph |
 | `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model, extraction instructions, and ingestion settings |
 | `custom_tools/knowledge_graph.py` | The read-only `knowledge_graph` tool |

@@ -12,14 +12,18 @@ class KnowledgeGraphIngestConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    interval_seconds: int = Field(default=600, ge=30, description="Seconds between ingestion passes")
+    interval_seconds: int = Field(
+        default=600,
+        ge=30,
+        description="Seconds to wait after an ingestion pass that ingested nothing; one that did is followed at once",
+    )
     # At least a second, so a conversation updated after a pass always carries a later update time than it had then.
     idle_seconds: int = Field(
         default=120,
         ge=1,
         description="Seconds a conversation must be idle before its new turns are ingested",
     )
-    max_sessions_per_cycle: int = Field(default=10, ge=1, description="Conversations ingested per pass")
+    max_sessions_per_cycle: int = Field(default=10, ge=1, description="Conversations each graph ingests per pass")
     max_episode_chars: int = Field(
         default=24000,
         ge=1000,

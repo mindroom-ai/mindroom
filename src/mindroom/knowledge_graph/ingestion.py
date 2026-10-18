@@ -54,6 +54,9 @@ _MAX_BAD_OUTPUTS = 5
 _MAX_FAILING_SECONDS = 3 * 86_400
 # Episodes one conversation adds per pass, so a long backlog cannot hold up every other conversation.
 _MAX_EPISODES_PER_PASS = 20
+# Graphs ingested at once. Each still adds one episode at a time, because Graphiti resolves an episode's entities against
+# what its graph already holds, and each episode already makes many model calls at once.
+_CONCURRENT_GRAPHS = 4
 _EPISODE_KINDS = ("conversation", "tool_results")
 _WAKE_EVENTS: set[asyncio.Event] = set()
 
@@ -157,9 +160,6 @@ class KnowledgeGraphIngestionWorker:
     store: GraphStore
     redacted_event_ids: RedactedEventIds
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _passes: int = field(default=0, init=False)
-    # Graphs with a conversation whose last attempt failed, or whose last pass failed, which keep health failing.
-    _failing_graphs: set[str] = field(default_factory=set, init=False)
 
     async def run(self) -> None:
         """Run ingestion passes until cancelled."""
@@ -170,63 +170,68 @@ class KnowledgeGraphIngestionWorker:
                 self._wake_event.clear()
                 config = self.config_provider()
                 interval = _IDLE_POLL_SECONDS
+                ingested = False
                 if config is not None and config.knowledge_graph_agents():
                     try:
-                        await self._run_cycle(config, now=time.time())
+                        ingested = await self._run_cycle(config, now=time.time())
                     except Exception as exc:
                         _report_failure("Knowledge graph ingestion pass failed", exc)
                     interval = config.knowledge_graph.ingest.interval_seconds
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
+                # A pass that ingested something may have left a backlog, which the next pass works on at once.
+                if not ingested:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
         finally:
             _WAKE_EVENTS.discard(self._wake_event)
 
-    async def _run_cycle(self, config: Config, *, now: float) -> None:
-        """Ingest up to ``max_sessions_per_cycle`` idle conversations with new turns."""
-        budget = config.knowledge_graph.ingest.max_sessions_per_cycle
+    async def _run_cycle(self, config: Config, *, now: float) -> bool:
+        """Ingest up to ``max_sessions_per_cycle`` idle conversations with new turns from each graph, several at once.
+
+        Return whether any conversation was ingested.
+        """
         # These read files, including every private instance's records, so they stay off the event loop.
         automation_thread_ids = await asyncio.to_thread(automation_threads, self.runtime_paths)
         entity_names = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
-        outcomes: list[bool] = []
         scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
-        # A graph no longer maintained, such as one named for a previous embedder, holds no failure.
-        self._failing_graphs &= {scope.graph_name for scope in scopes}
-        # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
-        start = self._passes % len(scopes) if scopes else 0
-        self._passes += 1
-        for scope in [*scopes[start:], *scopes[:start]]:
-            if budget <= 0:
-                break
-            # One agent or private instance whose conversations cannot be read must not stop the others.
-            try:
-                state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
-                due, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
-                if changed:
-                    await self._persist(scope.graph_name, state)
-                    # A conversation finished while listing is a clean outcome; one it could not read saved its failure.
-                    outcomes.append(True)
-                results = [
-                    await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
-                    for session in due
-                ]
-                # A conversation whose agent is not running, or whose redaction check failed, is looked at again later
-                # and spends none of the budget.
-                budget -= sum(result is not None for result in results)
-                outcomes.extend(result for result in results if result is not None)
-                # A conversation's failure is saved with it, so health stays failing until it succeeds, even across
-                # passes that do not reach it.
-                if any(entry["failures"] for entry in state["sessions"].values()):
-                    self._failing_graphs.add(scope.graph_name)
-                else:
-                    self._failing_graphs.discard(scope.graph_name)
-            except Exception as exc:
-                _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
-                self._failing_graphs.add(scope.graph_name)
-                outcomes.append(False)
+        outcomes: list[bool] = []
+        slots = asyncio.Semaphore(_CONCURRENT_GRAPHS)
+
+        async def ingest_graph(scope: GraphScope) -> int:
+            """Ingest one graph's due conversations and return how many were ingested."""
+            async with slots:
+                # One agent or private instance whose conversations cannot be read must not stop the others.
+                try:
+                    state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
+                    budget = config.knowledge_graph.ingest.max_sessions_per_cycle
+                    due, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
+                    if changed:
+                        await self._persist(scope.graph_name, state)
+                        # A conversation finished while listing is a clean outcome; one it could not read saved its failure.
+                        outcomes.append(True)
+                    results = [
+                        await self._ingest(config, scope, state, session, automation_thread_ids, entity_names.get, now)
+                        for session in due
+                    ]
+                    # A conversation whose agent is not running, or whose redaction check failed, is looked at again
+                    # later and is not counted.
+                    ingested = [result for result in results if result is not None]
+                    outcomes.extend(ingested)
+                    # A conversation's failure is saved with it, so health stays failing until it succeeds, even across
+                    # passes in which it is not due.
+                    if any(entry["failures"] for entry in state["sessions"].values()):
+                        outcomes.append(False)
+                except Exception as exc:
+                    _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
+                    outcomes.append(False)
+                    return 0
+                return len(ingested)
+
+        counts = await asyncio.gather(*(ingest_graph(scope) for scope in scopes))
         # Health reports a failure until a pass ingests something, nothing in it fails, and no conversation's last
         # attempt failed.
-        if outcomes and all(outcomes) and not self._failing_graphs:
+        if outcomes and all(outcomes):
             record_knowledge_graph_failure(None)
+        return any(counts)
 
     def _due_sessions(
         self,
@@ -295,7 +300,7 @@ class KnowledgeGraphIngestionWorker:
         """Ingest a bounded number of one conversation's new episodes and return whether none failed or was dropped.
 
         Return None when its agent cannot say yet what was redacted, or the check failed and was saved as a failure,
-        which leaves the conversation for a later pass without spending the pass budget.
+        which leaves the conversation for a later pass.
         """
         settings = config.knowledge_graph.ingest
         finished, blocked_until = finished_runs(session.runs, config, now=now)

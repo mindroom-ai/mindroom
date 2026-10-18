@@ -2513,7 +2513,7 @@
       "properties": {
         "interval_seconds": {
           "default": 600,
-          "description": "Seconds between ingestion passes",
+          "description": "Seconds to wait after an ingestion pass that ingested nothing; one that did is followed at once",
           "minimum": 30,
           "title": "Interval Seconds",
           "type": "integer"
@@ -2527,7 +2527,7 @@
         },
         "max_sessions_per_cycle": {
           "default": 10,
-          "description": "Conversations ingested per pass",
+          "description": "Conversations each graph ingests per pass",
           "minimum": 1,
           "title": "Max Sessions Per Cycle",
           "type": "integer"
