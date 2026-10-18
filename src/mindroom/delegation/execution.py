@@ -185,9 +185,15 @@ async def persist_delegation_state(
     if not isinstance(entity.db, BaseDb) or not response.session_id:
         msg = "Durable delegation requires persisted session storage"
         raise RuntimeError(msg)
+    # This row replaces the one Agno saved, so it gets the same storage scrub, which drops the replayed history.
+    stored = deepcopy(response)
+    if isinstance(stored, TeamRunOutput):
+        cast("Team", entity).scrub_run_output_for_storage(stored)
+    else:
+        cast("Agent", entity).scrub_run_output_for_storage(stored)
     await asyncio.to_thread(
         entity.db.upsert_run,
-        run=deepcopy(response),
+        run=stored,
         session_id=response.session_id,
         user_id=response.user_id,
     )
