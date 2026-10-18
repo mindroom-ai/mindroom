@@ -54,6 +54,7 @@ from mindroom.history.storage import (
 from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import (
+    CompactionLifecycleFailure,
     CompactionLifecycleStart,
     CompactionOutcome,
     HistoryScope,
@@ -2068,6 +2069,36 @@ async def test_stopping_the_turn_while_the_fold_is_stored_still_reports_success(
 
     assert [type(event) for event in lifecycle.events] == [CompactionLifecycleStart, CompactionOutcome]
     assert len(segments_of(storage, _SCOPE.key)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_a_fold_that_loses_its_append_reports_the_change_and_keeps_the_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold another writer outran stores nothing, leaves the request whole, and says the conversation changed."""
+    config, paths = _config(tmp_path)
+    storage = _seeded_storage(config, paths)
+    model = _ToolLoopModel(tool_rounds=5)
+    agent = _scoped_agent(model, config, paths, storage)
+    lifecycle = RecordingCompactionLifecycle()
+    bind_compaction_lifecycle(agent, lifecycle)
+    requests: list[list[Message]] = []
+
+    async def capture(messages: list[Message], _tools: object, _run_response: object) -> None:
+        requests.append(list(messages))
+
+    install_request_preparation(model, marker="_test_capture", prepare=capture)
+    monkeypatch.setattr(compaction, "append_fold", lambda *_args, **_kwargs: False)
+
+    await _run_in_session(agent, "Do the task")
+
+    assert type(lifecycle.events[0]) is CompactionLifecycleStart
+    assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
+    assert lifecycle.events[1].failure_reason == "The conversation changed during compaction."
+    assert not any(is_compaction_summary(message) for request in requests for message in request)
+    assert segments_of(storage, _SCOPE.key) == []
 
 
 def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
