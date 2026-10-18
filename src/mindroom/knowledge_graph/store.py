@@ -15,7 +15,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
+from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
+from mindroom.knowledge_graph.names import entity_names
 from mindroom.knowledge_graph.usage import usage_target
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
@@ -110,7 +112,7 @@ class GraphStore(Protocol):
         """Return the scope's facts most relevant to ``query``."""
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
-        """Return the scope's entity named ``name`` in any letter case, else the best fuzzy match, or None."""
+        """Return the scope's entity named ``name`` or the name it stands for, else the best fuzzy match, or None."""
 
 
 class UnusableExtractionError(ValueError):
@@ -340,7 +342,7 @@ class GraphitiStore:
         return await self._run(self._search_facts(scope, query, limit))
 
     async def entity(self, scope: GraphScope, name: str) -> _GraphEntity | None:
-        """Return the scope's entity named ``name`` in any letter case, else the best fuzzy match, with its facts."""
+        """Return the scope's entity named ``name`` or the name it stands for, else the best fuzzy match, with facts."""
         return await self._run(self._entity(scope, name))
 
     async def _add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
@@ -382,15 +384,23 @@ class GraphitiStore:
         from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF  # noqa: PLC0415
 
         driver = graphiti.driver.clone(database=scope.graph_name)
+        # Ingestion names a known agent or person by one name, which an alias, agent key, or Matrix ID stands for; a
+        # graph extracted before that name was settled can still hold only the name asked for.
+        config = self._config_provider()
+        agent_keys = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self._runtime_paths)
+        canonical = entity_names(config, agent_keys).canonical(name)
         # Hybrid search ranks an entity whose summary or longer name mentions the text above one named exactly that
         # (a bare first name), so an exact name is looked up first.
-        records, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=name)
+        for exact in dict.fromkeys([canonical, name]):
+            records, _, _ = await driver.execute_query(_EXACT_ENTITY_QUERY, name=exact)
+            if records:
+                break
         others: list[str] = []
         if records:
             node = await EntityNode.get_by_uuid(driver, records[0]["uuid"])
         else:
             results = await graphiti.search_(
-                name,
+                canonical,
                 config=NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": _ENTITY_CANDIDATES}),
                 group_ids=[scope.graph_name],
             )

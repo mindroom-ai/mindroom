@@ -84,6 +84,8 @@ def extraction_instructions(known: Sequence[KnownEntity]) -> str:
         return _EXTRACTION_INSTRUCTIONS
     lines = [_EXTRACTION_INSTRUCTIONS, "When the text mentions one of these, use exactly this name:"]
     for entity in known:
-        details = [entity.kind, *([f"also called {', '.join(entity.aliases)}"] if entity.aliases else [])]
-        lines.append(f"- {entity.name} ({'; '.join(details)})")
+        details: list[str] = [entity.kind] if entity.kind else []
+        if entity.aliases:
+            details.append(f"also called {', '.join(entity.aliases)}")
+        lines.append(f"- {entity.name} ({'; '.join(details)})" if details else f"- {entity.name}")
     return "\n".join(lines)

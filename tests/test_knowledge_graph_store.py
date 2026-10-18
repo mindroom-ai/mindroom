@@ -54,11 +54,11 @@ class _HashEmbedder:
 
 @pytest_asyncio.fixture
 async def store(tmp_path: Path) -> AsyncIterator[GraphitiStore]:
-    """A store over a fresh embedded database."""
+    """A store over a fresh embedded database, with one alias entry."""
     config = Config(
         agents={"mind": AgentConfig(display_name="Mind", knowledge_graph=True)},
         models={"luna": ModelConfig(provider="openai", id="gpt-6-luna")},
-        knowledge_graph={"model": "luna"},
+        knowledge_graph={"model": "luna", "aliases": {"Robin Vale": ["@robin:example.test", "Robin"]}},
     )
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     with patch.object(store_module, "create_configured_embedder", return_value=_HashEmbedder()):
@@ -332,6 +332,34 @@ async def test_entity_without_exact_match_lists_other_close_matches(store: Graph
     assert ranking[0] == "Atlas dashboard v2"
     assert sorted(ranking) == ["Atlas Labs", "Atlas dashboard v2", "Project dashboard"]
     assert [entity.name, *entity.others] == ranking
+
+
+@pytest.mark.asyncio
+async def test_entity_looks_up_the_one_name_an_alias_or_id_stands_for(store: GraphitiStore) -> None:
+    """A configured alias, Matrix ID, or agent key finds the entity under its one name, ahead of one named the alias."""
+    await _seed_entity(store, ALPHA, "Robin", summary="A stray duplicate.")
+    await _seed_entity(store, ALPHA, "Robin Vale", summary="A person.", facts=2)
+    await _seed_entity(store, ALPHA, "Mind", summary="The agent.")
+
+    for name in ("robin", "@robin:example.test", "ROBIN VALE"):
+        entity = await store.entity(ALPHA, name)
+        assert entity is not None
+        assert entity.name == "Robin Vale"
+    mind = await store.entity(ALPHA, "mind")
+    assert mind is not None
+    assert mind.summary == "The agent."
+
+
+@pytest.mark.asyncio
+async def test_entity_falls_back_to_the_name_asked_for(store: GraphitiStore) -> None:
+    """A graph extracted before an alias entry existed can hold only the alias, which is then found as asked."""
+    await _seed_entity(store, ALPHA, "Robin Vale Consulting", summary="A company.")
+    await _seed_entity(store, ALPHA, "Robin", summary="A person.", name_embedding=[1.0] * 32)
+
+    entity = await store.entity(ALPHA, "Robin")
+
+    assert entity is not None
+    assert entity.summary == "A person."
 
 
 def _holds_embedding(value: object) -> bool:

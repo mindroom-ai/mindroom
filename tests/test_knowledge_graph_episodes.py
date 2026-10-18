@@ -173,6 +173,27 @@ def test_a_person_speaks_under_the_newest_display_name_they_used() -> None:
     ]
 
 
+def test_an_alias_entry_names_the_person_behind_a_matrix_id() -> None:
+    """An entry listing a person's Matrix ID labels their lines with its name, whatever display name they use."""
+    config = Config(
+        agents={"mind": AgentConfig(display_name="Mind")},
+        knowledge_graph={"aliases": {"Alice Vale": ["@alice:example.test", "Al"]}},
+    )
+    run = _run("r1", prompt=render_msg_tag(sender="@alice:example.test", display_name="Ally", body="Ship date?"))
+
+    [rendered] = render_episodes(
+        [run],
+        thread_kind="conversation",
+        episode_kind="conversation",
+        agent_name="mind",
+        settings=SETTINGS,
+        names=entity_names(config, AGENTS),
+    )
+
+    assert rendered.episode.body.splitlines() == ["Alice Vale: Ship date?", "Mind: Atlas ships Friday."]
+    assert [entity.name for entity in rendered.episode.known_entities] == ["Mind", "Alice Vale"]
+
+
 def test_an_interrupted_turn_adds_only_what_the_person_said() -> None:
     """A stopped turn is stored as a summary that can quote tool previews, which must not read as the agent's words."""
     run = _run("r1", answer='The `search_graph` tool finished with output preview "- Alice owns Project Atlas"')

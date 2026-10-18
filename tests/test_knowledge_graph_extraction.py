@@ -57,8 +57,13 @@ def test_instructions_keep_paths_and_urls_out_and_date_by_occurrence() -> None:
 
 
 def test_instructions_give_each_known_entity_one_name() -> None:
-    """Each known agent and person is listed under the one name to use, with its kind and the other names it goes by."""
-    known = (KnownEntity("Mind", "agent", ("mind", "@mindroom_mind:x")), KnownEntity("alice", "person", ()))
+    """Each known agent, person, or configured name is listed under the one name to use, with the names it also has."""
+    known = (
+        KnownEntity("Mind", "agent", ("mind", "@mindroom_mind:x")),
+        KnownEntity("alice", "person", ()),
+        KnownEntity("Project Atlas", None, ("Atlas",)),
+        KnownEntity("Beacon", None, ()),
+    )
 
     static = extraction_instructions(())
     text = extraction_instructions(known)
@@ -68,4 +73,6 @@ def test_instructions_give_each_known_entity_one_name() -> None:
         "When the text mentions one of these, use exactly this name:",
         "- Mind (agent; also called mind, @mindroom_mind:x)",
         "- alice (person)",
+        "- Project Atlas (also called Atlas)",
+        "- Beacon",
     ]
