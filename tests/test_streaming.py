@@ -635,6 +635,7 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         )
         assert placeholder_sent is True
         assert delivered_bodies == [_PROGRESS_PLACEHOLDER]
+        assert timing.metadata["first_visible_kind"] == "placeholder"
         assert "first_substantive_reply" not in timing.marks
         assert "first_substantive_kind" not in timing.metadata
 
@@ -648,6 +649,7 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         "Answer buffered while the placeholder is in flight",
     ]
     assert "first_substantive_reply" in timing.marks
+    assert timing.metadata["first_visible_kind"] == "placeholder"
     assert timing.metadata["first_substantive_kind"] == "stream_update"
 
 

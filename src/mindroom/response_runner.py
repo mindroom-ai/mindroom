@@ -851,8 +851,7 @@ async def _response_typing_indicator(
     finished = asyncio.Event()
 
     async def approved_typing() -> None:
-        await participation.decided.wait()
-        if participation.approved:
+        if await participation.wait_for_approval():
             async with show_typing():
                 await finished.wait()
 
@@ -864,18 +863,6 @@ async def _response_typing_indicator(
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
-
-
-def _placeholder_after_approval(participation: ParticipationGate | None) -> Callable[[], Awaitable[bool]] | None:
-    """Let a participation-gated reply show its placeholder once it is approved."""
-    if participation is None:
-        return None
-
-    async def approved() -> bool:
-        await participation.decided.wait()
-        return participation.approved
-
-    return approved
 
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
@@ -5447,7 +5434,9 @@ class ResponseRunner:
                         allow_new_terminal_message=lambda: (
                             runtime.participation is None or runtime.participation.approved
                         ),
-                        placeholder_ready=_placeholder_after_approval(runtime.participation),
+                        placeholder_ready=(
+                            None if runtime.participation is None else runtime.participation.wait_for_approval
+                        ),
                     ),
                 )
                 if request.pipeline_timing is not None:
