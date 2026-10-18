@@ -226,7 +226,13 @@ def _compaction_replay_messages(
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
     skip_roles = set(history_skip_roles(history_settings))
-    messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
+    # A stored run can hold copies of the history its request replayed; replay skips them, and the runs they came
+    # from are summarized on their own.
+    messages = [
+        deepcopy(message)
+        for message in run.messages or []
+        if message.role not in skip_roles and not message.from_history
+    ]
     if history_settings.max_tool_calls_from_history is not None and messages:
         filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     strip_stale_anthropic_replay_fields(messages)
