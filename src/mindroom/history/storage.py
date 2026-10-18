@@ -35,8 +35,6 @@ from typing import TYPE_CHECKING, Any
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.db.utils import deserialize_session_json_fields
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import JSON, column, inspect, select, table
@@ -47,7 +45,7 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history import summary_rows
-from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import (
@@ -62,6 +60,8 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session.summary import SessionSummary
 
 
@@ -294,7 +294,7 @@ def read_scope_seen_event_ids(
     for run in session.runs or []:
         if not is_model_history_visible_run(run):
             continue
-        if _scope_for_run(run) != scope:
+        if not run_in_scope(run, scope):
             continue
         seen_event_ids.update(summary_rows.seen_event_ids(run.metadata))
     return seen_event_ids
@@ -313,7 +313,7 @@ def _read_scope_history_event_ids(
     """
     event_ids = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="all")
     for run in session.runs or []:
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and _scope_for_run(run) == scope:
+        if run_in_scope(run, scope) and run.parent_run_id is None:
             event_ids |= summary_rows.seen_event_ids(run.metadata) | summary_rows.source_event_ids(run.metadata)
     return event_ids
 
@@ -578,7 +578,7 @@ def read_fold_basis(
     runs = [
         run
         for run in (stored.runs or [] if isinstance(stored, (AgentSession, TeamSession)) else [])
-        if is_model_history_visible_run(run) and _scope_for_run(run) == scope
+        if is_model_history_visible_run(run) and run_in_scope(run, scope)
     ]
     run_ids = [run.run_id for run in runs if run.run_id]
     covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
@@ -714,15 +714,3 @@ def _valid_matrix_history_metadata(metadata: dict[str, Any]) -> dict[str, Any] |
     if raw_value.get("version") != _MATRIX_HISTORY_METADATA_VERSION:
         return None
     return raw_value
-
-
-def _scope_for_run(run: RunOutput | TeamRunOutput) -> HistoryScope | None:
-    if isinstance(run, TeamRunOutput):
-        team_id = run.team_id
-        if isinstance(team_id, str) and team_id:
-            return HistoryScope(kind="team", scope_id=team_id)
-        return None
-    agent_id = run.agent_id
-    if isinstance(agent_id, str) and agent_id:
-        return HistoryScope(kind="agent", scope_id=agent_id)
-    return None

@@ -6,8 +6,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.constants import prompt_roles_for_history_storage
@@ -19,7 +17,7 @@ from mindroom.history.message_content import (
     project_history_media_for_replay,
     render_message_content,
 )
-from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
@@ -29,6 +27,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.agent import Agent
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -287,17 +287,7 @@ def scope_visible_runs(
     scope: HistoryScope,
 ) -> list[RunOutput | TeamRunOutput]:
     """Return this scope's model-history-visible runs in stored order."""
-    return _runs_for_scope([run for run in session.runs or [] if is_model_history_visible_run(run)], scope)
-
-
-def _runs_for_scope(
-    runs: Sequence[RunOutput | TeamRunOutput],
-    scope: HistoryScope,
-) -> list[RunOutput | TeamRunOutput]:
-    """Filter model-history-visible runs down to one persisted history scope."""
-    if scope.kind == "team":
-        return [run for run in runs if isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id]
-    return [run for run in runs if isinstance(run, RunOutput) and run.agent_id == scope.scope_id]
+    return [run for run in session.runs or [] if is_model_history_visible_run(run) and run_in_scope(run, scope)]
 
 
 def current_summary_text(session: AgentSession | TeamSession) -> str | None:
