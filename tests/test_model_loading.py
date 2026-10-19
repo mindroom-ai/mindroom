@@ -695,37 +695,17 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize(
-    ("routing", "served_provider", "warns"),
-    [
-        ({"order": ["deepseek", "google-ai-studio"]}, "Google AI Studio", False),
-        ({"order": ["google-vertex"]}, "Google", False),
-        ({"order": ["deepseek"], "allow_fallbacks": True}, "OpenInference", True),
-        ({"sort": "price"}, "OpenInference", False),
-    ],
-)
-async def test_openrouter_warns_when_served_outside_provider_order(
-    tmp_path: Path,
-    routing: dict[str, object],
-    served_provider: str,
-    warns: bool,
-    stream: bool,
-) -> None:
-    """A response OpenRouter serves from a provider outside the configured order logs a warning."""
+async def test_openrouter_usage_log_names_served_provider(tmp_path: Path, stream: bool) -> None:
+    """The usage log names the upstream OpenRouter served the response from."""
     config = bind_runtime_paths(
         Config(
             models={
-                "deepseek": ModelConfig(
-                    provider="openrouter",
-                    id="deepseek/deepseek-v4.1-flash",
-                    api_key="sk-test",
-                    extra_kwargs={"extra_body": {"provider": routing}},
-                ),
+                "deepseek": ModelConfig(provider="openrouter", id="deepseek/deepseek-v4.1-flash", api_key="sk-test"),
             },
         ),
         test_runtime_paths(tmp_path),
     )
-    response = ModelResponse(content="ok", provider_data={"model_extra": {"provider": served_provider}})
+    response = ModelResponse(content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
 
     async def fake_invoke(*_args: object, **_kwargs: object) -> ModelResponse:
         return response
@@ -745,15 +725,7 @@ async def test_openrouter_warns_when_served_outside_provider_order(
         else:
             assert await model.ainvoke(**request) is response
 
-    expected = {
-        "event": "openrouter_provider_fallback",
-        "log_level": "warning",
-        "model_name": "deepseek",
-        "model_id": "deepseek/deepseek-v4.1-flash",
-        "requested_order": ["deepseek"],
-        "served_provider": "OpenInference",
-    }
-    assert [log for log in logs if log["event"] == "openrouter_provider_fallback"] == ([expected] if warns else [])
+    assert [log.get("served_provider") for log in logs if log["event"] == "LLM usage"] == ["OpenInference"]
 
 
 @pytest.mark.parametrize(
@@ -779,7 +751,7 @@ def test_openrouter_stream_keeps_served_provider_on_non_text_chunks(
     delta: dict[str, object],
     expected_provider_data: dict[str, object],
 ) -> None:
-    """Tool-call and reasoning chunks carry the served provider so streamed fallbacks are still detected."""
+    """Tool-call and reasoning chunks carry the served provider, so the usage log names it for every stream."""
     chunk = ChatCompletionChunk.model_validate(
         {
             "id": "gen-1",

@@ -456,16 +456,6 @@ def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, 
     return provider
 
 
-def _openrouter_provider_order(model_config: ModelConfig) -> list[str] | None:
-    """Return the upstream ``extra_body.provider.order`` an OpenRouter model config pins, if any."""
-    if canonical_provider(model_config.provider) != "openrouter":
-        return None
-    extra_body = (model_config.extra_kwargs or {}).get("extra_body")
-    routing = extra_body.get("provider") if isinstance(extra_body, dict) else None
-    order = routing.get("order") if isinstance(routing, dict) else None
-    return [name for name in order if isinstance(name, str)] if isinstance(order, list) else None
-
-
 def get_model_instance(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -515,7 +505,6 @@ def get_model_instance(
         debug_config=config.debug,
         default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         configured_provider=provider,
-        openrouter_provider_order=_openrouter_provider_order(model_config),
     )
     install_claude_prompt_cache_hook(model)
     install_provider_stream_retry_hook(
