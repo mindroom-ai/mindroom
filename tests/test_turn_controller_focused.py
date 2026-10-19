@@ -1997,6 +1997,7 @@ async def test_moved_thread_copy_that_names_an_agent_starts_no_turn(
     skip_mentions: bool,
 ) -> None:
     """A copied message that names an agent wakes it unless the copy carries the mention guard."""
+    with_responder_access(config, "general", users=[_entity_user_id(config, sender_name)])
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
     event = _text_event(
@@ -2026,6 +2027,7 @@ async def test_a_file_that_ignores_mentions_keeps_the_mention_in_text_batched_wi
     tmp_path: Path,
 ) -> None:
     """An agent's file and its recipient text share one batch, and the file's flag must not erase the text's mention."""
+    with_responder_access(config, "general", users=[_entity_user_id(config, "research")])
     harness = _build_harness(config, tmp_path, debounce_seconds=1.0)
     room = _room_with_members(config, "general", "research")
     file_event = _managed_file_event(
@@ -2405,6 +2407,8 @@ async def test_mention_in_an_agents_finished_reply_wakes_the_mentioned_agent_onc
 async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions(tmp_path: Path, status: str) -> None:
     """Only a completed reply hands off; a stopped or failed one stays an ordinary edit."""
     config = _owner_only_general_config(tmp_path)
+    # The edit path checks the editing agent's own account, so general admits research here.
+    with_responder_access(config, "general", users=[_OWNER, _entity_user_id(config, "research")])
     harness = _build_harness(config, tmp_path)
     regenerator = _NoEditRegeneration()
     harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)

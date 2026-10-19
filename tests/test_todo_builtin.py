@@ -1156,7 +1156,11 @@ def test_todo_attributes_items_to_whoever_wrote_the_title(tmp_path: Path) -> Non
     assert bridge_result.startswith(f"Updated `{planned_id}`")
     assert _read_todos(config)["items"][0]["requester_id"] == "@bridge:localhost"
 
-    # Agent-to-agent turns are always allowed to address agents, so an agent may queue work for `secret`.
+    # An agent's own turn may queue work for `secret` only once `secret`'s access admits that agent.
+    with tool_runtime_context(_tool_context(config, requester_id=agent_requester)):
+        refused_result = tool.add_todo(agent=_agent(), title="Agent handoff", assigned_agent="secret")
+    assert refused_result.startswith("Cannot give or change todo work for 'secret'")
+    config.agents["secret"].access = ResponderAccessConfig(users=["@user:localhost", agent_requester])
     with tool_runtime_context(_tool_context(config, requester_id=agent_requester)):
         agent_result = tool.add_todo(agent=_agent(), title="Agent handoff", assigned_agent="secret")
     items = _read_todos(config)["items"]
