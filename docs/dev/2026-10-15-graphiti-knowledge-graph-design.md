@@ -174,7 +174,6 @@ Rejected: several episodes of one graph at once, because Graphiti resolves an ep
 
 Rebuilding graphs, for example after extraction or naming changes, meant stopping MindRoom and deleting `knowledge_graph/`: the database keeps every graph in memory, and the ingestion worker saves each graph's progress after every episode, so it would write the old progress back for a graph whose files were removed under it, and that graph would never be filled again.
 `knowledge_graph.generation` joins the embedder in naming graphs, as an embedder change already did, and a change under `knowledge_graph` restarts no agent, so a hot config change takes effect at the next pass; even an agent in a voice call keeps running and finishes the call with lookups on the settings it joined with, as a reply in progress does.
-Generation 0 adds nothing to the name, so graphs built before generations existed keep their names.
 Rejected: deleting old graphs automatically, because a name is a one-way hash of settings that may be gone and replies started before the change can still read them; and a reset command inside the runtime, which would have to coordinate with a running pass for the same result.
 
 ## Ingestion invariants

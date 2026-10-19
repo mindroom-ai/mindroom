@@ -2267,7 +2267,7 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
 
 
 def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
-    """Starting the graphs over changes nothing a call uses, so it does not end a call in progress."""
+    """Starting the graphs over does not end a call in progress, which keeps the graphs it joined with."""
     running_entities = {ROUTER_AGENT_NAME, "general", "writer", "helper"}
 
     plan = build_config_update_plan(

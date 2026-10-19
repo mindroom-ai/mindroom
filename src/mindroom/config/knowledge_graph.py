@@ -1,4 +1,4 @@
-"""Knowledge graph settings: the extraction model, extraction instructions, conversation ingestion, and known names."""
+"""Knowledge graph settings: extraction model and instructions, conversation ingestion, known names, and generation."""
 
 from typing import Self
 

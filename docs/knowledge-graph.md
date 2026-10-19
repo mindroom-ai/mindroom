@@ -50,7 +50,7 @@ Up to four agents' graphs are filled at the same time, counting each requester o
 Facts are embedded with [`memory.embedder`](memory.md#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder or raising `knowledge_graph.generation` starts new, empty graphs that fill again from conversations active within `backfill_days`, which pays for that extraction again, charged to each conversation's requester.
-Replies and voice calls already running when the change applies keep reading the old graphs until they finish, and setting an earlier generation again reads that generation's graphs as they were left.
+Replies and voice calls already running when you raise the generation keep reading the old graphs until they finish, and setting an earlier generation again reads that generation's graphs as they were left.
 The old graphs keep their memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory, which also starts the current graphs over.
 
 ## What Goes Into the Graph
@@ -95,7 +95,7 @@ Every other alias is a plain name that extraction maps to the entry's name and t
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
-Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`.
+Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`.
 
 ## The `knowledge_graph` Tool
 
