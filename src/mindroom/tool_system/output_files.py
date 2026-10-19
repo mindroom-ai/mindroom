@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import stat
+import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextvars import ContextVar
@@ -24,6 +25,9 @@ from mindroom.path_confinement import is_git_metadata_path, open_directory_withi
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
+
+if sys.version_info >= (3, 14):
+    from annotationlib import Format, type_repr
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
@@ -618,7 +622,18 @@ def _copy_annotations_with_output_path(
     except Exception:
         annotations = dict(getattr(original_entrypoint, "__annotations__", {}) or {})
     annotations[OUTPUT_PATH_ARGUMENT] = str | None
-    wrapper.__annotations__ = annotations
+    if sys.version_info < (3, 14):
+        wrapper.__annotations__ = annotations
+        return
+
+    # Python 3.14 functools.wraps copies __annotate__, which assigning __annotations__ sets to None,
+    # so outer wrappers such as the sandbox proxy would expose no types and skip argument validation.
+    def annotate(annotation_format: Format) -> dict[str, object]:
+        if annotation_format == Format.STRING:
+            return {name: type_repr(value) for name, value in annotations.items()}
+        return dict(annotations)
+
+    wrapper.__annotate__ = annotate
 
 
 def _docstring_with_output_path(original_doc: str | None) -> str:

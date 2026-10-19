@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import os
 import stat
@@ -192,6 +193,36 @@ def test_wrapped_entrypoint_drops_mindroom_output_path_before_calling_original(t
     assert seen == ["hi"]
     assert (tmp_path / "tool-results/out.txt").read_text(encoding="utf-8") == "large marker"
     assert _receipt(result.result)["status"] == "saved_to_file"
+
+
+class _LineToolkit(Toolkit):
+    def __init__(self, seen: list[object]) -> None:
+        self.seen = seen
+        super().__init__(name="lines", tools=[self.read_line])
+
+    def read_line(self, start_line: int) -> str:
+        self.seen.append(start_line)
+        return "line"
+
+
+def test_outer_functools_wraps_keeps_wrapped_entrypoint_validation(tmp_path: Path) -> None:
+    """Outer wrappers such as the sandbox proxy still coerce model arguments like "28"."""
+    seen: list[object] = []
+    toolkit = _LineToolkit(seen)
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    function = _first_function(toolkit)
+    inner = function.entrypoint
+    assert inner is not None
+
+    @functools.wraps(inner)
+    def outer(*args: object, **kwargs: object) -> object:
+        return inner(*args, **kwargs)
+
+    function.entrypoint = outer
+    result = FunctionCall(function=_processed(function), arguments={"start_line": "28"}, call_id="call-1").execute()
+
+    assert result.status == "success"
+    assert seen == [28]
 
 
 def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) -> None:
