@@ -16,6 +16,7 @@ Each authored entry in an agent's `tools:` list loads or unloads as one unit.
 | `initial` | bool | `false` | Load a deferred tool at session start and keep it loaded; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
+The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:

@@ -5655,6 +5655,7 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
 
 Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
 
@@ -6226,6 +6227,8 @@ agents:
     tools:
       - usage_stats
 ```
+
+`mindroom config init` and newly provisioned hosted instances give the starter Mind agent these self-service functions.
 
 Enable `get_all_usage()` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
 
@@ -7469,6 +7472,7 @@ Each authored entry in an agent's `tools:` list loads or unloads as one unit.
 | `initial` | bool | `false` | Load a deferred tool at session start and keep it loaded; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
+The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
