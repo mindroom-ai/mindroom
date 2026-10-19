@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
+from mindroom.logging_config import get_logger
 from mindroom.origins import normalized_origin
 from mindroom.requester_identity import runtime_matrix_domain
 
@@ -15,6 +16,9 @@ from mindroom.requester_identity import runtime_matrix_domain
 _AUDIENCE_PARAM = "io.mindroom.audience"
 # The fork lists this in `/_matrix/client/versions` `unstable_features` while it binds tokens.
 _BINDING_FEATURE = "io.mindroom.openid_audience"
+_BINDING_CHECK_FAILED = "Could not check whether the homeserver binds OpenID tokens"
+
+logger = get_logger(__name__)
 
 
 class MatrixOpenIDToken(BaseModel):
@@ -93,10 +97,12 @@ async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as client:  # noqa: SIM117 - own the client until response cleanup completes
             async with client.get(url, allow_redirects=False) as response:
                 if response.status != 200:
+                    logger.warning(_BINDING_CHECK_FAILED, status=response.status)
                     return False
                 body = await collect_bounded_bytes(response.content.iter_chunked(4096), max_bytes=16384)
         payload = json.loads(body)
-    except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError, ValueError, UnicodeError):
+    except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError, ValueError, UnicodeError) as exc:
+        logger.warning(_BINDING_CHECK_FAILED, error=type(exc).__name__)
         return False
     features = payload.get("unstable_features") if isinstance(payload, dict) else None
     return isinstance(features, dict) and features.get(_BINDING_FEATURE) is True
