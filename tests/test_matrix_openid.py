@@ -142,8 +142,12 @@ _VersionsServer = Callable[[web.Response], Awaitable[RuntimePaths]]
 _BINDING_CHECK_FAILED = "Could not check whether the homeserver binds OpenID tokens"
 
 
-def _warnings(logs: list[dict[str, object]]) -> list[object]:
-    return [log["event"] for log in logs if log["log_level"] == "warning"]
+def _warnings(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {key: value for key, value in log.items() if key != "log_level"}
+        for log in logs
+        if log["log_level"] == "warning"
+    ]
 
 
 @pytest_asyncio.fixture
@@ -202,24 +206,31 @@ async def test_binding_probe_false_without_the_flag(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "answer",
+    ("answer", "why"),
     [
-        lambda: web.Response(status=500),
-        lambda: web.Response(status=302, headers={"Location": "https://elsewhere.example/_matrix/client/versions"}),
-        lambda: web.Response(text="not json"),
-        lambda: web.json_response({"unstable_features": {"io.mindroom.openid_audience": True}, "pad": "x" * 20000}),
+        (lambda: web.Response(status=500), {"status": 500}),
+        (
+            lambda: web.Response(status=302, headers={"Location": "https://elsewhere.example/_matrix/client/versions"}),
+            {"status": 302},
+        ),
+        (lambda: web.Response(text="not json"), {"error": "JSONDecodeError"}),
+        (
+            lambda: web.json_response({"unstable_features": {"io.mindroom.openid_audience": True}, "pad": "x" * 20000}),
+            {"error": "ByteLimitExceededError"},
+        ),
     ],
     ids=["server-error", "redirect", "not-json", "oversized"],
 )
 async def test_binding_probe_false_on_bad_responses(
     versions_server: _VersionsServer,
     answer: Callable[[], web.Response],
+    why: dict[str, object],
 ) -> None:
     """Any answer that is not a small, direct JSON confirmation means no binding, with a warning saying why."""
     paths = await versions_server(answer())
     with capture_logs() as logs:
         assert await homeserver_binds_openid_audience(paths) is False
-    assert _warnings(logs) == [_BINDING_CHECK_FAILED]
+    assert _warnings(logs) == [{"event": _BINDING_CHECK_FAILED, **why}]
 
 
 @pytest.mark.asyncio
@@ -232,4 +243,4 @@ async def test_binding_probe_false_when_homeserver_unreachable(tmp_path: Path) -
     )
     with capture_logs() as logs:
         assert await homeserver_binds_openid_audience(paths) is False
-    assert _warnings(logs) == [_BINDING_CHECK_FAILED]
+    assert _warnings(logs) == [{"event": _BINDING_CHECK_FAILED, "error": "ClientConnectorError"}]
