@@ -136,7 +136,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 | Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
-Other people in the room see the title without the button, and other Matrix clients see only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+Other people in the room who use MindRoom Chat on the agent's homeserver see the title without the button; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
 ### Find a canvas again
 
