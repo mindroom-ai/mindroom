@@ -372,6 +372,27 @@ async def test_persona_inherits_its_callers_skills_without_the_authoring_note(tm
 
 
 @pytest.mark.asyncio
+async def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tmp_path: Path) -> None:
+    """A workspace skill that does not load is named to the agent that owns it, not to a persona borrowing its skills."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    _write_skills(runtime, "scripted")
+    broken = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "broken"
+    broken.mkdir()
+    (broken / "SKILL.md").write_text("---\nname: broken\ndescription: Use when: it breaks\n---\n\nbody\n")
+    options = {"persist_runtime_state": False}
+
+    configured = await _system_prompt(
+        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+    )
+    authored = await _system_prompt(_child(runtime, None, execution_identity=identity))
+
+    assert "skills/broken/SKILL.md" in configured
+    assert "skills/broken/SKILL.md" not in authored
+    assert "scripted" in authored
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("skills", "listed"),
     [(["scripted"], {"scripted"}), ([], set()), (["scripted", "removed"], {"scripted"})],

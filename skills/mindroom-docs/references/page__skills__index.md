@@ -44,8 +44,8 @@ metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
 A skill without any frontmatter still loads with the name and description fallbacks, but frontmatter gives clearer listings.
 Keep each skill focused on one capability, give it a descriptive name such as `code-review`, and declare its dependencies with `metadata.openclaw.requires`.
 
-Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures.
-A workspace skill that breaks these limits is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+A workspace skill does not load when its frontmatter is not valid YAML, for example because an unquoted `description` contains `: `, breaks these limits, or names the skill with more than 64 characters; MindRoom logs a warning, and until the file is fixed the agent's system prompt names the file and the reason.
 
 ## Installing and managing skills
 
