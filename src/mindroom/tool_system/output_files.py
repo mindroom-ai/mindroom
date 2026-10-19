@@ -48,6 +48,10 @@ _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
+_AUTO_SAVE_READ_HINT = (
+    "Do not read this whole file: it is over threshold_bytes, so the result would be saved to a file again. "
+    "Read it in parts instead, such as a line range (for example with read_file_chunk) or a search for what you need."
+)
 _TEXT_FALLBACK_HEADER = (
     "MindRoom tool output serialized with text fallback because the result was not JSON-normalizable.\n\n"
 )
@@ -194,6 +198,7 @@ def _auto_save_success_receipt(
     receipt["auto_saved"] = True
     receipt["threshold_bytes"] = threshold_bytes
     receipt["preview"] = preview
+    receipt["hint"] = _AUTO_SAVE_READ_HINT
     return {"mindroom_tool_output": receipt}
 
 

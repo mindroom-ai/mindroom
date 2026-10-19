@@ -973,6 +973,7 @@ def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> Non
     assert receipt["threshold_bytes"] == 100
     assert receipt["format"] == "text"
     assert marker in str(receipt["preview"])
+    assert "line range" in str(receipt["hint"])
     assert raw_output not in str(result.result)
     saved_path = tmp_path / cast("str", receipt["path"])
     assert raw_output == saved_path.read_text(encoding="utf-8")
