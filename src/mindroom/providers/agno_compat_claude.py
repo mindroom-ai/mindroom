@@ -59,7 +59,7 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # https://github.com/agno-agi/agno/pull/6626 expose or log the stop reason but still drop or run cut-off calls.
 # Remove when: The pinned Agno parser keeps every tool call of a response cut off at the output limit, streamed
 # or not, and marks the response so its calls can be answered without running; the owner's answer and
-# retry limit per response loop in providers/claude_compat.py remain.
+# its limit on cut-off responses in a row in providers/claude_compat.py remain.
 # Coverage: tests/test_claude_output_limit.py::test_cut_off_tool_call_is_answered_instead_of_run;
 # tests/test_claude_output_limit.py::test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly.
 
