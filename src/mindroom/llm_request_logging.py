@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, is_dataclass
@@ -415,9 +416,10 @@ def _log_llm_usage(
     logger.info("LLM usage", **payload)
 
 
-def _openrouter_provider_key(name: str) -> str:
-    """Normalize an OpenRouter slug (``deepinfra/turbo``) or display name (``DeepInfra``) for comparison."""
-    return "".join(char for char in name.lower().split("/", 1)[0] if char.isalnum())
+def _served_by_pinned_provider(served_provider: str, pinned_slug: str) -> bool:
+    """Match a served display name (``Google``) to a pinned slug (``google-vertex``) by the slug's first word."""
+    first_word = re.split(r"[^a-z0-9]+", pinned_slug.lower())[0]
+    return "".join(char for char in served_provider.lower() if char.isalnum()).startswith(first_word)
 
 
 def _served_openrouter_provider(provider_data: dict[str, Any] | None) -> str | None:
@@ -437,7 +439,7 @@ def _warn_on_openrouter_provider_fallback(
     """Warn when OpenRouter served a response from a provider outside the configured ``order``."""
     if not provider_order or served_provider is None:
         return
-    if _openrouter_provider_key(served_provider) in {_openrouter_provider_key(name) for name in provider_order}:
+    if any(_served_by_pinned_provider(served_provider, slug) for slug in provider_order):
         return
     logger.warning(
         "openrouter_provider_fallback",

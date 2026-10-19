@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from openai import AsyncOpenAI as AsyncOpenAIClient
     from openai import OpenAI as OpenAIClient
+    from openai.types.chat import ChatCompletionChunk
     from openai.types.responses import Response
     from pydantic import BaseModel
 
@@ -144,6 +145,13 @@ class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
             cache_system_prompt=self.cache_system_prompt,
             extended_cache_time=self.extended_cache_time,
         )
+
+    def _parse_provider_response_delta(self, response_delta: ChatCompletionChunk) -> ModelResponse:
+        """Keep the served provider on every chunk; Agno only copies ``model_extra`` onto text chunks."""
+        model_response = super()._parse_provider_response_delta(response_delta)
+        if response_delta.model_extra and model_response.provider_data is None:
+            model_response.provider_data = {"model_extra": response_delta.model_extra}
+        return model_response
 
     def get_client(self) -> OpenAIClient:
         """Route chat completions through the Anthropic-routed prompt-cache ladder."""

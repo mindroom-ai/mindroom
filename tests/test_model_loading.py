@@ -11,6 +11,7 @@ from agno.models.response import ModelResponse
 from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
+from openai.types.chat import ChatCompletionChunk
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
@@ -698,6 +699,7 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
     ("routing", "served_provider", "warns"),
     [
         ({"order": ["deepseek", "google-ai-studio"]}, "Google AI Studio", False),
+        ({"order": ["google-vertex"]}, "Google", False),
         ({"order": ["deepseek"], "allow_fallbacks": True}, "OpenInference", True),
         ({"sort": "price"}, "OpenInference", False),
     ],
@@ -752,3 +754,30 @@ async def test_openrouter_warns_when_served_outside_provider_order(
         "served_provider": "OpenInference",
     }
     assert [log for log in logs if log["event"] == "openrouter_provider_fallback"] == ([expected] if warns else [])
+
+
+def test_openrouter_stream_keeps_served_provider_on_tool_call_chunks() -> None:
+    """Tool-call-only chunks carry the served provider so streamed fallbacks are still detected."""
+    chunk = ChatCompletionChunk.model_validate(
+        {
+            "id": "gen-1",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "deepseek/deepseek-v4.1-flash",
+            "provider": "OpenInference",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": None,
+                        "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "f"}}],
+                    },
+                },
+            ],
+        },
+    )
+
+    parsed = MindRoomOpenRouter(id="deepseek/deepseek-v4.1-flash")._parse_provider_response_delta(chunk)
+
+    assert parsed.tool_calls
+    assert parsed.provider_data == {"model_extra": {"provider": "OpenInference"}}
