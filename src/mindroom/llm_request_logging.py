@@ -1,4 +1,4 @@
-"""Provider-neutral LLM usage telemetry and opt-in request logging."""
+"""Provider-neutral LLM usage telemetry, OpenRouter fallback warnings, and opt-in request logging."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from agno.models.message import Message
@@ -415,6 +415,39 @@ def _log_llm_usage(
     logger.info("LLM usage", **payload)
 
 
+def _openrouter_provider_key(name: str) -> str:
+    """Normalize an OpenRouter slug (``deepinfra/turbo``) or display name (``DeepInfra``) for comparison."""
+    return "".join(char for char in name.lower().split("/", 1)[0] if char.isalnum())
+
+
+def _served_openrouter_provider(provider_data: dict[str, Any] | None) -> str | None:
+    """Return the upstream provider OpenRouter reports for one response, if any."""
+    model_extra = (provider_data or {}).get("model_extra")
+    served_provider = model_extra.get("provider") if isinstance(model_extra, dict) else None
+    return served_provider if isinstance(served_provider, str) else None
+
+
+def _warn_on_openrouter_provider_fallback(
+    *,
+    model: Model,
+    model_name: str,
+    provider_order: list[str] | None,
+    served_provider: str | None,
+) -> None:
+    """Warn when OpenRouter served a response from a provider outside the configured ``order``."""
+    if not provider_order or served_provider is None:
+        return
+    if _openrouter_provider_key(served_provider) in {_openrouter_provider_key(name) for name in provider_order}:
+        return
+    logger.warning(
+        "openrouter_provider_fallback",
+        model_name=model_name,
+        model_id=model.id,
+        requested_order=provider_order,
+        served_provider=served_provider,
+    )
+
+
 async def _write_llm_response_log(
     *,
     model: Model,
@@ -577,6 +610,7 @@ async def _invoke_with_llm_request_logging(
     debug_config: DebugConfig,
     default_log_dir: Path,
     configured_provider: str | None,
+    openrouter_provider_order: list[str] | None,
     request_context: dict[str, _JSONValue],
 ) -> ModelResponse:
     """Invoke one model and persist the request after wire tools are known."""
@@ -602,6 +636,12 @@ async def _invoke_with_llm_request_logging(
         usage=response.response_usage,
         request_context=request_context,
     )
+    _warn_on_openrouter_provider_fallback(
+        model=model,
+        model_name=agent_name,
+        provider_order=openrouter_provider_order,
+        served_provider=_served_openrouter_provider(response.provider_data),
+    )
     return response
 
 
@@ -615,6 +655,7 @@ def _stream_with_llm_request_logging(
     debug_config: DebugConfig,
     default_log_dir: Path,
     configured_provider: str | None,
+    openrouter_provider_order: list[str] | None,
     request_context: dict[str, _JSONValue],
 ) -> AsyncIterator[ModelResponse]:
     """Stream one model response and persist its final wire tools once."""
@@ -624,6 +665,7 @@ def _stream_with_llm_request_logging(
         request_log_ref: _RequestLogRef | None = None
         request_logged = False
         last_usage: MessageMetrics | None = None
+        served_provider: str | None = None
 
         async def _write_request_once() -> None:
             nonlocal request_log_ref, request_logged
@@ -653,6 +695,7 @@ def _stream_with_llm_request_logging(
                     await _write_request_once()
                     if chunk.response_usage is not None:
                         last_usage = chunk.response_usage
+                    served_provider = _served_openrouter_provider(chunk.provider_data) or served_provider
                     yield chunk
         finally:
             await _write_request_once()
@@ -663,6 +706,12 @@ def _stream_with_llm_request_logging(
                 request_log_ref=request_log_ref,
                 usage=last_usage,
                 request_context=request_context,
+            )
+            _warn_on_openrouter_provider_fallback(
+                model=model,
+                model_name=agent_name,
+                provider_order=openrouter_provider_order,
+                served_provider=served_provider,
             )
 
     return _stream()
@@ -675,8 +724,13 @@ def install_llm_request_logging(
     debug_config: DebugConfig,
     default_log_dir: Path,
     configured_provider: str | None = None,
+    openrouter_provider_order: list[str] | None = None,
 ) -> None:
-    """Wrap one model for usage telemetry and optional full request logging."""
+    """Wrap one model for usage telemetry and optional full request logging.
+
+    ``openrouter_provider_order`` is the ``extra_body.provider.order`` an OpenRouter
+    model config pins; responses served by another upstream log a warning.
+    """
 
     def _logged_ainvoke(
         original_ainvoke: Callable[..., Coroutine[object, object, ModelResponse]],
@@ -694,6 +748,7 @@ def install_llm_request_logging(
             debug_config=debug_config,
             default_log_dir=default_log_dir,
             configured_provider=configured_provider,
+            openrouter_provider_order=openrouter_provider_order,
             request_context=_snapshot_request_log_context(),
         )
 
@@ -713,6 +768,7 @@ def install_llm_request_logging(
             debug_config=debug_config,
             default_log_dir=default_log_dir,
             configured_provider=configured_provider,
+            openrouter_provider_order=openrouter_provider_order,
             request_context=_snapshot_request_log_context(),
         )
 

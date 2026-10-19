@@ -7,10 +7,12 @@ from unittest.mock import patch
 
 import pytest
 from agno.models.message import Message as AgnoMessage
+from agno.models.response import ModelResponse
 from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -30,6 +32,7 @@ from mindroom.providers.synthetic_model import SyntheticModel
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
 
@@ -687,3 +690,65 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
     assert install_logging.call_args.args == (model,)
     assert install_logging.call_args.kwargs["configured_provider"] == "openai"
     assert install_logging.call_args.kwargs["debug_config"].log_llm_requests is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("routing", "served_provider", "warns"),
+    [
+        ({"order": ["deepseek", "google-ai-studio"]}, "Google AI Studio", False),
+        ({"order": ["deepseek"], "allow_fallbacks": True}, "OpenInference", True),
+        ({"sort": "price"}, "OpenInference", False),
+    ],
+)
+async def test_openrouter_warns_when_served_outside_provider_order(
+    tmp_path: Path,
+    routing: dict[str, object],
+    served_provider: str,
+    warns: bool,
+    stream: bool,
+) -> None:
+    """A response OpenRouter serves from a provider outside the configured order logs a warning."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "deepseek": ModelConfig(
+                    provider="openrouter",
+                    id="deepseek/deepseek-v4.1-flash",
+                    api_key="sk-test",
+                    extra_kwargs={"extra_body": {"provider": routing}},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    response = ModelResponse(content="ok", provider_data={"model_extra": {"provider": served_provider}})
+
+    async def fake_invoke(*_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        yield response
+
+    with (
+        patch.object(MindRoomOpenRouter, "ainvoke", fake_invoke),
+        patch.object(MindRoomOpenRouter, "ainvoke_stream", fake_stream),
+    ):
+        model = get_model_instance(config, runtime_paths_for(config), "deepseek")
+    request = {"messages": [AgnoMessage(role="user", content="hi")], "assistant_message": AgnoMessage(role="assistant")}
+    with capture_logs() as logs:
+        if stream:
+            assert [chunk async for chunk in model.ainvoke_stream(**request)] == [response]
+        else:
+            assert await model.ainvoke(**request) is response
+
+    expected = {
+        "event": "openrouter_provider_fallback",
+        "log_level": "warning",
+        "model_name": "deepseek",
+        "model_id": "deepseek/deepseek-v4.1-flash",
+        "requested_order": ["deepseek"],
+        "served_provider": "OpenInference",
+    }
+    assert [log for log in logs if log["event"] == "openrouter_provider_fallback"] == ([expected] if warns else [])
