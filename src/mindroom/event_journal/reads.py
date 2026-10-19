@@ -137,12 +137,15 @@ def read_conversation(
             refresh_pending.append(_refresh_request(row))
             continue
         messages.append(_visible_message(row))
+    # The oldest row the page covers is the oldest one it kept, even when that
+    # row was deleted before its content was loaded; anything older is behind it.
+    last = rows[-1] if trimmed else (sizes[kept - 1] if kept else None)
     next_cursor = (
         ConversationCursor(
-            created_ts=int(rows[-1]["created_ts"]),
-            logical_event_id=rows[-1]["logical_event_id"],
+            created_ts=int(last["created_ts"]),
+            logical_event_id=last["logical_event_id"],
         )
-        if rows and (trimmed or kept < len(sizes) or len(sizes) == limit)
+        if last is not None and (trimmed or kept < len(sizes) or len(sizes) == limit)
         else None
     )
     return ConversationPage(

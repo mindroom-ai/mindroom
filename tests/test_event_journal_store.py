@@ -88,10 +88,20 @@ from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, rep
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import (
+        AsyncGenerator,
+        AsyncIterator,
+        Awaitable,
+        Callable,
+        Iterable,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
     from pathlib import Path
 
     from mindroom.event_journal import (
+        ConversationPage,
         MatrixDelivery,
         PrincipalStore,
         RefreshRequest,
@@ -1643,6 +1653,31 @@ class TestAPageIsBoundedByTheRowsItReads:
         assert seen == ["$m11"]
 
 
+async def _read_with_writes_between_page_queries(
+    store: EventJournalStore,
+    writes: Callable[[], Iterable[Awaitable[object]]],
+    *,
+    thread_id: str | None,
+    limit: int,
+) -> ConversationPage:
+    """Read one page of agent@alice, committing ``writes`` after its size query and before its content query."""
+    loop = asyncio.get_running_loop()
+
+    def land() -> None:
+        for write in writes():
+            asyncio.run_coroutine_threadsafe(write, loop).result(_WORKER_WAIT_SECONDS)
+
+    return await store.backend.read(
+        lambda transaction: reads.read_conversation(
+            _PausingTransaction(transaction, land, lambda sql: reads._PAGE_SIZE_COLUMNS in sql),
+            "agent@alice",
+            room_id=ROOM,
+            thread_id=thread_id,
+            limit=limit,
+        ),
+    )
+
+
 class TestBoundedReads:
     """Reads are paged; there is no call that returns a whole room."""
 
@@ -1669,25 +1704,45 @@ class TestBoundedReads:
         replies = journal_database().principal("agent@alice")
         await admit(alice, "$root", ts=1_000)
         await admit(alice, "$answer", ts=2_000, thread_id="$root")
-        loop = asyncio.get_running_loop()
 
-        def replies_land() -> None:
-            for index, event_id in enumerate(("$follow-up", "$reply")):
-                landing = admit(replies, event_id, ts=3_000 + index, thread_id="$root")
-                asyncio.run_coroutine_threadsafe(landing, loop).result(_WORKER_WAIT_SECONDS)
-
-        page = await store.backend.read(
-            lambda transaction: reads.read_conversation(
-                _PausingTransaction(transaction, replies_land, lambda sql: reads._PAGE_SIZE_COLUMNS in sql),
-                "agent@alice",
-                room_id=ROOM,
-                thread_id="$root",
-                limit=50,
-            ),
+        page = await _read_with_writes_between_page_queries(
+            store,
+            lambda: [admit(replies, f"$reply{index}", ts=3_000 + index, thread_id="$root") for index in range(2)],
+            thread_id="$root",
+            limit=50,
         )
 
         assert [m.logical_event_id for m in page.messages] == ["$root", "$answer"]
         assert page.next_cursor is None
+
+    async def test_a_page_whose_kept_rows_were_all_deleted_mid_read_still_points_behind_them(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """Older history stays reachable when every row a page kept is redacted before it is loaded.
+
+        A deleted row is absent from the content query, so a page whose every
+        kept row went that way loads nothing. Taking the cursor from the loaded
+        rows then said nothing was behind the page, and an export or a strict
+        read stopped there with the surviving history unread.
+        """
+        store = journal_database()
+        alice = store.principal("agent@alice")
+        redactions = journal_database().principal("agent@alice")
+        await admit(alice, "$old", ts=1_000)
+        await admit(alice, "$new", ts=2_000)
+
+        page = await _read_with_writes_between_page_queries(
+            store,
+            lambda: [admit(redactions, "$redaction", ts=3_000, kind=EventKind.REDACTION, redacts="$new")],
+            thread_id=None,
+            limit=1,
+        )
+
+        assert page.messages == ()
+        assert page.next_cursor is not None
+        behind = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=1, before=page.next_cursor)
+        assert [m.logical_event_id for m in behind.messages] == ["$old"]
 
     async def test_pages_walk_backwards_without_gaps_or_repeats(
         self,
