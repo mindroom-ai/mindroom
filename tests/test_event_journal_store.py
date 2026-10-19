@@ -88,10 +88,20 @@ from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, rep
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import (
+        AsyncGenerator,
+        AsyncIterator,
+        Awaitable,
+        Callable,
+        Iterable,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
     from pathlib import Path
 
     from mindroom.event_journal import (
+        ConversationPage,
         MatrixDelivery,
         PrincipalStore,
         RefreshRequest,
@@ -1643,6 +1653,31 @@ class TestAPageIsBoundedByTheRowsItReads:
         assert seen == ["$m11"]
 
 
+async def _read_with_writes_between_page_queries(
+    store: EventJournalStore,
+    writes: Callable[[], Iterable[Awaitable[object]]],
+    *,
+    thread_id: str | None,
+    limit: int,
+) -> ConversationPage:
+    """Read one page of agent@alice, committing ``writes`` after its size query and before its content query."""
+    loop = asyncio.get_running_loop()
+
+    def land() -> None:
+        for write in writes():
+            asyncio.run_coroutine_threadsafe(write, loop).result(_WORKER_WAIT_SECONDS)
+
+    return await store.backend.read(
+        lambda transaction: reads.read_conversation(
+            _PausingTransaction(transaction, land, lambda sql: reads._PAGE_SIZE_COLUMNS in sql),
+            "agent@alice",
+            room_id=ROOM,
+            thread_id=thread_id,
+            limit=limit,
+        ),
+    )
+
+
 class TestBoundedReads:
     """Reads are paged; there is no call that returns a whole room."""
 
@@ -1650,6 +1685,64 @@ class TestBoundedReads:
         """A read requires a positive limit."""
         with pytest.raises(ValueError, match="positive limit"):
             await alice.read_conversation(room_id=ROOM, thread_id=None, limit=0)
+
+    async def test_replies_landing_mid_read_do_not_push_the_root_out_of_the_page(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A page holds the rows it was sized on, whatever lands before its content is loaded.
+
+        The page is sized in one query and loaded in a second, and neither
+        backend runs them against one snapshot. Replies committed in between
+        used to push the oldest sized rows, the thread root first, out of the
+        second query's window while the page still reported nothing behind it.
+        A thread summary read that page as the whole thread and titled it from
+        a mid-thread reply.
+        """
+        store = journal_database()
+        alice = store.principal("agent@alice")
+        replies = journal_database().principal("agent@alice")
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$answer", ts=2_000, thread_id="$root")
+
+        page = await _read_with_writes_between_page_queries(
+            store,
+            lambda: [admit(replies, f"$reply{index}", ts=3_000 + index, thread_id="$root") for index in range(2)],
+            thread_id="$root",
+            limit=50,
+        )
+
+        assert [m.logical_event_id for m in page.messages] == ["$root", "$answer"]
+        assert page.next_cursor is None
+
+    async def test_a_page_whose_kept_rows_were_all_deleted_mid_read_still_points_behind_them(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """Older history stays reachable when every row a page kept is redacted before it is loaded.
+
+        A deleted row is absent from the content query, so a page whose every
+        kept row went that way loads nothing. Taking the cursor from the loaded
+        rows then said nothing was behind the page, and an export or a strict
+        read stopped there with the surviving history unread.
+        """
+        store = journal_database()
+        alice = store.principal("agent@alice")
+        redactions = journal_database().principal("agent@alice")
+        await admit(alice, "$old", ts=1_000)
+        await admit(alice, "$new", ts=2_000)
+
+        page = await _read_with_writes_between_page_queries(
+            store,
+            lambda: [admit(redactions, "$redaction", ts=3_000, kind=EventKind.REDACTION, redacts="$new")],
+            thread_id=None,
+            limit=1,
+        )
+
+        assert page.messages == ()
+        assert page.next_cursor is not None
+        behind = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=1, before=page.next_cursor)
+        assert [m.logical_event_id for m in behind.messages] == ["$old"]
 
     async def test_pages_walk_backwards_without_gaps_or_repeats(
         self,
@@ -9614,6 +9707,9 @@ class TestHotQueriesAreIndexCovered:
         "projection page after a cursor": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=?"  # noqa: S608 - the production clause, not input
             f"{_CONVERSATION_CURSOR_CLAUSE} ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        ),
+        "projection page content": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND logical_event_id IN (?, ?, ?)"
         ),
         "revision point lookup": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND revision_event_id=?"

@@ -33,21 +33,28 @@ class GraphScope:
 
 
 def _graph_name(scope_key: str, signature: Sequence[str]) -> str:
-    """Return the graph name for a scope and embedder, which reveals neither."""
+    """Return the graph name for a scope and its signature, which reveals neither."""
     digest = hashlib.sha256("|".join((scope_key, *signature)).encode()).hexdigest()
     return f"kg_{digest[:24]}"
 
 
 def _graph_signature(config: Config) -> tuple[str, ...]:
-    """Return the embedder settings its vectors depend on, so another embedder means another graph."""
+    """Return what names a graph besides its scope: the embedder its vectors depend on, and the generation."""
     embedder = config.memory.embedder
     # Graph vectors come from MindRoom's own embedder, like knowledge vectors.
-    return effective_knowledge_embedder_signature(
+    signature = effective_knowledge_embedder_signature(
         embedder.provider,
         embedder.config.model,
         host=embedder.config.host,
         dimensions=embedder.config.dimensions,
     )
+    generation = config.knowledge_graph.generation
+    # LEGACY_COMPAT: Graph names derived from the scope and embedder alone.
+    # Legacy format: A graph name hashed the scope key and the embedder signature, with no generation.
+    # Last legacy release: v2026.10.376; replacement: unreleased, which adds a nonzero `knowledge_graph.generation`.
+    # Handling: Generation 0 adds nothing to the signature, so every existing graph keeps its name and its progress.
+    # Coverage: tests/test_knowledge_graph_scope.py::test_a_new_generation_names_new_graphs.
+    return (*signature, f"generation {generation}") if generation else signature
 
 
 def graph_scope(

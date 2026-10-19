@@ -1,7 +1,8 @@
 """Background ingestion: the finished turns of graph-enabled agents become graph episodes.
 
 Stored sessions are the source of truth; a per-graph state file records how far each conversation has been ingested,
-so a restart resumes where the last pass stopped and changing the embedder, which names a new graph, starts over.
+so a restart resumes where the last pass stopped and changing the embedder or the generation, which names a new graph,
+starts over.
 """
 
 from __future__ import annotations
