@@ -105,10 +105,14 @@ def read_conversation(
     budget, and then carries a cursor exactly as a full page does. Its rows are
     sized first and only the ones that fit are loaded.
 
-    On PostgreSQL the size and content queries can see different snapshots,
-    so a write committed between them can carry a page past its budget by the
-    rows that write changed. That overshoot is accepted rather than folding
-    the thread root's separate lookup into one windowed statement.
+    The size and content queries can see different snapshots on both
+    backends, so the content is loaded for exactly the rows the size query
+    kept. Running the window again for the kept count let replies committed in
+    between push the oldest kept rows, the thread root first, out of the page
+    while it still reported nothing behind it. A write in between can still
+    change a kept row's content and carry the page past its budget by what it
+    changed. That overshoot is accepted rather than folding the thread root's
+    separate lookup into one windowed statement.
     """
     if limit <= 0:
         msg = "A conversation read requires a positive limit"
@@ -120,22 +124,9 @@ def read_conversation(
         thread_id=thread_id,
         limit=limit,
         before=before,
-        columns=_PAGE_SIZE_COLUMNS,
     )
     kept = _rows_within_content_budget(sizes)
-    rows = (
-        _page_rows(
-            transaction,
-            principal_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            limit=kept,
-            before=before,
-            columns=_PAGE_COLUMNS,
-        )
-        if kept
-        else ()
-    )
+    rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
     decoded = _rows_within_decoded_budget(rows)
     trimmed = decoded < len(rows)
     rows = rows[:decoded]
@@ -169,9 +160,8 @@ def _page_rows(
     thread_id: str | None,
     limit: int,
     before: ConversationCursor | None,
-    columns: str,
 ) -> tuple[Row, ...]:
-    """Return one page's rows, newest first.
+    """Return the order and stored size of one page's rows, newest first.
 
     A thread's root message carries no thread relation of its own — it becomes
     a root only when someone replies to it — so it is stored in the room
@@ -183,7 +173,7 @@ def _page_rows(
     rows = list(
         transaction.fetchall(
             f"""
-            SELECT {columns} FROM visible_messages
+            SELECT {_PAGE_SIZE_COLUMNS} FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND thread_id = ?{cursor_clause}
             ORDER BY created_ts DESC, logical_event_id DESC
             LIMIT ?
@@ -194,7 +184,7 @@ def _page_rows(
     if thread_id is not None:
         root = transaction.fetchone(
             f"""
-            SELECT {columns} FROM visible_messages
+            SELECT {_PAGE_SIZE_COLUMNS} FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?{cursor_clause}
             """,  # noqa: S608 - a fixed column list and a fixed clause, not input
             (principal_id, room_id, thread_id, *cursor_params),
@@ -204,6 +194,34 @@ def _page_rows(
             rows.sort(key=lambda row: (int(row["created_ts"]), row["logical_event_id"]), reverse=True)
             del rows[limit:]
     return tuple(rows)
+
+
+def _load_rows(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    sized: tuple[Row, ...],
+) -> tuple[Row, ...]:
+    """Return the full rows a page was sized on, in the same order, by primary key.
+
+    A row deleted since it was sized is simply absent, as it would be from any
+    later read.
+    """
+    if not sized:
+        return ()
+    placeholders = ", ".join("?" for _ in sized)
+    loaded = {
+        row["logical_event_id"]: row
+        for row in transaction.fetchall(
+            f"""
+            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            WHERE principal_id = ? AND room_id = ? AND logical_event_id IN ({placeholders})
+            """,  # noqa: S608 - a fixed column list and generated placeholders, not input
+            (principal_id, room_id, *(row["logical_event_id"] for row in sized)),
+        )
+    }
+    return tuple(loaded[row["logical_event_id"]] for row in sized if row["logical_event_id"] in loaded)
 
 
 def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:

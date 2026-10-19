@@ -1651,6 +1651,44 @@ class TestBoundedReads:
         with pytest.raises(ValueError, match="positive limit"):
             await alice.read_conversation(room_id=ROOM, thread_id=None, limit=0)
 
+    async def test_replies_landing_mid_read_do_not_push_the_root_out_of_the_page(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A page holds the rows it was sized on, whatever lands before its content is loaded.
+
+        The page is sized in one query and loaded in a second, and neither
+        backend runs them against one snapshot. Replies committed in between
+        used to push the oldest sized rows, the thread root first, out of the
+        second query's window while the page still reported nothing behind it.
+        A thread summary read that page as the whole thread and titled it from
+        a mid-thread reply.
+        """
+        store = journal_database()
+        alice = store.principal("agent@alice")
+        replies = journal_database().principal("agent@alice")
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$answer", ts=2_000, thread_id="$root")
+        loop = asyncio.get_running_loop()
+
+        def replies_land() -> None:
+            for index, event_id in enumerate(("$follow-up", "$reply")):
+                landing = admit(replies, event_id, ts=3_000 + index, thread_id="$root")
+                asyncio.run_coroutine_threadsafe(landing, loop).result(_WORKER_WAIT_SECONDS)
+
+        page = await store.backend.read(
+            lambda transaction: reads.read_conversation(
+                _PausingTransaction(transaction, replies_land, lambda sql: reads._PAGE_SIZE_COLUMNS in sql),
+                "agent@alice",
+                room_id=ROOM,
+                thread_id="$root",
+                limit=50,
+            ),
+        )
+
+        assert [m.logical_event_id for m in page.messages] == ["$root", "$answer"]
+        assert page.next_cursor is None
+
     async def test_pages_walk_backwards_without_gaps_or_repeats(
         self,
         alice: PrincipalStore,
@@ -9614,6 +9652,9 @@ class TestHotQueriesAreIndexCovered:
         "projection page after a cursor": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=?"  # noqa: S608 - the production clause, not input
             f"{_CONVERSATION_CURSOR_CLAUSE} ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        ),
+        "projection page content": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND logical_event_id IN (?, ?, ?)"
         ),
         "revision point lookup": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND revision_event_id=?"
