@@ -222,8 +222,8 @@ Rejected: deleting old graphs automatically, because a name is a one-way hash of
 
 ## Limitations
 
-- Redacting or deleting a message does not remove facts already extracted from it; raising `knowledge_graph.generation` rebuilds the graphs from the remaining conversations of the last `backfill_days`, and the previous graphs, no longer read, keep their data until `knowledge_graph/` is deleted with MindRoom stopped.
-- A config reload that changes the embedder or the generation during a pass can add that pass's remaining episodes to the old graph.
+- Redacting or deleting a message does not remove facts already extracted from it; raising `knowledge_graph.generation` rebuilds the graphs from the remaining conversations of the last `backfill_days`, and the previous graphs, which replies and voice calls already running finish on, keep their data until `knowledge_graph/` is deleted with MindRoom stopped.
+- A config reload that changes the embedder or the generation during a pass can add that pass's remaining episodes to the old graph, and the new graphs start filling only after that pass ends.
 - A pass waits for its slowest graph, so while one graph works through a long backlog, new turns in the others wait until that pass finishes, including any graphs still waiting for a free place.
 - Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.
 

@@ -2505,7 +2505,7 @@
         },
         "generation": {
           "default": 0,
-          "description": "Raise to start every graph over from the conversations within backfill_days; the previous graphs are no longer read",
+          "description": "Raise to start every graph over from the conversations within backfill_days; new replies and calls read the new graphs",
           "minimum": 0,
           "title": "Generation",
           "type": "integer"

@@ -49,7 +49,11 @@ def _graph_signature(config: Config) -> tuple[str, ...]:
         dimensions=embedder.config.dimensions,
     )
     generation = config.knowledge_graph.generation
-    # The first generation adds nothing, so graphs built before generations existed keep their names.
+    # LEGACY_COMPAT: Graph names derived from the scope and embedder alone.
+    # Legacy format: A graph name hashed the scope key and the embedder signature, with no generation.
+    # Last legacy release: v2026.10.376; replacement: unreleased, which adds `knowledge_graph.generation` to the name.
+    # Handling: Generation 0 adds nothing to the signature, so every existing graph keeps its name and its progress.
+    # Coverage: tests/test_knowledge_graph_scope.py::test_a_new_generation_names_new_graphs.
     return (*signature, f"generation {generation}") if generation else signature
 
 

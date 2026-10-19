@@ -46,7 +46,7 @@ Up to four agents' graphs are filled at the same time, counting each requester o
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder or raising `knowledge_graph.generation` starts new, empty graphs that fill again from conversations active within `backfill_days`, which pays for that extraction again, charged to each conversation's requester.
-Replies already running when the change applies keep reading the old graphs until they finish.
+Replies and voice calls already running when the change applies keep reading the old graphs until they finish, and setting an earlier generation again reads that generation's graphs as they were left.
 The old graphs keep their memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory, which also starts the current graphs over.
 
 ## What Goes Into the Graph
@@ -66,7 +66,7 @@ Each fact keeps its sources: `conversation` means someone said it, `tool_results
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
 A message redacted before its conversation is added stays out of the graph, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
-Redacting a message later does not remove facts already extracted from it; to stop agents from reading them, raise `knowledge_graph.generation`, or, to delete them too, instead stop MindRoom and delete `knowledge_graph/` in the storage directory, and either way the graphs rebuild from the remaining conversations, without redacted messages.
+Redacting a message later does not remove facts already extracted from it; to stop agents from reading them, raise `knowledge_graph.generation`, or, to delete them too, instead stop MindRoom and delete `knowledge_graph/` in the storage directory, and either way the graphs rebuild from the remaining conversations of the last `backfill_days`, without redacted messages.
 
 ## Names
 

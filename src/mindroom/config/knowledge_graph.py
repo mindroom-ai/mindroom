@@ -75,8 +75,8 @@ class KnowledgeGraphConfig(BaseModel):
         default=0,
         ge=0,
         description=(
-            "Raise to start every graph over from the conversations within backfill_days; the previous graphs are no "
-            "longer read"
+            "Raise to start every graph over from the conversations within backfill_days; new replies and calls read "
+            "the new graphs"
         ),
     )
     aliases: dict[str, list[str]] = Field(
