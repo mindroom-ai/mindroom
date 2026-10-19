@@ -170,6 +170,13 @@ The first build on a deployment with four graphs took 37.6 hours, 85% of it extr
 Graphs can share the Graphiti client because the pinned Graphiti gives each `add_episode` call its own database handle; versions before that fix switched the shared client's database, which corrupted concurrent graphs ([graphiti#1676](https://github.com/getzep/graphiti/issues/1676), fixed by [graphiti#1699](https://github.com/getzep/graphiti/pull/1699)).
 Rejected: several episodes of one graph at once, because Graphiti resolves an episode's entities and facts against what its graph already holds, so two episodes extracted together can each create the same person; Graphiti's bulk import, which uses other prompts and previous-episode context and has not been evaluated; and a separate loop per graph, which would stop a long backlog from delaying other graphs' passes but adds lifecycle machinery while the graph with the longest backlog bounds a build either way.
 
+### A generation number starts graphs over without a restart
+
+Rebuilding graphs, for example after extraction or naming changes, meant stopping MindRoom and deleting `knowledge_graph/`: the database keeps every graph in memory, and the ingestion worker saves each graph's progress after every episode, so it would write the old progress back for a graph whose files were removed under it, and that graph would never be filled again.
+`knowledge_graph.generation` joins the embedder in naming graphs, so raising it gives every scope a new graph and a new progress file, as an embedder change already did; no agent restarts for a `knowledge_graph` setting, so a hot config change takes effect at the next pass.
+Generation 0 adds nothing to the name, so graphs built before generations existed keep their names.
+Rejected: deleting the previous generation's graphs when the generation rises, because a pass that started before the change can still be adding to one; and a reset command inside the runtime, which would have to coordinate with a running pass for the same result.
+
 ## Ingestion invariants
 
 - Only finished turns are ingested, and a turn waiting for approval holds back every later turn of its conversation, because it finishes in place with its original, earlier creation time and a marker past it would skip it.
@@ -215,7 +222,7 @@ Rejected: several episodes of one graph at once, because Graphiti resolves an ep
 
 ## Limitations
 
-- Redacting or deleting a message does not remove facts already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
+- Redacting or deleting a message does not remove facts already extracted from it; raising `knowledge_graph.generation` rebuilds the graphs from the remaining conversations of the last `backfill_days`, and the previous graphs, no longer read, keep their data until `knowledge_graph/` is deleted with MindRoom stopped.
 - A config reload that changes the embedder during a pass can add that pass's remaining episodes to the old graph.
 - A pass waits for its slowest graph, so while one graph works through a long backlog, new turns in the others wait until that pass finishes, including any graphs still waiting for a free place.
 - Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.

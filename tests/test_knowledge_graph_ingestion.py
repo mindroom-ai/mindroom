@@ -330,6 +330,21 @@ async def test_embedder_change_rebuilds_into_a_new_graph(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_a_new_generation_rebuilds_into_a_new_graph(tmp_path: Path) -> None:
+    """Raising the generation fills a new graph from the stored conversations again, without a restart."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
+
+    config.knowledge_graph.generation = 1
+    await worker._run_cycle(config, now=T0 + 20)
+
+    assert store.sessions() == ["!room:x:$t1", "!room:x:$t1"]
+    assert len({graph for graph, _, _ in store.episodes}) == 2
+
+
+@pytest.mark.asyncio
 async def test_wake_runs_a_pass_before_the_interval(tmp_path: Path) -> None:
     """An exploration run's results are ingested without waiting a full interval."""
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()

@@ -2503,6 +2503,13 @@
           },
           "description": "Conversation ingestion settings"
         },
+        "generation": {
+          "default": 0,
+          "description": "Raise to start every graph over from the conversations within backfill_days; the previous graphs are no longer read",
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
         "aliases": {
           "additionalProperties": {
             "items": {
@@ -5301,6 +5308,7 @@
           "max_sessions_per_cycle": 10,
           "max_tool_result_chars": 4000
         },
+        "generation": 0,
         "aliases": {}
       },
       "description": "Knowledge graph built from graph-enabled agents' conversations"

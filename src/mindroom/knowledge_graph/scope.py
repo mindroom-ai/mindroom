@@ -39,15 +39,18 @@ def _graph_name(scope_key: str, signature: Sequence[str]) -> str:
 
 
 def _graph_signature(config: Config) -> tuple[str, ...]:
-    """Return the embedder settings its vectors depend on, so another embedder means another graph."""
+    """Return what names a graph besides its scope: the embedder its vectors depend on, and the generation."""
     embedder = config.memory.embedder
     # Graph vectors come from MindRoom's own embedder, like knowledge vectors.
-    return effective_knowledge_embedder_signature(
+    signature = effective_knowledge_embedder_signature(
         embedder.provider,
         embedder.config.model,
         host=embedder.config.host,
         dimensions=embedder.config.dimensions,
     )
+    generation = config.knowledge_graph.generation
+    # The first generation adds nothing, so graphs built before generations existed keep their names.
+    return (*signature, f"generation {generation}") if generation else signature
 
 
 def graph_scope(
