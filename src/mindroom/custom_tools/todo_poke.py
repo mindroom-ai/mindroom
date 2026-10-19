@@ -230,9 +230,9 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
 
     # LEGACY_COMPAT: Todo items without a recorded requester_id.
     # Legacy format: A native `todos.json` item with no `requester_id` key.
-    # Last legacy release: v2026.9.292 wrote every item without a requester; replacement: the next release records the title author's `requester_id` on every item it writes.
-    # Handling: The item still parses so its thread's attributed work keeps poking, but it is never poked itself, because its title may come from a human the assignee refuses; its next write by an admitted requester records an author.
-    # Coverage: tests/test_todo_poke.py::test_scan_never_pokes_items_without_a_recorded_requester.
+    # Last legacy release: v2026.9.294 wrote every item without a requester; replacement: v2026.9.295 records the title author's `requester_id` on every item it writes.
+    # Handling: The item still parses so its thread's attributed work keeps poking, but it is never poked itself, because its title may come from a human the assignee refuses; its next write by an admitted requester records that requester.
+    # Coverage: tests/test_todo_poke.py::test_scan_never_pokes_items_without_a_recorded_requester, tests/test_todo_builtin.py::test_todo_write_records_requester_on_legacy_item.
     requester_id = _require_string(item_data, "requester_id") if "requester_id" in item_data else None
 
     return _TodoItemSnapshot(

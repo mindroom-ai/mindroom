@@ -563,6 +563,15 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_memory_auto_flush_model(self) -> Config:
+        """Require the auto-flush extractor model to name a configured model."""
+        extractor_model = self.memory.auto_flush.extractor.model
+        if extractor_model is not None and extractor_model not in self.models:
+            msg = f"Unknown memory.auto_flush.extractor.model: {extractor_model!r}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_personal_rooms(self) -> Config:
         """Require a real target and onboarding rooms observed by the router."""
         if self.personal_rooms is not None:

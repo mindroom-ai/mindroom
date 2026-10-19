@@ -315,15 +315,25 @@ async def test_new_graph_backfills_only_recent_sessions(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_embedder_change_rebuilds_into_a_new_graph(tmp_path: Path) -> None:
-    """Another embedder means another graph, which is filled from the stored conversations again."""
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param(lambda config: setattr(config.memory.embedder.config, "dimensions", 256), id="embedder"),
+        pytest.param(lambda config: setattr(config.knowledge_graph, "generation", 1), id="generation"),
+    ],
+)
+async def test_another_embedder_or_generation_rebuilds_into_a_new_graph(
+    tmp_path: Path,
+    change: Callable[[Config], object],
+) -> None:
+    """Either names another graph, which the running worker fills from the stored conversations again."""
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$t1", ["r1"])
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+    worker = _worker(config, paths, store)
+    await worker._run_cycle(config, now=T0 + 10)
 
-    changed = config.model_copy(deep=True)
-    changed.memory.embedder.config.dimensions = 256
-    await _worker(changed, paths, store)._run_cycle(changed, now=T0 + 20)
+    change(config)
+    await worker._run_cycle(config, now=T0 + 20)
 
     assert store.sessions() == ["!room:x:$t1", "!room:x:$t1"]
     assert len({graph for graph, _, _ in store.episodes}) == 2

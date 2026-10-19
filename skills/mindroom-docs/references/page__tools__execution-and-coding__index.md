@@ -44,7 +44,7 @@ When an agent has a workspace, it is the working directory (`base_dir`) of `file
 Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
 The path must name a file inside the workspace; absolute paths, `..`, paths that start with `~` or contain `$` or `%`, symlinks, and paths inside a `.git` directory are refused.
-Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, and a preview.
+Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, a preview, and a note to read the file in parts, because reading it whole would only save it again.
 `MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` sets the largest output either kind of save writes (default 64 MiB).
 
 ```yaml

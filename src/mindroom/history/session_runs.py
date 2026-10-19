@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 
-# Which of a room's events an agent saw redacted, or None while that agent's bot is not running.
+# Which of a room's events an agent saw redacted, or None until that agent's running bot has finished its first sync.
 type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozenset[str] | None]]
 
 # A task another agent delegated runs in a session of its own, named after the delegation.

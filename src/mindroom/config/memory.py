@@ -143,6 +143,10 @@ class _MemoryAutoFlushContextConfig(BaseModel):
 class _MemoryAutoFlushExtractorConfig(BaseModel):
     """Extraction limits for one background memory flush job."""
 
+    model: str | None = Field(
+        default=None,
+        description="Model config that runs extraction instead of the agent's own model",
+    )
     no_reply_token: str = Field(
         default="NO_REPLY",
         description="Token indicating no durable memory should be written",
