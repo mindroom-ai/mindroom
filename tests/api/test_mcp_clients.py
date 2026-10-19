@@ -184,7 +184,7 @@ def test_portal_session_finds_the_account_its_email_mapping_names(
         _provision(managed_client, **{"user": "alice", **account})
     managed_client.cookies.set(
         CONNECTIONS_SESSION_COOKIE,
-        issue_connections_session(f"@{session_user}:example.org", now=time.time()),
+        issue_connections_session(f"@{session_user}:example.org", now=time.time(), dashboard=False),
     )
 
     selection = managed_client.get("/api/connections/mcp/selection")
