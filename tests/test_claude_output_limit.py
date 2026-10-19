@@ -18,7 +18,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.providers import model_loading
-from mindroom.providers.claude_compat import _cut_off_responses_in_a_row
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -65,6 +64,21 @@ def _cut_off_write() -> dict[str, Any]:
     )
 
 
+def _small_write() -> dict[str, Any]:
+    """The model splits the work and writes the first part in a call of normal size."""
+    return _message(
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_part",
+                "name": "save_file",
+                "input": {"file_name": "part1.py", "contents": "print(1)\n"},
+            },
+        ],
+        stop_reason="tool_use",
+    )
+
+
 def _answer(text: str) -> dict[str, Any]:
     return _message([{"type": "text", "text": text}], stop_reason="end_turn")
 
@@ -106,7 +120,6 @@ def _coder_config(
     *,
     context_window: int | None = None,
     compaction: CompactionConfig | None = None,
-    max_tool_calls_per_turn: int = 1000,
 ) -> Config:
     """A Claude coding agent whose file tool writes into the test directory."""
     # Without a configured workspace the file tool writes relative to the working directory.
@@ -122,7 +135,7 @@ def _coder_config(
                     extra_kwargs={"api_key": "dummy", "max_tokens": _OUTPUT_LIMIT},
                 ),
             },
-            defaults=DefaultsConfig(compaction=compaction, max_tool_calls_per_turn=max_tool_calls_per_turn),
+            defaults=DefaultsConfig(compaction=compaction),
             memory="none",
         ),
         test_runtime_paths(tmp_path),
@@ -139,15 +152,13 @@ def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
 def compacting_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     """The same agent with a context window that one cut-off response's output overfills, so its retry is compacted.
 
-    Naming the summary model keeps compaction in MindRoom instead of Claude's native compaction, and a budget of
-    three tool calls caps each run at five model requests.
+    Naming the summary model keeps compaction in MindRoom instead of Claude's native compaction.
     """
     return _coder_config(
         tmp_path,
         monkeypatch,
         context_window=30_000,
         compaction=CompactionConfig(model="claude", reserve_tokens=4096),
-        max_tool_calls_per_turn=3,
     )
 
 
@@ -236,7 +247,7 @@ async def test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly(
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """Two corrective retries per run, then a clear error instead of a silent or endless run."""
+    """Two corrective retries for cut-off responses in a row, then a clear error instead of a silent or endless run."""
     bodies = _fake_claude(monkeypatch, [_cut_off_write()])
 
     response = await _reply(config, "Write the full simulation script to big.py.", stream=stream)
@@ -250,21 +261,45 @@ async def test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_compaction_between_cut_offs_leaves_the_run_to_its_model_call_cap(
+async def test_a_complete_response_starts_the_count_over(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """Only cut-off responses in a row count, so a run that recovers between them is not stopped."""
+    bodies = _fake_claude(
+        monkeypatch,
+        [_cut_off_write(), _cut_off_write(), _small_write(), _cut_off_write(), _cut_off_write(), _answer("Wrote it.")],
+    )
+
+    response = await _reply(config, "Write the full simulation script to big.py.", stream=stream)
+
+    assert len(bodies) == 6
+    assert "Wrote it." in response
+    assert [path.name for path in tmp_path.rglob("*.py")] == ["part1.py"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_compaction_between_cut_offs_does_not_renew_the_retries(
     compacting_config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """Compaction folds each cut-off response into its summary, so no two are in a row and the model-call cap ends the run."""
-    bodies = _fake_claude(monkeypatch, [_cut_off_write()])
+    """Compaction folds the earlier cut-off responses into its summary, and the third one still ends the run."""
+    bodies = _fake_claude(
+        monkeypatch,
+        [_cut_off_write(), _cut_off_write(), _cut_off_write(), _answer("Wrote big.py in two parts.")],
+    )
 
-    await _reply(compacting_config, "Write the full simulation script to big.py.", stream=stream)
+    response = await _reply(compacting_config, "Write the full simulation script to big.py.", stream=stream)
 
     requests = [body for body in bodies if "tools" in body]
-    assert len(requests) == 3 + 2
-    # Every retry was compacted first, so none carried an earlier cut-off response.
-    assert len(bodies) - len(requests) == len(requests) - 1
+    assert len(requests) == 3
+    # Both retries were compacted first, so neither carried an earlier cut-off response.
+    assert len(bodies) - len(requests) == 2
     assert not [
         block
         for body in requests[1:]
@@ -273,21 +308,9 @@ async def test_compaction_between_cut_offs_leaves_the_run_to_its_model_call_cap(
         if block["type"] == "tool_use"
     ]
     assert not list(tmp_path.rglob("big.py"))
-
-
-def test_cut_off_responses_count_back_to_the_last_prompt() -> None:
-    """A prompt after cut-off responses starts the count over, so only the cut-offs since it count."""
-    cut_off = {"stop_reason": "max_tokens"}
-    messages = [
-        Message(role="assistant", content="", provider_data=cut_off),
-        Message(role="tool", content="Not run"),
-        Message(role="user", content="Write it in parts."),
-        Message(role="assistant", content="", provider_data=cut_off),
-        Message(role="tool", content="Not run"),
-        Message(role="assistant", content="", provider_data=cut_off),
-    ]
-
-    assert _cut_off_responses_in_a_row(messages, "assistant") == 2
+    assert "Wrote big.py in two parts." not in response
+    assert "output limit" in response
+    assert "smaller steps" in response
 
 
 def save_file(file_name: str, contents: str) -> str:
