@@ -13935,7 +13935,7 @@ Platform administrators pass every responder's `access` check, and every agent, 
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
 
-Work no person started, such as a shared agent's [automation](https://docs.mindroom.chat/scheduling/#automations) run and the delegations, todos, schedules, and mentions it makes, runs as that agent's Matrix account, so another agent or team takes it on only when its own `access` admits that account.
+Work no person started, such as a shared agent's [automation](https://docs.mindroom.chat/scheduling/#automations) run and the delegations, todos, mentions, and schedules that mention another agent it makes, runs as that agent's Matrix account, so another agent or team takes it on only when its own `access` admits that account.
 The default `access` admits an agent joined to one of the responder's rooms; otherwise list the agent's Matrix ID in `access.users`.
 
 A team's `access` covers requests to the team as a whole, so someone the team admits reaches every member agent through the team, even members whose own `access` would not admit them directly.
@@ -14595,7 +14595,8 @@ Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_d
 
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question governed by access policy and requester authorization.
 An agent or team mentioned in another entity's reply acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
-Work no person started, such as a shared agent's automation run and the delegations, todos, schedules, and mentions it makes, acts as that agent's own account, which every other agent and team admits only through its own `access`.
+Work no person started, such as a shared agent's automation run and the delegations, todos, mentions, and schedules that mention another agent it makes, acts as that agent's own account, which every other agent and team admits only through its own `access`.
+A schedule that mentions no agent reaches its target through the router hand-off, which drops a managed requester, so the target checks the router's account, which the default `access` admits because the router joins every managed room.
 
 ## Protecting the primary from worker code
 

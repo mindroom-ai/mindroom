@@ -94,7 +94,7 @@ Platform administrators pass every responder's `access` check, and every agent, 
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
 
-Work no person started, such as a shared agent's [automation](https://docs.mindroom.chat/scheduling/#automations) run and the delegations, todos, schedules, and mentions it makes, runs as that agent's Matrix account, so another agent or team takes it on only when its own `access` admits that account.
+Work no person started, such as a shared agent's [automation](https://docs.mindroom.chat/scheduling/#automations) run and the delegations, todos, mentions, and schedules that mention another agent it makes, runs as that agent's Matrix account, so another agent or team takes it on only when its own `access` admits that account.
 The default `access` admits an agent joined to one of the responder's rooms; otherwise list the agent's Matrix ID in `access.users`.
 
 A team's `access` covers requests to the team as a whole, so someone the team admits reaches every member agent through the team, even members whose own `access` would not admit them directly.
