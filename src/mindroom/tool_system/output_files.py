@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import stat
+import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextvars import ContextVar
@@ -24,6 +25,9 @@ from mindroom.path_confinement import is_git_metadata_path, open_directory_withi
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
+
+if sys.version_info >= (3, 14):
+    from annotationlib import Format, type_repr
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
@@ -44,6 +48,10 @@ _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
+_AUTO_SAVE_READ_HINT = (
+    "Do not read this whole file: it is over threshold_bytes, so the result would be saved to a file again. "
+    "Read it in parts instead, such as a line range (for example with read_file_chunk) or a search for what you need."
+)
 _TEXT_FALLBACK_HEADER = (
     "MindRoom tool output serialized with text fallback because the result was not JSON-normalizable.\n\n"
 )
@@ -190,6 +198,7 @@ def _auto_save_success_receipt(
     receipt["auto_saved"] = True
     receipt["threshold_bytes"] = threshold_bytes
     receipt["preview"] = preview
+    receipt["hint"] = _AUTO_SAVE_READ_HINT
     return {"mindroom_tool_output": receipt}
 
 
@@ -618,7 +627,18 @@ def _copy_annotations_with_output_path(
     except Exception:
         annotations = dict(getattr(original_entrypoint, "__annotations__", {}) or {})
     annotations[OUTPUT_PATH_ARGUMENT] = str | None
-    wrapper.__annotations__ = annotations
+    if sys.version_info < (3, 14):
+        wrapper.__annotations__ = annotations
+        return
+
+    # Python 3.14 functools.wraps copies __annotate__, which assigning __annotations__ sets to None,
+    # so outer wrappers such as the sandbox proxy would expose no types and skip argument validation.
+    def annotate(annotation_format: Format) -> dict[str, object]:
+        if annotation_format == Format.STRING:
+            return {name: type_repr(value) for name, value in annotations.items()}
+        return dict(annotations)
+
+    wrapper.__annotate__ = annotate
 
 
 def _docstring_with_output_path(original_doc: str | None) -> str:

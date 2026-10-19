@@ -185,7 +185,7 @@ Matrix sync callback
 | `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
 | `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |
 | `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
-| `knowledge_graph/scope.py` | Which graph an agent or private instance owns, named in code from its state root and embedder |
+| `knowledge_graph/scope.py` | Which graph an agent or private instance owns, named in code from its state root, embedder, and generation |
 | `knowledge_graph/store.py` | The runtime's one Graphiti client and its episode, fact, and entity operations; health and the store registry |
 | `knowledge_graph/clients.py` | Graphiti's LLM, embedder, and reranker clients backed by MindRoom's model and embedder construction |
 | `knowledge_graph/usage.py` | Which conversation an extraction call's tokens are charged to |
@@ -195,7 +195,7 @@ Matrix sync callback
 | `knowledge_graph/names.py` | The one name of each known agent, person, and `knowledge_graph.aliases` entry: speaker labels, names listed for extraction, and lookups |
 | `knowledge_graph/ingestion.py` | Background ingestion passes over several graphs at once, with per-kind markers, backoff, and dropped episodes |
 | `knowledge_graph/runtime.py` | Starts and stops the store and ingestion worker as agents enable the graph |
-| `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model, extraction instructions, ingestion settings, and aliases |
+| `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model, extraction instructions, ingestion settings, aliases, and generation |
 | `custom_tools/knowledge_graph.py` | The read-only `knowledge_graph` tool |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/skill_usage.py` | Workspace skill usage records the skill learner's archival reads as an inactivity clock |

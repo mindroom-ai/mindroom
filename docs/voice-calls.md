@@ -248,7 +248,7 @@ With `cascaded` and `live`, the agent tells the caller to use text chat for them
 [Deferred tools](tools/dynamic-tools.md) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart also drops it from the call, and so does any configuration change applied while the agent is in a call.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.

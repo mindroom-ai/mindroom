@@ -700,6 +700,33 @@ async def test_llm_usage_telemetry_reports_missing_provider_metrics(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_llm_usage_telemetry_names_served_provider(tmp_path: Path, stream: bool) -> None:
+    """Usage telemetry should name the upstream OpenRouter reports serving the response."""
+    served = {"model_extra": {"provider": "OpenInference"}}
+
+    @dataclass
+    class _OpenRouterModel(_FakeModel):
+        async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            return ModelResponse(content="ok", provider_data=served)
+
+        async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+            yield ModelResponse(content="ok", provider_data=served)
+            yield ModelResponse(content="!")
+
+    model = _OpenRouterModel()
+    request = {"messages": [Message(role="user", content="hello")], "assistant_message": Message(role="assistant")}
+    with capture_logs() as logs:
+        install_llm_request_logging(model, agent_name="default", debug_config=DebugConfig(), default_log_dir=tmp_path)
+        if stream:
+            assert [chunk.content async for chunk in model.ainvoke_stream(**request)] == ["ok", "!"]
+        else:
+            assert (await model.ainvoke(**request)).content == "ok"
+
+    assert [entry.get("served_provider") for entry in logs] == ["OpenInference"]
+
+
+@pytest.mark.asyncio
 async def test_llm_usage_telemetry_does_not_double_count_invoke_via_stream(tmp_path: Path) -> None:
     """A model whose invoke method consumes its stream should emit one usage event."""
 

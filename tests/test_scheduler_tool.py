@@ -29,6 +29,7 @@ from tests.authorization_helpers import (
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
@@ -52,7 +53,7 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
             reply_to_event_id=None,
         ),
         requester_id="@user:localhost",
-        client=AsyncMock(),
+        client=make_matrix_client_mock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
         relations=make_relation_lookup(),

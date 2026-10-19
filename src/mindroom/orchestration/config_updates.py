@@ -252,7 +252,7 @@ def _call_agents_to_restart(
         for agent_name in old_agents - changed_agents
         if (bot := agent_bots.get(agent_name)) is not None and bot.active_call_requesters
     }
-    if agents_in_call and config.authored_model_dump() != new_config.authored_model_dump():
+    if agents_in_call and _authored_outside_knowledge_graph(config) != _authored_outside_knowledge_graph(new_config):
         logger.info(
             "call_agent_configuration_changed_during_call_restart_required",
             agents=sorted(agents_in_call),
@@ -260,6 +260,17 @@ def _call_agents_to_restart(
         )
         changed_agents |= agents_in_call
     return changed_agents
+
+
+def _authored_outside_knowledge_graph(config: Config) -> dict[str, object]:
+    """Return the authored config without the knowledge_graph section.
+
+    A call in progress keeps its graph lookups on the settings it joined with, as a reply in progress does, rather than
+    ending for a change that only tunes or rebuilds the graphs.
+    """
+    authored = config.authored_model_dump()
+    authored.pop("knowledge_graph", None)
+    return authored
 
 
 def _call_manager_signature(config: Config, agent_name: str) -> object | None:

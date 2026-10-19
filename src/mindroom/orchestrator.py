@@ -1534,9 +1534,12 @@ class _MultiAgentOrchestrator:
         room_id: str,
         event_ids: tuple[str, ...],
     ) -> frozenset[str] | None:
-        """Return which of a room's events one running managed entity saw redacted, or None when not running."""
+        """Return which of a room's events one managed entity saw redacted, or None until it is running and synced.
+
+        Redactions made while the entity was stopped reach its journal only with its first sync.
+        """
         bot = self.agent_bots.get(entity_name)
-        if bot is None or not bot.running:
+        if bot is None or not bot.running or not bot.first_sync_complete:
             return None
         return await bot.redacted_event_ids(room_id, event_ids)
 

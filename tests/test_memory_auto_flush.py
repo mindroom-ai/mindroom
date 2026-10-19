@@ -31,7 +31,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     tool_execution_identity,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session
+from tests.conftest import FakeModel, bind_runtime_paths, runtime_paths_for, seed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1047,6 +1047,40 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
     context = cast("str", call["existing_context"])
     assert "Alice-authored shared memory" in context
     assert "Shared daily memory" in context
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("extractor_model", "used_model"), [(None, "default"), ("fast", "fast")])
+async def test_extraction_runs_on_the_extractor_model_when_one_is_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extractor_model: str | None,
+    used_model: str,
+) -> None:
+    """An agent on a slow model can leave extraction to a faster one, and otherwise extracts with its own."""
+    config = _config(tmp_path)
+    config.memory.auto_flush.extractor.model = extractor_model
+    session = _thread("t1")
+    _seed(config, session, [_run("r1", session, T0 + 10)])
+    requested: list[str] = []
+
+    def model_instance(_config: object, _runtime_paths: object, model_name: str) -> FakeModel:
+        requested.append(model_name)
+        return FakeModel(id=model_name, provider="fake")
+
+    monkeypatch.setattr(auto_flush.model_loading, "get_model_instance", model_instance)
+
+    await auto_flush._extract_memory_summary(
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        agent_name="general",
+        session_id=session,
+        lines=_lines("r1"),
+        existing_context="",
+        execution_identity=None,
+    )
+
+    assert requested == [used_model]
 
 
 def test_credentials_are_removed_before_the_extractor() -> None:
