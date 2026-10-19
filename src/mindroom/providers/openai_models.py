@@ -149,8 +149,9 @@ class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
     def _parse_provider_response_delta(self, response_delta: ChatCompletionChunk) -> ModelResponse:
         """Keep the served provider on every chunk; Agno only copies ``model_extra`` onto text chunks."""
         model_response = super()._parse_provider_response_delta(response_delta)
-        if response_delta.model_extra and model_response.provider_data is None:
-            model_response.provider_data = {"model_extra": response_delta.model_extra}
+        if response_delta.model_extra:
+            model_response.provider_data = model_response.provider_data or {}
+            model_response.provider_data.setdefault("model_extra", response_delta.model_extra)
         return model_response
 
     def get_client(self) -> OpenAIClient:

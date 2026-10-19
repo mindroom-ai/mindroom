@@ -756,8 +756,30 @@ async def test_openrouter_warns_when_served_outside_provider_order(
     assert [log for log in logs if log["event"] == "openrouter_provider_fallback"] == ([expected] if warns else [])
 
 
-def test_openrouter_stream_keeps_served_provider_on_tool_call_chunks() -> None:
-    """Tool-call-only chunks carry the served provider so streamed fallbacks are still detected."""
+@pytest.mark.parametrize(
+    ("delta", "expected_provider_data"),
+    [
+        (
+            {
+                "content": None,
+                "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "f"}}],
+            },
+            {"model_extra": {"provider": "OpenInference"}},
+        ),
+        (
+            {"content": None, "reasoning_details": [{"type": "reasoning.text", "text": "hm"}]},
+            {
+                "reasoning_details": [{"type": "reasoning.text", "text": "hm"}],
+                "model_extra": {"provider": "OpenInference"},
+            },
+        ),
+    ],
+)
+def test_openrouter_stream_keeps_served_provider_on_non_text_chunks(
+    delta: dict[str, object],
+    expected_provider_data: dict[str, object],
+) -> None:
+    """Tool-call and reasoning chunks carry the served provider so streamed fallbacks are still detected."""
     chunk = ChatCompletionChunk.model_validate(
         {
             "id": "gen-1",
@@ -765,19 +787,10 @@ def test_openrouter_stream_keeps_served_provider_on_tool_call_chunks() -> None:
             "created": 0,
             "model": "deepseek/deepseek-v4.1-flash",
             "provider": "OpenInference",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "content": None,
-                        "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "f"}}],
-                    },
-                },
-            ],
+            "choices": [{"index": 0, "delta": delta}],
         },
     )
 
     parsed = MindRoomOpenRouter(id="deepseek/deepseek-v4.1-flash")._parse_provider_response_delta(chunk)
 
-    assert parsed.tool_calls
-    assert parsed.provider_data == {"model_extra": {"provider": "OpenInference"}}
+    assert parsed.provider_data == expected_provider_data
