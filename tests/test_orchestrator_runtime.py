@@ -193,21 +193,29 @@ async def test_open_reply_event_id_reads_only_running_bots_replies(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_redacted_event_ids_read_only_running_bots(tmp_path: Path) -> None:
-    """Background readers learn redactions from the agent's own bot, and wait while it is not running."""
+async def test_redacted_event_ids_read_only_synced_running_bots(tmp_path: Path) -> None:
+    """Background readers learn redactions from the agent's own bot, and wait until it is running and synced."""
     config = _runtime_bound_config(Config(), tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
 
-    def bot(*, running: bool) -> AgentBot:
+    def bot(*, running: bool, first_sync_complete: bool = True) -> AgentBot:
         managed_bot = MagicMock(spec=AgentBot)
         managed_bot.running = running
+        managed_bot.first_sync_complete = first_sync_complete
         managed_bot.redacted_event_ids = AsyncMock(return_value=frozenset({"$a"}))
         return managed_bot
 
-    orchestrator.agent_bots = {"running": bot(running=True), "stopped": bot(running=False)}
+    orchestrator.agent_bots = {
+        "running": bot(running=True),
+        "syncing": bot(running=True, first_sync_complete=False),
+        "stopped": bot(running=False),
+    }
 
     assert await orchestrator.redacted_event_ids("running", "!room", ("$a", "$b")) == frozenset({"$a"})
     orchestrator.agent_bots["running"].redacted_event_ids.assert_awaited_once_with("!room", ("$a", "$b"))
+    # Redactions made while it was stopped are journaled only once its first sync completes.
+    assert await orchestrator.redacted_event_ids("syncing", "!room", ("$a",)) is None
+    orchestrator.agent_bots["syncing"].redacted_event_ids.assert_not_awaited()
     assert await orchestrator.redacted_event_ids("stopped", "!room", ("$a",)) is None
     assert await orchestrator.redacted_event_ids("unknown", "!room", ("$a",)) is None
 
