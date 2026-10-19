@@ -16,6 +16,7 @@ from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
 from mem0.llms.openai import OpenAILLM
 from mem0.utils.factory import LlmFactory
+from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -918,6 +919,11 @@ class TestMemoryConfig:
         assert memory.auto_flush.batch.max_sessions_per_agent_per_cycle == 2
         assert memory.auto_flush.extractor.max_messages_per_flush == 12
         assert memory.auto_flush.extractor.max_chars_per_flush == 9000
+
+    def test_memory_auto_flush_extractor_model_must_be_configured(self) -> None:
+        """A misspelled extractor model fails when the config loads, not on every flush."""
+        with pytest.raises(ValidationError, match=r"Unknown memory\.auto_flush\.extractor\.model: 'fast'"):
+            Config(memory={"auto_flush": {"extractor": {"model": "fast"}}})
 
     def test_memory_auto_flush_default_interval_is_5_minutes(self) -> None:
         """Without the reply path waking it, auto-flush passes every five minutes by default."""

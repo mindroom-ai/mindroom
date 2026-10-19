@@ -3193,6 +3193,7 @@
         "extractor": {
           "$ref": "#/$defs/_MemoryAutoFlushExtractorConfig",
           "default": {
+            "model": null,
             "no_reply_token": "NO_REPLY",
             "max_messages_per_flush": 20,
             "max_chars_per_flush": 12000,
@@ -3295,6 +3296,7 @@
               "max_chars_per_flush": 12000,
               "max_extraction_seconds": 30,
               "max_messages_per_flush": 20,
+              "model": null,
               "no_reply_token": "NO_REPLY"
             }
           },
@@ -4929,6 +4931,19 @@
     "_MemoryAutoFlushExtractorConfig": {
       "description": "Extraction limits for one background memory flush job.",
       "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model config that runs extraction instead of the agent's own model",
+          "title": "Model"
+        },
         "no_reply_token": {
           "default": "NO_REPLY",
           "description": "Token indicating no durable memory should be written",
@@ -5277,6 +5292,7 @@
             "max_chars_per_flush": 12000,
             "max_extraction_seconds": 30,
             "max_messages_per_flush": 20,
+            "model": null,
             "no_reply_token": "NO_REPLY"
           },
           "flush_interval_seconds": 300,
