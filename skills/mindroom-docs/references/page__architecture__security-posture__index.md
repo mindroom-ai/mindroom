@@ -19,7 +19,7 @@ Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_d
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question governed by access policy and requester authorization.
 An agent or team mentioned in another entity's reply acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
 Work no person started, such as a shared agent's automation run and the delegations, todos, mentions, and schedules that mention another agent it makes, acts as that agent's own account, which every other agent and team admits only through its own `access`.
-A schedule that mentions no agent reaches its target through the router hand-off, which drops a managed requester, so the target checks the router's account, which the default `access` admits because the router joins every managed room.
+When an agent-created schedule that mentions no agent reaches one of several responders through a router hand-off, the hand-off drops the managed requester, so the target checks the router's account, which the default `access` admits because the router joins every managed room.
 
 ## Protecting the primary from worker code
 
