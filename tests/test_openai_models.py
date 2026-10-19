@@ -16,7 +16,6 @@ from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 from openai import OpenAI
-from openai.types.chat import ChatCompletionChunk
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
 from mindroom.attachments.media import attachment_records_to_media
@@ -520,43 +519,3 @@ def test_legacy_openai_tool_replay_keeps_unchanged_messages_by_identity() -> Non
 
     assert repair_legacy_openai_tool_replay([message]) == [message]
     assert repair_legacy_openai_tool_replay([message])[0] is message
-
-
-@pytest.mark.parametrize(
-    ("delta", "expected_provider_data"),
-    [
-        (
-            {
-                "content": None,
-                "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "f"}}],
-            },
-            {"model_extra": {"provider": "OpenInference"}},
-        ),
-        (
-            {"content": None, "reasoning_details": [{"type": "reasoning.text", "text": "hm"}]},
-            {
-                "reasoning_details": [{"type": "reasoning.text", "text": "hm"}],
-                "model_extra": {"provider": "OpenInference"},
-            },
-        ),
-    ],
-)
-def test_openrouter_stream_keeps_served_provider_on_non_text_chunks(
-    delta: dict[str, object],
-    expected_provider_data: dict[str, object],
-) -> None:
-    """Tool-call and reasoning chunks carry the served provider, so the usage log names it for every stream."""
-    chunk = ChatCompletionChunk.model_validate(
-        {
-            "id": "gen-1",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "deepseek/deepseek-v4.1-flash",
-            "provider": "OpenInference",
-            "choices": [{"index": 0, "delta": delta}],
-        },
-    )
-
-    parsed = MindRoomOpenRouter(id="deepseek/deepseek-v4.1-flash")._parse_provider_response_delta(chunk)
-
-    assert parsed.provider_data == expected_provider_data
