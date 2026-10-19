@@ -125,13 +125,20 @@ const columns: ColumnDef<AgentTableRow>[] = [
     header: "Tools & connections",
     cell: ({ row }) => {
       const { set, total } = accountCounts(row.original);
+      const count = row.original.tools.length;
+      const tools = `${count} ${count === 1 ? "tool" : "tools"}`;
       // An agent that shows no keys, as while Agent Keys is off, counts only accounts.
       const counted = Array.isArray(row.original.egress_services)
-        ? "accounts and keys"
-        : "accounts";
+        ? total === 1
+          ? "account or key"
+          : "accounts and keys"
+        : total === 1
+          ? "account"
+          : "accounts";
       return (
         <span className="text-muted-foreground">
-          {`${row.original.tools.length} tools / ${set} of ${total} ${counted} set`}
+          {/* An agent with no accounts or keys to set only counts its tools. */}
+          {total === 0 ? tools : `${tools} / ${set} of ${total} ${counted} set`}
         </span>
       );
     },
