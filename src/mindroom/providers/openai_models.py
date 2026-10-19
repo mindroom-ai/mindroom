@@ -146,6 +146,17 @@ class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
             extended_cache_time=self.extended_cache_time,
         )
 
+    # AGNO_COMPAT: Streamed chat deltas keep the chunk's model_extra only on text chunks.
+    # Reason: OpenAIChat._parse_provider_response_delta copies model_extra into
+    # provider_data only when delta.content is not None, so OpenRouter's served
+    # provider is lost on tool-call, reasoning, and usage-only chunks.
+    # Upstream issue: Tracking gap; https://github.com/agno-agi/agno/issues/5673 is
+    # closed, and no issue for non-text stream chunks was identified.
+    # Upstream PR: https://github.com/agno-agi/agno/pull/5683 is merged but partial,
+    # because it copies model_extra onto text stream chunks only.
+    # Remove when: Agno copies the chunk's model_extra onto every parsed delta while
+    # keeping reasoning_details; MindRoom's usage log still reads served_provider.
+    # Coverage: tests/test_openai_models.py::test_openrouter_stream_keeps_served_provider_on_non_text_chunks.
     def _parse_provider_response_delta(self, response_delta: ChatCompletionChunk) -> ModelResponse:
         """Keep the served provider on every chunk; Agno only copies ``model_extra`` onto text chunks."""
         model_response = super()._parse_provider_response_delta(response_delta)

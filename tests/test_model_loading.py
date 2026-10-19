@@ -7,13 +7,10 @@ from unittest.mock import patch
 
 import pytest
 from agno.models.message import Message as AgnoMessage
-from agno.models.response import ModelResponse
 from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
-from openai.types.chat import ChatCompletionChunk
 from pydantic import ValidationError
-from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -33,7 +30,6 @@ from mindroom.providers.synthetic_model import SyntheticModel
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
 
@@ -691,78 +687,3 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
     assert install_logging.call_args.args == (model,)
     assert install_logging.call_args.kwargs["configured_provider"] == "openai"
     assert install_logging.call_args.kwargs["debug_config"].log_llm_requests is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_openrouter_usage_log_names_served_provider(tmp_path: Path, stream: bool) -> None:
-    """The usage log names the upstream OpenRouter served the response from."""
-    config = bind_runtime_paths(
-        Config(
-            models={
-                "deepseek": ModelConfig(provider="openrouter", id="deepseek/deepseek-v4.1-flash", api_key="sk-test"),
-            },
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    response = ModelResponse(content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
-
-    async def fake_invoke(*_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield response
-
-    with (
-        patch.object(MindRoomOpenRouter, "ainvoke", fake_invoke),
-        patch.object(MindRoomOpenRouter, "ainvoke_stream", fake_stream),
-    ):
-        model = get_model_instance(config, runtime_paths_for(config), "deepseek")
-    request = {"messages": [AgnoMessage(role="user", content="hi")], "assistant_message": AgnoMessage(role="assistant")}
-    with capture_logs() as logs:
-        if stream:
-            assert [chunk async for chunk in model.ainvoke_stream(**request)] == [response]
-        else:
-            assert await model.ainvoke(**request) is response
-
-    assert [log.get("served_provider") for log in logs if log["event"] == "LLM usage"] == ["OpenInference"]
-
-
-@pytest.mark.parametrize(
-    ("delta", "expected_provider_data"),
-    [
-        (
-            {
-                "content": None,
-                "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "f"}}],
-            },
-            {"model_extra": {"provider": "OpenInference"}},
-        ),
-        (
-            {"content": None, "reasoning_details": [{"type": "reasoning.text", "text": "hm"}]},
-            {
-                "reasoning_details": [{"type": "reasoning.text", "text": "hm"}],
-                "model_extra": {"provider": "OpenInference"},
-            },
-        ),
-    ],
-)
-def test_openrouter_stream_keeps_served_provider_on_non_text_chunks(
-    delta: dict[str, object],
-    expected_provider_data: dict[str, object],
-) -> None:
-    """Tool-call and reasoning chunks carry the served provider, so the usage log names it for every stream."""
-    chunk = ChatCompletionChunk.model_validate(
-        {
-            "id": "gen-1",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "deepseek/deepseek-v4.1-flash",
-            "provider": "OpenInference",
-            "choices": [{"index": 0, "delta": delta}],
-        },
-    )
-
-    parsed = MindRoomOpenRouter(id="deepseek/deepseek-v4.1-flash")._parse_provider_response_delta(chunk)
-
-    assert parsed.provider_data == expected_provider_data
