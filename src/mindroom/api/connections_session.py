@@ -24,6 +24,7 @@ from mindroom.api.connections_session_cookie import (
     issue_connections_session,
 )
 from mindroom.constants import RuntimePaths
+from mindroom.logging_config import get_logger
 from mindroom.matrix_openid import (
     MatrixOpenIDError,
     MatrixOpenIDToken,
@@ -36,6 +37,8 @@ from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+
+logger = get_logger(__name__)
 
 
 class _SignInRoute(APIRoute):
@@ -107,7 +110,8 @@ async def _dashboard_allowed(
         return False
     try:
         return await verify_matrix_openid(openid_token, paths) == matrix_user_id
-    except MatrixOpenIDError:
+    except MatrixOpenIDError as error:
+        logger.warning("Dashboard access check failed after the binding probe", detail=error.detail)
         return False
 
 

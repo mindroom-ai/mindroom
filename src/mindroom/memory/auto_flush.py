@@ -309,7 +309,7 @@ async def _extract_memory_summary(
         excerpt=excerpt,
     )
 
-    model_name = config.resolve_entity(agent_name).model_name
+    model_name = extractor.model or config.resolve_entity(agent_name).model_name
     model = model_loading.get_model_instance(config, runtime_paths, model_name)
     extractor_agent = Agent(
         name="MemoryAutoFlushExtractor",

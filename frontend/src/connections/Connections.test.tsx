@@ -1810,9 +1810,33 @@ describe("agent table summary, search, and order", () => {
     render(<Connections />);
     await screen.findByRole("button", { name: "Expand Personal assistant" });
     expect(agentRow("Personal assistant")).toHaveTextContent(
-      "2 tools / 1 of 1 accounts set",
+      "2 tools / 1 of 1 account set",
     );
     expect(agentRow("Personal assistant")).not.toHaveTextContent(/keys/);
+  });
+
+  it("counts only the tools of an agent with no accounts or keys to set", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            agentWith("personal", "Personal assistant", {
+              services: [],
+              egress_services: null,
+            }),
+            agentWith("research", "Research Team", {
+              services: [],
+              egress_services: [],
+            }),
+          ],
+        }),
+    });
+    render(<Connections />);
+    await screen.findByRole("button", { name: "Expand Personal assistant" });
+    for (const name of ["Personal assistant", "Research Team"]) {
+      expect(within(agentRow(name)).getByText("1 tool")).toBeInTheDocument();
+      expect(agentRow(name)).not.toHaveTextContent(/accounts?|keys?|set/);
+    }
   });
 
   it("does not count a service that only limits paths as an account or a key", async () => {
@@ -1841,7 +1865,7 @@ describe("agent table summary, search, and order", () => {
     render(<Connections />);
     await screen.findByRole("button", { name: "Expand Personal assistant" });
     expect(agentRow("Personal assistant")).toHaveTextContent(
-      "2 tools / 1 of 1 accounts and keys set",
+      "2 tools / 1 of 1 account or key set",
     );
   });
 
@@ -1861,7 +1885,7 @@ describe("agent table summary, search, and order", () => {
     await expandAgent();
     await waitFor(() =>
       expect(agentRow("Personal assistant")).toHaveTextContent(
-        "2 tools / 1 of 1 accounts and keys set",
+        "2 tools / 1 of 1 account or key set",
       ),
     );
     fireEvent.click(
@@ -1874,7 +1898,7 @@ describe("agent table summary, search, and order", () => {
     );
     await waitFor(() =>
       expect(agentRow("Personal assistant")).toHaveTextContent(
-        "2 tools / 0 of 1 accounts and keys set",
+        "2 tools / 0 of 1 account or key set",
       ),
     );
   });
@@ -1895,12 +1919,12 @@ describe("agent table summary, search, and order", () => {
     render(<Connections />);
     await screen.findByRole("button", { name: "Expand Personal assistant" });
     expect(agentRow("Personal assistant")).toHaveTextContent(
-      "2 tools / 1 of 1 accounts and keys set",
+      "2 tools / 1 of 1 account or key set",
     );
     await expandAgent();
     await waitFor(() =>
       expect(agentRow("Personal assistant")).toHaveTextContent(
-        "2 tools / 0 of 1 accounts and keys set",
+        "2 tools / 0 of 1 account or key set",
       ),
     );
   });
@@ -1947,13 +1971,13 @@ describe("agent table summary, search, and order", () => {
     );
     await waitFor(() =>
       expect(agentRow("Research Team")).toHaveTextContent(
-        "1 tools / 0 of 1 accounts and keys set",
+        "1 tool / 0 of 1 account or key set",
       ),
     );
     // The closed agent cannot load its status again, so the refreshed catalog decides.
     await waitFor(() =>
       expect(agentRow("Personal assistant")).toHaveTextContent(
-        "1 tools / 0 of 1 accounts and keys set",
+        "1 tool / 0 of 1 account or key set",
       ),
     );
   });

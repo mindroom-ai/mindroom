@@ -2255,6 +2255,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
+MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
 
 ## Azure OpenAI
 
@@ -3315,7 +3316,7 @@ Auto-flush periodically turns the new turns of file-backed agents' conversations
 It applies only to agents whose effective backend is `file`, including each requester's private instance.
 
 1. Every `flush_interval_seconds`, a background worker looks for conversations with new finished turns that have been quiet for `idle_seconds`.
-2. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
+2. The agent's own model, or `extractor.model` when set, reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
 3. When the model answers with the `no_reply_token`, nothing is written.
 4. Results are appended to `memory/YYYY-MM-DD.md`, and a retry never appends the same result twice.
 
@@ -3349,6 +3350,7 @@ memory:
 | `max_retry_cooldown_seconds` | `300` (min 1) | Upper bound for the growing retry wait |
 | `batch.max_sessions_per_cycle` | `10` (min 1) | Conversations flushed per pass, across all agents |
 | `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Conversations flushed per pass for one agent or private instance |
+| `extractor.model` | none | A key of `models` that runs extraction instead of the agent's own model; set a fast model when extractions time out |
 | `extractor.no_reply_token` | `NO_REPLY` | Reply meaning nothing should be saved |
 | `extractor.max_messages_per_flush` | `20` (min 1) | New messages read per extraction; a longer backlog is read over later passes |
 | `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters read per extraction |
@@ -3917,7 +3919,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | Field | Default | Description |
 |---|---|---|
 | `knowledge_graph.model` | none | A key of `models` that extracts entities and facts; required once any agent enables the graph |
-| `knowledge_graph.extraction_instructions` | empty | Text with your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards |
+| `knowledge_graph.extraction_instructions` | empty | Text with your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards, or to the last `backfill_days` of conversations once you raise `knowledge_graph.generation` |
 | `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time to wait after an ingestion pass that added nothing; a pass that added something is followed at once |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations each graph adds per pass; the rest wait for the next |
@@ -3925,12 +3927,15 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 | `knowledge_graph.aliases` | `{}` | The one name the graph uses for a person, agent, or thing, mapped to its other names; see [Names](#names) |
+| `knowledge_graph.generation` | `0` (integer, min 0) | Raise it to start every graph over without restarting MindRoom |
 
 With the defaults, new turns reach the graph 2 to 12 minutes after a conversation goes quiet, plus extraction time, and later when many conversations are waiting.
 Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once.
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
-Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read but keeps its memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory.
+Changing the embedder or raising `knowledge_graph.generation` starts new, empty graphs that fill again from conversations active within `backfill_days`, which pays for that extraction again, charged to each conversation's requester.
+Replies and voice calls already running when you raise the generation keep reading the old graphs until they finish, and setting an earlier generation again reads that generation's graphs as they were left.
+The old graphs keep their memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory, which also starts the current graphs over.
 
 ## What Goes Into the Graph
 
@@ -3949,7 +3954,7 @@ Each fact keeps its sources: `conversation` means someone said it, `tool_results
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
 A message redacted before its conversation is added stays out of the graph, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
-Redacting a message later does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`, without redacted messages.
+Redacting a message later does not remove facts already extracted from it; to stop new replies and calls from reading them, raise `knowledge_graph.generation`, or, to delete them too, instead stop MindRoom and delete `knowledge_graph/` in the storage directory, and either way the graphs rebuild from the remaining conversations of the last `backfill_days`, without redacted messages.
 
 ## Names
 
@@ -3974,7 +3979,7 @@ Every other alias is a plain name that extraction maps to the entry's name and t
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
-Entities extracted earlier under other names, such as a Matrix ID, stay separate.
+Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`.
 
 ## The `knowledge_graph` Tool
 
@@ -5243,7 +5248,7 @@ With `cascaded` and `live`, the agent tells the caller to use text chat for them
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart also drops it from the call, and so does any configuration change applied while the agent is in a call.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
@@ -8781,7 +8786,7 @@ When an agent has a workspace, it is the working directory (`base_dir`) of `file
 Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
 The path must name a file inside the workspace; absolute paths, `..`, paths that start with `~` or contain `$` or `%`, symlinks, and paths inside a `.git` directory are refused.
-Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, and a preview.
+Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, a preview, and a note to read the file in parts, because reading it whole would only save it again.
 `MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` sets the largest output either kind of save writes (default 64 MiB).
 
 ```yaml
@@ -13996,7 +14001,7 @@ Dashboard access follows deployment authentication; the Matrix `administrators` 
 - Standalone: `MINDROOM_API_KEY` protects the dashboard and its API; without it, access is unauthenticated, so set it before exposing an instance beyond a trusted local network.
 - Hosted (Supabase): the user's platform sign-in is validated, and the instance owner account is enforced when configured.
 - [Trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/): every gateway-authenticated user may change configuration unless Connections is enabled, which adds an `administrators` check; see its [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary).
-- [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat): with the Connections portal enabled, a user in `administrators` who opens Connections from Chat also reaches the dashboard without the API key, but only when the homeserver binds OpenID tokens to this deployment; everyone else keeps the authentication above.
+- [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat): with the Connections portal enabled, a user in `administrators` who opens Connections from Chat also reaches the dashboard without the API key, but only outside hosted platform mode and when the homeserver binds OpenID tokens to this deployment; everyone else keeps the authentication above.
 
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so dashboard requests made with the API key act as the owner's Matrix identity for credential management.
 Browser changes made with a dashboard sign-in or trusted upstream identity must come from the dashboard's own origin; see [Browser Mutation Protection](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#browser-mutation-protection).
@@ -14793,7 +14798,7 @@ Do not report or "fix" these; they are deliberate.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
-- Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so deleting the `knowledge_graph/` storage directory rebuilds the graph without them; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
+- Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so raising `knowledge_graph.generation` rebuilds the graphs without them; replies and voice calls already running finish on the old graphs, which stay stored until `knowledge_graph/` is deleted with MindRoom stopped; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
@@ -19547,6 +19552,7 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, and fix any invalid entry because one disables the whole list |
 | `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
+| An administrator's Dashboard link from Connections asks for the API key | Check that `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true` and `MINDROOM_PUBLIC_URL` is set; the warning `Could not check whether the homeserver binds OpenID tokens` means MindRoom could not read `/versions`, and `Dashboard access check failed after the binding probe` means the second token check failed. Open Connections from Chat again afterwards, because the session records dashboard access at sign-in |
 | `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
 | `403 Connections require a configured private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent` |
 | `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |
