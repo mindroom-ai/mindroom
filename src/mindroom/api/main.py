@@ -77,7 +77,7 @@ from mindroom.runtime_state import get_runtime_state
 from mindroom.usage.legacy_usage_storage import migrate_usage_storage
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.in_flight import touch_workers_in_flight
-from mindroom.workers.runtime import lease_configured_primary_worker_manager
+from mindroom.workers.runtime import lease_configured_primary_worker_manager, shutdown_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -556,7 +556,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
-    if knowledge_refresh_scheduler is None:
+    # `mindroom run` binds its scheduler before it serves this app, so without one the API runs on its own.
+    standalone = knowledge_refresh_scheduler is None
+    if standalone:
         api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
         standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
@@ -589,6 +591,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     if api_owned_knowledge_refresh_scheduler is not None:
         await api_owned_knowledge_refresh_scheduler.shutdown()
     close_usage_export_runner(_app)
+    if standalone:
+        # `mindroom run` stops the worker manager itself once its bots have stopped.
+        # An API running on its own must stop it here, or its Docker worker containers outlive the process.
+        await run_blocking_until_complete(shutdown_primary_worker_manager)
 
 
 def bind_orchestrator_knowledge_refresh_scheduler(

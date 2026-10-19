@@ -137,6 +137,7 @@ Install proxied plugin tools in the runner image, or mount only the plugin direc
 Use this to run the primary runtime on the host, including with `uvx mindroom run`, and give each worker key its own persistent Docker container, without Kubernetes.
 A container is reused until its launch configuration changes.
 Idle containers keep running unless `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is set to a positive interval, which then stops containers idle longer than `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`.
+When MindRoom shuts down, it removes its worker containers but keeps each worker's files, and the worker's next call starts a new container.
 
 MindRoom installs the optional `docker` extra the first time this backend is used.
 If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
