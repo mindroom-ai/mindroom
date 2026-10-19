@@ -455,6 +455,8 @@ Common options include:
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., [OpenRouter provider routing](#openrouter-provider-routing))
 
+When a Claude response reaches `max_tokens`, its text is kept, but a tool call it cut off never runs: the agent is asked to split the work into smaller tool calls, and a third cut-off response in one reply ends that reply with an error.
+
 Some models reject sampling controls:
 
 - Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
