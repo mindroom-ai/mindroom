@@ -36,13 +36,58 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # tests/test_claude_compat.py::test_other_claude_models_keep_sampling_controls_in_extra_body.
 
 # AGNO_COMPAT: Claude parsing drops terminal stop reasons.
-# Reason: Agno 3.0.9 does not expose Claude's terminal stop_reason in parsed
-# provider_data, which prevents consumers from detecting provider-capped output.
-# Upstream issue: No matching issue identified; this metadata extension point is untracked.
-# Upstream PR: None identified.
-# Remove when: The pinned Agno parser exposes stop_reason through provider_data or
-# another stable terminal-metadata interface.
-# Coverage: tests/test_compaction_summary_provider_compat.py::test_summary_uses_stop_reason_and_raw_body_precedence.
+# Reason: Agno 3.0.9 does not expose Claude's terminal stop_reason in parsed provider_data, neither for
+# a non-streaming response nor for a stream's message_stop event, which prevents consumers from
+# detecting provider-capped output.
+# Upstream issue: https://github.com/agno-agi/agno/issues/6179, open.
+# Upstream PR: https://github.com/agno-agi/agno/pull/8630, open; it adds a normalized finish reason to
+# parsed responses and run outputs, streamed or not.
+# Remove when: The pinned Agno parser exposes stop_reason for streamed and non-streamed responses through
+# provider_data or another stable terminal-metadata interface.
+# Coverage: tests/test_compaction_summary_provider_compat.py::test_summary_uses_stop_reason_and_raw_body_precedence;
+# tests/test_claude_output_limit.py::test_cut_off_tool_call_is_answered_instead_of_run.
+
+# AGNO_COMPAT: Claude tool calls cut off by the output limit are dropped or run with partial arguments.
+# Reason: Agno 3.0.9 extracts tool calls from a non-streaming response only when stop_reason is "tool_use",
+# so a tool call cut off by max_tokens is dropped and the run completes as if the model had finished. A
+# stream emits the cut-off call at content_block_stop with the arguments the SDK could parse from the
+# truncated JSON, and Agno runs it with them. Both happen when one response, such as a large file write,
+# needs more output than max_tokens allows.
+# Upstream issue: Tracking gap; https://github.com/agno-agi/agno/issues/6179 tracks only the hidden stop
+# reason, not the tool calls it cuts off.
+# Upstream PR: None identified; https://github.com/agno-agi/agno/pull/8630 and
+# https://github.com/agno-agi/agno/pull/6626 expose or log the stop reason but still drop or run cut-off calls.
+# Remove when: The pinned Agno parser keeps every tool call of a response cut off at the output limit, streamed
+# or not, and marks the response so its calls can be answered without running; the owner's answer and
+# per-run retry limit in providers/claude_compat.py remain.
+# Coverage: tests/test_claude_output_limit.py::test_cut_off_tool_call_is_answered_instead_of_run;
+# tests/test_claude_output_limit.py::test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly.
+
+# Claude stop reasons of a response the output limit cut off before it was complete.
+OUTPUT_LIMIT_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
+
+
+def terminal_message(response: object) -> AnthropicMessage | BetaMessage | None:
+    """Return the complete message of a non-streaming Claude response or of a stream's message_stop event."""
+    # Only Claude models parse these responses, so the provider SDK is already loaded.
+    from anthropic.lib.streaming import (  # noqa: PLC0415
+        MessageStopEvent,
+        ParsedBetaMessageStopEvent,
+        ParsedMessageStopEvent,
+    )
+    from anthropic.types import Message as AnthropicMessage  # noqa: PLC0415
+    from anthropic.types.beta import BetaMessage  # noqa: PLC0415
+
+    if isinstance(response, (MessageStopEvent, ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
+        return response.message
+    if isinstance(response, (AnthropicMessage, BetaMessage)):
+        return response
+    return None
+
+
+def stopped_at_output_limit(message: Message) -> bool:
+    """Return whether the output limit cut off the Claude response stored in an assistant message."""
+    return (message.provider_data or {}).get("stop_reason") in OUTPUT_LIMIT_STOP_REASONS
 
 
 # AGNO_COMPAT: Claude streams report usage only when they complete.
@@ -161,12 +206,27 @@ class ClaudeProviderSDKCompat:
         response_format: dict[str, Any] | type[Any] | None = None,
         **kwargs: object,
     ) -> ModelResponse:
+        # Only Claude models parse these responses, so the provider SDK is already loaded.
+        from anthropic.types import ToolUseBlock  # noqa: PLC0415
+        from anthropic.types.beta import BetaToolUseBlock  # noqa: PLC0415
+
         parsed = super()._parse_provider_response(  # ty: ignore[unresolved-attribute]
             response,
             response_format=response_format,
             **kwargs,
         )
         parsed.provider_data = {**(parsed.provider_data or {}), "stop_reason": response.stop_reason}
+        if response.stop_reason in OUTPUT_LIMIT_STOP_REASONS and not parsed.tool_calls:
+            # Keep the cut-off calls, so the owner answers them instead of the run ending here.
+            parsed.tool_calls = [
+                {
+                    "id": block.id,
+                    "type": "function",
+                    "function": {"name": block.name, "arguments": json.dumps(block.input)},
+                }
+                for block in response.content
+                if isinstance(block, (ToolUseBlock, BetaToolUseBlock))
+            ]
         return parsed
 
     def _parse_provider_response_delta(
@@ -187,6 +247,8 @@ class ClaudeProviderSDKCompat:
             self._stream_start_usage = self._get_metrics(response.message.usage)  # ty: ignore[unresolved-attribute]
         elif parsed.response_usage is not None:
             self._stream_start_usage = None
+        if (message := terminal_message(response)) is not None:
+            parsed.provider_data = {**(parsed.provider_data or {}), "stop_reason": message.stop_reason}
         return parsed
 
 

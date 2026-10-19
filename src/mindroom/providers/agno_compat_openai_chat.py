@@ -23,8 +23,10 @@ if TYPE_CHECKING:
 # AGNO_COMPAT: Chat Completions parsing drops terminal finish reasons.
 # Reason: Agno 3.0.9 drops Chat Completions finish_reason during parsing, while
 # response completion classification needs the provider's terminal reason.
-# Upstream issue: No matching issue identified; this metadata extension point is untracked.
-# Upstream PR: None identified.
+# Upstream issue: Tracking gap for Chat Completions; https://github.com/agno-agi/agno/issues/6179
+# tracks the same gap for Claude.
+# Upstream PR: https://github.com/agno-agi/agno/pull/8630, open; it adds a normalized finish reason
+# for every provider, Chat Completions included.
 # Remove when: The pinned Agno parser exposes finish_reason in provider_data or
 # another stable terminal-metadata interface.
 # Coverage: tests/test_compaction_openai_summary.py::test_summary_rejects_explicit_output_limit_below_usage_cap;
