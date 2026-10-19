@@ -173,9 +173,9 @@ Rejected: several episodes of one graph at once, because Graphiti resolves an ep
 ### A generation number starts graphs over without a restart
 
 Rebuilding graphs, for example after extraction or naming changes, meant stopping MindRoom and deleting `knowledge_graph/`: the database keeps every graph in memory, and the ingestion worker saves each graph's progress after every episode, so it would write the old progress back for a graph whose files were removed under it, and that graph would never be filled again.
-`knowledge_graph.generation` joins the embedder in naming graphs, so raising it gives every scope a new graph and a new progress file, as an embedder change already did; no agent restarts for a `knowledge_graph` setting, so a hot config change takes effect at the next pass.
+`knowledge_graph.generation` joins the embedder in naming graphs, as an embedder change already did, and a change under `knowledge_graph` restarts no agent, so a hot config change takes effect at the next pass; even an agent in a voice call keeps running and finishes the call with lookups on the settings it joined with, as a reply in progress does.
 Generation 0 adds nothing to the name, so graphs built before generations existed keep their names.
-Rejected: deleting the previous generation's graphs when the generation rises, because a pass that started before the change can still be adding to one; and a reset command inside the runtime, which would have to coordinate with a running pass for the same result.
+Rejected: deleting old graphs automatically, because a name is a one-way hash of settings that may be gone and replies started before the change can still read them; and a reset command inside the runtime, which would have to coordinate with a running pass for the same result.
 
 ## Ingestion invariants
 
@@ -223,7 +223,7 @@ Rejected: deleting the previous generation's graphs when the generation rises, b
 ## Limitations
 
 - Redacting or deleting a message does not remove facts already extracted from it; raising `knowledge_graph.generation` rebuilds the graphs from the remaining conversations of the last `backfill_days`, and the previous graphs, no longer read, keep their data until `knowledge_graph/` is deleted with MindRoom stopped.
-- A config reload that changes the embedder during a pass can add that pass's remaining episodes to the old graph.
+- A config reload that changes the embedder or the generation during a pass can add that pass's remaining episodes to the old graph.
 - A pass waits for its slowest graph, so while one graph works through a long backlog, new turns in the others wait until that pass finishes, including any graphs still waiting for a free place.
 - Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.
 

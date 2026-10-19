@@ -2266,6 +2266,21 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
     assert plan.entities_to_restart & {"general", "writer"} == expected_call_restarts | in_call
 
 
+def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
+    """Starting the graphs over changes nothing a call uses, so it does not end a call in progress."""
+    running_entities = {ROUTER_AGENT_NAME, "general", "writer", "helper"}
+
+    plan = build_config_update_plan(
+        current_config=_two_call_agents_config(),
+        new_config=_two_call_agents_config(lambda d: d.update(knowledge_graph={"generation": 1})),
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
+    )
+
+    assert plan.entities_to_restart == set()
+
+
 def test_config_update_plan_restarts_call_agents_when_administrators_change() -> None:
     """Active call tool contexts rebuild so administrator changes cannot leave stale policy."""
     old_config = _runtime_bound_config(

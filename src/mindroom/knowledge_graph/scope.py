@@ -33,7 +33,7 @@ class GraphScope:
 
 
 def _graph_name(scope_key: str, signature: Sequence[str]) -> str:
-    """Return the graph name for a scope and embedder, which reveals neither."""
+    """Return the graph name for a scope and its signature, which reveals neither."""
     digest = hashlib.sha256("|".join((scope_key, *signature)).encode()).hexdigest()
     return f"kg_{digest[:24]}"
 

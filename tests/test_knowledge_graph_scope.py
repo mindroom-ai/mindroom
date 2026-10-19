@@ -83,9 +83,12 @@ def test_a_new_generation_names_new_graphs(tmp_path: Path) -> None:
     rebuilt = _config()
     rebuilt.knowledge_graph.generation = 1
 
+    second = graph_scope("mind", rebuilt, paths, None).graph_name
+    rebuilt.knowledge_graph.generation = 2
+
     # The name every graph had before generations existed, so upgrading does not start graphs over.
     assert first == "kg_73840b33d9c5004c75e430fc"
-    assert graph_scope("mind", rebuilt, paths, None).graph_name != first
+    assert len({first, second, graph_scope("mind", rebuilt, paths, None).graph_name}) == 3
 
 
 def test_local_embedder_graph_is_separate_from_graphs_without_prompts(
