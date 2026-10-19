@@ -1100,6 +1100,7 @@ def test_refused_workspace_skills_are_reported_with_why(tmp_path: Path, frontmat
     assert _skill_names(skills) == ["xl_quoted"]
     assert [skill.path for skill in refused] == ["skills/xl_check/SKILL.md"]
     assert reason in refused[0].reason
+    assert "\n" not in refused[0].reason
 
 
 def test_a_workspace_skills_directory_that_is_one_refused_skill_is_reported(tmp_path: Path) -> None:
