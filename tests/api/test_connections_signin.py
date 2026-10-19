@@ -16,6 +16,7 @@ import pytest
 from aiohttp import web
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from mindroom.api import auth, connections_session, frontend, main
 from mindroom.api.connections_session_cookie import (
@@ -201,6 +202,24 @@ def test_dashboard_bit_needs_public_url(signin: dict[str, Any]) -> None:
     signin["binds"].return_value = True
     assert sign_in(signin["client"], "alice").status_code == 200
     assert _session_of(signin["client"]) == ("@alice:example.org", False)
+
+
+def test_failed_check_after_binding_probe_logs_why_dashboard_was_refused(signin: dict[str, Any]) -> None:
+    """A token check that fails after the binding probe leaves a warning for the administrator to find."""
+    _with_admin(signin)
+    signin["binds"].return_value = True
+    signin["verifier"].side_effect = [
+        "@alice:example.org",
+        MatrixOpenIDError(503, "Matrix OpenID verifier is unavailable."),
+    ]
+    with capture_logs() as logs:
+        assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+    assert [
+        log.get("detail") for log in logs if log["event"] == "Dashboard access check failed after the binding probe"
+    ] == [
+        "Matrix OpenID verifier is unavailable.",
+    ]
 
 
 def test_binding_probe_runs_only_for_administrators(signin: dict[str, Any]) -> None:

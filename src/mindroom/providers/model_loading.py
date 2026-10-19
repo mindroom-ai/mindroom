@@ -11,6 +11,7 @@ from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host,
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
+from mindroom.providers.agno_compat_sdk_clients import remove_sdk_client_finalizers
 from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.providers.google_adc import load_google_application_credentials
 from mindroom.providers.media_fallback import install_provider_media_fallback
@@ -515,4 +516,5 @@ def get_model_instance(
         model,
         fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
     )
+    remove_sdk_client_finalizers()
     return model
