@@ -3952,7 +3952,7 @@ Each fact keeps its sources: `conversation` means someone said it, `tool_results
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
 A message redacted before its conversation is added stays out of the graph, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
-Redacting a message later does not remove facts already extracted from it; to stop agents from reading them, raise `knowledge_graph.generation`, or, to delete them too, instead stop MindRoom and delete `knowledge_graph/` in the storage directory, and either way the graphs rebuild from the remaining conversations of the last `backfill_days`, without redacted messages.
+Redacting a message later does not remove facts already extracted from it; to stop new replies and calls from reading them, raise `knowledge_graph.generation`, or, to delete them too, instead stop MindRoom and delete `knowledge_graph/` in the storage directory, and either way the graphs rebuild from the remaining conversations of the last `backfill_days`, without redacted messages.
 
 ## Names
 
@@ -5246,7 +5246,7 @@ With `cascaded` and `live`, the agent tells the caller to use text chat for them
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change to the `knowledge_graph` section.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
