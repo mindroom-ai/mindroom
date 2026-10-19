@@ -459,7 +459,7 @@ Common options include:
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., [OpenRouter provider routing](#openrouter-provider-routing))
 
-When a Claude response reaches `max_tokens`, its text is kept, but a tool call it cut off never runs: the agent is asked to split the work into smaller tool calls, and a third cut-off response in one reply ends that reply with an error.
+When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
 Some models reject sampling controls:
 
