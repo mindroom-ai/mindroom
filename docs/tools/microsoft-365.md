@@ -14,7 +14,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
-| `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite` |
+| `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -192,18 +192,22 @@ Updating a task's notes replaces them completely.
 
 | Function | Changes data | Purpose |
 | --- | --- | --- |
-| `microsoft_teams_list_teams` | no | List the teams the requester is a member of. |
-| `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see. |
+| `microsoft_teams_list_teams` | no | List the teams the requester is a member of, and whether each is archived. |
+| `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see, and whether each is archived. |
 | `microsoft_teams_list_channel_messages` | no | List up to 50 top-level posts of one channel, without their replies, most recently active thread first. |
-| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names. |
+| `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post, newest first. |
+| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names, most recent message first. |
 | `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
 | `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
 | `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
 | `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
 
-Messages come back as plain text, up to 4,000 characters each.
+Messages come back as plain text, up to 4,000 characters each, with quoted replies as lines starting with `> `.
+Deleted messages and system events, such as members joining, come back labeled, without text.
+Channel, chat, and message listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Sent messages appear under the requester's name and are plain text of up to 28,000 bytes, so HTML in the text is not rendered as formatting.
 The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
+Shared channels from a team the requester is not a member of are not reachable.
 
 ## Approvals For Writes
 
