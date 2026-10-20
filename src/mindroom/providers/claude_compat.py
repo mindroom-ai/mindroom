@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CLAUDE_SAFEGUARD_STOP_REASON = "refusal"
-# Every cut-off response spends the model's whole output budget, so this many cut-off responses in a row
-# get corrective results and the next one ends the run.
+# Every cut-off response spends the model's whole output budget, so a response loop gets this many
+# corrective results and the next cut-off ends it.
 _OUTPUT_LIMIT_RETRIES = 2
 _CUT_OFF_TOOL_CALL_RESULT = (
     "Not run: your previous response hit the output limit and was cut off before it was complete, "
@@ -48,13 +48,13 @@ class ClaudeProviderCompat(ClaudeProviderSDKCompat, ClaudeNativeCompaction):
     id: str
     name: str
     tool_message_role: str
-    # The cut-off responses in a row of each running response loop, under the identity of its message list.
-    _cut_offs_in_a_row: dict[int, int]
+    # The cut-off responses of each running response loop, under the identity of its message list.
+    _cut_offs: dict[int, int]
 
     def __post_init__(self) -> None:
         """Start with no response loop running."""
         super().__post_init__()
-        self._cut_offs_in_a_row = {}
+        self._cut_offs = {}
 
     def _check_stop_reason(self, provider_response: object) -> None:
         """Raise a typed refusal, and log a response the output limit cut off."""
@@ -111,19 +111,19 @@ class ClaudeProviderCompat(ClaudeProviderSDKCompat, ClaudeNativeCompaction):
     # runs, keeps a count under the identity of that list, which compaction rewrites in place.
     # Upstream issue: Tracking gap; no issue proposes giving get_function_calls_to_run its run or loop.
     # Upstream PR: None identified.
-    # Remove when: Agno passes get_function_calls_to_run its run or another per-loop context; the limit on
-    # cut-off responses in a row remains.
+    # Remove when: Agno passes get_function_calls_to_run its run or another per-loop context; the retry limit
+    # per response loop remains.
     # Coverage: tests/test_claude_output_limit.py::test_compaction_between_cut_offs_does_not_renew_the_retries;
     # tests/test_claude_output_limit.py::test_concurrent_response_loops_count_their_cut_offs_apart.
     @contextmanager
     def _response_loop(self, messages: list[Message]) -> Iterator[None]:
         """Count one response loop's cut-off responses apart from every other loop, for as long as it runs."""
         key = id(messages)
-        self._cut_offs_in_a_row[key] = 0
+        self._cut_offs[key] = 0
         try:
             yield
         finally:
-            self._cut_offs_in_a_row.pop(key, None)
+            self._cut_offs.pop(key, None)
 
     async def aresponse(self, messages: list[Message], *args: object, **kwargs: object) -> ModelResponse:
         """Run Agno's response loop with its own count of cut-off responses."""
@@ -154,14 +154,11 @@ class ClaudeProviderCompat(ClaudeProviderSDKCompat, ClaudeNativeCompaction):
 
         The response's last call is incomplete, and a streamed one carries only the arguments that parsed
         before the cut. Each call gets a result telling the model why, so the loop makes another request;
-        the third cut-off response in a row ends the run with an error instead. Each response loop counts
+        the loop's third cut-off response ends it with an error instead. Each response loop counts
         afresh, so a run resumed after an approval gets new retries, and so does the skill review that forks
         a finished response's request.
         """
-        key = id(messages)
         if not stopped_at_output_limit(assistant_message):
-            if key in self._cut_offs_in_a_row:
-                self._cut_offs_in_a_row[key] = 0
             return super().get_function_calls_to_run(  # ty: ignore[unresolved-attribute]
                 assistant_message,
                 messages,
@@ -177,13 +174,14 @@ class ClaudeProviderCompat(ClaudeProviderSDKCompat, ClaudeNativeCompaction):
             )
             for tool_call in assistant_message.tool_calls or []
         )
-        # A call from outside Agno's async response loops counts as a loop of its own.
-        cut_off_responses = self._cut_offs_in_a_row.get(key, 0) + 1
-        if key in self._cut_offs_in_a_row:
-            self._cut_offs_in_a_row[key] = cut_off_responses
+        # A call from outside Agno's async response loops is never stopped by this limit.
+        key = id(messages)
+        cut_off_responses = self._cut_offs.get(key, 0) + 1
+        if key in self._cut_offs:
+            self._cut_offs[key] = cut_off_responses
         if cut_off_responses > _OUTPUT_LIMIT_RETRIES:
             msg = (
-                f"The output limit cut off {cut_off_responses} of this model's responses in a row "
+                f"The output limit cut off {cut_off_responses} of this model's responses in this run "
                 "before their tool calls were complete, so the run stopped. Ask for the work in smaller steps, "
                 "or raise the model's max_tokens."
             )

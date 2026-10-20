@@ -247,7 +247,7 @@ async def test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly(
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """Two corrective retries for cut-off responses in a row, then a clear error instead of a silent or endless run."""
+    """Two corrective retries per run, then a clear error instead of a silent or endless run."""
     bodies = _fake_claude(monkeypatch, [_cut_off_write()])
 
     response = await _reply(config, "Write the full simulation script to big.py.", stream=stream)
@@ -261,22 +261,23 @@ async def test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_a_complete_response_starts_the_count_over(
+async def test_complete_responses_between_cut_offs_do_not_renew_the_retries(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """Only cut-off responses in a row count, so a run that recovers between them is not stopped."""
+    """A model that keeps returning to its oversized call between small ones still ends at its third cut-off."""
     bodies = _fake_claude(
         monkeypatch,
-        [_cut_off_write(), _cut_off_write(), _small_write(), _cut_off_write(), _cut_off_write(), _answer("Wrote it.")],
+        [_cut_off_write(), _small_write(), _cut_off_write(), _small_write(), _cut_off_write(), _answer("Wrote it.")],
     )
 
     response = await _reply(config, "Write the full simulation script to big.py.", stream=stream)
 
-    assert len(bodies) == 6
-    assert "Wrote it." in response
+    assert len(bodies) == 5
+    assert "Wrote it." not in response
+    assert "output limit" in response
     assert [path.name for path in tmp_path.rglob("*.py")] == ["part1.py"]
 
 
@@ -313,13 +314,14 @@ async def test_compaction_between_cut_offs_does_not_renew_the_retries(
     assert "smaller steps" in response
 
 
-def save_file(file_name: str, contents: str) -> str:
-    """Write a file; the model's cut-off calls to it are never run."""
-    raise AssertionError((file_name, contents))
+async def _respond(model: Model, messages: list[Message], *, stream: bool, ran: list[str]) -> None:
+    """Run one Agno response loop of ``model`` over ``messages``, which it extends, recording each file it saves."""
 
+    def save_file(file_name: str, contents: str) -> str:
+        """Write a file; the model's cut-off calls to it are never run."""
+        ran.append(file_name)
+        return f"Saved {len(contents)} characters to {file_name}."
 
-async def _respond(model: Model, messages: list[Message], *, stream: bool) -> None:
-    """Run one Agno response loop of ``model`` over ``messages``, which it extends with its responses."""
     tools = [Function.from_callable(save_file)]
     if not stream:
         await model.aresponse(messages=messages, tools=tools)
@@ -341,14 +343,16 @@ async def test_a_new_response_loop_gets_its_own_retries(
         [_cut_off_write(), _cut_off_write(), _answer("Done."), _cut_off_write(), _answer("Reviewed.")],
     )
     model = model_loading.get_model_instance(config, runtime_paths_for(config), "claude")
+    ran: list[str] = []
     turn = [Message(role="user", content="Write the full simulation script to big.py.")]
-    await _respond(model, turn, stream=stream)
+    await _respond(model, turn, stream=stream, ran=ran)
 
     review = [*turn, Message(role="user", content="Review this conversation.")]
-    await _respond(model, review, stream=stream)
+    await _respond(model, review, stream=stream, ran=ran)
 
     assert len(bodies) == 5
     assert review[-1].content == "Reviewed."
+    assert ran == []
 
 
 @pytest.mark.asyncio
@@ -372,10 +376,12 @@ async def test_concurrent_response_loops_count_their_cut_offs_apart(config: Conf
     model = model_loading.get_model_instance(config, runtime_paths_for(config), "claude")
     model.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
     turns = [[Message(role="user", content=prompt)] for prompt in prompts]
+    ran: list[str] = []
 
-    await asyncio.gather(*(_respond(model, turn, stream=stream) for turn in turns))
+    await asyncio.gather(*(_respond(model, turn, stream=stream, ran=ran) for turn in turns))
 
     assert [turn[-1].content for turn in turns] == [f"Done: {prompt}" for prompt in prompts]
+    assert ran == []
 
 
 @pytest.mark.asyncio
