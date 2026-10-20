@@ -8,7 +8,7 @@ Native tool search on Claude and OpenAI Responses models is unchanged.
 Runtime loading gave each agent `list_tools`, `load_tool`, `unload_tool`, and `tool_search`, and `load_tool` added the toolkit to the provider `tools` array and its instructions to the system prompt.
 Every provider caches a byte-identical prompt prefix, and the tool definitions and system prompt sit at the front of that prefix: Anthropic orders tools, system, then messages, and open-model chat templates render tools inside the leading system block.
 Each load or unload therefore missed the cache for the whole conversation, and the same-turn continuation that rebuilt the agent after a load sent that uncached request immediately.
-The deferred-tool catalog in the system prompt also depended on the loaded set, so it changed with every load.
+A line naming the currently loaded tools at the end of the system prompt also changed with every load.
 
 ## Decision
 
