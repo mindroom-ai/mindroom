@@ -18,6 +18,7 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_session,
     graph_tool_result,
     path_segment,
+    read_upload_source,
     share_id,
 )
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
@@ -334,6 +335,25 @@ def test_an_upload_source_over_the_limit_is_refused(tmp_path: Path) -> None:
         checked_upload_source("big.bin", workspace_root=workspace, file_access="workspace", max_bytes=4)
 
     assert excinfo.value.code == "too_large"
+
+
+def test_reading_an_upload_source_refuses_a_file_swapped_or_grown_after_the_check(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    (workspace / "doc.bin").write_bytes(b"0123")
+    (tmp_path / "secret.bin").write_bytes(b"secret")
+    source = checked_upload_source("doc.bin", workspace_root=workspace, file_access="workspace", max_bytes=4)
+
+    assert read_upload_source(source, 4) == b"0123"
+    (workspace / "doc.bin").write_bytes(b"0123456789")
+    with pytest.raises(MicrosoftGraphError) as grown:
+        read_upload_source(source, 4)
+    (workspace / "doc.bin").unlink()
+    (workspace / "doc.bin").symlink_to(tmp_path / "secret.bin")
+    with pytest.raises(MicrosoftGraphError) as swapped:
+        read_upload_source(source, 100)
+
+    assert grown.value.code == "too_large"
+    assert swapped.value.code == "invalid_local_path"
 
 
 def test_an_upload_source_outside_the_workspace_is_refused(tmp_path: Path) -> None:

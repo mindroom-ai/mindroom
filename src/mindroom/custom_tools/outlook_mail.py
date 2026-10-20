@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
@@ -21,6 +23,7 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_session,
     graph_tool_result,
     path_segment,
+    read_upload_source,
 )
 from mindroom.oauth.microsoft import outlook_mail_oauth_provider
 
@@ -28,10 +31,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _WRITE_FUNCTIONS = frozenset(
@@ -269,11 +270,7 @@ class OutlookMailTools(Toolkit):
             max_bytes=_MAX_ATTACHMENT_BYTES,
             field_name="attachments",
         )
-        with source.open() as handle:
-            content = handle.read(_MAX_ATTACHMENT_BYTES + 1)
-        if len(content) > _MAX_ATTACHMENT_BYTES:
-            msg = f"{source.display_path} grew past the {_MAX_ATTACHMENT_BYTES}-byte attachment limit."
-            raise MicrosoftGraphError(code="too_large", message=msg)
+        content = read_upload_source(source, _MAX_ATTACHMENT_BYTES)
         return {
             "@odata.type": "#microsoft.graph.fileAttachment",
             "name": source.name,
