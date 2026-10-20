@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class VisibleToolSurface:
-    """Provider-visible runtime tool surface for one agent."""
+    """Runtime tool surface for one agent, deferred toolkits included unless a selection limits them."""
 
     runtime_tool_configs: tuple[EffectiveToolConfig, ...]
 
@@ -257,7 +257,7 @@ def visible_tool_surface(
     enable_dynamic_tools_manager: bool = False,
     include_matrix_room_runtime_tools: bool = False,
 ) -> VisibleToolSurface:
-    """Return the canonical provider-visible runtime tool surface for one agent.
+    """Return the canonical runtime tool surface for one agent.
 
     ``deferred_tools`` limits which authored deferred tools are attached, and ``None`` attaches all of them.
     Deferred tools marked ``initial`` are always attached.

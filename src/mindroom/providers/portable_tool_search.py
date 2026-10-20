@@ -27,14 +27,13 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
 
 __all__ = [
-    "CALL_TOOL_NAME",
     "install_portable_deferred_tool_search",
     "portable_deferred_tool_names",
     "project_portable_request",
     "resolve_call_tool_calls",
 ]
 
-CALL_TOOL_NAME: Final = "call_tool"
+_CALL_TOOL_NAME: Final = "call_tool"
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_portable_deferred_tool_names"
 _INVOCATION_MARKER = "_mindroom_portable_tool_search_invocation"
 _REWRITE_MARKER = "_mindroom_portable_tool_search_rewrite"
@@ -112,7 +111,7 @@ def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
             return message.model_copy(update={"tool_calls": calls})
         return message
     if message.tool_name in deferred:
-        return message.model_copy(update={"tool_name": CALL_TOOL_NAME})
+        return message.model_copy(update={"tool_name": _CALL_TOOL_NAME})
     return message
 
 
@@ -127,23 +126,23 @@ def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, A
         # Handling: entries naming a deferred function are renamed to call_tool, so the function responses Gemini
         # receives after normalize_tool_messages splits the message match the wrapped calls; stored history is unchanged.
         # Coverage: tests/test_portable_tool_search.py::test_projection_renames_results_in_combined_tool_messages.
-        return {**call, "tool_name": CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
+        return {**call, "tool_name": _CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
     if function.get("name") not in deferred:
         return call
     arguments = _json_object(function.get("arguments") or "{}") or {}
     wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
-    return {**call, "function": {**function, "name": CALL_TOOL_NAME, "arguments": wrapped}}
+    return {**call, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
 
 
 def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict[str, Any]:
     function = call.get("function")
-    if not isinstance(function, dict) or function.get("name") != CALL_TOOL_NAME:
+    if not isinstance(function, dict) or function.get("name") != _CALL_TOOL_NAME:
         return call
     payload = _json_object(function.get("arguments") or "{}")
     if payload is None:
         return call
     name = payload.get("name")
-    if not isinstance(name, str) or name == CALL_TOOL_NAME or name not in callable_names:
+    if not isinstance(name, str) or name == _CALL_TOOL_NAME or name not in callable_names:
         return call
     # Weaker models sometimes send the nested arguments as a JSON string.
     raw_arguments = payload.get("arguments")

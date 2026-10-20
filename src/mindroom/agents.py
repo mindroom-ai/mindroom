@@ -1375,7 +1375,7 @@ def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
         function.owning_toolkit = authored_name
 
 
-def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and deferred tools share one construction path
+def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferred tools share one construction path
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,

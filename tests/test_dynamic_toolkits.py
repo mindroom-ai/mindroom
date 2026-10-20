@@ -362,8 +362,8 @@ def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_pa
     assert overrides_by_name["coding"] == {}
 
 
-def test_loaded_deferred_concrete_tool_preserves_override_over_preset_child(tmp_path: Path) -> None:
-    """Concrete deferred tool entries should own preset-expanded children once loaded."""
+def test_attached_deferred_concrete_tool_preserves_override_over_preset_child(tmp_path: Path) -> None:
+    """Concrete deferred tool entries should own preset-expanded children once attached."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         "openclaw_compat",
@@ -371,28 +371,28 @@ def test_loaded_deferred_concrete_tool_preserves_override_over_preset_child(tmp_
     ]
     config = _validated_config(tmp_path, raw)
 
-    unloaded_configs = _runtime_tool_configs(
+    unattached_configs = _runtime_tool_configs(
         agent_name="code",
         config=config,
         deferred_tools=[],
         enable_dynamic_tools_manager=False,
     )
-    loaded_configs = _runtime_tool_configs(
+    attached_configs = _runtime_tool_configs(
         agent_name="code",
         config=config,
         deferred_tools=["shell"],
         enable_dynamic_tools_manager=False,
     )
-    unloaded_names = [entry.name for entry in unloaded_configs]
-    loaded_overrides_by_name = {entry.name: entry.tool_config_overrides for entry in loaded_configs}
+    unattached_names = [entry.name for entry in unattached_configs]
+    attached_overrides_by_name = {entry.name: entry.tool_config_overrides for entry in attached_configs}
 
-    assert "openclaw_compat" in unloaded_names
-    assert "shell" not in unloaded_names
-    assert loaded_overrides_by_name["shell"] == {"extra_env_passthrough": "FOO_*"}
+    assert "openclaw_compat" in unattached_names
+    assert "shell" not in unattached_names
+    assert attached_overrides_by_name["shell"] == {"extra_env_passthrough": "FOO_*"}
 
 
-def test_loaded_parent_keeps_implied_child_when_child_is_separately_deferred(tmp_path: Path) -> None:
-    """A loaded deferred parent should expose its expanded children even if one child is separately unloaded."""
+def test_attached_parent_keeps_implied_child_when_child_is_separately_deferred(tmp_path: Path) -> None:
+    """An attached deferred parent should expose its expanded children even if one child is separately unattached."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"matrix_message": {"defer": True}},
@@ -400,7 +400,7 @@ def test_loaded_parent_keeps_implied_child_when_child_is_separately_deferred(tmp
     ]
     config = _validated_config(tmp_path, raw)
 
-    unloaded_names = [
+    unattached_names = [
         entry.name
         for entry in _runtime_tool_configs(
             agent_name="code",
@@ -409,7 +409,7 @@ def test_loaded_parent_keeps_implied_child_when_child_is_separately_deferred(tmp
             enable_dynamic_tools_manager=False,
         )
     ]
-    loaded_names = [
+    attached_names = [
         entry.name
         for entry in _runtime_tool_configs(
             agent_name="code",
@@ -419,8 +419,8 @@ def test_loaded_parent_keeps_implied_child_when_child_is_separately_deferred(tmp
         )
     ]
 
-    assert unloaded_names == []
-    assert loaded_names == ["matrix_message", "attachments", "matrix_room"]
+    assert unattached_names == []
+    assert attached_names == ["matrix_message", "attachments", "matrix_room"]
 
 
 @pytest.mark.parametrize(
@@ -439,7 +439,7 @@ def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
     raw["agents"]["code"]["tools"] = tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    unloaded_names = [
+    unattached_names = [
         entry.name
         for entry in _runtime_tool_configs(
             agent_name="code",
@@ -448,7 +448,7 @@ def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
             enable_dynamic_tools_manager=False,
         )
     ]
-    loaded_names = [
+    attached_names = [
         entry.name
         for entry in _runtime_tool_configs(
             agent_name="code",
@@ -458,21 +458,21 @@ def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
         )
     ]
 
-    assert "matrix_message" not in unloaded_names
-    assert "attachments" not in unloaded_names
-    assert "matrix_room" not in unloaded_names
-    assert "matrix_message" in loaded_names
-    assert "attachments" in loaded_names
-    assert "matrix_room" in loaded_names
+    assert "matrix_message" not in unattached_names
+    assert "attachments" not in unattached_names
+    assert "matrix_room" not in unattached_names
+    assert "matrix_message" in attached_names
+    assert "attachments" in attached_names
+    assert "matrix_room" in attached_names
 
 
-def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None:
-    """Runtime tool selection should expose only eager and loaded deferred tools."""
+def test_runtime_selection_hides_unattached_deferred_tools(tmp_path: Path) -> None:
+    """Runtime tool selection should expose only eager and attached deferred tools."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = ["sleep", {"shell": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    unloaded_names = [
+    unattached_names = [
         entry.name
         for entry in _runtime_tool_configs(
             agent_name="code",
@@ -481,7 +481,7 @@ def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None
             enable_dynamic_tools_manager=True,
         )
     ]
-    loaded_names = [
+    attached_names = [
         entry.name
         for entry in _runtime_tool_configs(
             agent_name="code",
@@ -491,8 +491,8 @@ def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None
         )
     ]
 
-    assert unloaded_names == ["sleep", "dynamic_tools"]
-    assert loaded_names == ["sleep", "shell", "dynamic_tools"]
+    assert unattached_names == ["sleep", "dynamic_tools"]
+    assert attached_names == ["sleep", "shell", "dynamic_tools"]
 
 
 @pytest.mark.asyncio
@@ -785,7 +785,7 @@ def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
     assert _agent_has_matrix_messaging_tool(config, "code")
 
 
-def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
+def test_native_tool_search_attaches_deferred_toolkits_and_skips_portable_tool_search(tmp_path: Path) -> None:
     """Claude-native tool search attaches all deferred toolkits and drops the manager machinery."""
     raw = _base_config_data()
     raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
@@ -1010,7 +1010,7 @@ def test_native_tool_search_keeps_initial_toolkit_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An initially loaded deferred toolkit should keep its instructions inline."""
+    """An initial deferred toolkit should keep its instructions inline."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
     raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
@@ -1164,7 +1164,7 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
 
 
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
-def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(
+def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_portable_tool_search(
     tmp_path: Path,
     provider: str,
     model_id: str,
@@ -1268,7 +1268,7 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
 
 
 def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path) -> None:
-    """Voice-safe eager loading cannot advertise a toolkit with no callable functions."""
+    """Eager deferred tools cannot advertise a toolkit with no callable functions."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
@@ -1286,9 +1286,8 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
     }
     assert "sleep" not in function_names
-    assert "load_tool" not in function_names
-    assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
-    assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
+    assert "tool_search" not in function_names
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
 
 
 @pytest.mark.parametrize(
