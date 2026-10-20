@@ -2443,7 +2443,7 @@ class TestUserIdPassthrough:
             ]
 
         assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == [
-            "Finished on the new model."
+            "Finished on the new model.",
         ]
         assert mock_prepare.await_count == 2
         assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
