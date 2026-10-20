@@ -94,6 +94,44 @@ def path_segment(value: object, field_name: str) -> str:
     return quote(value, safe="!:@=")
 
 
+def next_page_token(payload: Mapping[str, Any]) -> str | None:
+    """Return the continuation token for a Graph collection page: its next link relative to Graph, or None."""
+    link = payload.get("@odata.nextLink")
+    if isinstance(link, str) and link.startswith(f"{GRAPH_URL}/"):
+        return link.removeprefix(GRAPH_URL)
+    return None
+
+
+def page_path(page_token: object, collection_suffix: str) -> str:
+    """Return the Graph path a page token continues, refusing anything but this function's own collection.
+
+    Graph may phrase a next link differently from the first request, for example by drive instead of `/me`,
+    so a token is checked by shape: a relative Graph path ending in the collection, with a query and no `..`.
+    """
+    token = page_token if isinstance(page_token, str) else ""
+    path, _, query = token.partition("?")
+    if (
+        not query
+        or not path.startswith("/")
+        or not path.endswith(collection_suffix)
+        or ".." in path
+        or any(character in "#\\ " or ord(character) < 32 for character in token)
+    ):
+        msg = "page_token must be the next_page_token this function returned."
+        raise MicrosoftGraphError(code="invalid_page_token", message=msg)
+    return token
+
+
+def page_offset(page_token: object | None, maximum: int) -> int:
+    """Return the result offset a numeric page token names, or 0 for the first page."""
+    if page_token is None:
+        return 0
+    if not isinstance(page_token, str) or not page_token.isdigit() or int(page_token) > maximum:
+        msg = "page_token must be the next_page_token this function returned."
+        raise MicrosoftGraphError(code="invalid_page_token", message=msg)
+    return int(page_token)
+
+
 def share_id(url: str) -> str:
     """Encode a sharing or web link as a Graph share ID."""
     return "u!" + base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")

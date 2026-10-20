@@ -106,6 +106,7 @@ They take a worksheet name and an address such as `B2` or `A1:C10` without a wor
 A written string that starts with `=` becomes a formula.
 
 Search uses Microsoft Search, which covers work and school accounts.
+Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
 
 ## Approvals For Writes
 

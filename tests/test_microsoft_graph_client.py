@@ -17,6 +17,7 @@ from mindroom.custom_tools.microsoft_graph import (
     checked_upload_source,
     graph_session,
     graph_tool_result,
+    next_page_token,
     path_segment,
     share_id,
 )
@@ -542,3 +543,19 @@ def test_a_download_into_an_inaccessible_directory_is_reported(
         locked.chmod(0o700)
 
     assert result["code"] == "workspace_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("link", "token"),
+    [
+        (
+            "https://graph.microsoft.com/v1.0/me/drive/root/children?$skiptoken=a",
+            "/me/drive/root/children?$skiptoken=a",
+        ),
+        ("https://evil.example.com/v1.0/me/drive/root/children?$skiptoken=a", None),
+        ("https://graph.microsoft.com/beta/me/drive/root/children?$skiptoken=a", None),
+        (None, None),
+    ],
+)
+def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, token: str | None) -> None:
+    assert next_page_token({"@odata.nextLink": link} if link else {}) == token
