@@ -76,6 +76,16 @@ def test_embedder_change_changes_the_graph_name(tmp_path: Path) -> None:
     assert before != after
 
 
+def test_embedder_prefixes_change_the_graph_name(tmp_path: Path) -> None:
+    """Prefixed graph vectors cannot share a graph with unprefixed ones."""
+    paths = _paths(tmp_path)
+    names = {
+        graph_scope("mind", config, paths, None).graph_name
+        for config in (_config(), _config(query_prefix="q: "), _config(query_prefix="q: ", document_prefix="d: "))
+    }
+    assert len(names) == 3
+
+
 def test_a_new_generation_names_new_graphs(tmp_path: Path) -> None:
     """Raising the generation starts every graph over under a new name, and the first one keeps existing graphs."""
     paths = _paths(tmp_path)

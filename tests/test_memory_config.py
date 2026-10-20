@@ -344,6 +344,20 @@ class TestMemoryConfig:
 
         assert _memory_collection_name(openai_config) != _memory_collection_name(local_config)
 
+    def test_memory_collection_name_changes_when_embedder_prefixes_change(self) -> None:
+        """Memories embedded with prefixes are isolated from unprefixed ones."""
+
+        def collection(**prefixes: str) -> str:
+            embedder = _MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(model="embeddinggemma-2", **prefixes),
+            )
+            return _memory_collection_name(
+                Config(memory=MemoryConfig(embedder=embedder, llm=None), router=RouterConfig(model="default")),
+            )
+
+        assert len({collection(), collection(query_prefix="q: "), collection(document_prefix="d: ")}) == 3
+
     def test_get_memory_config_uses_runtime_shared_credentials_path(self, tmp_path: Path) -> None:
         """Runtime-shared credential overrides should be visible to Mem0 provider config."""
         runtime_paths = resolve_primary_runtime_paths(

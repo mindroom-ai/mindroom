@@ -116,10 +116,10 @@ memory:
 ```
 
 MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
-It embeds queries and documents with the model's own prompts.
 
 Some models expect a prompt in front of each text, different for queries and documents.
-A local `sentence_transformers` model gets them automatically; for the same model behind an OpenAI-compatible server such as llama.cpp, set them as prefixes.
+With a local `sentence_transformers` model, knowledge, file-memory and knowledge-graph searches get the model's own prompts automatically, while Mem0 embeds without them.
+For the same model behind an OpenAI-compatible server such as llama.cpp, set the prompts as prefixes; the `openai` provider applies them everywhere, Mem0 included.
 For EmbeddingGemma 2:
 
 ```yaml

@@ -73,10 +73,7 @@ class _MemoryEmbedderConfig(BaseModel):
     def _prefixes_need_openai_provider(self) -> Self:
         """Reject prefixes that the configured provider would silently ignore."""
         if self.provider != "openai" and (self.config.query_prefix or self.config.document_prefix):
-            msg = (
-                "memory.embedder.config.query_prefix and document_prefix apply only to the openai provider; "
-                "sentence_transformers applies the model's own prompts"
-            )
+            msg = "memory.embedder.config.query_prefix and document_prefix apply only to the openai provider"
             raise ValueError(msg)
         return self
 

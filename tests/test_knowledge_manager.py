@@ -67,7 +67,7 @@ from mindroom.knowledge.file_listing import (
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
-from mindroom.knowledge.indexing_config import IndexingSettings, knowledge_git_dir
+from mindroom.knowledge.indexing_config import IndexingSettings, indexing_settings_key, knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
@@ -3205,6 +3205,19 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == key.indexing_settings
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
+
+
+def test_embedder_prefixes_make_indexing_settings_incompatible(tmp_path: Path) -> None:
+    """An index embedded with other prefixes is neither queried nor reused."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    plain = indexing_settings_key(config, runtime_paths.storage_root, "docs", docs_path)
+    config.memory.embedder.config.document_prefix = "d: "
+
+    prefixed = indexing_settings_key(config, runtime_paths.storage_root, "docs", docs_path)
+
+    assert not knowledge_registry.published_index_settings_compatible(plain, prefixed)
 
 
 def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:
