@@ -19,6 +19,10 @@ if TYPE_CHECKING:
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _MAX_RESULTS_LIMIT = 20
+_LISTING_BYTE_LIMIT = 16 * 1024
+_LISTED_DESCRIPTION_LENGTH = 256
+# Room for the status, usage, and truncation message around the listed functions.
+_LISTING_ENVELOPE_BYTES = 512
 _CALL_TOOL_DESCRIPTION = "Call a deferred function found with tool_search, passing its arguments as a JSON object."
 _CALL_TOOL_PARAMETERS = {
     "type": "object",
@@ -52,17 +56,20 @@ class DynamicToolsToolkit(Toolkit):
     def _payload(status: str, **kwargs: object) -> str:
         return json.dumps({"status": status, "tool": "dynamic_tools", **kwargs}, sort_keys=True)
 
-    def tool_search(self, query: str, max_results: int = 5) -> str:
-        """Search deferred functions by name or keywords and return their full definitions.
+    def tool_search(self, query: str = "", max_results: int = 5) -> str:
+        """Search deferred functions by name or keywords and return their full definitions, or list them all.
 
         Call a returned function with call_tool(name, arguments).
 
         Args:
             query: Function name, toolkit name, or keywords describing the needed capability.
+                Leave it empty to list every deferred function without its definition.
             max_results: Maximum number of function definitions to return, at most 20.
 
         """
         raw_query = query.strip().lower()
+        if not raw_query:
+            return self._listing()
         query_tokens = _tokens(raw_query)
         scored: list[tuple[int, int, DeferredToolkit, dict[str, Any]]] = []
         for deferred in self._deferred_toolkits:
@@ -93,6 +100,35 @@ class DynamicToolsToolkit(Toolkit):
             else:
                 hint = "Use more specific keywords to see the others."
             payload["message"] = f"{len(scored)} functions matched; these are the best {len(matches)}. {hint}"
+        return self._payload("ok", **payload)
+
+    def _listing(self) -> str:
+        """List every deferred function's name, toolkit, and description, within the size of one result."""
+        functions = [
+            {
+                "name": definition["name"],
+                "toolkit": deferred.domain_name,
+                "description": definition["description"][:_LISTED_DESCRIPTION_LENGTH],
+            }
+            for deferred in self._deferred_toolkits
+            for definition in _function_definitions(deferred)
+        ]
+        listed: list[dict[str, str]] = []
+        size = _LISTING_ENVELOPE_BYTES
+        for function in functions:
+            size += len(json.dumps(function)) + 2
+            if size > _LISTING_BYTE_LIMIT:
+                break
+            listed.append(function)
+        payload: dict[str, object] = {
+            "functions": listed,
+            "usage": "Call tool_search with a function's exact name to get its definition, then call it with call_tool.",
+        }
+        if len(listed) < len(functions):
+            payload["message"] = (
+                f"Listed {len(listed)} of {len(functions)} deferred functions; "
+                "search by keywords or a toolkit name to find the others."
+            )
         return self._payload("ok", **payload)
 
     def call_tool(self, name: str = "", arguments: object = None, **_extra: object) -> str:

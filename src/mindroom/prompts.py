@@ -188,7 +188,7 @@ These toolkits are available, but the definitions of their functions are not loa
 <available-deferred-tools>
 {tool_catalog}
 </available-deferred-tools>
-Use tool_search(query) to get the definitions of matching functions, then call one with call_tool(name, arguments), passing its arguments as a JSON object.
+Use tool_search(query) to get the definitions of matching functions, or tool_search() with no query to list every deferred function, then call one with call_tool(name, arguments), passing its arguments as a JSON object.
 Search before concluding that a capability is unavailable."""
 
 NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery

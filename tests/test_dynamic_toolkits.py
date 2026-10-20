@@ -1462,6 +1462,41 @@ def test_tool_search_at_the_result_limit_suggests_only_narrower_keywords() -> No
     assert "max_results" not in at_limit["message"]
 
 
+def test_tool_search_without_a_query_lists_every_deferred_function() -> None:
+    """An empty query lists each deferred function's name, toolkit, and description, without definitions."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"), _deferred(_WeatherTools(), "Forecasts"))
+
+    payload = _tool_payload(toolkit.tool_search())
+
+    assert payload["functions"] == [
+        {"name": "crm_lookup", "toolkit": "crm", "description": "Look up one customer record by ID."},
+        {"name": "crm_notes", "toolkit": "crm", "description": "Read recent support notes about an account lookup."},
+        {"name": "forecast", "toolkit": "weather", "description": "Return the forecast for a city."},
+    ]
+    assert "matches" not in payload
+    assert "message" not in payload
+    assert "tool_search" in payload["usage"]
+
+
+def test_tool_search_listing_stops_at_the_size_limit() -> None:
+    """A listing too large for one result names how many functions it left out."""
+
+    def documented_function(index: int) -> Function:
+        return Function(name=f"bulk_{index}", description="x" * 200, entrypoint=lambda: "ok")
+
+    bulk = Toolkit(name="bulk")
+    for index in range(200):
+        bulk.functions[f"bulk_{index}"] = documented_function(index)
+    toolkit = _search_toolkit(_deferred(bulk, "Bulk operations"))
+
+    result = toolkit.tool_search("")
+    payload = _tool_payload(result)
+
+    assert len(result.encode()) <= 16 * 1024
+    assert 0 < len(payload["functions"]) < 200
+    assert f"{len(payload['functions'])} of 200" in payload["message"]
+
+
 def test_tool_search_without_matches_suggests_other_keywords() -> None:
     """An empty result tells the model how to search again."""
     toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
