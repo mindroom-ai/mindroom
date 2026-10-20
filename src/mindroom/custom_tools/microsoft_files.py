@@ -372,7 +372,8 @@ class MicrosoftFilesTools(Toolkit):
         Args:
             folder: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link of the folder.
             limit: Maximum number of entries to return, from 1 to 200.
-            page_token: The next_page_token of the previous call, to continue the same listing.
+            page_token: The next_page_token of the previous call, to continue the same listing; folder and limit
+                are then taken from the token.
 
         """
 

@@ -331,6 +331,11 @@ def test_list_folder_follows_its_own_page_token(tmp_path: Path, monkeypatch: pyt
         "/me/drive/root/children/../../../me/messages?x=1",
         "/me/drive/root/childrenX?$skiptoken=abc",
         "",
+        "/../beta/me/drive/root/children?x=1",
+        "//evil.example.com/me/drive/root/children?x=1",
+        "/me/drive/root/children?x=1#fragment",
+        "/me/drive/root/children?x=1 2",
+        "/me/drive/root/children?x=\x01",
     ],
 )
 def test_list_folder_refuses_a_page_token_for_another_collection(
@@ -344,7 +349,10 @@ def test_list_folder_refuses_a_page_token_for_another_collection(
     assert graph.requests == []
 
 
-@pytest.mark.parametrize("page_token", ["-1", "abc", "1.5", "99999999999"])
+@pytest.mark.parametrize(
+    "page_token",
+    ["-1", "abc", "1.5", "99999999999", "\u00b2", pytest.param("9" * 5000, id="5000-digits")],
+)
 def test_search_refuses_a_malformed_page_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

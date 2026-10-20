@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from contextlib import ExitStack, contextmanager
 from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Any
@@ -60,6 +61,7 @@ GRAPH_URL = "https://graph.microsoft.com/v1.0"
 _GRAPH_HOST = "graph.microsoft.com"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _CHUNK_BYTES = 1024 * 1024
+_OFFSET = re.compile(r"[0-9]{1,10}")
 _STATUS_ERRORS = {
     403: ("forbidden", "The connected Microsoft account has no permission for this."),
     404: ("not_found", "Microsoft Graph found nothing there, or the connected account cannot see it."),
@@ -113,6 +115,7 @@ def page_path(page_token: object, collection_suffix: str) -> str:
     if (
         not query
         or not path.startswith("/")
+        or path.startswith("//")
         or not path.endswith(collection_suffix)
         or ".." in path
         or any(character in "#\\ " or ord(character) < 32 for character in token)
@@ -126,7 +129,7 @@ def page_offset(page_token: object | None, maximum: int) -> int:
     """Return the result offset a numeric page token names, or 0 for the first page."""
     if page_token is None:
         return 0
-    if not isinstance(page_token, str) or not page_token.isdigit() or int(page_token) > maximum:
+    if not isinstance(page_token, str) or not _OFFSET.fullmatch(page_token) or int(page_token) > maximum:
         msg = "page_token must be the next_page_token this function returned."
         raise MicrosoftGraphError(code="invalid_page_token", message=msg)
     return int(page_token)
