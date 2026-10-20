@@ -57,7 +57,7 @@ def observe_final_request(
 ) -> AbstractContextManager[None]:
     """Record one primary attempt's final request when its response counts toward skill learning.
 
-    Each attempt names its own configured ``model_name``, because a dynamic continuation can switch models within one
+    Each attempt names its own configured ``model_name``, because a same-turn continuation can switch models within one
     response.
     """
     if capture is None or model is None:

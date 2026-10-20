@@ -38,7 +38,6 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
-from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
@@ -60,6 +59,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import shell_tools
+from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths

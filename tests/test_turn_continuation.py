@@ -6,8 +6,8 @@ import json
 
 from agno.models.response import ToolExecution
 
-from mindroom.dynamic_tool_continuation import (
-    DYNAMIC_TOOL_CONTINUATION_LIMIT,
+from mindroom.turn_continuation import (
+    TURN_CONTINUATION_LIMIT,
     continuation_decision_from_tools,
 )
 
@@ -176,7 +176,7 @@ def test_model_switch_at_the_limit_returns_limit_message() -> None:
     decision = continuation_decision_from_tools(
         [_model_switch_execution("after-toolcall")],
         original_prompt="Book the campsite",
-        continuation_count=DYNAMIC_TOOL_CONTINUATION_LIMIT,
+        continuation_count=TURN_CONTINUATION_LIMIT,
     )
 
     assert decision.should_continue is False

@@ -8,16 +8,17 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
+from mindroom.tool_system.tool_schema_cache import processed_function_definition
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from agno.tools.function import Function
 
     from mindroom.tool_system.dynamic_toolkits import DeferredToolkit
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _MAX_RESULTS_LIMIT = 20
+_EXACT_NAME_SCORE = 1000
 
 
 def _tokens(text: str) -> set[str]:
@@ -56,7 +57,7 @@ class DynamicToolsToolkit(Toolkit):
             if deferred.instructions
         }
         payload: dict[str, object] = {
-            "matches": [{**definition, "toolkit": deferred.domain_name} for _s, _o, deferred, definition in matches],
+            "matches": [_match(deferred, definition) for _score, _order, deferred, definition in matches],
             "instructions": instructions,
             "usage": "Call a match with call_tool(name, arguments), passing arguments as a JSON object.",
         }
@@ -64,7 +65,9 @@ class DynamicToolsToolkit(Toolkit):
             payload["message"] = "No deferred function matched. Try other keywords or a toolkit name from the list."
         return self._payload("ok", **payload)
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> str:
+    # A bare dict renders as an object with arbitrary values; Agno renders dict[str, Any] values as empty objects,
+    # which schema-enforcing servers would then require.
+    def call_tool(self, name: str, arguments: dict | None = None) -> str:
         """Call a deferred function found with tool_search, passing its arguments as a JSON object."""
         del arguments
         return self._payload(
@@ -76,16 +79,17 @@ class DynamicToolsToolkit(Toolkit):
         )
 
 
+def _match(deferred: DeferredToolkit, definition: dict[str, Any]) -> dict[str, Any]:
+    match = {**definition, "toolkit": deferred.domain_name}
+    if function_instructions := deferred.function_instructions.get(definition["name"]):
+        match["instructions"] = function_instructions
+    return match
+
+
 def _function_definitions(deferred: DeferredToolkit) -> list[dict[str, Any]]:
-    functions: dict[str, Function] = {**deferred.toolkit.get_async_functions(), **deferred.toolkit.get_functions()}
-    definitions = []
-    for name in dict.fromkeys(deferred.wire_function_names):
-        function = functions[name]._per_run_copy()
-        function.process_entrypoint(strict=False)
-        definitions.append(
-            {"name": name, "description": function.description or "", "parameters": function.parameters},
-        )
-    return definitions
+    # Async runs execute the async implementation when a toolkit registers both, so describe that one.
+    functions = deferred.toolkit.get_async_functions()
+    return [processed_function_definition(functions[name]) for name in dict.fromkeys(deferred.wire_function_names)]
 
 
 def _search_score(
@@ -94,19 +98,16 @@ def _search_score(
     query_tokens: set[str],
     raw_query: str,
 ) -> int:
+    """Score one function by the query words it matches, each counted once in its best field."""
     if raw_query == definition["name"]:
-        return 100
-    if not query_tokens:
-        return 0
+        return _EXACT_NAME_SCORE
     detail_tokens = _tokens(definition["description"])
     for parameter_name in definition["parameters"].get("properties", {}):
         detail_tokens |= _tokens(parameter_name)
-    for score, tokens in (
-        (80, _tokens(definition["name"])),
-        (70, _tokens(deferred.domain_name)),
-        (40, detail_tokens),
-        (20, _tokens(deferred.description)),
-    ):
-        if query_tokens & tokens:
-            return score
-    return 0
+    fields = (
+        (8, _tokens(definition["name"])),
+        (4, _tokens(deferred.domain_name)),
+        (2, detail_tokens),
+        (1, _tokens(deferred.description)),
+    )
+    return sum(max((weight for weight, tokens in fields if token in tokens), default=0) for token in query_tokens)

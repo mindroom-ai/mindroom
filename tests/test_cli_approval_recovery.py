@@ -74,7 +74,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 from tests.response_runner_helpers import _bot
 from tests.test_agent_cli_authority import _runtime_context
 from tests.test_agent_tool_calls import _catalog
-from tests.test_approval_dynamic_continuation import _ScriptedModel
+from tests.test_approval_turn_continuation import _ScriptedModel
 
 if TYPE_CHECKING:
     from pathlib import Path

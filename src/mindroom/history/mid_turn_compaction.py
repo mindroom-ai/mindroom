@@ -31,6 +31,7 @@ from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.agno_compat_message_builder import built_request_session
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
+from mindroom.history.prompt_tokens import deferred_wire_tool_names
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
     compaction_summary_message,
@@ -54,9 +55,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import NativeCompactionModel, checkpoint_items, native_replay_messages
-from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names, claude_loaded_tool_names
-from mindroom.providers.openai_tool_search import model_deferred_tool_names
-from mindroom.providers.portable_tool_search import portable_deferred_tool_names
+from mindroom.providers.claude_prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import run_session_storage_operation, save_compaction_usage
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
@@ -500,10 +499,9 @@ def _tool_tokens(model: Model, tools: list[dict[str, Any]] | None, messages: Seq
     """
     if not tools:
         return 0
-    deferred = claude_deferred_tool_names(model) | model_deferred_tool_names(model)
+    deferred = deferred_wire_tool_names(model)
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
-    deferred |= portable_deferred_tool_names(model)
     sent = [tool for tool in tools if _tool_name(tool) not in deferred] if deferred else tools
     return estimate_text_tokens(stable_serialize(sent)) if sent else 0
 

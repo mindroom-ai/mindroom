@@ -69,7 +69,7 @@ from tests.history_helpers import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
-from tests.test_approval_dynamic_continuation import _call, _ScriptedModel
+from tests.test_approval_turn_continuation import _call, _ScriptedModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

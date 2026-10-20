@@ -11,14 +11,14 @@ if TYPE_CHECKING:
 
     from agno.models.response import ToolExecution
 
-__all__ = ["DYNAMIC_TOOL_CONTINUATION_LIMIT", "continuation_decision_from_tools"]
+__all__ = ["TURN_CONTINUATION_LIMIT", "continuation_decision_from_tools"]
 
-DYNAMIC_TOOL_CONTINUATION_LIMIT = 4
+TURN_CONTINUATION_LIMIT = 4
 _MODEL_SWITCH_FUNCTION_NAME = "switch_thread_model"
 
 
 @dataclass(frozen=True)
-class _DynamicToolContinuationDecision:
+class _TurnContinuationDecision:
     """How one response path should handle a completed model-switch call."""
 
     next_prompt: str | None = None
@@ -93,7 +93,7 @@ def _model_switch_limit_message(*, model_name: str, when: str) -> str:
     """Return visible fallback text when repeated model switches do not converge."""
     return (
         "Model switching did not produce a final answer after "
-        f"{DYNAMIC_TOOL_CONTINUATION_LIMIT} continuation attempts. "
+        f"{TURN_CONTINUATION_LIMIT} continuation attempts. "
         f"The last request selected `{model_name}` with timing `{when}`."
     )
 
@@ -113,24 +113,24 @@ def _model_switch_decision(
     *,
     original_prompt: str,
     continuation_count: int,
-) -> _DynamicToolContinuationDecision:
+) -> _TurnContinuationDecision:
     """Return how to continue after one thread-model switch result."""
     model_name, when = model_switch
     if model_name is None or when is None:
-        if continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
-            return _DynamicToolContinuationDecision(
+        if continuation_count >= TURN_CONTINUATION_LIMIT:
+            return _TurnContinuationDecision(
                 limit_message="Model switching did not produce a final answer after repeated rejected requests.",
             )
-        return _DynamicToolContinuationDecision(
+        return _TurnContinuationDecision(
             next_prompt=_failed_model_switch_continuation_prompt(original_prompt),
         )
-    if continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
-        return _DynamicToolContinuationDecision(
+    if continuation_count >= TURN_CONTINUATION_LIMIT:
+        return _TurnContinuationDecision(
             limit_message=_model_switch_limit_message(model_name=model_name, when=when),
             model_switch_name=model_name,
             model_switch_when=when,
         )
-    return _DynamicToolContinuationDecision(
+    return _TurnContinuationDecision(
         next_prompt=_model_switch_continuation_prompt(
             original_prompt,
             model_name=model_name,
@@ -146,11 +146,11 @@ def continuation_decision_from_tools(
     *,
     original_prompt: str,
     continuation_count: int,
-) -> _DynamicToolContinuationDecision:
+) -> _TurnContinuationDecision:
     """Return the continuation decision for a completed model response."""
     model_switch = _model_switch_from_tools(tools)
     if model_switch is None:
-        return _DynamicToolContinuationDecision()
+        return _TurnContinuationDecision()
     return _model_switch_decision(
         model_switch,
         original_prompt=original_prompt,

@@ -31,9 +31,16 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.agno_compat_prepared_tools import prepare_team_prompt_tools, temporary_tool_instructions
+from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names
+from mindroom.providers.openai_tool_search import model_deferred_tool_names
+from mindroom.providers.portable_tool_search import portable_deferred_tool_names
 from mindroom.timing import timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from mindroom.tool_system.tool_schema_cache import cached_processed_schema
+from mindroom.tool_system.tool_schema_cache import (
+    default_function_parameters,
+    live_function_definition,
+    processed_function_definition,
+)
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -90,21 +97,29 @@ def team_static_token_estimator(team: Team) -> _StaticTokenEstimator:
     return _StaticTokenEstimator(partial(_estimate_team_non_prompt_static_tokens, team))
 
 
+def deferred_wire_tool_names(model: object) -> frozenset[str]:
+    """Return the function names a model's tool search keeps off the provider request until it finds them."""
+    return claude_deferred_tool_names(model) | model_deferred_tool_names(model) | portable_deferred_tool_names(model)
+
+
 def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
     """Estimate system-message and tool tokens that do not depend on the prompt text."""
     surface = _agent_prompt_tool_surface(agent)
+    deferred = deferred_wire_tool_names(agent.model)
+    payloads = [payload for payload in surface.payloads if payload["name"] not in deferred]
     session, _run_response, run_context = _agent_prompt_estimation_inputs(agent)
     with temporary_tool_instructions(agent, surface.tool_instructions):
         system_message = agent.get_system_message(
             session=session,
             run_context=run_context,
-            tools=cast("list[Function | dict]", list(surface.payloads)) or None,
+            tools=cast("list[Function | dict]", payloads) or None,
             add_session_state_to_context=False,
         )
     static_tokens = 0
     if system_message is not None and system_message.content is not None:
         static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + surface.definition_tokens
+    definition_tokens = surface.definition_tokens if not deferred else _definition_tokens(payloads)
+    return static_tokens + definition_tokens
 
 
 def _estimate_team_non_prompt_static_tokens(team: Team) -> int:
@@ -188,7 +203,7 @@ def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
         payloads_by_name: dict[str, _ToolDefinition] = {}
         for tool in prepared.tools:
             if isinstance(tool, Function):
-                payload = _live_function_payload(tool)
+                payload = live_function_definition(tool)
             elif _is_tool_definition_dict(tool):
                 payload = _dict_tool_payload(tool)
             else:
@@ -204,15 +219,18 @@ def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
     return surface
 
 
+def _definition_tokens(payloads: Sequence[_ToolDefinition]) -> int:
+    return len(stable_serialize(list(payloads))) // 4 if payloads else 0
+
+
 def _build_prompt_tool_surface(
     payloads: list[_ToolDefinition],
     tool_instructions: list[str],
 ) -> _PromptToolSurface:
-    definition_tokens = len(stable_serialize(payloads)) // 4 if payloads else 0
     return _PromptToolSurface(
         payloads=tuple(payloads),
         tool_instructions=tuple(tool_instructions),
-        definition_tokens=definition_tokens,
+        definition_tokens=_definition_tokens(payloads),
     )
 
 
@@ -241,14 +259,14 @@ def _prompt_tool_surface_for_tools(tools: object) -> _PromptToolSurface:
 
 def _prompt_payload_candidates(tool: object) -> list[tuple[Function | None, _ToolDefinition]]:
     if isinstance(tool, Function):
-        return [(tool, _processed_function_payload(tool))]
+        return [(tool, processed_function_definition(tool))]
     if isinstance(tool, Toolkit):
-        return [(function, _processed_function_payload(function)) for function in _toolkit_functions(tool).values()]
+        return [(function, processed_function_definition(function)) for function in _toolkit_functions(tool).values()]
     if _is_tool_definition_dict(tool):
         return [(None, _dict_tool_payload(tool))]
     if callable(tool):
         function = Function.from_callable(tool)
-        return [(function, _live_function_payload(function))]
+        return [(function, live_function_definition(function))]
     return []
 
 
@@ -261,36 +279,6 @@ def _toolkit_functions(toolkit: Toolkit) -> dict[str, Function]:
     for name, function in toolkit.async_functions.items():
         functions.setdefault(name, function)
     return functions
-
-
-def _processed_function_payload(function: Function) -> _ToolDefinition:
-    """Build one prompt-only payload with a processed schema, never mutating the input."""
-    if function.skip_entrypoint_processing or function.entrypoint is None:
-        return _live_function_payload(function)
-    effective_strict = False if function.strict is None else function.strict
-    snapshot = cached_processed_schema(function, strict=effective_strict)
-    if snapshot is None:
-        prepared_function = function.model_copy(deep=True)
-        prepared_function.process_entrypoint(strict=effective_strict)
-        return {
-            "name": prepared_function.name,
-            "description": prepared_function.description or "",
-            "parameters": prepared_function.parameters or _default_function_parameters(),
-        }
-    return {
-        "name": function.name,
-        "description": snapshot.description or "",
-        "parameters": snapshot.parameters or _default_function_parameters(),
-    }
-
-
-def _live_function_payload(function: Function) -> _ToolDefinition:
-    """Build one prompt-only payload from a Function's current schema fields."""
-    return {
-        "name": function.name,
-        "description": function.description or "",
-        "parameters": deepcopy(function.parameters) if function.parameters else _default_function_parameters(),
-    }
 
 
 def _is_tool_definition_dict(tool: object) -> TypeGuard[_ToolDefinition]:
@@ -306,12 +294,8 @@ def _dict_tool_payload(tool: _ToolDefinition) -> _ToolDefinition:
     return {
         "name": str(tool["name"]),
         "description": str(tool.get("description", "")),
-        "parameters": deepcopy(parameters) if isinstance(parameters, dict) else _default_function_parameters(),
+        "parameters": deepcopy(parameters) if isinstance(parameters, dict) else default_function_parameters(),
     }
-
-
-def _default_function_parameters() -> dict[str, object]:
-    return {"type": "object", "properties": {}, "required": []}
 
 
 def _team_prompt_estimation_inputs(team: Team) -> tuple[TeamSession, TeamRunOutput, RunContext]:

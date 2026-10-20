@@ -97,12 +97,12 @@ from mindroom.response_turn import (
     BlockingAttemptResolution,
     BlockingTurnAdapter,
     CompletedAttempt,
-    DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
@@ -223,9 +223,9 @@ def _initial_agent_continuation(
     current_prompt_is_structured: bool,
     current_event_id: str | None,
     run_id: str | None,
-) -> DynamicContinuationRunState:
+) -> TurnContinuationRunState:
     """Build the initial continuation state for one agent response turn."""
-    return DynamicContinuationRunState.initial(
+    return TurnContinuationRunState.initial(
         prompt=prompt,
         model_prompt=model_prompt,
         current_timestamp_ms=current_timestamp_ms,
@@ -1633,7 +1633,7 @@ async def ai_response(  # noqa: C901, PLR0915
 
     async def _run_blocking_attempt(  # noqa: C901
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> BlockingAttemptResolution:
         """Run one prepared agent attempt."""
         try:
@@ -2149,7 +2149,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0915
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:

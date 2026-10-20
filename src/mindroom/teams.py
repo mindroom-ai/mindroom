@@ -107,12 +107,12 @@ from mindroom.response_turn import (
     BlockingTurnAdapter,
     CompletedApprovalRun,
     CompletedAttempt,
-    DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
     PausedAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
     apply_local_approval_decisions,
@@ -860,7 +860,7 @@ def _has_visible_team_output(response: TeamRunOutput | RunOutput) -> bool:
     and neither do session-history assistant messages (excluded in
     ``_get_response_content``) — both made the empty-run guard dead after the
     first turn of a session. The "No team response generated." placeholder
-    does not count either, so the dynamic-tool continuation limit message can
+    does not count either, so the turn continuation limit message can
     replace it.
     """
     return bool(format_team_response(response)) or bool(_get_response_content(response).strip())
@@ -1976,9 +1976,9 @@ def _initial_team_continuation(
     current_prompt_is_structured: bool,
     current_event_id: str | None,
     run_id: str | None,
-) -> DynamicContinuationRunState:
+) -> TurnContinuationRunState:
     """Build the continuation state for one team turn's first attempt."""
-    return DynamicContinuationRunState.initial(
+    return TurnContinuationRunState.initial(
         prompt=message,
         model_prompt=None,
         current_timestamp_ms=current_timestamp_ms,
@@ -3032,7 +3032,7 @@ async def team_response(  # noqa: C901, PLR0915
 
     async def _run_team_attempt(  # noqa: C901, PLR0912, PLR0915
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> BlockingAttemptResolution:
         """Run one prepared team attempt."""
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
@@ -3504,7 +3504,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
@@ -3821,7 +3821,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 # The driver emits response_text only after settling the
                 # attempt: a pre-settle yield would leak the fallback
                 # placeholder before an empty-run retry, or stale
-                # first-attempt text before a dynamic-tool continuation.
+                # first-attempt text before a same-turn continuation.
                 yield AttemptResolved(
                     CompletedAttempt(
                         response_text=response_text,

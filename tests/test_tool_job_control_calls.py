@@ -15,7 +15,6 @@ from agno.team import Team
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
-from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
@@ -25,6 +24,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 

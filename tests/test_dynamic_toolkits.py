@@ -29,6 +29,7 @@ from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
 )
+from mindroom.history.prompt_tokens import agent_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.providers.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
@@ -36,7 +37,7 @@ from mindroom.providers.portable_tool_search import portable_deferred_tool_names
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
-    suppress_fully_deferred_toolkit_instructions,
+    defer_toolkit,
     visible_tool_surface,
 )
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -316,7 +317,6 @@ def test_initial_deferred_tools_attach_under_a_restricted_selection_with_implied
 
     surface = visible_tool_surface(agent_name="code", config=config, loaded_tools=[])
 
-    assert surface.loaded_tools == ("matrix_message",)
     assert [entry.name for entry in surface.runtime_tool_configs] == ["matrix_message", "attachments", "matrix_room"]
 
 
@@ -761,7 +761,6 @@ def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path
 
     surface = visible_tool_surface(agent_name="code", config=config)
 
-    assert surface.loaded_tools == ()
     assert "homeassistant" not in {entry.name for entry in surface.runtime_tool_configs}
 
 
@@ -948,7 +947,7 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
-    suppress_fully_deferred_toolkit_instructions(toolkit)
+    defer_toolkit("deferred", "", toolkit)
     agent = Agent(id="deferred-agent", model=OpenAIChat(id="test"), tools=[toolkit], instructions=["BASE"])
 
     assert toolkit.functions["deferred_tool"].add_instructions is False
@@ -992,7 +991,7 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         instructions=deferred_toolkit_marker,
         add_instructions=True,
     )
-    suppress_fully_deferred_toolkit_instructions(deferred_toolkit)
+    defer_toolkit("deferred", "", deferred_toolkit)
     agent = Agent(id="collision-agent", model=OpenAIChat(id="test"), tools=[active_toolkit, deferred_toolkit])
 
     assert active_toolkit.add_instructions is True
@@ -1381,8 +1380,7 @@ class _WeatherTools(Toolkit):
 
 
 def _deferred(toolkit: Toolkit, description: str) -> DeferredToolkit:
-    instructions = toolkit.instructions if toolkit.add_instructions else None
-    return DeferredToolkit(toolkit.name, description, instructions, toolkit)
+    return defer_toolkit(toolkit.name, description, toolkit)
 
 
 def _search_toolkit(*deferred: DeferredToolkit) -> DynamicToolsToolkit:
@@ -1461,3 +1459,175 @@ def test_call_tool_fallback_returns_retry_guidance() -> None:
     assert payload["status"] == "error"
     assert "'crm_lookpu' was not called" in payload["message"]
     assert "tool_search" in payload["message"]
+
+
+def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
+    """call_tool's arguments must allow any JSON values, or schema-enforcing servers cannot emit real calls."""
+    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
+    function.process_entrypoint(strict=False)
+
+    arguments = function.parameters["properties"]["arguments"]
+    object_schema = next(option for option in arguments.get("anyOf", [arguments]) if option.get("type") == "object")
+    assert object_schema.get("additionalProperties", True) is True
+    assert "properties" not in object_schema
+
+
+def test_call_tool_schema_converts_to_a_plain_gemini_object() -> None:
+    """Gemini conversion must not invent placeholder argument keys."""
+    convert_schema = pytest.importorskip("agno.utils.gemini").convert_schema
+    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
+    function.process_entrypoint(strict=False)
+
+    converted = convert_schema(function.parameters)
+
+    assert converted is not None
+    assert "example_key" not in str(converted)
+
+
+class _DualTools(Toolkit):
+    """Registers a sync and an async implementation under one name, as async-capable toolkits do."""
+
+    def __init__(self) -> None:
+        super().__init__(name="dual", tools=[self.lookup])
+        self.async_functions["lookup"] = Function.from_callable(self.lookup_async, name="lookup")
+
+    def lookup(self, customer_id: int) -> str:
+        """Look up a customer synchronously."""
+        return str(customer_id)
+
+    async def lookup_async(self, account_id: int) -> str:
+        """Look up an account asynchronously."""
+        return str(account_id)
+
+
+def test_tool_search_describes_the_async_implementation_agno_runs() -> None:
+    """Agno prefers async implementations in async runs, so search must describe that one."""
+    toolkit = _search_toolkit(_deferred(_DualTools(), "Dual"))
+
+    match = _tool_payload(toolkit.tool_search("lookup"))["matches"][0]
+
+    assert set(match["parameters"]["properties"]) == {"account_id"}
+
+
+class _PingTools(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="ping", tools=[self.ping])
+        self.functions["ping"].instructions = "Only ping hosts the user named."
+
+    def ping(self, host: str) -> str:
+        """Ping a host."""
+        return host
+
+
+def test_tool_search_returns_function_instructions_kept_out_of_the_prompt() -> None:
+    """Per-function guidance a deferred function would render arrives with its search result instead."""
+    pings = _PingTools()
+    toolkit = _search_toolkit(_deferred(pings, "Network checks"))
+
+    match = _tool_payload(toolkit.tool_search("ping"))["matches"][0]
+
+    assert match["instructions"] == "Only ping hosts the user named."
+    assert pings.functions["ping"].add_instructions is False
+
+
+class _GithubTools(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="github", tools=[self.close_issue, self.assign_issue])
+
+    def close_issue(self, number: int) -> str:
+        """Close an issue."""
+        return str(number)
+
+    def assign_issue(self, number: int, user: str) -> str:
+        """Assign an issue to a user."""
+        return f"{number} {user}"
+
+
+class _JiraTools(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="jira", tools=[self.create_issue])
+
+    def create_issue(self, summary: str) -> str:
+        """Create an issue."""
+        return summary
+
+
+def test_tool_search_ranks_functions_matching_more_query_words_first() -> None:
+    """A natural-language query naming the toolkit and the action finds that toolkit's function first."""
+    toolkit = _search_toolkit(_deferred(_GithubTools(), "GitHub"), _deferred(_JiraTools(), "Jira"))
+
+    matches = _tool_payload(toolkit.tool_search("jira create issue"))["matches"]
+
+    assert (matches[0]["toolkit"], matches[0]["name"]) == ("jira", "create_issue")
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [("openai", "gpt-4o-mini"), ("anthropic", "claude-opus-5")],
+)
+def test_deferred_function_shadowed_by_an_eager_one_stays_eager_and_unsearchable(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
+    """Agno runs the first toolkit's function for a name, so a later deferred duplicate is neither hidden nor offered."""
+    raw = _base_config_data()
+    raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = ["file", {"coding": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+
+    deferred_names = portable_deferred_tool_names(agent.model) | vars(agent.model).get(
+        _DEFERRED_TOOL_NAMES_ATTR,
+        frozenset(),
+    )
+    assert "read_file" not in deferred_names
+    assert deferred_names
+    search = next((tool for tool in agent.tools if tool.name == "dynamic_tools"), None)
+    if search is not None:
+        matches = _tool_payload(search.tool_search("read_file"))["matches"]
+        assert all(match["name"] != "read_file" for match in matches)
+
+
+def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:
+    """Native tool search never rewrites call_tool, so an authored dynamic_tools entry must not offer it."""
+    raw = _base_config_data()
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True}}, "dynamic_tools"]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
+    assert "call_tool" not in function_names
+    assert "tool_search" not in function_names
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [("openai", "gpt-4o-mini"), ("anthropic", "claude-opus-5")],
+)
+def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
+    """The history budget must not charge definitions that tool search keeps off the request."""
+
+    def estimate(tools: list[object]) -> int:
+        raw = _base_config_data()
+        raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+        raw["agents"]["code"]["tools"] = tools  # type: ignore[index]
+        config = _validated_config(tmp_path, raw)
+        agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+        return agent_static_token_estimator(agent).non_prompt_tokens()
+
+    base = estimate(["sleep"])
+    eager = estimate(["sleep", "github"])
+    deferred = estimate(["sleep", {"github": {"defer": True}}])
+
+    assert deferred - base < (eager - base) / 4

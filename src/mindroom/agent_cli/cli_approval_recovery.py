@@ -17,7 +17,6 @@ from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.projection import register_cli_media
 from mindroom.approval.tool_owners import validate_approval_tool_owners
 from mindroom.delegation.state import DelegationState
-from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
     persist_interrupted_replay_snapshot,
@@ -41,6 +40,7 @@ from mindroom.tool_system.agent_tool_calls import (
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.turn_continuation import continuation_decision_from_tools
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

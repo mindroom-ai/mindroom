@@ -63,7 +63,6 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     RuntimePaths,
 )
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, run_error_event_text
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.turn_recorder import TurnRecorder
@@ -95,6 +94,7 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -2094,8 +2094,8 @@ class TestUserIdPassthrough:
         assert len(tool_trace) == 1
 
     @pytest.mark.asyncio
-    async def test_ai_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
-        """Dynamic tool loads should rebuild the agent and continue the same task."""
+    async def test_ai_response_continues_after_next_turn_model_switch(self, tmp_path: Path) -> None:
+        """A next-turn model switch should rebuild the agent and continue the same task."""
         first_agent = MagicMock()
         first_agent.model = MagicMock()
         first_agent.model.__class__.__name__ = "OpenAIChat"
@@ -2315,8 +2315,8 @@ class TestUserIdPassthrough:
         assert observed_tool_models == ["default", "large"]
 
     @pytest.mark.asyncio
-    async def test_ai_response_continuation_cancelled_run_preserves_dynamic_tool_trace(self, tmp_path: Path) -> None:
-        """Cancelled continuation runs should keep dynamic-tool calls in interrupted history."""
+    async def test_ai_response_continuation_cancelled_run_preserves_first_attempt_trace(self, tmp_path: Path) -> None:
+        """Cancelled continuation runs should keep the first attempt's tool calls in interrupted history."""
         first_agent = MagicMock()
         first_agent.model = MagicMock()
         first_agent.model.__class__.__name__ = "OpenAIChat"
@@ -2386,8 +2386,8 @@ class TestUserIdPassthrough:
         assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
-        """Streaming dynamic tool loads should rebuild the agent before continuing."""
+    async def test_stream_agent_response_continues_after_next_turn_model_switch(self, tmp_path: Path) -> None:
+        """Streaming next-turn model switches should rebuild the agent before continuing."""
         first_agent = MagicMock()
         first_agent.model = MagicMock()
         first_agent.model.__class__.__name__ = "OpenAIChat"
@@ -2527,11 +2527,11 @@ class TestUserIdPassthrough:
         assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
-    async def test_ai_response_returns_message_after_dynamic_tool_limit(self, tmp_path: Path) -> None:
-        """Repeated dynamic tool manager calls should return fallback text in the default visible mode."""
+    async def test_ai_response_returns_message_after_continuation_limit(self, tmp_path: Path) -> None:
+        """Repeated rejected model switches should return fallback text in the default visible mode."""
         agents = []
         prepared_runs = []
-        for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+        for index in range(TURN_CONTINUATION_LIMIT + 1):
             agent = MagicMock()
             agent.model = MagicMock()
             agent.model.__class__.__name__ = "OpenAIChat"
@@ -2565,15 +2565,15 @@ class TestUserIdPassthrough:
             )
 
         assert "Model switching did not produce a final answer" in response
-        assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert mock_prepare.await_count == TURN_CONTINUATION_LIMIT + 1
         assert all(agent.arun.await_count == 1 for agent in agents)
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_returns_message_after_dynamic_tool_limit(self, tmp_path: Path) -> None:
-        """Streaming repeated dynamic tool manager calls should yield visible fallback text."""
+    async def test_stream_agent_response_returns_message_after_continuation_limit(self, tmp_path: Path) -> None:
+        """Streaming repeated rejected model switches should yield visible fallback text."""
         agents = []
         prepared_runs = []
-        for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+        for index in range(TURN_CONTINUATION_LIMIT + 1):
             agent = MagicMock()
             agent.model = MagicMock()
             agent.model.__class__.__name__ = "OpenAIChat"
@@ -2613,7 +2613,7 @@ class TestUserIdPassthrough:
         content_chunks = [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)]
         assert len(content_chunks) == 1
         assert "Model switching did not produce a final answer" in content_chunks[0]
-        assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert mock_prepare.await_count == TURN_CONTINUATION_LIMIT + 1
         assert all(agent.arun.call_count == 1 for agent in agents)
 
     @pytest.mark.asyncio

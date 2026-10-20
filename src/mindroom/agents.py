@@ -83,7 +83,8 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     VisibleToolSurface,
-    suppress_fully_deferred_toolkit_instructions,
+    defer_toolkit,
+    drop_shadowed_deferred_functions,
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
@@ -161,7 +162,6 @@ class _AgentToolAssembly:
     """Toolkits and dynamic-tool visibility assembled for one agent instance."""
 
     tools: list[Toolkit]
-    hidden_toolkits: frozenset[str]
     # Toolkits whose surviving functions stay off the provider request until tool search finds them.
     # Keep the owners rather than a pre-projection name snapshot because final
     # MCP collision projection may remove a deferred function while preserving
@@ -1554,14 +1554,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
                     domain_name = tool_entry.authored_name or tool_name
                     metadata = TOOL_METADATA.get(domain_name)
                     deferred_toolkits.append(
-                        DeferredToolkit(
-                            domain_name=domain_name,
-                            description=metadata.description if metadata else "",
-                            instructions=toolkit.instructions if toolkit.add_instructions else None,
-                            toolkit=toolkit,
-                        ),
+                        defer_toolkit(domain_name, metadata.description if metadata else "", toolkit),
                     )
-                    suppress_fully_deferred_toolkit_instructions(toolkit)
         except _MatrixRoomRuntimeToolCollisionError:
             raise
         except Exception as exc:
@@ -1577,7 +1571,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
-    if dynamic_tools_entry is not None and deferred_toolkits:
+    # Only portable tool search rewrites call_tool, so an authored dynamic_tools entry is ignored everywhere else.
+    if dynamic_tools_entry is not None and portable_deferred_tools and deferred_toolkits:
         dynamic_toolkit = build_entry(dynamic_tools_entry)
         if dynamic_toolkit is not None:
             tools.append(dynamic_toolkit)
@@ -1598,11 +1593,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
     if controls is not None:
         tools.append(controls)
     hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
+    drop_shadowed_deferred_functions(tools, deferred_toolkits)
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
     return _AgentToolAssembly(
         tools=tools,
-        hidden_toolkits=hidden_toolkits,
         deferred_toolkits=tuple(deferred_toolkits),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
