@@ -127,7 +127,7 @@ def _configured_tool_configs(context: MCPFunctionSurfaceContext, agent_name: str
     return visible_tool_surface(
         agent_name=agent_name,
         config=context.config,
-        loaded_tools=(),
+        deferred_tools=(),
         enable_dynamic_tools_manager=True,
         include_matrix_room_runtime_tools=True,
     ).runtime_tool_configs

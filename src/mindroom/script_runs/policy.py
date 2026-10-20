@@ -90,15 +90,11 @@ def _visible_script_tool_entries(
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
     ensure_tool_registry_loaded(context.runtime_paths, config)
-    entity_view = config.resolve_entity(context.agent_name)
-    all_deferred_tools = [entry.name for entry in entity_view.authored_deferred_tool_configs]
     return tuple(
         entry
         for entry in visible_tool_surface(
             agent_name=context.agent_name,
             config=config,
-            loaded_tools=all_deferred_tools,
-            enable_dynamic_tools_manager=False,
         ).runtime_tool_configs
         if entry.name in TOOL_METADATA and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
     )

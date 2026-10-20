@@ -884,7 +884,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
         if not deferred_toolkits:
             return None
-        return wrap_direct(DynamicToolsToolkit(deferred_toolkits=deferred_toolkits))
+        # Search results must reach the model inline, so they skip output-file redirection.
+        return bind_toolkit_construction(
+            DynamicToolsToolkit(deferred_toolkits=deferred_toolkits),
+            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
+        )
 
     return _build_registered_agent_tool(
         tool_name,
@@ -1249,7 +1253,7 @@ def _resolve_agent_dynamic_tool_selection(
     return visible_tool_surface(
         agent_name=agent_name,
         config=config,
-        loaded_tools=required_tool_names if minimal_mode and not eager_deferred_tools else None,
+        deferred_tools=required_tool_names if minimal_mode and not eager_deferred_tools else None,
         delegation_depth=delegation_depth,
         enable_dynamic_tools_manager=portable_deferred_tools,
         include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,

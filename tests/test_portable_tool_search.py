@@ -69,6 +69,22 @@ def test_projection_wraps_deferred_history_without_mutating_it() -> None:
     assert result.tool_name == "crm_lookup"
 
 
+def test_projection_renames_results_in_combined_tool_messages() -> None:
+    # Older Gemini history stores several results in one tool message, each entry naming its function.
+    combined = Message(
+        role="tool",
+        tool_calls=[
+            {"tool_call_id": "c1", "tool_name": "crm_lookup", "content": "ok"},
+            {"tool_call_id": "c2", "tool_name": "shell", "content": "ls"},
+        ],
+    )
+
+    [projected], _ = project_portable_request([combined], None, DEFERRED)
+
+    assert [entry["tool_name"] for entry in projected.tool_calls] == ["call_tool", "shell"]
+    assert combined.tool_calls[0]["tool_name"] == "crm_lookup"
+
+
 def test_projection_is_byte_stable() -> None:
     assistant = Message(role="assistant", tool_calls=[_call("c1", "crm_lookup", '{"id": 7, "note": "é"}')])
 

@@ -14,6 +14,7 @@ from agno.session import AgentSession
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
+from mindroom import agents as agents_module
 from mindroom.agents import (
     _context_hidden_toolkits,
     create_agent,
@@ -148,14 +149,14 @@ def _runtime_tool_configs(
     *,
     agent_name: str,
     config: Config,
-    loaded_tools: list[str],
+    deferred_tools: list[str],
     enable_dynamic_tools_manager: bool,
 ) -> list[EffectiveToolConfig]:
     return list(
         visible_tool_surface(
             agent_name=agent_name,
             config=config,
-            loaded_tools=loaded_tools,
+            deferred_tools=deferred_tools,
             enable_dynamic_tools_manager=enable_dynamic_tools_manager,
         ).runtime_tool_configs,
     )
@@ -315,7 +316,7 @@ def test_initial_deferred_tools_attach_under_a_restricted_selection_with_implied
     raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": True, "initial": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    surface = visible_tool_surface(agent_name="code", config=config, loaded_tools=[])
+    surface = visible_tool_surface(agent_name="code", config=config, deferred_tools=[])
 
     assert [entry.name for entry in surface.runtime_tool_configs] == ["matrix_message", "attachments", "matrix_room"]
 
@@ -352,7 +353,7 @@ def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_pa
     runtime_configs = _runtime_tool_configs(
         agent_name="code",
         config=config,
-        loaded_tools=[],
+        deferred_tools=[],
         enable_dynamic_tools_manager=False,
     )
     overrides_by_name = {entry.name: entry.tool_config_overrides for entry in runtime_configs}
@@ -373,13 +374,13 @@ def test_loaded_deferred_concrete_tool_preserves_override_over_preset_child(tmp_
     unloaded_configs = _runtime_tool_configs(
         agent_name="code",
         config=config,
-        loaded_tools=[],
+        deferred_tools=[],
         enable_dynamic_tools_manager=False,
     )
     loaded_configs = _runtime_tool_configs(
         agent_name="code",
         config=config,
-        loaded_tools=["shell"],
+        deferred_tools=["shell"],
         enable_dynamic_tools_manager=False,
     )
     unloaded_names = [entry.name for entry in unloaded_configs]
@@ -404,7 +405,7 @@ def test_loaded_parent_keeps_implied_child_when_child_is_separately_deferred(tmp
         for entry in _runtime_tool_configs(
             agent_name="code",
             config=config,
-            loaded_tools=[],
+            deferred_tools=[],
             enable_dynamic_tools_manager=False,
         )
     ]
@@ -413,7 +414,7 @@ def test_loaded_parent_keeps_implied_child_when_child_is_separately_deferred(tmp
         for entry in _runtime_tool_configs(
             agent_name="code",
             config=config,
-            loaded_tools=["matrix_message"],
+            deferred_tools=["matrix_message"],
             enable_dynamic_tools_manager=False,
         )
     ]
@@ -443,7 +444,7 @@ def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
         for entry in _runtime_tool_configs(
             agent_name="code",
             config=config,
-            loaded_tools=[],
+            deferred_tools=[],
             enable_dynamic_tools_manager=False,
         )
     ]
@@ -452,7 +453,7 @@ def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
         for entry in _runtime_tool_configs(
             agent_name="code",
             config=config,
-            loaded_tools=["matrix_message"],
+            deferred_tools=["matrix_message"],
             enable_dynamic_tools_manager=False,
         )
     ]
@@ -476,7 +477,7 @@ def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None
         for entry in _runtime_tool_configs(
             agent_name="code",
             config=config,
-            loaded_tools=[],
+            deferred_tools=[],
             enable_dynamic_tools_manager=True,
         )
     ]
@@ -485,7 +486,7 @@ def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None
         for entry in _runtime_tool_configs(
             agent_name="code",
             config=config,
-            loaded_tools=["shell"],
+            deferred_tools=["shell"],
             enable_dynamic_tools_manager=True,
         )
     ]
@@ -1731,3 +1732,26 @@ def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
 
     assert "tool_search" in _tool_payload(entrypoint(customer_id=7))["message"]
     assert "'crm_lookpu' was not called" in _tool_payload(entrypoint(name="crm_lookpu", customer_id=7))["message"]
+
+
+def test_search_toolkit_results_are_never_redirected_to_output_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Definitions must reach the model inline, so the search toolkit skips output-file wrapping."""
+    wrapped: list[str] = []
+    original = agents_module.wrap_toolkit_for_output_files
+
+    def recording_wrap(toolkit: Toolkit, policy: object) -> Toolkit:
+        wrapped.append(toolkit.name)
+        return original(toolkit, policy)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agents_module, "wrap_toolkit_for_output_files", recording_wrap)
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["sleep", {"calculator": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+
+    assert "dynamic_tools" in {toolkit.name for toolkit in agent.tools}
+    assert "dynamic_tools" not in wrapped

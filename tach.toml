@@ -7155,7 +7155,6 @@ expose = [
     "VisibleToolSurface",
     "defer_toolkit",
     "drop_shadowed_deferred_functions",
-    "has_deferred_tools",
     "visible_tool_surface",
 ]
 from = ["mindroom.tool_system.dynamic_toolkits"]

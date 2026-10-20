@@ -45,7 +45,7 @@ def _deferred_tool_names(config: Config, agent_name: str) -> list[str]:
     return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
 
 
-def _initial_loaded_tools(config: Config, agent_name: str) -> list[str]:
+def _initial_deferred_tools(config: Config, agent_name: str) -> list[str]:
     return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs if entry.initial]
 
 
@@ -85,7 +85,7 @@ def drop_shadowed_deferred_functions(tools: Sequence[Toolkit], deferred_toolkits
         seen |= names
 
 
-def has_deferred_tools(config: Config, agent_name: str) -> bool:
+def _has_deferred_tools(config: Config, agent_name: str) -> bool:
     """Return whether one agent has at least one authored deferred tool."""
     return bool(config.resolve_entity(agent_name).authored_deferred_tool_configs)
 
@@ -143,7 +143,7 @@ def _special_tool_names(
     if config.agent_uses_knowledge_graph(agent_name):
         tool_names.append("knowledge_graph")
 
-    if enable_dynamic_tools_manager and has_deferred_tools(config, agent_name):
+    if enable_dynamic_tools_manager and _has_deferred_tools(config, agent_name):
         tool_names.append("dynamic_tools")
 
     return tool_names
@@ -170,14 +170,13 @@ def _visible_authored_tool_configs(
     config: Config,
     agent_name: str,
     *,
-    loaded_deferred_tools: set[str],
+    attached_deferred_tools: set[str],
 ) -> list[EffectiveToolConfig]:
     visible_by_name: dict[str, EffectiveToolConfig] = {}
     hidden_deferred_by_name: dict[str, EffectiveToolConfig] = {}
 
     for authored_entry in config.resolve_entity(agent_name).authored_tool_configs:
-        is_loaded_deferred = authored_entry.defer and authored_entry.name in loaded_deferred_tools
-        is_visible_owner = not authored_entry.defer or is_loaded_deferred
+        is_visible_owner = not authored_entry.defer or authored_entry.name in attached_deferred_tools
         for tool_name in config.expand_tool_names([authored_entry.name]):
             expanded = _expanded_authored_entry_config(authored_entry, tool_name)
             expanded_precedence = _tool_config_owner_precedence(config, expanded)
@@ -253,23 +252,22 @@ def visible_tool_surface(
     *,
     agent_name: str,
     config: Config,
-    loaded_tools: Iterable[str] | None = None,
+    deferred_tools: Iterable[str] | None = None,
     delegation_depth: int = 0,
     enable_dynamic_tools_manager: bool = False,
     include_matrix_room_runtime_tools: bool = False,
 ) -> VisibleToolSurface:
     """Return the canonical provider-visible runtime tool surface for one agent.
 
-    ``loaded_tools`` limits which authored deferred tools are attached, and ``None`` attaches all of them.
+    ``deferred_tools`` limits which authored deferred tools are attached, and ``None`` attaches all of them.
     Deferred tools marked ``initial`` are always attached.
     """
-    requested_tools = _deferred_tool_names(config, agent_name) if loaded_tools is None else list(loaded_tools)
-    loaded_tool_names = _attachable_deferred_tools(
+    requested_tools = _deferred_tool_names(config, agent_name) if deferred_tools is None else list(deferred_tools)
+    attached_deferred_tools = _attachable_deferred_tools(
         config,
         agent_name,
-        [*_initial_loaded_tools(config, agent_name), *requested_tools],
+        [*_initial_deferred_tools(config, agent_name), *requested_tools],
     )
-    loaded_deferred_tools = set(loaded_tool_names)
     runtime_tool_configs = [
         EffectiveToolConfig(
             name=entry.name,
@@ -285,7 +283,7 @@ def visible_tool_surface(
         for entry in _visible_authored_tool_configs(
             config,
             agent_name,
-            loaded_deferred_tools=loaded_deferred_tools,
+            attached_deferred_tools=set(attached_deferred_tools),
         )
     ]
 

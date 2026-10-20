@@ -118,7 +118,10 @@ def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
 
 def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
     function = call.get("function")
-    if not isinstance(function, dict) or function.get("name") not in deferred:
+    if not isinstance(function, dict):
+        # Older Gemini history stores several results in one tool message, each entry naming its function.
+        return {**call, "tool_name": CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
+    if function.get("name") not in deferred:
         return call
     arguments = _json_object(function.get("arguments") or "{}") or {}
     wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
