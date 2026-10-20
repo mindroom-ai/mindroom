@@ -1,0 +1,58 @@
+# Portable Deferred Tools Design
+
+This record explains why deferred tools on models without native tool search use a fixed search-and-call wrapper instead of loading tools into the request at runtime.
+Native tool search on Claude and OpenAI Responses models is unchanged.
+
+## Problem
+
+Runtime loading gave each agent `list_tools`, `load_tool`, `unload_tool`, and `tool_search`, and `load_tool` added the toolkit to the provider `tools` array and its instructions to the system prompt.
+Every provider caches a byte-identical prompt prefix, and the tool definitions and system prompt sit at the front of that prefix: Anthropic orders tools, system, then messages, and open-model chat templates render tools inside the leading system block.
+Each load or unload therefore missed the cache for the whole conversation, and the same-turn continuation that rebuilt the agent after a load sent that uncached request immediately.
+The deferred-tool catalog in the system prompt also depended on the loaded set, so it changed with every load.
+
+## Decision
+
+On every model without native tool search, an agent with deferred tools sends one fixed tool list for the whole session: its eager tools plus `tool_search` and `call_tool`.
+`tool_search` returns the full definitions of matching functions, and the instructions of their toolkits, as an ordinary tool result, so discovery only appends to the end of the conversation.
+The model calls a discovered function through `call_tool(name, arguments)`, the shape of MCP's `tools/call`.
+MindRoom rewrites that call to the real function before Agno resolves it, and presents every stored call to a deferred function as a `call_tool` call when it sends history to the provider.
+Stored history, approvals, tool hooks, worker routing, background jobs, and the chat display therefore see only real function names, exactly as on the native path.
+Deferred toolkits are built when the agent is built, as the native path already does, so no per-session loaded-tool state exists.
+
+The rewrite happens at the model boundary rather than inside a dispatching tool because approval, hooks, worker routing, and job execution attach to the real Agno function.
+A dispatcher that invoked the real entrypoint from inside `call_tool` would bypass all of them.
+
+The model calls discovered functions through the wrapper instead of by their real names because those names are absent from the declared tool list.
+Inference servers that constrain tool names to the declared list (vLLM and llama.cpp grammars) cannot emit an undeclared name, and models are trained to call only declared tools.
+
+## Rejected Alternatives
+
+- **Placeholder declarations.**
+  Declaring every deferred function up front with a one-line description and permissive parameters keeps real names and needs no rewrite.
+  It costs roughly 20 to 40 tokens per function on every request and keeps a large catalog in front of the model, which deferral exists to avoid; MCP-heavy agents reach hundreds of functions.
+- **Append-only runtime loading.**
+  Appending revealed definitions to the end of the `tools` array keeps only the prefix before the new definition cached.
+  Because templates render tools before the conversation, the conversation itself still misses the cache.
+  OpenRouter's client-side deferral on endpoints without native support works this way.
+- **OpenRouter `deferred_tools` (portable profile).**
+  It implements the same search-and-call wrapper on OpenRouter's side for any model, but only for OpenRouter routes.
+  Its state travels in encrypted reasoning that must be replayed byte-for-byte, so compaction, redaction rollback, interrupted-reply replay, model switches, and catalog changes after a config reload fail with `deferred_tools_history_changed` or `deferred_tools_catalog_changed`.
+  It was also a beta that restricts `tool_choice` and was still rolling out per account in October 2026.
+  Its model-facing wrapper names and schemas are not published, so there was nothing exact to copy.
+- **Anthropic mid-conversation `tool_addition`.**
+  It adds tool definitions inline without touching the cache, but only on recent Claude models, which already use native tool search.
+
+## Assumptions and Constraints
+
+- Building every deferred toolkit when the agent is built is acceptable, because the native path has done so since #1417.
+- Providers accept a `call_tool` call whose `arguments` is a nested JSON object; weaker models sometimes send it as a JSON string, which the rewrite accepts.
+- Deferred function arguments lose provider-side `strict` schema enforcement; Agno's existing argument parsing and validation return errors to the model so it can retry.
+- Discovered definitions live in the conversation, so after compaction summarizes them away the model searches again.
+- The rewrite binds to Agno internals with no public extension point, so each binding carries an `AGNO_COMPAT` record.
+- Minimal mode keeps calling deferred toolkits through `mindroom-agent`, which never changed the provider tool list.
+
+## Evidence
+
+Validated by a live comparison between `main` and this change on OpenRouter models, over a multi-turn conversation that discovers and calls two deferred tools.
+The comparison records `cached_tokens` per request and whether each deferred call succeeds.
+Results are added below when the run completes.
