@@ -1445,7 +1445,7 @@ class Config(BaseModel):
         return policy.scope_label
 
     def _get_agent_eager_tools(self, agent_name: str) -> list[str]:
-        """Return expanded non-deferred tools visible without a dynamic load."""
+        """Return the expanded eager (non-deferred) tools of one agent."""
         tool_names: list[str] = []
         for entry in self._get_agent_authored_tool_configs(agent_name):
             if entry.defer:

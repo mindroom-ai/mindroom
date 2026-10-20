@@ -1553,7 +1553,7 @@ async def ai_response(  # noqa: C901, PLR0915
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
-        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        eager_deferred_tools: Whether to send every deferred toolkit as an ordinary tool from the start.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
@@ -2087,7 +2087,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
-        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        eager_deferred_tools: Whether to send every deferred toolkit as an ordinary tool from the start.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
