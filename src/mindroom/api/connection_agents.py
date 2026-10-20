@@ -40,7 +40,7 @@ def require_connections_same_origin(
     detail: str = "Connection changes require a same-origin request",
 ) -> None:
     """Reject mutations from another origin (shared helper for connections and egress routes)."""
-    expected = deployment_origin(runtime_paths, str(request.base_url))
+    expected = deployment_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
     if expected is None or not (expected.startswith("https://") or is_local_origin(expected)):
         raise HTTPException(
             403,

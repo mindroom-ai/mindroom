@@ -111,7 +111,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     """Trust a Matrix OpenID token only from an allowlisted Chat origin, then start a portal session."""
     # The portal page reports the postMessage origin it received the token from. Without this
     # allowlist a page the victim visits could hand the portal an attacker's token.
-    origin = deployment_origin(paths, str(request.base_url))
+    origin = deployment_origin(paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
     if not connections_client_origin_allowed(paths, body.client_origin, origin):
         raise HTTPException(403, "Connections sign-in is not allowed from this client", headers=CONNECTIONS_HEADERS)
     # Without binding, any backend a user opens from Chat could replay their token here. Request headers cannot show

@@ -53,9 +53,9 @@ def _openid_audience(paths: RuntimePaths) -> str | None:
 async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
     """Verify only at the configured homeserver with no redirects or URL logging.
 
-    The origin of `MINDROOM_PUBLIC_URL` goes along as the audience, so a homeserver that binds tokens accepts only a
-    token Chat requested for this deployment. The audience never comes from the request, whose `Host` header a
-    replaying backend controls.
+    The origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset, goes along as the
+    audience, so a homeserver that binds tokens accepts only a token Chat requested for this deployment. The audience
+    never comes from the request, whose `Host` header a replaying backend controls.
     """
     domain = runtime_matrix_domain(paths)
     if token.matrix_server_name != domain:

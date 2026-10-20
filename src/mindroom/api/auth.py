@@ -615,11 +615,6 @@ async def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _Sup
     return response.user
 
 
-def _dashboard_origin(request: Request, settings: _ApiAuthSettings) -> str | None:
-    """Return this dashboard's public origin, which platform logins and browser mutations must name."""
-    return normalized_origin(settings.public_url or str(request.base_url))
-
-
 def _verified_platform_sso_claims(
     request: Request,
     settings: _ApiAuthSettings,
@@ -629,7 +624,7 @@ def _verified_platform_sso_claims(
     required_claims: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Verify a platform login ticket or session signed with this instance's own SSO key."""
-    audience = _dashboard_origin(request, settings)
+    audience = deployment_origin(settings.public_url, str(request.base_url))
     if settings.platform_sso_secret is None or audience is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
     try:
@@ -1001,7 +996,8 @@ def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
     to this deployment, outside hosted platform mode and never on OAuth callbacks.
     """
     snapshot = _bind_authenticated_request_snapshot(request)
-    cookie = connections_session_cookie(deployment_origin(snapshot.runtime_paths, str(request.base_url)))
+    public_url = cast("ApiAuthState", snapshot.auth_state).settings.public_url
+    cookie = connections_session_cookie(deployment_origin(public_url, str(request.base_url)))
     token = request.cookies.get(cookie)
     session = read_connections_session(token, now=time.time()) if token else None
     if session is None:
@@ -1211,7 +1207,7 @@ def _require_browser_mutation_origin(
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = _dashboard_origin(request, settings)
+    origin = deployment_origin(settings.public_url, str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
     require_same_origin(request, origin)
