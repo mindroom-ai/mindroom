@@ -119,7 +119,14 @@ def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
 def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
     function = call.get("function")
     if not isinstance(function, dict):
-        # Older Gemini history stores several results in one tool message, each entry naming its function.
+        # LEGACY_COMPAT: Combined Gemini tool-result messages.
+        # Legacy format: one role="tool" message with tool_call_id=None whose tool_calls entries each carry
+        # tool_call_id, tool_name, and content; selected here when an entry has no "function" key.
+        # Last legacy release: v2026.4.35 stored them through Agno 2.4.7's Gemini adapter; v2026.4.36 (Agno 2.5.13)
+        # writes one canonical tool message per result.
+        # Handling: entries naming a deferred function are renamed to call_tool, so the function responses Gemini
+        # receives after normalize_tool_messages splits the message match the wrapped calls; stored history is unchanged.
+        # Coverage: tests/test_portable_tool_search.py::test_projection_renames_results_in_combined_tool_messages.
         return {**call, "tool_name": CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
     if function.get("name") not in deferred:
         return call
