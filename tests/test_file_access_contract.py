@@ -365,7 +365,9 @@ async def _attach_with_outlook_mail(
         tool_output_workspace_root=workspace,
         file_access=file_access,
     )
-    result = json.loads(tool.outlook_mail_create_draft(["sam@example.org"], "Report", "Attached.", attachments=[raw_path]))
+    result = json.loads(
+        tool.outlook_mail_create_draft(["sam@example.org"], "Report", "Attached.", attachments=[raw_path]),
+    )
     attached = [
         base64.b64decode(attachment["contentBytes"])
         for request in graph.requests
