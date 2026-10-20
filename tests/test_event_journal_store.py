@@ -1692,10 +1692,10 @@ class TestBoundedReads:
     ) -> None:
         """A page holds the rows it was sized on, whatever lands before its content is loaded.
 
-        The page is sized in one query and loaded in a second, and neither
-        backend runs them against one snapshot. Replies committed in between
-        used to push the oldest sized rows, the thread root first, out of the
-        second query's window while the page still reported nothing behind it.
+        The page is sized in one query and loaded in a second. Before reads
+        ran against one snapshot, replies committed in between pushed the
+        oldest sized rows, the thread root first, out of the second query's
+        window while the page still reported nothing behind it.
         A thread summary read that page as the whole thread and titled it from
         a mid-thread reply.
         """
@@ -1715,16 +1715,16 @@ class TestBoundedReads:
         assert [m.logical_event_id for m in page.messages] == ["$root", "$answer"]
         assert page.next_cursor is None
 
-    async def test_a_page_whose_kept_rows_were_all_deleted_mid_read_still_points_behind_them(
+    async def test_a_read_does_not_see_a_write_committed_between_its_statements(
         self,
         journal_database: Callable[[], EventJournalStore],
     ) -> None:
-        """Older history stays reachable when every row a page kept is redacted before it is loaded.
+        """Every statement of one read sees the same snapshot.
 
-        A deleted row is absent from the content query, so a page whose every
-        kept row went that way loads nothing. Taking the cursor from the loaded
-        rows then said nothing was behind the page, and an export or a strict
-        read stopped there with the surviving history unread.
+        SQLite reads ran in autocommit and PostgreSQL reads at READ COMMITTED,
+        so each statement saw whatever had committed by then. A redaction
+        landing between a page's size and content queries left the page sized
+        on a row it could not load, and the page came back empty.
         """
         store = journal_database()
         alice = store.principal("agent@alice")
@@ -1739,7 +1739,7 @@ class TestBoundedReads:
             limit=1,
         )
 
-        assert page.messages == ()
+        assert [m.logical_event_id for m in page.messages] == ["$new"]
         assert page.next_cursor is not None
         behind = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=1, before=page.next_cursor)
         assert [m.logical_event_id for m in behind.messages] == ["$old"]

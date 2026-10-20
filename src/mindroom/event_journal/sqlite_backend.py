@@ -278,17 +278,18 @@ class SqliteBackend:
             raise RuntimeError(CLOSED_MESSAGE)
 
         def apply() -> T:
-            connection = self._reader()
-            connection.execute("BEGIN")
-            try:
-                return operation(_SqliteTransaction(connection))
-            finally:
-                connection.execute("ROLLBACK")
+            return self._apply_read(operation)
 
         return await self._recovery_offload.run(apply)
 
     def _apply_read[T](self, operation: Operation[T]) -> T:
-        return operation(_SqliteTransaction(self._reader()))
+        """Run one read in a transaction, so all its statements see the snapshot its first one took."""
+        connection = self._reader()
+        connection.execute("BEGIN")
+        try:
+            return operation(_SqliteTransaction(connection))
+        finally:
+            connection.execute("ROLLBACK")
 
     async def close(self) -> None:
         """Close admission once and await the one owned connection teardown.
