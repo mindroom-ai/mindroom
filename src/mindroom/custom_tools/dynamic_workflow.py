@@ -914,7 +914,7 @@ def _participant_run_config(
     """Return the participant policy: approval by default, with the caller's allowed tools pre-approved.
 
     A participant may read the skills it names whenever its caller could without approval;
-    reading or running a skill's scripts still needs an operator rule.
+    reading a skill's scripts still needs an operator rule.
     """
     return build_automation_approval_config(
         context.config,

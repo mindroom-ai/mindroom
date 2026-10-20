@@ -118,10 +118,10 @@ Agents see their available skills in the system prompt and load details with the
 
 - `get_skill_instructions(skill_name)` loads the full instructions for a skill
 - `get_skill_reference(skill_name, reference_path)` reads a reference document
-- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` reads or executes a script
+- `get_skill_script(skill_name, script_path)` reads a script
 
-Workspace skill scripts can be read with `get_skill_script`, but not executed through it.
-Agents with shell or file execution tools can still run workspace files through those tools.
+`get_skill_script` never runs a script, whichever skill it comes from.
+Agents with a shell tool run scripts with it, where their shell commands run.
 
 Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
 A workspace skill created during a turn becomes available on the next agent run, not in the same response.
