@@ -109,7 +109,7 @@ The [Connections portal](https://docs.mindroom.chat/connections-portal/#settings
 
 Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
 Audience binding, its `MINDROOM_PUBLIC_URL` requirement, and the rollout order are described under [Token binding](https://docs.mindroom.chat/connections-portal/#token-binding).
-Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`.
+Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<port>` when it is unset.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](https://docs.mindroom.chat/authorization/#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.

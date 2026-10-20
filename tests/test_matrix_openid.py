@@ -118,8 +118,6 @@ async def test_audience_is_the_normalized_browser_origin(
 @pytest.mark.parametrize(
     "public_url",
     [
-        "",
-        "   ",
         "portal.example.org",
         "localhost:8765",
         "ftp://portal.example.org",
@@ -132,10 +130,29 @@ async def test_no_audience_without_a_usable_public_url(
     homeserver: tuple[ComputerPeer, RuntimePaths],
     public_url: str,
 ) -> None:
-    """The audience is never guessed from anywhere but MINDROOM_PUBLIC_URL, so none is sent without one."""
+    """An unusable MINDROOM_PUBLIC_URL is never replaced by a guess, so no audience is sent."""
     peer, paths = homeserver
     assert await verify_matrix_openid(TOKEN, _with_public_url(paths, public_url)) == "@alice:example.org"
     assert peer.userinfo_audiences == [None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env", "audience"),
+    [({}, "http://localhost:8765"), ({"MINDROOM_PORT": "9000"}, "http://localhost:9000")],
+)
+async def test_audience_defaults_to_the_local_api_origin(
+    homeserver: tuple[ComputerPeer, RuntimePaths],
+    env: dict[str, str],
+    audience: str,
+) -> None:
+    """Without MINDROOM_PUBLIC_URL the audience is MindRoom's own local origin, which Chat opens on the same machine."""
+    peer, paths = homeserver
+    for public_url in ("", "   "):
+        local = replace(paths, process_env={**paths.process_env, "MINDROOM_PUBLIC_URL": public_url, **env})
+        peer.userinfo_audiences.clear()
+        assert await verify_matrix_openid(TOKEN, local) == "@alice:example.org"
+        assert peer.userinfo_audiences == [audience]
 
 
 _VersionsServer = Callable[[web.Response], Awaitable[RuntimePaths]]

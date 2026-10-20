@@ -59,6 +59,11 @@ def is_local_origin(origin: str | None) -> bool:
     )
 
 
+def local_api_origin(paths: RuntimePaths) -> str:
+    """Return MindRoom's own API origin on this machine, which links, callbacks, and token audiences use by default."""
+    return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765') or '8765'}"
+
+
 def deployment_origin(paths: RuntimePaths, request_url: str) -> str | None:
     """Return the browser origin of this deployment: `MINDROOM_PUBLIC_URL` when set, else the request's own URL."""
     return normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL") or request_url)

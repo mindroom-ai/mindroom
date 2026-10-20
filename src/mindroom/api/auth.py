@@ -1031,7 +1031,7 @@ def _require_connections_route_authorized(
     auth_user: dict[str, Any],
     snapshot: ApiSnapshot,
 ) -> None:
-    """Keep trusted personal users outside administrator routes when the portal is enabled."""
+    """Keep trusted personal users outside administrator routes while `MINDROOM_CONNECTIONS_AGENT` is set."""
     if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
     path = request.scope["path"]

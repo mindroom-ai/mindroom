@@ -197,14 +197,6 @@ def test_dashboard_bit_needs_admin_and_binding(signin: dict[str, Any], admin: st
     assert _session_of(signin["client"]) == ("@alice:example.org", False)
 
 
-def test_dashboard_bit_needs_public_url(signin: dict[str, Any]) -> None:
-    """Without MINDROOM_PUBLIC_URL no audience was sent, so the token was never bound to this deployment."""
-    _with_admin(signin, MINDROOM_PUBLIC_URL="")
-    signin["binds"].return_value = True
-    assert sign_in(signin["client"], "alice").status_code == 200
-    assert _session_of(signin["client"]) == ("@alice:example.org", False)
-
-
 def test_failed_check_after_binding_probe_logs_why_dashboard_was_refused(signin: dict[str, Any]) -> None:
     """A token check that fails after the binding probe leaves a warning for the administrator to find."""
     _with_admin(signin)
@@ -902,13 +894,13 @@ def test_sign_in_never_takes_the_audience_from_the_request(
     signin: dict[str, Any],
     binding_homeserver: ComputerPeer,
 ) -> None:
-    """Without MINDROOM_PUBLIC_URL no audience is sent, so a token bound to the portal's origin is refused."""
+    """Without MINDROOM_PUBLIC_URL the audience is the local default, so a token bound to the request's origin is refused."""
     binding_homeserver.expected_audience = PORTAL_ORIGIN
     _serve(signin, MINDROOM_PUBLIC_URL="")
     response = sign_in(signin["client"], "openid-secret")
     assert response.status_code == 401
     assert "set-cookie" not in response.headers
-    assert binding_homeserver.userinfo_audiences == [None]
+    assert binding_homeserver.userinfo_audiences == ["http://localhost:8765"]
 
 
 def test_binding_switched_on_during_sign_in_grants_no_dashboard(

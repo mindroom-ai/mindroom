@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
-from mindroom.origins import normalized_origin
+from mindroom.origins import local_api_origin, normalized_origin
 from mindroom.requester_identity import runtime_matrix_domain
 
 # MindRoom's Tuwunel fork binds tokens to this audience (`io.mindroom.openid_audience`); other homeservers ignore it.
@@ -40,9 +40,14 @@ class MatrixOpenIDError(Exception):
         super().__init__(detail)
 
 
-def openid_audience(paths: RuntimePaths) -> str | None:
-    """Return the audience MindRoom asks the homeserver to enforce: the normalized origin of `MINDROOM_PUBLIC_URL`."""
-    return normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL"))
+def _openid_audience(paths: RuntimePaths) -> str | None:
+    """Return the audience MindRoom asks the homeserver to enforce, never taken from a request.
+
+    It is the normalized origin of `MINDROOM_PUBLIC_URL`, or MindRoom's own local origin when that is unset, which is
+    the address MindRoom Chat opens for a backend on the same machine.
+    """
+    public_url = (paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
+    return normalized_origin(public_url) if public_url else local_api_origin(paths)
 
 
 async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
@@ -57,7 +62,7 @@ async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) ->
         raise MatrixOpenIDError(401, "OpenID server does not match the configured Matrix server.")
     url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/federation/v1/openid/userinfo"
     params = {"access_token": token.access_token}
-    audience = openid_audience(paths)
+    audience = _openid_audience(paths)
     if audience is not None:
         params[_AUDIENCE_PARAM] = audience
     try:

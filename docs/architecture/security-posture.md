@@ -175,7 +175,7 @@ The portal asks the window that opened it for a Matrix OpenID token over `postMe
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
-MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL` as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
+MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<port>` when it is unset, as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
 MindRoom then sets the `__Host-mindroom_connections_session` cookie.
 The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`.
 Browsers refuse `Secure` cookies over plain HTTP, so a portal on a local address served over HTTP names it `mindroom_connections_session` without `Secure`; an HTTPS portal ignores that name, so a sibling host cannot plant a session for it.
@@ -184,7 +184,7 @@ To keep a stale tab from acting as the new account, the Connections pages send t
 MindRoom answers 401 when that header names a different account than the request authenticates as, whether by a session or by trusted upstream.
 Requests without the header, such as OAuth popup navigations, still work.
 At sign-in, MindRoom also records in the signed cookie whether the session may open the dashboard.
-It may only when the user is in `administrators`, `MINDROOM_PUBLIC_URL` is set, and the homeserver's `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true`, which MindRoom's Tuwunel fork does while it binds tokens.
+It may only when the user is in `administrators` and the homeserver's `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true`, which MindRoom's Tuwunel fork does while it binds tokens.
 Under binding, a token that verified with this deployment's audience was requested for this deployment, so another deployment's operator cannot replay it here; without binding they could, and the dashboard is full control.
 MindRoom verifies the token a second time after reading `/versions`, because `/versions` shows only the setting after the first verification: if binding came on in between, the second verification refuses the unbound token, and if it went off, the first one already proved the token bound to this deployment.
 The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.

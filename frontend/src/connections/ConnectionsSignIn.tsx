@@ -98,8 +98,7 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
  * Render a Connections page for the Matrix user signed in to MindRoom Chat.
  *
  * When MindRoom Chat opened the portal and its tab is still open, it ignores any existing session and only renders after
- * Chat's OpenID handshake succeeds. Otherwise the page shows the session the server reports, or renders as is when the
- * portal is off.
+ * Chat's OpenID handshake succeeds. Otherwise the page shows the session the server reports.
  *
  * @param children - Page content shown only after sign-in succeeds.
  */

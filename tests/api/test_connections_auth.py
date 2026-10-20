@@ -206,15 +206,15 @@ def test_personal_identity_rejects_spoofed_headers_without_signed_assertion(
     assert response.status_code == 401
 
 
-@pytest.mark.parametrize(("portal_enabled", "user"), [(True, "owner"), (False, "alice")])
-def test_administrator_and_disabled_portal_preserve_dashboard_access(
-    portal_enabled: bool,
+@pytest.mark.parametrize(("agent_set", "user"), [(True, "owner"), (False, "alice")])
+def test_administrator_and_unset_connections_agent_preserve_dashboard_access(
+    agent_set: bool,
     user: str,
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
-    """Configured administrators retain access, and disabled portals preserve prior upstream behavior."""
-    client = connections_auth_client(MINDROOM_CONNECTIONS_AGENT="test_agent" if portal_enabled else None)
+    """Administrators keep the dashboard, and without `MINDROOM_CONNECTIONS_AGENT` every gateway user keeps it."""
+    client = connections_auth_client(MINDROOM_CONNECTIONS_AGENT="test_agent" if agent_set else None)
     response = client.get("/api/config", headers=signed_connections_headers(user))
     assert response.status_code == 200
 
