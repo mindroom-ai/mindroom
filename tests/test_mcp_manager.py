@@ -11,7 +11,7 @@ import json
 import threading
 import time
 import traceback
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Generator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -262,7 +262,7 @@ class _FakeClientSession:
 
 
 @pytest.fixture(autouse=True)
-def _reset_fake_session_state() -> Generator[None, None, None]:
+def _reset_fake_session_state() -> None:
     _FakeClientSession.sessions = []
     _FakeClientSession.planned_tool_results = []
     _FakeClientSession.planned_tool_pages = []
@@ -282,7 +282,6 @@ def _reset_fake_session_state() -> Generator[None, None, None]:
     _FakeClientSession.close_attempt_count = 0
     _FakeClientSession.authorization_rejected = False
     _FakeClientSession.reject_authorization_on_tool_error = False
-    return
 
 
 @pytest.fixture(autouse=True)
