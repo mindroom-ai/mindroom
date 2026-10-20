@@ -13,11 +13,12 @@ A line naming the currently loaded tools at the end of the system prompt also ch
 ## Decision
 
 On every model without native tool search, an agent with deferred tools sends one fixed tool list for the whole session: its eager tools plus `tool_search` and `call_tool`.
-`tool_search` returns the full definitions of matching functions, and the instructions of their toolkits, as an ordinary tool result, so discovery only appends to the end of the conversation.
+`tool_search` returns the full definitions of matching functions, with the instructions they and their toolkits would render, as an ordinary tool result, so discovery only appends to the end of the conversation.
 The model calls a discovered function through `call_tool(name, arguments)`, the shape of MCP's `tools/call`.
 MindRoom rewrites that call to the real function before Agno resolves it, and presents every stored call to a deferred function as a `call_tool` call when it sends history to the provider.
 Stored history, approvals, tool hooks, worker routing, background jobs, and the chat display therefore see only real function names, exactly as on the native path.
 Deferred toolkits are built when the agent is built, as the native path already does, so no per-session loaded-tool state exists.
+Agno registers only the first function of each name, so a deferred function whose name an earlier toolkit already provides is neither hidden nor offered by search.
 
 The rewrite happens at the model boundary rather than inside a dispatching tool because approval, hooks, worker routing, and job execution attach to the real Agno function.
 A dispatcher that invoked the real entrypoint from inside `call_tool` would bypass all of them.
@@ -53,6 +54,4 @@ Inference servers that constrain tool names to the declared list (vLLM and llama
 
 ## Evidence
 
-Validated by a live comparison between `main` and this change on OpenRouter models, over a multi-turn conversation that discovers and calls two deferred tools.
-The comparison records `cached_tokens` per request and whether each deferred call succeeds.
-Results are added below when the run completes.
+A live comparison between `main` and this change on OpenRouter models is pending: a three-turn conversation that discovers and calls two deferred tools, recording `cached_tokens` per request and whether each deferred call succeeds.
