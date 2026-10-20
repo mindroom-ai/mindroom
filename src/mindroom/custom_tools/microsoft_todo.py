@@ -296,6 +296,8 @@ class MicrosoftTodoTools(Toolkit):
 
         Before calling, tell the requester the task's title and the list's name, because an approval prompt may
         show only IDs.
+        Read the returned task's due as microsoft_todo_list_tasks says: convert it to the requester's zone before
+        naming the day.
 
         Args:
             list_id: The list's id from microsoft_todo_list_lists.
@@ -333,6 +335,8 @@ class MicrosoftTodoTools(Toolkit):
 
         Before calling, tell the requester the task's title, its list, and what will change, because an approval
         prompt may show only IDs.
+        Read the returned task's due as microsoft_todo_list_tasks says: convert it to the requester's zone before
+        naming the day.
 
         Args:
             list_id: The list's id from microsoft_todo_list_lists.

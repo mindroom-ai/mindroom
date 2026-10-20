@@ -134,6 +134,8 @@ def test_write_descriptions_ask_the_agent_to_name_the_change(tmp_path: Path, mon
 
     for name in WRITE_FUNCTIONS:
         assert "Before calling, tell the requester" in _description(tools, name), name
+    for name in ("microsoft_todo_create_task", "microsoft_todo_update_task"):
+        assert "convert it to the requester's zone before naming the day" in _description(tools, name), name
     update = Function.from_callable(tools.microsoft_todo_update_task).to_dict()["parameters"]["properties"]
     assert "an empty string removes the due date" in update["due_date"]["description"]
     assert update["importance"]["enum"] == ["low", "normal", "high"]
