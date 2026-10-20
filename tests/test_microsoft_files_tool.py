@@ -292,6 +292,24 @@ def test_search_continues_from_the_page_token(tmp_path: Path, monkeypatch: pytes
     assert json.loads(graph.requests[0].content)["requests"][0]["from"] == 5
 
 
+def test_search_continues_past_the_first_thousand_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _Graph()
+    files.answer_first = lambda request: (
+        httpx.Response(
+            200,
+            json={"value": [{"hitsContainers": [{"hits": [{"resource": _item()}], "moreResultsAvailable": True}]}]},
+        )
+        if request.url.path == "/v1.0/search/query"
+        else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _payload(tools.microsoft_files_search("plan", limit=50, page_token="1050"))
+
+    assert json.loads(graph.requests[0].content)["requests"][0]["from"] == 1050
+    assert result["next_page_token"] == "1051"
+
+
 def test_list_folder_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
     files.answer_first = lambda request: (
@@ -326,7 +344,7 @@ def test_list_folder_refuses_a_page_token_for_another_collection(
     assert graph.requests == []
 
 
-@pytest.mark.parametrize("page_token", ["-1", "abc", "1.5", "100000"])
+@pytest.mark.parametrize("page_token", ["-1", "abc", "1.5", "99999999999"])
 def test_search_refuses_a_malformed_page_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

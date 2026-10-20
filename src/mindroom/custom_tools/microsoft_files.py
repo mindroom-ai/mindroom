@@ -45,8 +45,8 @@ _MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 # Range values come back into the conversation, so one read or write stays small.
 _MAX_RANGE_CELLS = 10_000
-# Microsoft Search returns at most the first 1,000 results of a query.
-_MAX_SEARCH_OFFSET = 1000
+# Microsoft Search takes the result offset as a 32-bit integer.
+_MAX_SEARCH_OFFSET = 2**31 - 1
 _DOWNLOAD_DIR = "microsoft-files-downloads"
 _TOOL_NAME = "microsoft_files"
 _ITEM_SELECT = "id,name,size,eTag,webUrl,lastModifiedDateTime,lastModifiedBy,parentReference,file,folder"
