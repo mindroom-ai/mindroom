@@ -19,6 +19,7 @@ __all__ = [
     "GRAPH_ME_URL",
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
+    "microsoft_todo_oauth_provider",
     "microsoft_token_url",
     "outlook_calendar_oauth_provider",
     "outlook_mail_oauth_provider",
@@ -150,4 +151,14 @@ def outlook_calendar_oauth_provider() -> OAuthProvider:
         display_name="Outlook Calendar",
         scopes=("Calendars.ReadWrite",),
         status_capabilities=("read and change Outlook calendar events",),
+    )
+
+
+def microsoft_todo_oauth_provider() -> OAuthProvider:
+    """Return the Microsoft To Do provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_todo",
+        display_name="Microsoft To Do",
+        scopes=("Tasks.ReadWrite",),
+        status_capabilities=("list, create, update, and delete Microsoft To Do tasks",),
     )
