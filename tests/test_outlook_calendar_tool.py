@@ -335,6 +335,8 @@ def test_event_summary_caps_attendees_and_keeps_a_foreign_time_zone_visible(
     ("kwargs", "message"),
     [
         ({"start": "tomorrow", "end": "2026-10-22"}, "start must be an ISO 8601"),
+        ({"start": "0001-01-01T00:00:00+01:00", "end": "2026-01-01"}, "start is outside"),
+        ({"start": "2026-01-01", "end": "9999-12-31T23:00:00-02:00"}, "end is outside"),
         ({"start": "2026-10-22", "end": "2026-10-21"}, "end must be after start"),
         ({"start": "2026-10-21", "end": "2026-10-21"}, "end must be after start"),
         ({"start": "2026-01-01", "end": "2027-01-03"}, "at most 366 days"),

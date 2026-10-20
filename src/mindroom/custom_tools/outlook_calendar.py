@@ -102,7 +102,13 @@ def _parse_time(value: object, field_name: str) -> datetime:
 def _utc(value: object, field_name: str) -> datetime:
     """Return a calendar-view bound in UTC; a value without an offset is UTC, as Graph reads it."""
     moment = _parse_time(value, field_name)
-    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    try:
+        return moment.astimezone(UTC)
+    except OverflowError:
+        msg = f"{field_name} is outside the years 1 to 9999 once converted to UTC."
+        raise _invalid(msg) from None
 
 
 def _window(start: object, end: object) -> tuple[str, str]:
