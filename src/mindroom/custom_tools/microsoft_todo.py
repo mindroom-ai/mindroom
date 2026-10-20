@@ -105,7 +105,7 @@ def _due(value: object) -> dict[str, str]:
 
 
 def _notes(value: object) -> dict[str, str]:
-    """Return plain-text notes as the HTML body To Do shows, keeping their characters and line breaks."""
+    """Return plain-text notes as the HTML body To Do shows, keeping their text and line breaks."""
     if not isinstance(value, str):
         raise MicrosoftGraphError(code="invalid_argument", message="notes must be text.")
     return {"content": html.escape("\n".join(value.splitlines())).replace("\n", "<br>"), "contentType": "html"}
