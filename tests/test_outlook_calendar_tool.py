@@ -190,6 +190,9 @@ def test_descriptions_state_utc_and_make_writes_legible(tmp_path: Path, monkeypa
     for name in ("outlook_calendar_create_event", "outlook_calendar_update_event"):
         assert "time_zone, which defaults to UTC, so pass the requester's zone" in _description(tools, name), name
     assert "the series master answers the whole series" in _description(tools, "outlook_calendar_respond_to_event")
+    for name in ("outlook_calendar_update_event", "outlook_calendar_delete_event"):
+        assert "A series_master_id" in _description(tools, name), name
+        assert "every occurrence of the series; tell the requester so" in _description(tools, name), name
     for name in WRITE_FUNCTIONS:
         assert "Before calling, tell the requester" in _description(tools, name), name
     assert "Outlook sends every attendee a cancellation" in _description(tools, "outlook_calendar_delete_event")
@@ -366,7 +369,7 @@ def test_get_event_returns_the_text_body(tmp_path: Path, monkeypatch: pytest.Mon
 
     assert result["event"] == {**EVENT_SUMMARY, "body": "Agenda\n1. Plan", "truncated": False}
     [request] = graph.requests
-    assert request.headers["prefer"] == 'outlook.timezone="UTC", outlook.body-content-type="text"'
+    assert request.headers["prefer"] == 'outlook.body-content-type="text"'
     assert request.url.params["$select"] == f"{outlook_calendar._EVENT_SELECT},body"
 
 

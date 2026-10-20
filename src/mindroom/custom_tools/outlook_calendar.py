@@ -46,7 +46,8 @@ _MAX_BODY_CHARACTERS = 20_000
 _MAX_ATTENDEES = 100
 _TOOL_NAME = "outlook_calendar"
 _UTC = 'outlook.timezone="UTC"'
-_UTC_TEXT = f'{_UTC}, outlook.body-content-type="text"'
+# Graph returns event times in UTC without a time zone preference, so a body request sends only this one.
+_TEXT = 'outlook.body-content-type="text"'
 _UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _CALENDAR_SELECT = "id,name,owner,canEdit,isDefaultCalendar"
 _PROVIDER_SELECT = "defaultOnlineMeetingProvider,allowedOnlineMeetingProviders"
@@ -202,7 +203,7 @@ def _person(recipient: object) -> dict[str, Any]:
 
 
 def _time(value: object) -> str | None:
-    """Return a Graph dateTimeTimeZone as ISO 8601; with the UTC preference that is always `...Z`."""
+    """Return a Graph dateTimeTimeZone as ISO 8601; in UTC, Graph's default and preference here, that is `...Z`."""
     moment = _dict(value).get("dateTime")
     if not isinstance(moment, str):
         return None
@@ -408,7 +409,8 @@ class OutlookCalendarTools(Toolkit):
             end: Window end in ISO 8601, after start and at most 366 days later.
             calendar: A calendar id from outlook_calendar_list_calendars; omit for the default calendar.
             limit: Maximum number of events to return, from 1 to 50.
-            page_token: The next_page_token of the previous call, to continue the same listing.
+            page_token: The next_page_token of the previous call, to continue the same listing; start, end,
+                calendar, and limit are then ignored.
 
         """
 
@@ -451,7 +453,7 @@ class OutlookCalendarTools(Toolkit):
                 "GET",
                 _event_path(event_id),
                 params={"$select": f"{_EVENT_SELECT},body"},
-                prefer=_UTC_TEXT,
+                prefer=_TEXT,
             ),
             lambda payload: {"event": _event_with_body(payload)},
         )
@@ -529,6 +531,7 @@ class OutlookCalendarTools(Toolkit):
         Before calling, tell the requester the event's subject and current time and what will change, because an
         approval prompt may show only IDs. When the requester organizes a meeting with attendees, Outlook sends
         every attendee the update. An occurrence id from outlook_calendar_list_events changes only that occurrence.
+        A series_master_id changes every occurrence of the series; tell the requester so.
         An online meeting's description cannot be replaced, because that would remove its join link. Times are in
         time_zone, which defaults to UTC, so pass the requester's zone.
 
@@ -568,7 +571,8 @@ class OutlookCalendarTools(Toolkit):
         an approval prompt may show only IDs. When the requester organizes the meeting (is_organizer), Outlook sends
         every attendee a cancellation. When the requester is only an attendee, the event leaves their calendar
         without telling the organizer; use outlook_calendar_respond_to_event with decline to tell them instead.
-        An occurrence id removes only that occurrence of a recurring meeting.
+        An occurrence id removes only that occurrence of a recurring meeting. A series_master_id deletes every
+        occurrence of the series; tell the requester so.
 
         Args:
             event_id: An event id from outlook_calendar_list_events.
