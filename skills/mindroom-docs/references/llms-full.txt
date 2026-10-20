@@ -12743,7 +12743,7 @@ Updating a task's notes replaces them completely.
 | `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
 | `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
 
-Messages come back as plain text, up to 4,000 characters each, with quoted replies as lines starting with `> `.
+Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
 Channel, chat, and message listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Sent messages appear under the requester's name and are plain text of up to 28,000 bytes, so HTML in the text is not rendered as formatting.
