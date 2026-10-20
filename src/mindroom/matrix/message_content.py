@@ -46,9 +46,44 @@ type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
 _MAX_SIDECAR_HOPS = 8
 
+# The Matrix message fields readers use. A payload holds whatever its uploader
+# wrote, and the content it resolves to is stored with every message naming it,
+# so only these fields and MindRoom's own namespaced metadata are kept.
+_READ_MESSAGE_FIELDS = frozenset(
+    {
+        "msgtype",
+        "body",
+        "format",
+        "formatted_body",
+        "m.mentions",
+        "m.relates_to",
+        "m.new_content",
+        "url",
+        "file",
+        "info",
+        "filename",
+        "geo_uri",
+        "org.matrix.msc3245.voice",
+        "org.matrix.msc1767.audio",
+    },
+)
+_MINDROOM_KEY_PREFIXES = ("io.mindroom.", "com.mindroom.")
+
+
+def _read_fields(content: dict[str, Any]) -> dict[str, Any]:
+    """Return the keys of one content layer that a reader uses."""
+    return {
+        key: value
+        for key, value in content.items()
+        if key in _READ_MESSAGE_FIELDS or key.startswith(_MINDROOM_KEY_PREFIXES)
+    }
+
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
-    """Extract canonical content dict from a v2 large-message sidecar JSON payload."""
+    """Extract canonical content dict from a v2 large-message sidecar JSON payload.
+
+    An edit's payload is the whole edit, so its ``m.new_content`` is trimmed the same way.
+    """
     try:
         payload = json.loads(payload_json)
         # A ``\ud800`` escape parses into an unpaired surrogate, which no model request can encode.
@@ -62,7 +97,10 @@ def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | Non
         return None
     if not isinstance(payload, dict):
         return None
-    return {key: value for key, value in payload.items() if isinstance(key, str)}
+    content = _read_fields(payload)
+    if isinstance(new_content := content.get("m.new_content"), dict):
+        content["m.new_content"] = _read_fields(new_content)
+    return content
 
 
 def _normalized_content_dict(content: object) -> dict[str, Any]:

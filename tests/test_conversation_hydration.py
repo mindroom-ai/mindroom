@@ -1735,6 +1735,31 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == [whole]
         assert page.refresh_pending == ()
 
+    async def test_a_resolved_attachment_stores_only_the_fields_readers_use(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The text, its formatting, and MindRoom's metadata are stored; anything else the uploader wrote is not."""
+        source = self._sidecar_source("$long", "preview [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        read_fields = {
+            "msgtype": "m.text",
+            "body": "whole",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>whole</p>",
+            "m.mentions": {"user_ids": [BOB]},
+            STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+        }
+        client = FakeClient(
+            events={"$long": source},
+            sidecars={"mxc://s/long": json.dumps({**read_fields, "pad": [1e15] * 10})},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [read_fields]
+
     async def test_a_non_strict_read_reports_the_message_as_missing_rather_than_truncated(
         self,
         alice: PrincipalStore,

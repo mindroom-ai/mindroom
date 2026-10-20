@@ -255,7 +255,7 @@ class TestResolvedMessageExtraction:
 
     @pytest.mark.asyncio
     async def test_extract_edit_body_hydrates_v2_edit_sidecar(self) -> None:
-        """Edit extraction should return the canonical m.new_content from a v2 sidecar."""
+        """Edit extraction should return the canonical m.new_content from a v2 sidecar, without unread keys."""
         canonical_content = {
             "msgtype": "m.text",
             "body": "* Full edit body",
@@ -266,11 +266,12 @@ class TestResolvedMessageExtraction:
             },
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
         }
+        payload = {**canonical_content, "m.new_content": {**canonical_content["m.new_content"], "pad": [1] * 10}}
         client = _make_client()
         client.download = AsyncMock(
             return_value=MagicMock(
                 spec=nio.DownloadResponse,
-                body=json.dumps(canonical_content).encode("utf-8"),
+                body=json.dumps(payload).encode("utf-8"),
             ),
         )
 
