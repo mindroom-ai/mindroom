@@ -240,12 +240,7 @@ class PostgresBackend:
             raise RuntimeError(CLOSED_MESSAGE)
 
         def apply() -> T:
-            try:
-                with self._recovery_reader.cursor(row_factory=dict_row) as cursor:
-                    cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-                    return operation(_PostgresTransaction(cursor))
-            finally:
-                self._recovery_reader.rollback()
+            return self._apply_read(self._recovery_reader, operation)
 
         return await self._recovery_offload.run(apply)
 
@@ -254,8 +249,10 @@ class PostgresBackend:
         connection: psycopg.Connection[tuple[Any, ...]],
         operation: Operation[T],
     ) -> T:
+        """Run one read so all its statements see the snapshot its first one took, as READ COMMITTED does not."""
         try:
             with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 return operation(_PostgresTransaction(cursor))
         finally:
             connection.rollback()

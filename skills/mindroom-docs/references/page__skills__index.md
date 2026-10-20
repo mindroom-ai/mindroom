@@ -44,8 +44,8 @@ metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
 A skill without any frontmatter still loads with the name and description fallbacks, but frontmatter gives clearer listings.
 Keep each skill focused on one capability, give it a descriptive name such as `code-review`, and declare its dependencies with `metadata.openclaw.requires`.
 
-Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures.
-A workspace skill that breaks these limits is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+A workspace skill whose frontmatter is not valid YAML, for example because an unquoted `description` contains `: `, or breaks these limits is skipped with a warning.
 
 ## Installing and managing skills
 
@@ -97,6 +97,7 @@ Being able to write workspace skills does not make an agent create them.
 To have agents save reusable workflows on their own, add that guidance to the agent's instructions, or enable [automatic skill learning](#automatic-skill-learning).
 
 MindRoom loads at most 256 workspace skills per agent, skips a skill whose `SKILL.md` exceeds 1 MiB or whose name exceeds 64 characters, and truncates descriptions to 1,024 characters, logging a warning in each case.
+Until the file is fixed, the owning agent's system prompt names each workspace skill skipped for its frontmatter or name, and why.
 
 ## Eligibility gating (OpenClaw metadata)
 

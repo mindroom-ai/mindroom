@@ -682,6 +682,7 @@ def _backend(
     storage_path: Path | None = None,
     host_config_path: Path | None = None,
     tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    name_prefix: str = "mindroom-worker",
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, frozenset[str]]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
@@ -693,7 +694,7 @@ def _backend(
         security_policy=security_policy,
         runtime=runtime,
         ready_timeout_seconds=5.0,
-        name_prefix="mindroom-worker",
+        name_prefix=name_prefix,
         publish_host="127.0.0.1",
         endpoint_host="127.0.0.1",
         user="1000:1000",
@@ -4164,6 +4165,35 @@ def test_docker_backend_recreates_container_when_name_prefix_changes(
     assert first_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
     assert fake_client.containers.run_calls[0]["name"] != fake_client.containers.run_calls[1]["name"]
+
+
+@pytest.mark.parametrize(
+    ("name_prefix", "names_prefix", "warned"),
+    [
+        ("benchmark-harness-run-20261018-0042-ab", "benchmark-harness-run-20261018-0042-ab", False),
+        ("benchmark-harness-run-20261018-0042-abc", "benchmark-harness-run-20261018-0042-ab", True),
+        ("benchmark-harness-run-20261018-0042-a-bc", "benchmark-harness-run-20261018-0042-a", True),
+    ],
+    ids=["38-characters-kept", "39-characters-cut", "cut-after-a-dash"],
+)
+def test_docker_backend_warns_once_when_container_names_cut_the_name_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name_prefix: str,
+    names_prefix: str,
+    warned: bool,
+) -> None:
+    """Names keep 38 prefix characters, so a longer prefix is cut in every name and the backend says so once."""
+    with capture_logs() as logs:
+        backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path, name_prefix=name_prefix)
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+        handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert handle.worker_id.rsplit("-", 1)[0] == names_prefix
+    prefix_warnings = [entry for entry in logs if "MINDROOM_DOCKER_WORKER_NAME_PREFIX" in entry["event"]]
+    assert [(entry["log_level"], entry["container_name_prefix"]) for entry in prefix_warnings] == (
+        [("warning", names_prefix)] if warned else []
+    )
 
 
 def test_docker_backend_uses_distinct_container_names_for_different_storage_roots(

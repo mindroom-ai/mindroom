@@ -25,6 +25,7 @@ from mindroom.hooks import (
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
@@ -393,7 +394,7 @@ def _run_coroutine_from_sync(coroutine: _ToolHookResult) -> _ToolHookResult:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(runner_coroutine)
+        return asyncio.run(closing_model_connections(runner_coroutine))
     return _DeferredAsyncToolHookResult(runner_coroutine)
 
 
@@ -402,7 +403,7 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _T
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(_await_result(deferred.awaitable))
+        return asyncio.run(closing_model_connections(deferred.awaitable))
 
     result_box: list[_ToolHookResult] = []
     error_box: list[BaseException] = []
@@ -410,7 +411,7 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _T
 
     def runner() -> None:
         try:
-            result_box.append(context.run(asyncio.run, _await_result(deferred.awaitable)))
+            result_box.append(context.run(asyncio.run, closing_model_connections(deferred.awaitable)))
         except BaseException as exc:
             error_box.append(exc)
 

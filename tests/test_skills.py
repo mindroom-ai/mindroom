@@ -23,7 +23,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.skill_learning import library
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
-from mindroom.tool_system.skills import build_agent_skills
+from mindroom.tool_system.skills import RefusedWorkspaceSkill, build_agent_skills
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -997,11 +997,12 @@ def test_workspace_skills_that_fail_to_load_still_spend_the_budget(
         (broken / "SKILL.md").write_text("---\n- not a mapping\n---\n" + "x" * (900 << 10), encoding="utf-8")
     _write_skill(workspace_skills, "valid", "Sorted after every broken skill")
     parse = skills_module._parse_skill_frontmatter
-    parsed_paths: set[str] = set()
+    parse_count = 0
 
-    def recording_parse(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
-        parsed_paths.add(path)
-        return parse(content, path=path, allow_missing=allow_missing)
+    def recording_parse(content: str, *, allow_missing: bool) -> tuple[dict[str, Any], str]:
+        nonlocal parse_count
+        parse_count += 1
+        return parse(content, allow_missing=allow_missing)
 
     monkeypatch.setattr(skills_module, "_parse_skill_frontmatter", recording_parse)
 
@@ -1009,7 +1010,7 @@ def test_workspace_skills_that_fail_to_load_still_spend_the_budget(
         skills = _load_workspace_only(tmp_path, storage)
 
     assert _skill_names(skills) == []
-    assert len(parsed_paths) < 10
+    assert 0 < parse_count < 10
     assert any("budget" in entry["event"] for entry in logs if entry["log_level"] == "warning")
 
 
@@ -1065,6 +1066,88 @@ def test_workspace_skill_frontmatter_nested_too_deep_is_refused(tmp_path: Path) 
 
     assert _skill_names(skills) == ["plain"]
     assert any("nest" in str(entry.get("error", "")) for entry in logs if entry["log_level"] == "warning")
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "reason"),
+    [
+        ("name: xl_check\ndescription: Use when: the task needs an xlsx check", "line 3, column 22"),
+        (f"name: {'x' * 65}\ndescription: Check a workbook", "64 characters"),
+    ],
+)
+def test_refused_workspace_skills_are_reported_with_why(tmp_path: Path, frontmatter: str, reason: str) -> None:
+    """A SKILL.md that does not load is reported by its workspace path and reason, while its quoted twin loads."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "xl_check").mkdir()
+    (workspace_skills / "xl_check" / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n\n# Body\n", encoding="utf-8")
+    (workspace_skills / "xl_quoted").mkdir()
+    (workspace_skills / "xl_quoted" / "SKILL.md").write_text(
+        '---\nname: xl_quoted\ndescription: "Use when: the task needs an xlsx check"\n---\n\n# Body\n',
+        encoding="utf-8",
+    )
+    refused: list[RefusedWorkspaceSkill] = []
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+        refused=refused,
+    )
+
+    assert _skill_names(skills) == ["xl_quoted"]
+    assert [skill.path for skill in refused] == ["skills/xl_check/SKILL.md"]
+    assert reason in refused[0].reason
+    assert "\n" not in refused[0].reason
+
+
+def test_a_workspace_skills_directory_that_is_one_refused_skill_is_reported(tmp_path: Path) -> None:
+    """A workspace whose skills/SKILL.md cannot load is reported at that path."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "SKILL.md").write_text("---\n- not a mapping\n---\n\n# Body\n", encoding="utf-8")
+    refused: list[RefusedWorkspaceSkill] = []
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+        refused=refused,
+    )
+
+    assert skills is None
+    assert [(skill.path, skill.reason) for skill in refused] == [
+        ("skills/SKILL.md", "Skill frontmatter must be a mapping"),
+    ]
+
+
+def test_refusal_reasons_cannot_bloat_the_prompt(tmp_path: Path) -> None:
+    """A parse error that quotes planted frontmatter is cut to a description's length before it reaches a prompt."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "tagged").mkdir()
+    (workspace_skills / "tagged" / "SKILL.md").write_text(
+        f"---\nname: tagged\ndescription: !<tag:example.com,2026:{'t' * 100_000}> planted\n---\n\n# Body\n",
+        encoding="utf-8",
+    )
+    refused: list[RefusedWorkspaceSkill] = []
+
+    build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+        refused=refused,
+    )
+
+    assert [skill.path for skill in refused] == ["skills/tagged/SKILL.md"]
+    assert "constructor" in refused[0].reason
+    assert len(refused[0].reason) <= skills_module.MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS
 
 
 @pytest.mark.parametrize("oversized", ["names", "scripts"])

@@ -132,7 +132,7 @@ The poke mentions only the assigned agent and quotes todo titles as plain text.
 
 Work whose requester is a human is poked on that human's behalf, so the agent applies its normal reply access and tool authorization to that human.
 Work whose requester is an agent, team, or the router is poked as the assigned agent's own turn.
-Work is not poked when its requester is a human the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
+Work is not poked when its requester is a human, agent, team, or router the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
 Items whose requester was never recorded are skipped and logged once as `todo_poke_requester_unrecorded` until someone allowed to address the assigned agent updates them.
 
 | Environment variable | Default | Behavior |

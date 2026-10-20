@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_block import StateBlock, heading, html_block
 from markdown_it.token import Token
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 from pygments import highlight
@@ -442,10 +443,33 @@ def _render_preserved_math_block(
     return f"<div>{escape(content)}</div>\n"
 
 
+def _decline_line_at_end_of_input(rule: Callable[[StateBlock, int, int, bool], bool]) -> Callable[..., bool]:
+    """Return the block rule declining a line that starts at the end of the input instead of indexing past it."""
+
+    def guarded_rule(state: StateBlock, start_line: int, end_line: int, silent: bool) -> bool:
+        if state.bMarks[start_line] + state.tShift[start_line] >= len(state.src):
+            return False
+        return rule(state, start_line, end_line, silent)
+
+    return guarded_rule
+
+
 def _build_markdown_renderer() -> MarkdownIt:
     renderer = MarkdownIt("commonmark", {"breaks": True, "highlight": _highlight})
     renderer.enable("table")
     renderer.enable("strikethrough")
+    # markdown-it-py <=4.2.0 raises IndexError when a quoted table ends on a bare ">" with no newline after it,
+    # as a streamed reply often does: the table runs these rules on that empty last line and they index past the input.
+    # Upstream issue: https://github.com/executablebooks/markdown-it-py/issues/415
+    # Upstream PR (merged, unreleased): https://github.com/executablebooks/markdown-it-py/pull/416
+    # Remove when the pinned markdown-it-py release includes that PR.
+    # Replacing a rule resets the chains it may end, so they are passed again as markdown-it-py registers them.
+    for name, rule in (("html_block", html_block), ("heading", heading)):
+        renderer.block.ruler.at(
+            name,
+            _decline_line_at_end_of_input(rule),
+            {"alt": ["paragraph", "reference", "blockquote"]},
+        )
     renderer.use(
         dollarmath_plugin,
         allow_labels=False,

@@ -4829,6 +4829,47 @@ def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) 
     assert WORKSPACE_SKILL_AUTHORING_PROMPT not in agent.instructions
 
 
+@pytest.mark.parametrize("also_valid", [False, True])
+def test_agent_instructions_name_each_workspace_skill_that_did_not_load(tmp_path: Path, also_valid: bool) -> None:
+    """An agent learns which of its workspace skills did not load and why, even when no other skill loads."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    skills_root = agent_workspace_root_path(runtime_paths.storage_root, "general") / "skills"
+    (skills_root / "xl_check").mkdir(parents=True)
+    (skills_root / "xl_check" / "SKILL.md").write_text(
+        "---\nname: xl_check\ndescription: Use when: the task needs an xlsx check\n---\n\n# Body\n",
+    )
+    if also_valid:
+        (skills_root / "good").mkdir()
+        (skills_root / "good" / "SKILL.md").write_text("---\nname: good\ndescription: Good skill\n---\n\n# Body\n")
+
+    agent = _create_agent_for_test("general", config)
+
+    [note] = [instruction for instruction in agent.instructions if "skills/xl_check/SKILL.md" in instruction]
+    assert "mapping values are not allowed in this context" in note
+    assert "line 3, column 22" in note
+    assert not any("skills/good/" in instruction for instruction in agent.instructions)
+    assert (agent.skills is not None) is also_valid
+
+
+def test_agent_whose_skill_functions_approval_hides_is_not_told_about_skills_that_did_not_load(
+    tmp_path: Path,
+) -> None:
+    """Approval rules that hide every skill function leave out all skill guidance, including skills that did not load."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.tool_approval = ToolApprovalConfig(default="require_approval")
+    skill_dir = agent_workspace_root_path(runtime_paths.storage_root, "general") / "skills" / "xl_check"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: xl_check\ndescription: Use when: the task needs an xlsx check\n---\n\n# Body\n",
+    )
+
+    agent = _create_agent_for_test("general", config)
+
+    assert not any("skills/xl_check/SKILL.md" in instruction for instruction in agent.instructions)
+
+
 @pytest.mark.parametrize("has_memory_tool", [False, True])
 @pytest.mark.parametrize("async_mode", [False, True])
 @pytest.mark.asyncio

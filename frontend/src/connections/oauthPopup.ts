@@ -53,6 +53,14 @@ export async function connectWithPopup(
   const popup = window.open("about:blank", "_blank", "width=500,height=700");
   if (!popup)
     throw new Error("The popup was blocked. Allow popups and try again.");
+  // Say what is coming instead of a blank window; navigating to the authorization page replaces it.
+  const placeholder = popup.document;
+  placeholder.title = "Opening sign-in…";
+  placeholder.documentElement.style.colorScheme =
+    document.documentElement.classList.contains("dark") ? "dark" : "light";
+  placeholder.body.style.cssText =
+    "margin:0;min-height:100vh;display:grid;place-items:center;font:16px system-ui,sans-serif";
+  placeholder.body.textContent = "Opening sign-in…";
 
   return new Promise((resolve, reject) => {
     let expectedOrigin: string | null = null;

@@ -19,6 +19,7 @@ from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.names import entity_names
 from mindroom.knowledge_graph.usage import usage_target
+from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -247,8 +248,9 @@ class _GraphLoop:
         self.loop.run_forever()
 
     async def stop(self) -> None:
-        """Cancel the work still on the loop, then stop it and wait for its thread."""
+        """Cancel the work still on the loop, close its model connections, then stop it and wait for its thread."""
         await run_on_loop(self.loop, _cancel_other_tasks())
+        await run_on_loop(self.loop, aclose_model_http_client())
         self.loop.call_soon_threadsafe(self.loop.stop)
         await asyncio.to_thread(self._thread.join)
         self.loop.close()

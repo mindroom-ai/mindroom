@@ -205,7 +205,7 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
 def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
-    """Allowed humans keep their identity, internal senders run as the assignee, and any other requester is refused."""
+    """Allowed humans keep their identity, admitted MindRoom accounts run as the assignee, and others are refused."""
     config = _restricted_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
@@ -219,10 +219,14 @@ def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
     # A human the assignee no longer replies to would only have the poke ignored at ingress.
     assert kind("@mallory:localhost") is TodoPokeRequesterKind.REFUSED
     assert kind("@alice:localhost", "removed") is TodoPokeRequesterKind.REFUSED
-    assert kind(ids["code"].full_id) is TodoPokeRequesterKind.INTERNAL
-    assert kind(ids["router"].full_id) is TodoPokeRequesterKind.INTERNAL
-    assert kind(mindroom_user_id(config, runtime_paths)) is TodoPokeRequesterKind.INTERNAL
+    assert kind(ids["secret"].full_id) is TodoPokeRequesterKind.INTERNAL
+    # Work another agent recorded with no person behind it pokes only an assignee whose access admits that agent.
+    assert kind(ids["code"].full_id) is TodoPokeRequesterKind.REFUSED
+    assert kind(ids["router"].full_id) is TodoPokeRequesterKind.REFUSED
+    assert kind(mindroom_user_id(config, runtime_paths)) is TodoPokeRequesterKind.REFUSED
     assert kind("@bridge:localhost") is TodoPokeRequesterKind.REFUSED
+    config.agents["secret"].access = ResponderAccessConfig(users=["@alice:localhost", ids["code"].full_id])
+    assert kind(ids["code"].full_id) is TodoPokeRequesterKind.INTERNAL
 
     with (
         patch(

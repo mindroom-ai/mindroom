@@ -161,12 +161,14 @@ class TodoPokeRuntimeCoordinator:
             internal_sender_ids = current_internal_sender_ids(config, self.runtime_paths)
         except MissingManagedEntityAccountError as exc:
             raise TodoPokeDeliveryUnavailableError from exc
-        # Access policies never restrict internal senders, so their work runs as the assignee's own turn.
-        if requester_id in internal_sender_ids:
-            return TodoPokeRequesterKind.INTERNAL
+        # Work from MindRoom's own accounts runs as the assignee's own turn once the assignee's access admits its author.
+        internal = requester_id in internal_sender_ids
         # Ingress promotes only a human or configured bot-account original sender to requester; any other sender would run with the assignee's authority.
-        # Pokes act only for humans, and ingress refuses a human the assignee may not reply to, so such work would only take poke slots.
-        if not is_human_requester_id(requester_id, config, self.runtime_paths) or agent_name not in config.agents:
+        # Other pokes act only for humans, and ingress refuses a human the assignee may not reply to, so such work would only take poke slots.
+        if (
+            not (internal or is_human_requester_id(requester_id, config, self.runtime_paths))
+            or agent_name not in config.agents
+        ):
             return TodoPokeRequesterKind.REFUSED
         try:
             allowed = is_sender_allowed_for_responder(
@@ -181,7 +183,9 @@ class TodoPokeRuntimeCoordinator:
         except ReplyMembershipPendingError as exc:
             # Unresolved membership is no refusal, so skip the scan without pruning this requester's dedup state.
             raise TodoPokeDeliveryUnavailableError from exc
-        return TodoPokeRequesterKind.HUMAN if allowed else TodoPokeRequesterKind.REFUSED
+        if not allowed:
+            return TodoPokeRequesterKind.REFUSED
+        return TodoPokeRequesterKind.INTERNAL if internal else TodoPokeRequesterKind.HUMAN
 
     async def _send_poke(
         self,

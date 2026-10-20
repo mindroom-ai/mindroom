@@ -863,6 +863,7 @@ describe("egress broker connected accounts", () => {
     closed: boolean;
     close: ReturnType<typeof vi.fn>;
     location: { href: string };
+    document: Document;
   };
 
   beforeEach(() => {
@@ -870,6 +871,7 @@ describe("egress broker connected accounts", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     services = [{ ...github, oauth: githubAccount }, openai];

@@ -107,11 +107,17 @@ type FakePopup = {
   closed: boolean;
   close: ReturnType<typeof vi.fn>;
   location: { href: string };
+  document: Document;
 };
 /** The window a connection opens, faked so a test can read and close it. */
 let popup: FakePopup;
 function fakePopup() {
-  popup = { closed: false, close: vi.fn(), location: { href: "about:blank" } };
+  popup = {
+    closed: false,
+    close: vi.fn(),
+    location: { href: "about:blank" },
+    document: document.implementation.createHTMLDocument(),
+  };
   vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
 }
 /** What the popup's own page posts back when the provider is done. */

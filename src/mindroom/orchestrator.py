@@ -87,6 +87,7 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
+from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
@@ -3052,6 +3053,7 @@ async def _finish_runtime_shutdown(
         reset_matrix_sync_health()
         reset_runtime_state()
         shutdown_primary_worker_manager()
+        await aclose_model_http_client()
 
 
 async def _wait_for_runtime_shutdown_cleanup(

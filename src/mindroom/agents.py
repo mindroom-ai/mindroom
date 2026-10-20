@@ -123,6 +123,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.tool_system.skills import RefusedWorkspaceSkill
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
@@ -1315,6 +1316,7 @@ def _load_agent_skills(
     workspace_root: Path | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: tuple[str, ...] | None = None,
+    refused: list[RefusedWorkspaceSkill] | None = None,
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
@@ -1323,6 +1325,7 @@ def _load_agent_skills(
         workspace_root=workspace_root,
         output_file_policy=output_file_policy,
         only=only,
+        refused=refused,
     )
 
 
@@ -1719,13 +1722,27 @@ def _build_agent_role_context(
     )
 
 
-def _skill_usage_instructions(config: Config, skills: Skills | None, hidden_functions: frozenset[str]) -> list[str]:
-    """Return the skill-function guidance for an agent offered skills, naming any skill function approval hides."""
-    if skills is None or not skills.get_skill_names():
+def _skill_usage_instructions(
+    config: Config,
+    skills: Skills | None,
+    hidden_functions: frozenset[str],
+    refused: Sequence[RefusedWorkspaceSkill],
+) -> list[str]:
+    """Return the skill-function guidance for an agent offered skills, naming any skill function approval hides.
+
+    Each workspace skill in ``refused`` gets a line saying why it did not load, also when no skill loads.
+    """
+    if hidden_functions == SKILL_FUNCTION_NAMES:
         return []
+    refusals = [
+        f"Workspace skill `{skill.path}` did not load. {skill.reason}. Fix the file and it loads on your next run."
+        for skill in refused
+    ]
+    if skills is None or not skills.get_skill_names():
+        return refusals
     # This guidance and Agno's skills prompt both name every skill function, so name the ones the agent lacks.
     hidden = f"These skill functions are not available to you: {', '.join(sorted(hidden_functions))}."
-    return [config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"), *((hidden,) if hidden_functions else ())]
+    return [config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"), *((hidden,) if hidden_functions else ()), *refusals]
 
 
 def _build_agent_instructions(
@@ -2055,6 +2072,7 @@ def create_agent(  # noqa: PLR0915
     # Approval rules hide generated functions, so skill guidance names the skill functions they hide
     # and is left out when they hide all of them.
     hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
+    refused_skills: list[RefusedWorkspaceSkill] = []
     skills = (
         None
         if disable_runtime_capabilities
@@ -2069,6 +2087,7 @@ def create_agent(  # noqa: PLR0915
                 config.defaults.tool_output_auto_save_threshold_bytes,
             ),
             only=persona.kept_skills if persona is not None else None,
+            refused=refused_skills,
         )
     )
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
@@ -2077,7 +2096,13 @@ def create_agent(  # noqa: PLR0915
         agent_config.instructions if persona is None else (),
         config,
         agent_runtime,
-        skill_instructions=_skill_usage_instructions(config, prompt_skills, hidden_skill_functions),
+        # Only the agent that owns the workspace is told which of its skills did not load, not a persona borrowing them.
+        skill_instructions=_skill_usage_instructions(
+            config,
+            prompt_skills,
+            hidden_skill_functions,
+            refused_skills if persona is None else (),
+        ),
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,
         native_deferred_tool_names=() if portable_deferred_tools else tool_assembly.deferred_tool_names,

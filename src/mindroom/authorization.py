@@ -12,7 +12,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     configured_routable_entity_ids_for_room,
-    current_internal_sender_ids,
+    current_entity_id,
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
@@ -99,10 +99,11 @@ def _responder_reply_authorization(
 ) -> _ReplyAuthorizationDecision:
     """Allow any proven grant before considering unresolved relevant membership.
 
+    A responder always admits its own account; other MindRoom accounts need a grant like any requester.
     ``observed_room`` is the answering bot's own synced view of ``room_id``. Its roster never grants
     access; it only lets a same-room denial wait briefly for the router to apply a join.
     """
-    allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
+    allowed = _is_own_account(sender_id, entity_name, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
     allowed = allowed or resolved_sender in config.administrators
@@ -215,13 +216,12 @@ def is_sender_allowed_for_entity_replies_in_room(
     return True
 
 
-def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return internal sender IDs when prepared, or an empty set before provisioning."""
+def _is_own_account(sender_id: str, entity_name: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a sender is the responder's own prepared Matrix account."""
     try:
-        return current_internal_sender_ids(config, runtime_paths)
+        return sender_id == current_entity_id(entity_name, runtime_paths).full_id
     except MissingManagedEntityAccountError:
-        logger.debug("managed_entity_accounts_unavailable_for_auth_check")
-        return frozenset()
+        return False
 
 
 def is_sender_allowed_for_agent_credential_management(

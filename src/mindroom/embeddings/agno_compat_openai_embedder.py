@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.utils.log import log_info
+from openai import AsyncOpenAI
+
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 
 if TYPE_CHECKING:
     from openai.types.create_embedding_response import CreateEmbeddingResponse
@@ -44,6 +47,26 @@ class OpenAIEmbedderWithHooks(OpenAIEmbedder, ABC):
     ) -> list[list[float]]:
         """Validate successful responses and record owner health."""
         ...
+
+    # AGNO_COMPAT: The embedder has no async-only HTTP client setting.
+    # Reason: Agno hands `client_params` to both its sync and async SDK clients, so an async `http_client` there
+    # breaks the sync one, and without one the async SDK client builds a pool whose finalizer can hang reused sockets.
+    # Upstream issue: None identified (searched October 19, 2026).
+    # Upstream PR: None identified.
+    # Remove when: Agno embedders accept an async HTTP client separately from the sync one.
+    # Coverage: tests/test_model_http_client.py::test_openai_embedder_reuses_the_model_connection.
+    @property
+    def aclient(self) -> AsyncOpenAI:
+        """Build the async SDK client on the runtime's shared model HTTP client."""
+        if self.async_client is None:
+            self.async_client = AsyncOpenAI(
+                api_key=self.api_key,
+                organization=self.organization,
+                base_url=self.base_url,
+                http_client=MODEL_HTTP_CLIENT,
+                **(self.client_params or {}),
+            )
+        return self.async_client
 
     def response(self, text: str) -> CreateEmbeddingResponse:
         """Request a single embedding synchronously."""
