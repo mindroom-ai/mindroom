@@ -29,9 +29,9 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
 </div>
 
 <div class="mr-video">
-<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/7be35dba-d3c2-4cf8-a977-ee5943534fb9" data-poster-light="https://github.com/user-attachments/assets/7be35dba-d3c2-4cf8-a977-ee5943534fb9" data-poster-dark="https://github.com/user-attachments/assets/198dbfb6-1e07-4ca9-af3f-6eb8b6924c2b">
-  <source src="https://github.com/user-attachments/assets/a1ce1754-924d-4c37-b8bf-706a514dffb7" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/b4071583-35cc-463c-bb56-85e9444e9c32" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/578109b5-9129-412b-b5ab-8bdb10da2e22" data-poster-light="https://github.com/user-attachments/assets/578109b5-9129-412b-b5ab-8bdb10da2e22" data-poster-dark="https://github.com/user-attachments/assets/e1ff7e10-bf9a-46a8-bf18-6f142130246a">
+  <source src="https://github.com/user-attachments/assets/9c68a218-da26-47a5-a46f-7f0d4a2607fb" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/dfeece3b-ff67-4412-83fb-b02b6c531814" type="video/mp4">
 </video>
 </div>
 

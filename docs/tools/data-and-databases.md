@@ -252,9 +252,9 @@ agents:
 
 ## [`google_drive`]
 
-<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%" poster="https://github.com/user-attachments/assets/4444ef0a-80dc-4816-a72e-f2584cf27aa8" data-poster-light="https://github.com/user-attachments/assets/4444ef0a-80dc-4816-a72e-f2584cf27aa8" data-poster-dark="https://github.com/user-attachments/assets/d624a2b6-b435-4ce4-b937-2a1ca35f876a">
-  <source src="https://github.com/user-attachments/assets/6ab1efc9-1aec-4daf-8c45-924bbebb818f" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/cb2361eb-e273-461f-b307-22a4aaf3bf38" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%" poster="https://github.com/user-attachments/assets/38ae5852-8273-4cd5-b05e-27e36c5ff157" data-poster-light="https://github.com/user-attachments/assets/38ae5852-8273-4cd5-b05e-27e36c5ff157" data-poster-dark="https://github.com/user-attachments/assets/08b198a5-3134-4b36-b688-4f431e87babf">
+  <source src="https://github.com/user-attachments/assets/e5d0d6c6-f406-425a-a22d-570f0f4f45d5" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/ba7d6fcc-83e9-4a88-be2e-30ce9c8754e5" type="video/mp4">
 </video>
 
 `google_drive` works with files in the connected Google account, including shared drives the account can access.

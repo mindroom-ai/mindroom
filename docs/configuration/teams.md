@@ -6,9 +6,9 @@ icon: lucide/users
 
 A team lets several agents answer one request together, either as a named team under `teams:` that has its own Matrix account, or as an ad hoc team formed when a message involves several agents.
 
-<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/57788290-37e3-4dcd-89be-d4b3716c8405" data-poster-light="https://github.com/user-attachments/assets/57788290-37e3-4dcd-89be-d4b3716c8405" data-poster-dark="https://github.com/user-attachments/assets/8e2bced1-17ef-4da7-b019-58484c3c2996">
-  <source src="https://github.com/user-attachments/assets/53af7938-8302-4d18-bd5a-5b37a3e07c40" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/8a7185a6-b9c5-4d4c-b5e7-15f417520578" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/a892a233-6585-4156-932f-8addb1409879" data-poster-light="https://github.com/user-attachments/assets/a892a233-6585-4156-932f-8addb1409879" data-poster-dark="https://github.com/user-attachments/assets/613f4f1e-cae4-4e82-a082-282fbbf2d73b">
+  <source src="https://github.com/user-attachments/assets/fc66ec35-de5f-4a4e-9494-5bb1f361973a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/0fc87c04-06ed-4508-bc4f-f461720218dc" type="video/mp4">
 </video>
 
 ## Team Modes

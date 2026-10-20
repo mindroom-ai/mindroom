@@ -1,8 +1,8 @@
 # Tool Approval
 
-<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%" poster="https://github.com/user-attachments/assets/7cab9972-3ffb-4a02-b311-a0b56eea19a9" data-poster-light="https://github.com/user-attachments/assets/7cab9972-3ffb-4a02-b311-a0b56eea19a9" data-poster-dark="https://github.com/user-attachments/assets/8d6b893c-fa19-4ec0-8e1c-4abd293a5b13">
-  <source src="https://github.com/user-attachments/assets/6f3cfc01-a914-4cfa-b502-4f4c919e239c" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/0385dfc1-7d73-45a2-80f1-ab4baab7e943" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%" poster="https://github.com/user-attachments/assets/72632152-a056-40de-961e-2435119812d6" data-poster-light="https://github.com/user-attachments/assets/72632152-a056-40de-961e-2435119812d6" data-poster-dark="https://github.com/user-attachments/assets/44197f0e-da33-4076-b859-ac4e2ca39513">
+  <source src="https://github.com/user-attachments/assets/502962b4-4dc6-4819-ae5a-eef572a41422" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/cd2e754b-dbb7-4af7-a050-c29514ab712e" type="video/mp4">
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.

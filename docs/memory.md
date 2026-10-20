@@ -13,9 +13,9 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
 
-<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/724122a3-a10a-4065-9d3c-f7fc5578f6e1" data-poster-light="https://github.com/user-attachments/assets/724122a3-a10a-4065-9d3c-f7fc5578f6e1" data-poster-dark="https://github.com/user-attachments/assets/d32f67f6-f602-4f2c-9e1a-5477690a9e15">
-  <source src="https://github.com/user-attachments/assets/407e4432-f109-4f01-8971-4019120cae9a" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/fc9c8205-5e2b-41e5-a9ba-d31c1e158359" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
+  <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f1d8e8ce-8160-46bf-811d-2a3e71cde673" type="video/mp4">
 </video>
 
 ## Choosing a Backend

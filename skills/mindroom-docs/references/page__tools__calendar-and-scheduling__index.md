@@ -17,9 +17,9 @@ If an agent calls either tool before the account is connected, the tool returns 
 
 ## [`google_calendar`]
 
-<video controls playsinline preload="metadata" aria-label="Two people plan a weekend trip with an agent that checks the calendar and books it" style="width: 100%" poster="https://github.com/user-attachments/assets/431caaa5-fd93-4f38-9694-ec582ecbdf6a" data-poster-light="https://github.com/user-attachments/assets/431caaa5-fd93-4f38-9694-ec582ecbdf6a" data-poster-dark="https://github.com/user-attachments/assets/0b48728e-c9b5-464a-9144-40c32a7322f4">
-  <source src="https://github.com/user-attachments/assets/abcc2e40-c593-41dc-98de-b1681548000a" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/8b5fc2ab-0195-4b28-8a5b-103b2c99f73e" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Two people plan a weekend trip with an agent that checks the calendar and books it" style="width: 100%" poster="https://github.com/user-attachments/assets/6021fb0e-84fc-48a0-803e-410f4904b84a" data-poster-light="https://github.com/user-attachments/assets/6021fb0e-84fc-48a0-803e-410f4904b84a" data-poster-dark="https://github.com/user-attachments/assets/d1ced210-a86c-49e8-abac-640bf7116686">
+  <source src="https://github.com/user-attachments/assets/6f3e7958-0733-4141-b667-a798d94fcaee" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/108f8f22-6752-414e-93dd-38154715981c" type="video/mp4">
 </video>
 
 `google_calendar` provides `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.

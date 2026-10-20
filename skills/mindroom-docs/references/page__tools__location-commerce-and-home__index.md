@@ -124,9 +124,9 @@ get_average_order_value(group_by="day", created_after="2026-03-01", created_befo
 
 ## `homeassistant`
 
-<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%" poster="https://github.com/user-attachments/assets/ebc94adb-29c9-4a69-8a6c-de3cd66776a9" data-poster-light="https://github.com/user-attachments/assets/ebc94adb-29c9-4a69-8a6c-de3cd66776a9" data-poster-dark="https://github.com/user-attachments/assets/6fa4a61c-4862-4479-a015-62d51ad3b3cd">
-  <source src="https://github.com/user-attachments/assets/0baca8e8-ecff-44bc-bb46-f9e6e6739780" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/df2c4494-e658-4abb-acd0-1d2b60a0cc46" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%" poster="https://github.com/user-attachments/assets/534252f8-c599-4a1c-9aef-f1131ef9dfaf" data-poster-light="https://github.com/user-attachments/assets/534252f8-c599-4a1c-9aef-f1131ef9dfaf" data-poster-dark="https://github.com/user-attachments/assets/6729cad6-62ae-4ea4-92f4-6a3e422e7c36">
+  <source src="https://github.com/user-attachments/assets/bf32f178-1c18-4643-a2d6-1450e306cbe0" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/30f0c744-ecaf-4fbe-9c95-08576425ab3f" type="video/mp4">
 </video>
 
 `homeassistant` provides `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.

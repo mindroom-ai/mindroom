@@ -7,9 +7,9 @@ icon: lucide/mouse-pointer-click
 Agents can ask users a multiple-choice question that they answer by clicking an emoji reaction or typing the option number.
 Use this when an agent needs the user to pick between a few concrete options before it continues.
 
-<video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%" poster="https://github.com/user-attachments/assets/b12b844e-2530-4549-b274-09a0736facb8" data-poster-light="https://github.com/user-attachments/assets/b12b844e-2530-4549-b274-09a0736facb8" data-poster-dark="https://github.com/user-attachments/assets/df8ac53f-39cf-4ed0-b2fa-d52a6a8f5f3c">
-  <source src="https://github.com/user-attachments/assets/8b422079-ecb5-49a7-bf9d-1ad12734b16e" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/6ec40ae8-4488-4990-a4d4-8f93adca1ef7" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent asks a multiple-choice question before it decides" style="width: 100%" poster="https://github.com/user-attachments/assets/2a7ab600-0934-4b53-a47b-ec8fcd80201d" data-poster-light="https://github.com/user-attachments/assets/2a7ab600-0934-4b53-a47b-ec8fcd80201d" data-poster-dark="https://github.com/user-attachments/assets/4ee1ad16-4d36-4aca-932d-49b8447b5239">
+  <source src="https://github.com/user-attachments/assets/35bb8221-3405-4efb-b236-304a58f898e8" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/35bfe7b2-feab-484f-b5e8-22b26ac92df8" type="video/mp4">
 </video>
 
 ## Asking a Question

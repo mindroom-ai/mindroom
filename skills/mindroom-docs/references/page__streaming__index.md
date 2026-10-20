@@ -3,9 +3,9 @@
 MindRoom streams agent responses to Matrix by progressively editing a single message, so users see text appear as the model generates it.
 This page covers when streaming is used, how to tune or disable it, how streamed messages show tool calls, completion, cancellation, and errors, and how oversized responses are delivered.
 
-<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/9a7c0682-3443-4f7b-9221-532637022b1e" data-poster-light="https://github.com/user-attachments/assets/9a7c0682-3443-4f7b-9221-532637022b1e" data-poster-dark="https://github.com/user-attachments/assets/04b27190-a661-4246-8b5a-8ba52c0dc647">
-  <source src="https://github.com/user-attachments/assets/eaf0fceb-6456-4f85-8d6f-13abfff84c78" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/92f1a79e-640e-496f-ab4b-156d66ffb1eb" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/dc935612-af9a-4556-a502-5c1ffaf3810a" data-poster-light="https://github.com/user-attachments/assets/dc935612-af9a-4556-a502-5c1ffaf3810a" data-poster-dark="https://github.com/user-attachments/assets/d3312f2a-0315-4109-83d6-3470bb2a4247">
+  <source src="https://github.com/user-attachments/assets/0545ae90-c825-496d-81ad-45d3cc069822" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/71036d2f-4ccd-4cdd-99c2-518b915f2ba0" type="video/mp4">
 </video>
 
 

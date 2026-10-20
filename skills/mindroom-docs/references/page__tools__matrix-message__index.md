@@ -43,9 +43,9 @@ matrix_message(action="react", event_id="$message", message="✅")
 
 ## Agent conversations
 
-<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%" poster="https://github.com/user-attachments/assets/cb74315d-01e0-4eae-8987-8084cbd6cdee" data-poster-light="https://github.com/user-attachments/assets/cb74315d-01e0-4eae-8987-8084cbd6cdee" data-poster-dark="https://github.com/user-attachments/assets/15c99b9e-75b1-4478-9256-1a943b8e9097">
-  <source src="https://github.com/user-attachments/assets/0f2dc9fe-035c-4f07-844d-53778081080c" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/2fbb583a-41f1-491e-9c08-54c44509799e" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%" poster="https://github.com/user-attachments/assets/f0841f4c-b329-4f6e-beb8-db97385ca747" data-poster-light="https://github.com/user-attachments/assets/f0841f4c-b329-4f6e-beb8-db97385ca747" data-poster-dark="https://github.com/user-attachments/assets/4f646502-aa3d-45e0-9252-caeb82cff64b">
+  <source src="https://github.com/user-attachments/assets/f52dc877-6750-41a7-b7df-682a28cbdbfc" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/dfae0111-bd08-465d-a316-b37fc3b8324f" type="video/mp4">
 </video>
 
 List possible recipients with `matrix_room(action="agents")` and pass a result's `name` as `recipient`; no Matrix mention is needed.

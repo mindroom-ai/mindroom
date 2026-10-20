@@ -6,9 +6,9 @@ icon: lucide/code
 
 Use these tools to inspect and edit files, run shell commands or Python, manage Docker resources, do exact arithmetic, and generate files and charts.
 
-<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%" poster="https://github.com/user-attachments/assets/5bdfedd7-fb51-4d51-b558-d0ac1d7ec0da" data-poster-light="https://github.com/user-attachments/assets/5bdfedd7-fb51-4d51-b558-d0ac1d7ec0da" data-poster-dark="https://github.com/user-attachments/assets/b91e7f3f-1598-4791-8d84-eb216d020c49">
-  <source src="https://github.com/user-attachments/assets/b349a8bd-7a5d-4794-a569-1742ebaa73fa" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d883f31c-18d8-4446-ae34-ae5033283cff" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent writes and runs an analysis script in its own workspace and posts the plot" style="width: 100%" poster="https://github.com/user-attachments/assets/524efcc4-9b4c-4ee1-85c3-bca8dc13e1f8" data-poster-light="https://github.com/user-attachments/assets/524efcc4-9b4c-4ee1-85c3-bca8dc13e1f8" data-poster-dark="https://github.com/user-attachments/assets/e62497d7-3133-4abe-afc2-ec3db2889552">
+  <source src="https://github.com/user-attachments/assets/36d029f7-b67d-46c7-ae38-f76517dcd354" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/1e73d587-9a0e-44c3-a66d-8b6631cdbf61" type="video/mp4">
 </video>
 
 ## Tools On This Page

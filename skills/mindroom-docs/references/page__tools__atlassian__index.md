@@ -5,9 +5,9 @@ Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so 
 Additional Atlassian sites can be added as separate, independently connected tools through a small plugin.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
-<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%" poster="https://github.com/user-attachments/assets/83960aa1-159e-469a-8b69-e7c9336aaf23" data-poster-light="https://github.com/user-attachments/assets/83960aa1-159e-469a-8b69-e7c9336aaf23" data-poster-dark="https://github.com/user-attachments/assets/9853d1b2-7615-4db4-828f-9f3c931d5728">
-  <source src="https://github.com/user-attachments/assets/07ee3a6a-cea0-47ba-86bc-dc9085ae5d48" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/e33dca2c-fc1e-4e7a-b611-a0ca055178ba" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent answers a travel policy question from Confluence and Drive, with sources" style="width: 100%" poster="https://github.com/user-attachments/assets/59921dee-7062-4327-80eb-b53c6e2cd392" data-poster-light="https://github.com/user-attachments/assets/59921dee-7062-4327-80eb-b53c6e2cd392" data-poster-dark="https://github.com/user-attachments/assets/b74ba2fc-af0b-471e-8779-cff61de0c698">
+  <source src="https://github.com/user-attachments/assets/1e0337e0-30d6-400f-88df-8374cd728158" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/5a12e5b4-f8cd-4e88-9837-80e2f7678036" type="video/mp4">
 </video>
 
 The separate `jira` and `confluence` tools on [Project Management](https://docs.mindroom.chat/tools/project-management/) use a shared API token or password and also support Jira and Confluence Data Center.
