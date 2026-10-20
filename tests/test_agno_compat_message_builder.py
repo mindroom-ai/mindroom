@@ -183,6 +183,41 @@ async def test_team_list_message_patch_excludes_transient_input_from_persisted_r
     assert "Current question" in persisted_content
 
 
+@pytest.mark.parametrize("entity_kind", ["agent", "team"])
+@pytest.mark.asyncio
+async def test_turn_context_follows_the_prompt_so_the_next_request_repeats_the_opening(entity_kind: str) -> None:
+    """Unstored turn context must not sit where the next turn replays the prompt."""
+    model = RecordingOpenAIChat(id="gpt-test", api_key="sk-test")
+    entity_kwargs: dict[str, Any] = {
+        "model": model,
+        "db": InMemoryDb(),
+        "add_history_to_context": True,
+        "markdown": False,
+        "telemetry": False,
+    }
+    entity = Agent(**entity_kwargs) if entity_kind == "agent" else Team(members=[], **entity_kwargs)
+
+    def turn_input(context: str, prompt: str) -> list[Message]:
+        return [Message(role="user", content=context, add_to_agent_memory=False), Message(role="user", content=prompt)]
+
+    first = await entity.arun(turn_input("context one", "question one"), session_id="session")
+    first_request = _conversation_messages(model)
+    await entity.arun(turn_input("context two", "question two"), session_id="session")
+
+    assert first_request == [
+        {"role": "user", "content": "question one"},
+        {"role": "user", "content": "context one"},
+    ]
+    assert _conversation_messages(model) == [
+        {"role": "user", "content": "question one"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "question two"},
+        {"role": "user", "content": "context two"},
+    ]
+    assert first.input is not None
+    assert [message.content for message in first.input.input_content] == ["context one", "question one"]
+
+
 @pytest.mark.parametrize("use_async", [False, True])
 @pytest.mark.asyncio
 async def test_team_list_message_patch_sets_user_message(use_async: bool) -> None:

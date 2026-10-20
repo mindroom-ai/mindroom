@@ -1054,7 +1054,9 @@ def _minimal_turn_enrichment(
     agent.system_message = agent.bootstrap_message
     if required_system:
         agent.system_message += "\n" + _render_system_enrichment_context(required_system)
-    return render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required])
+    return render_transient_context(
+        (render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required]),),
+    )
 
 
 async def _prepare_turn_memory(

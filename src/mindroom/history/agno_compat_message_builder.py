@@ -8,6 +8,7 @@ Both builders, and the entry points that resume paused runs, also remove
 ordinary inline payloads from persisted history while retaining marked, bounded
 tool images for replay, and place the scope's compaction summary in replayed
 history.
+New runs also send their unstored turn context after the prompt.
 """
 
 from __future__ import annotations
@@ -68,6 +69,17 @@ if TYPE_CHECKING:
 # tests/test_agno_compat_message_builder.py::test_inline_media_cleanup_strips_every_kind_only_from_history;
 # tests/test_agno_compat_message_builder.py::test_viewed_image_replay_keeps_only_newest_four_and_discloses_omissions;
 # tests/test_agno_compat_message_builder.py::test_history_viewed_image_projection_enforces_aggregate_byte_limit.
+
+# AGNO_COMPAT: Ordering unstored turn context after the prompt requires private message builders.
+# Reason: MindRoom's run input ends with the prompt, which the Team input patch, media attachment, and mid-turn
+# compaction read as the turn's prompt, but the unstored context before it must reach the model after it.
+# Otherwise the next turn's request, which replays the prompt in that position, shares no prefix past the context,
+# so provider prompt caches and routing by a conversation's opening messages miss.
+# Upstream issue: Tracking gap; no supported hook to reorder a built request is proposed beyond the
+# message-preparation hooks listed for historical media.
+# Upstream PR: None identified.
+# Remove when: A supported message-preparation hook can order new-run requests; retain the ordering policy.
+# Coverage: tests/test_agno_compat_message_builder.py::test_turn_context_follows_the_prompt_so_the_next_request_repeats_the_opening.
 
 # AGNO_COMPAT: Agno renders the session summary only inside its system message.
 # Reason: Agno appends session.summary to the system prompt when add_session_summary_to_context is on, so every
@@ -206,6 +218,25 @@ def _insert_session_summary(run_messages: RunMessages, session: AgentSession | T
     messages.insert(index, compaction_summary_message(summary, run_local=False))
 
 
+def _send_turn_context_after_prompt(messages: list[Message]) -> None:
+    """Move a new run's unstored turn context from before its prompt to after it.
+
+    The run input ends with the prompt, and the next turn replays that prompt where the context sat.
+    Sending the context last keeps this request a prefix of the next one up to the prompt, so providers that cache
+    prefixes, or route by a conversation's opening messages, can reuse it.
+    """
+    if len(messages) < 2:
+        return
+    context, prompt = messages[-2:]
+    if (
+        context.role == "user"
+        and not context.add_to_agent_memory
+        and not context.from_history
+        and prompt.role == "user"
+    ):
+        messages[-2:] = [prompt, context]
+
+
 def _prepare_history(
     run_messages: RunMessages,
     target: object,
@@ -214,6 +245,8 @@ def _prepare_history(
     continuation: bool,
 ) -> RunMessages:
     """Apply MindRoom's replay policy to one built request."""
+    if not continuation:
+        _send_turn_context_after_prompt(run_messages.messages)
     session = kwargs.get("session")
     if isinstance(session, (AgentSession, TeamSession)):
         run_context = kwargs.get("run_context")
