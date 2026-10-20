@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         "microsoft_teams_list_teams",
         "microsoft_teams_list_channels",
         "microsoft_teams_list_channel_messages",
+        "microsoft_teams_list_channel_message_replies",
         "microsoft_teams_list_chats",
         "microsoft_teams_list_chat_messages",
         "microsoft_teams_send_channel_message",

@@ -1378,6 +1378,49 @@ describe("Knowledge", () => {
     );
   });
 
+  it("drops the local poll interval from the payload when a polled base switches to git", async () => {
+    const polledBase: KnowledgeBaseConfig = {
+      path: "./knowledge_docs/docs",
+      watch: true,
+      poll_interval_seconds: 600,
+    };
+    mockStore({ docs: polledBase });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Settings git source" }),
+    );
+
+    const update = mockUpdateKnowledgeBase.mock.lastCall?.[1] as
+      KnowledgeBaseConfig | undefined;
+    expect(update?.git).toBeDefined();
+    // The store merges updates into the existing base, then JSON.stringify drops undefined keys.
+    const savedBase = JSON.parse(
+      JSON.stringify({ ...polledBase, ...update }),
+    ) as Record<string, unknown>;
+    expect(savedBase).not.toHaveProperty("poll_interval_seconds");
+    expect(savedBase).toHaveProperty("git");
+  });
+
   it("hides local refresh controls for files-only bases", async () => {
     mockStore({
       docs: {
@@ -1450,6 +1493,7 @@ describe("Knowledge", () => {
         mode: "files",
         path: "",
         watch: false,
+        poll_interval_seconds: undefined,
       }),
     );
   });

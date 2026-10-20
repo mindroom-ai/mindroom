@@ -17,6 +17,8 @@ from mindroom.custom_tools.microsoft_graph import (
     checked_upload_source,
     graph_session,
     graph_tool_result,
+    html_to_text,
+    next_page_token,
     path_segment,
     read_upload_source,
     share_id,
@@ -562,3 +564,58 @@ def test_a_download_into_an_inaccessible_directory_is_reported(
         locked.chmod(0o700)
 
     assert result["code"] == "workspace_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("link", "token"),
+    [
+        (
+            "https://graph.microsoft.com/v1.0/me/drive/root/children?$skiptoken=a",
+            "/me/drive/root/children?$skiptoken=a",
+        ),
+        ("https://evil.example.com/v1.0/me/drive/root/children?$skiptoken=a", None),
+        ("https://graph.microsoft.com/beta/me/drive/root/children?$skiptoken=a", None),
+        (None, None),
+    ],
+)
+def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, token: str | None) -> None:
+    assert next_page_token({"@odata.nextLink": link} if link else {}) == token
+
+
+@pytest.mark.parametrize(
+    ("html", "text"),
+    [
+        ("Plain notes", "Plain notes"),
+        ("First line<br>Second line", "First line\nSecond line"),
+        ("Paragraph<br><br>after a blank line", "Paragraph\n\nafter a blank line"),
+        ("<p>First</p><p>Second &amp; third</p>", "First\nSecond & third"),
+        ("<ul><li>one</li><li>two</li></ul>", "one\ntwo"),
+        ("<p>a   b</p>\n\n\n<p></p><p>c</p>", "a b\nc"),
+        ('<attachment id="ee8d"></attachment>', ""),
+        ("Tom &lt;tom@contoso.com&gt;&nbsp;wrote", "Tom <tom@contoso.com> wrote"),
+        (
+            "<html><head><title>Note</title><style>p { color: red; }</style></head>"
+            "<body><div>Line  one\n  continues <b>bold</b></div></body></html>",
+            "Line one continues bold",
+        ),
+        ("<html><head><title>Note</title><body><p>Kept</p></body></html>", "Kept"),
+        (
+            "<table><tr><th>Name</th><th>Value</th></tr>\n<tr><td> Alpha </td> <td>1</td><td></td><td>x</td></tr></table>",
+            "Name | Value\nAlpha | 1 | | x",
+        ),
+        ('<p>see</p><img src="https://graph.microsoft.com/x" alt="chart">', "see\n[image]"),
+        ('<p>Ship it <emoji id="1f44d_thumbsup" alt="\U0001f44d" title="Thumbs up"></emoji></p>', "Ship it \U0001f44d"),
+        (
+            '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1616965872000">'
+            '<strong itemprop="mri">Sam Example</strong><p itemprop="preview">Can we ship today?</p></blockquote>'
+            "<p>Yes, after the review.</p>",
+            "> Sam Example\n> Can we ship today?\nYes, after the review.",
+        ),
+        (
+            "<blockquote>outer<blockquote>inner</blockquote>after</blockquote>reply",
+            "> outer\n> > inner\n> after\nreply",
+        ),
+    ],
+)
+def test_html_to_text_keeps_readable_text_and_line_breaks(html: str, text: str) -> None:
+    assert html_to_text(html) == text

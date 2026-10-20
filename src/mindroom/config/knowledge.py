@@ -81,7 +81,16 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,
-        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations unless poll_interval_seconds is set",
+    )
+    poll_interval_seconds: int | None = Field(
+        default=None,
+        ge=5,
+        description=(
+            "How often to schedule a background refresh for a local knowledge folder that another host writes to, "
+            "such as an NFS share, where filesystem watching never sees the writes; "
+            "unset means no polling; only for semantic mode, and Git-backed bases use git.poll_interval_seconds instead"
+        ),
     )
     require_content_before_publish: bool = Field(
         default=False,
@@ -158,5 +167,23 @@ class KnowledgeBaseConfig(BaseModel):
         """Ensure chunk overlap is always smaller than chunk size."""
         if self.chunk_overlap >= self.chunk_size:
             msg = "chunk_overlap must be smaller than chunk_size"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def effective_poll_interval_seconds(self) -> int | None:
+        """Return how often this base is polled in the background, or None when it is not polled."""
+        return self.poll_interval_seconds if self.git is None else self.git.poll_interval_seconds
+
+    @model_validator(mode="after")
+    def validate_poll_interval_is_local(self) -> KnowledgeBaseConfig:
+        """Reject the local poll interval on Git-backed bases, which have their own, and on files-mode bases, which have no index."""
+        if self.poll_interval_seconds is None:
+            return self
+        if self.git is not None:
+            msg = "poll_interval_seconds applies to local knowledge bases; use git.poll_interval_seconds for Git-backed bases"
+            raise ValueError(msg)
+        if self.mode == "files":
+            msg = "poll_interval_seconds applies to semantic local knowledge bases"
             raise ValueError(msg)
         return self

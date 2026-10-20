@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from contextlib import ExitStack, contextmanager
+from html.parser import HTMLParser
 from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -58,8 +60,11 @@ logger = get_logger(__name__)
 
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
 _GRAPH_HOST = "graph.microsoft.com"
+# Windows zone names ("W. Europe Standard Time", "UTC-11") and IANA names ("America/New_York").
+_TIME_ZONE = re.compile(r"[A-Za-z][A-Za-z0-9 ._+/-]{0,63}")
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _CHUNK_BYTES = 1024 * 1024
+_OFFSET = re.compile(r"[0-9]{1,10}")
 _STATUS_ERRORS = {
     403: ("forbidden", "The connected Microsoft account has no permission for this."),
     404: ("not_found", "Microsoft Graph found nothing there, or the connected account cannot see it."),
@@ -94,9 +99,132 @@ def path_segment(value: object, field_name: str) -> str:
     return quote(value, safe="!:@=")
 
 
+def time_zone_name(value: object) -> str:
+    """Return a model-supplied Windows or IANA time zone name for a Graph `dateTimeTimeZone`."""
+    if not isinstance(value, str) or not _TIME_ZONE.fullmatch(value) or value != value.strip():
+        msg = 'time_zone must be a Windows or IANA time zone name, such as "Pacific Standard Time" or "Europe/Berlin".'
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return value
+
+
+def next_page_token(payload: Mapping[str, Any]) -> str | None:
+    """Return the continuation token for a Graph collection page: its next link relative to Graph, or None."""
+    link = payload.get("@odata.nextLink")
+    if isinstance(link, str) and link.startswith(f"{GRAPH_URL}/"):
+        return link.removeprefix(GRAPH_URL)
+    return None
+
+
+def page_path(page_token: object, collection_suffix: str) -> str:
+    """Return the Graph path a page token continues, refusing anything but this function's own collection.
+
+    Graph may phrase a next link differently from the first request, for example by drive instead of `/me`,
+    so a token is checked by shape: a relative Graph path ending in the collection, with a query and no `..`.
+    """
+    token = page_token if isinstance(page_token, str) else ""
+    path, _, query = token.partition("?")
+    if (
+        not query
+        or not path.startswith("/")
+        or path.startswith("//")
+        or not path.endswith(collection_suffix)
+        or ".." in path
+        or any(character in "#\\ " or ord(character) < 32 for character in token)
+    ):
+        msg = "page_token must be the next_page_token this function returned."
+        raise MicrosoftGraphError(code="invalid_page_token", message=msg)
+    return token
+
+
+def page_offset(page_token: object | None, maximum: int) -> int:
+    """Return the result offset a numeric page token names, or 0 for the first page."""
+    if page_token is None:
+        return 0
+    if not isinstance(page_token, str) or not _OFFSET.fullmatch(page_token) or int(page_token) > maximum:
+        msg = "page_token must be the next_page_token this function returned."
+        raise MicrosoftGraphError(code="invalid_page_token", message=msg)
+    return int(page_token)
+
+
 def share_id(url: str) -> str:
     """Encode a sharing or web link as a Graph share ID."""
     return "u!" + base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+_HTML_BLOCK_TAGS = frozenset(
+    {"blockquote", "div", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "li", "ol", "p", "pre", "table", "tr", "ul"},
+)
+_HTML_CELL_TAGS = frozenset({"td", "th"})
+_HTML_HIDDEN_TAGS = frozenset({"head", "script", "style", "title"})
+# Text collapses its whitespace to spaces, so a tab in the collected text can only be a cell boundary.
+_HTML_CELL_BREAK = "\t"
+
+
+class _HtmlText(HTMLParser):
+    """Collect an HTML fragment's visible text.
+
+    Lines break at `br`, rows, and block elements, cells on a row are marked apart, images show as `[image]`,
+    emoji keep their alt text, and quoted lines start with `> ` for each quote level.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._line_start = True
+        self._hidden = 0
+        self._quote_depth = 0
+
+    def _break_line(self) -> None:
+        self.parts.append("\n")
+        self._line_start = True
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _HTML_HIDDEN_TAGS:
+            self._hidden += 1
+        elif tag == "body":
+            # The closing `head` tag is optional, so the body ends anything hidden before it.
+            self._hidden = 0
+        elif tag == "br" or (tag in _HTML_BLOCK_TAGS and not self._line_start):
+            self._break_line()
+        elif tag in _HTML_CELL_TAGS and not self._line_start:
+            self.parts.append(_HTML_CELL_BREAK)
+        elif tag == "img":
+            self.handle_data("[image]")
+        elif tag == "emoji":
+            # Teams sends an emoji as an empty element whose alt attribute is the emoji itself.
+            self.handle_data(dict(attrs).get("alt") or "")
+        if tag == "blockquote":
+            self._quote_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_HIDDEN_TAGS:
+            self._hidden = max(self._hidden - 1, 0)
+        elif tag in _HTML_BLOCK_TAGS and not self._line_start:
+            self._break_line()
+        if tag == "blockquote":
+            self._quote_depth = max(self._quote_depth - 1, 0)
+
+    def handle_data(self, data: str) -> None:
+        # Source whitespace, line breaks included, renders as one space, and none at the start of a line.
+        text = re.sub(r"\s+", " ", data)
+        if self._line_start:
+            text = text.lstrip()
+        if not self._hidden and text:
+            self.parts.append("> " * self._quote_depth + text if self._line_start else text)
+            self._line_start = False
+
+
+def html_to_text(html: str) -> str:
+    """Return the readable text of an HTML body: tags dropped, entities decoded, line breaks and quotes kept.
+
+    Cells on a table row are separated by ` | `, images show as `[image]`, and quoted lines start with `> ` for each
+    quote level.
+    """
+    parser = _HtmlText()
+    parser.feed(html)
+    parser.close()
+    lines = "".join(parser.parts).split("\n")
+    return "\n".join(" ".join(line.replace(_HTML_CELL_BREAK, " | ").split()) for line in lines).strip("\n")
 
 
 def _unsafe_filename(name: str) -> bool:

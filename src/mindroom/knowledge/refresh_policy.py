@@ -78,17 +78,17 @@ def _published_index_age_seconds(value: str | None, *, wall_now: datetime) -> fl
     return max((wall_now - published_at).total_seconds(), 0.0)
 
 
-def _git_poll_interval_seconds(lookup: PublishedIndexResolution, config: Config) -> float | None:
-    git_config = config.get_knowledge_base_config(lookup.key.base_id).git
-    if git_config is None:
+def _poll_interval_seconds(lookup: PublishedIndexResolution, config: Config) -> float | None:
+    interval_seconds = config.get_knowledge_base_config(lookup.key.base_id).effective_poll_interval_seconds
+    if interval_seconds is None:
         return None
-    return max(float(git_config.poll_interval_seconds), 0.0)
+    return max(float(interval_seconds), 0.0)
 
 
-def _git_poll_due(lookup: PublishedIndexResolution, config: Config, *, wall_now: datetime) -> bool:
+def _poll_due(lookup: PublishedIndexResolution, config: Config, *, wall_now: datetime) -> bool:
     if lookup.index is None:
         return False
-    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
+    poll_interval_seconds = _poll_interval_seconds(lookup, config)
     if poll_interval_seconds is None:
         return False
     age_seconds = _published_index_age_seconds(
@@ -109,7 +109,7 @@ def ready_index_effective_availability(
     if (
         availability is KnowledgeAvailability.READY
         and lookup.index is not None
-        and _git_poll_due(lookup, config, wall_now=wall_now)
+        and _poll_due(lookup, config, wall_now=wall_now)
     ):
         availability = KnowledgeAvailability.STALE
     return availability
@@ -122,7 +122,7 @@ def _refresh_cooldown_seconds(
 ) -> float:
     if availability is not KnowledgeAvailability.STALE:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
-    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
+    poll_interval_seconds = _poll_interval_seconds(lookup, config)
     if poll_interval_seconds is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
     return max(poll_interval_seconds, 1.0)
@@ -132,7 +132,7 @@ def _refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolution, config
     """Return READY refresh throttle without request-path source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
-    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
+    poll_interval_seconds = _poll_interval_seconds(lookup, config)
     return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
 
 
@@ -140,7 +140,7 @@ def _refresh_on_access_due(lookup: PublishedIndexResolution, config: Config, *, 
     """Return whether READY on-access refresh should be scheduled without source scans."""
     if config.get_knowledge_base_config(lookup.key.base_id).git is None:
         return True
-    return _git_poll_due(lookup, config, wall_now=wall_now)
+    return _poll_due(lookup, config, wall_now=wall_now)
 
 
 def refresh_trigger(

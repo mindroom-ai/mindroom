@@ -1,5 +1,5 @@
 """Tests for the OneDrive and SharePoint files toolkit."""
-# ruff: noqa: D103
+# ruff: noqa: D103, S105, S106
 
 from __future__ import annotations
 
@@ -246,7 +246,7 @@ def test_search_asks_microsoft_search_for_drive_items(tmp_path: Path, monkeypatc
     result = _payload(tools.microsoft_files_search("quarterly plan", limit=5))
 
     assert [file["path"] for file in result["files"]] == [ITEM_PATH]
-    assert result["more_available"] is True
+    assert result["next_page_token"] == "1"
     [request] = graph.requests
     assert json.loads(request.content) == {
         "requests": [
@@ -258,7 +258,13 @@ def test_search_asks_microsoft_search_for_drive_items(tmp_path: Path, monkeypatc
 def test_list_folder_defaults_to_the_requester_onedrive_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
     files.answer_first = lambda request: (
-        httpx.Response(200, json={"value": [_item(name="Reports", folder=True)], "@odata.nextLink": "https://x"})
+        httpx.Response(
+            200,
+            json={
+                "value": [_item(name="Reports", folder=True)],
+                "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/drive/root/children?$top=50&$skiptoken=abc",
+            },
+        )
         if request.url.path == "/v1.0/me/drive/root/children"
         else None
     )
@@ -267,8 +273,95 @@ def test_list_folder_defaults_to_the_requester_onedrive_root(tmp_path: Path, mon
     result = _payload(tools.microsoft_files_list_folder())
 
     assert [(file["name"], file["is_folder"]) for file in result["files"]] == [("Reports", True)]
-    assert result["more_available"] is True
+    assert result["next_page_token"] == "/me/drive/root/children?$top=50&$skiptoken=abc"
     assert graph.requests[0].url.params["$top"] == "50"
+
+
+def test_search_continues_from_the_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _Graph()
+    files.answer_first = lambda request: (
+        httpx.Response(200, json={"value": [{"hitsContainers": [{"hits": [], "moreResultsAvailable": False}]}]})
+        if request.url.path == "/v1.0/search/query"
+        else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _payload(tools.microsoft_files_search("quarterly plan", limit=5, page_token="5"))
+
+    assert result["next_page_token"] is None
+    assert json.loads(graph.requests[0].content)["requests"][0]["from"] == 5
+
+
+def test_search_continues_past_the_first_thousand_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _Graph()
+    files.answer_first = lambda request: (
+        httpx.Response(
+            200,
+            json={"value": [{"hitsContainers": [{"hits": [{"resource": _item()}], "moreResultsAvailable": True}]}]},
+        )
+        if request.url.path == "/v1.0/search/query"
+        else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _payload(tools.microsoft_files_search("plan", limit=50, page_token="1050"))
+
+    assert json.loads(graph.requests[0].content)["requests"][0]["from"] == 1050
+    assert result["next_page_token"] == "1051"
+
+
+def test_list_folder_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _Graph()
+    files.answer_first = lambda request: (
+        httpx.Response(200, json={"value": [_item()]}) if request.url.path == "/v1.0/me/drive/root/children" else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _payload(tools.microsoft_files_list_folder(page_token="/me/drive/root/children?$top=50&$skiptoken=abc"))
+
+    assert result["next_page_token"] is None
+    assert graph.requests[0].url.params["$skiptoken"] == "abc"
+
+
+@pytest.mark.parametrize(
+    "page_token",
+    [
+        "/me/messages?$skiptoken=abc",
+        "https://evil.example.com/me/drive/root/children?$skiptoken=abc",
+        "/me/drive/root/children/../../../me/messages?x=1",
+        "/me/drive/root/childrenX?$skiptoken=abc",
+        "",
+        "/../beta/me/drive/root/children?x=1",
+        "//evil.example.com/me/drive/root/children?x=1",
+        "/me/drive/root/children?x=1#fragment",
+        "/me/drive/root/children?x=1 2",
+        "/me/drive/root/children?x=\x01",
+    ],
+)
+def test_list_folder_refuses_a_page_token_for_another_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.microsoft_files_list_folder(page_token=page_token))["code"] == "invalid_page_token"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    "page_token",
+    ["-1", "abc", "1.5", "99999999999", "\u00b2", pytest.param("9" * 5000, id="5000-digits")],
+)
+def test_search_refuses_a_malformed_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.microsoft_files_search("plan", page_token=page_token))["code"] == "invalid_page_token"
+    assert graph.requests == []
 
 
 def test_download_writes_into_the_download_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
