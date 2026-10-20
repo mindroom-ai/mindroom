@@ -193,11 +193,11 @@ class ToolConfigEntry(BaseModel):
     )
     defer: bool = Field(
         default=False,
-        description="Hide the tool schema until the agent loads the tool for the current session",
+        description="Keep the tool's function definitions out of the model's context until the agent searches for them",
     )
     initial: bool = Field(
         default=False,
-        description="Load a deferred tool at session start and keep it loaded; requires defer",
+        description="Send a deferred tool as an ordinary tool on every request; requires defer",
     )
 
     @model_validator(mode="before")

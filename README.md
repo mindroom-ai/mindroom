@@ -185,7 +185,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 - **100+ tool integrations** — Gmail, GitHub, Google Docs, Google Drive, Home Assistant, shell, Python, web search, any [MCP server](https://docs.mindroom.chat/mcp/), and more, plus native Matrix tools and a per-thread `todo` planner.
 - **A real browser you can take over** — an agent works in its own persistent Chromium browser that you watch live in MindRoom Chat, take control of for a login or passkey, and hand back ([Worker Computer](https://docs.mindroom.chat/tools/worker-computer/)).
 - **Reach any computer you pair** — your agents can run on a server across the world and still use your laptop: turn on the desktop bridge on any machine, and the agent can use the apps and folders you allow and run the commands you approve, over end-to-end encrypted Matrix with no open ports or VPN ([Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)).
-- **Lean prompts** — minimal mode gives an agent one Bash tool that calls its other tools, and dynamic tools load rarely used tools only when needed, so each request carries fewer tokens ([Minimal Mode](https://docs.mindroom.chat/tools/agent-cli/), [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)).
+- **Lean prompts** — minimal mode gives an agent one Bash tool that calls its other tools, and dynamic tools keep rarely used tool definitions out of the request until the agent searches for them, so each request carries fewer tokens ([Minimal Mode](https://docs.mindroom.chat/tools/agent-cli/), [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)).
 
 **In the chat**
 

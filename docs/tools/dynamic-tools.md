@@ -4,16 +4,15 @@ icon: lucide/package-plus
 
 # Dynamic Tools
 
-Dynamic tools keep an agent's rarely used tools out of the model's tool list until the agent needs them, which saves context on every request.
+Dynamic tools keep the definitions of an agent's rarely used tools out of the model's context until the agent searches for them, which saves context on every request.
 Use them for agents with many optional tools.
-Each authored entry in an agent's `tools:` list loads or unloads as one unit.
 
 ## Configuration
 
 | Field | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `defer` | bool | `false` | Hide the tool until the agent loads it for the current session. |
-| `initial` | bool | `false` | Load a deferred tool at session start and keep it loaded; requires `defer: true`. |
+| `defer` | bool | `false` | Keep the tool's function definitions out of the model's context until the agent searches for them. |
+| `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
 
@@ -40,31 +39,27 @@ These configurations fail validation:
 
 ## Native Server-Side Tool Search
 
-Standard-mode agents on these models use the provider's own tool search instead of MindRoom's loading tools:
+Standard-mode agents on these models use the provider's own tool search instead of [MindRoom's](#mindroom-tool-search):
 
 - Claude Opus 4.5, Sonnet 4.5, Haiku 4.5, and newer on the `anthropic` and `vertexai_claude` providers.
 - GPT 5.4 and newer on `openai`, `codex`, and `openai_codex`.
 
-For `openai`, an explicit `api: chat_completions` or a custom endpoint selects runtime loading instead.
+For `openai`, an explicit `api: chat_completions` or a custom endpoint selects MindRoom's tool search instead.
 The endpoint is a non-empty `extra_kwargs.base_url`, otherwise `OPENAI_BASE_URL`; native search applies only when it is unset or `https://api.openai.com/v1`.
 
 On this path, deferred tools stay out of the model's context until the model searches for them, and discovering a tool does not invalidate the prompt cache.
 The system prompt names the deferred toolkits and tells the model to search them before concluding that a tool is unavailable.
-Discovered tools are called directly, so there is nothing to load or unload.
-Tools with `initial: true` are ordinary always-visible tools.
+Discovered tools are called directly.
 Toolkit instructions are omitted from the system prompt when every function in the toolkit is deferred and not `initial`.
 
-## Runtime Loading
+## MindRoom Tool Search
 
-On other models, an agent with at least one deferred tool gets the `dynamic_tools` toolkit, with `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
-`tool_search` matches keywords and exact names only.
-Tools with `initial: true` cannot be unloaded.
-
-A loaded tool becomes callable in the agent's next tool-call step, not in the same parallel batch as `load_tool()`.
-The agent continues the same response with the updated tools and the loaded toolkit's instructions, without waiting for another message.
-
-Loaded tools are tracked per agent and per conversation session, so two agents in the same Matrix thread do not share them.
-This state is held in memory, so a restart returns each session to its `initial` tools.
+On every other model, an agent with at least one deferred tool gets the `dynamic_tools` toolkit, with `tool_search(query, max_results)` and `call_tool(name, arguments)`.
+The system prompt lists the deferred toolkits with their descriptions.
+`tool_search` matches function names, toolkit names, and keywords in descriptions and parameter names, and returns the full definitions of up to `max_results` functions (default 5, at most 20) with their toolkit's instructions.
+The agent then calls a function with `call_tool`, passing its arguments as a JSON object; approval rules, hooks, and the chat display treat the call as a call of that function.
+Discovering and calling deferred tools never changes the tool list or the system prompt, so it does not invalidate the provider's prompt cache.
+Found definitions stay in the conversation until compaction summarizes them, after which the agent searches again.
 
 ## Minimal Mode
 
