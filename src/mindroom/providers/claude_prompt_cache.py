@@ -408,7 +408,7 @@ def _request_kwargs_without_unavailable_tool_references(request_kwargs: dict[str
     """Drop replayed tool-search references to tools absent from this request.
 
     Search results can reference tools that a later request no longer offers after
-    its dynamic tool surface changes, which Claude rejects. A search left with no
+    its tool surface changes, which Claude rejects. A search left with no
     references stays as an empty result, like a search that matched nothing, so
     the signed thinking blocks around it are not moved together.
     """

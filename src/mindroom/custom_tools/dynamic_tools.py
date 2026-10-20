@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _MAX_RESULTS_LIMIT = 20
+_CALL_TOOL_DESCRIPTION = "Call a deferred function found with tool_search, passing its arguments as a JSON object."
 _CALL_TOOL_PARAMETERS = {
     "type": "object",
     "properties": {
@@ -43,6 +44,7 @@ class DynamicToolsToolkit(Toolkit):
         # Agno would render the argument values of a typed dict as empty objects, and Gemini conversion drops the
         # description of an optional object, so the wrapper declares the same shape as the MCP call_tool bridge.
         call_tool = self.functions["call_tool"]
+        call_tool.description = _CALL_TOOL_DESCRIPTION
         call_tool.parameters = deepcopy(_CALL_TOOL_PARAMETERS)
         call_tool.skip_entrypoint_processing = True
 
@@ -85,15 +87,16 @@ class DynamicToolsToolkit(Toolkit):
             payload["message"] = "No deferred function matched. Try other keywords or a toolkit name from the list."
         return self._payload("ok", **payload)
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> str:
-        """Call a deferred function found with tool_search, passing its arguments as a JSON object."""
+    def call_tool(self, name: str = "", arguments: object = None, **_extra: object) -> str:
+        """Report a wrapper call that could not be routed to a deferred function.
+
+        Resolvable calls never reach this method: they run the named function directly.
+        """
         del arguments
+        subject = f"'{name}' was not called" if name else "Nothing was called"
         return self._payload(
             "error",
-            message=(
-                f"'{name}' was not called. Use an exact function name from tool_search "
-                "and pass arguments as a JSON object."
-            ),
+            message=f"{subject}. Use an exact function name from tool_search and pass arguments as a JSON object.",
         )
 
 

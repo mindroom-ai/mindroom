@@ -13,6 +13,7 @@ prompt cache.
 
 from __future__ import annotations
 
+import ast
 import json
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -136,7 +137,7 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
         return call
     # Weaker models sometimes send the nested arguments as a JSON string.
     raw_arguments = payload.get("arguments")
-    arguments = {} if raw_arguments is None else _json_object(raw_arguments)
+    arguments = {} if raw_arguments in (None, "") else _json_object(raw_arguments)
     if arguments is None:
         return call
     # Keys beside name and arguments, such as background_after or arguments flattened by a weaker model, belong to
@@ -151,7 +152,11 @@ def _json_object(value: object) -> dict[str, Any] | None:
         try:
             value = json.loads(value)
         except json.JSONDecodeError:
-            return None
+            # Agno accepts Python-literal arguments on direct calls, so the wrapper does too.
+            try:
+                value = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                return None
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 

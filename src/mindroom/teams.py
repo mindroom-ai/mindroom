@@ -2039,7 +2039,7 @@ def _build_team_runtime_db_callbacks(
 
     Releasing between continuation attempts closes the spent member agents'
     runtime DBs and drops them so the next attempt rebuilds members with the
-    updated dynamic-tool schema baked in.
+    switched model.
     """
 
     def _release_attempt_members(scope_context: ScopeSessionContext | None) -> None:

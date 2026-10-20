@@ -116,6 +116,22 @@ def test_resolve_missing_arguments_means_empty_object() -> None:
     assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
 
 
+def test_resolve_treats_empty_string_arguments_as_no_arguments() -> None:
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "arguments": ""}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
+
+
+def test_resolve_accepts_python_literal_arguments_like_agno() -> None:
+    call = _call("c1", "call_tool", "{'name': 'crm_lookup', 'arguments': {'id': 7}}")
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"id": 7}
+
+
 def test_resolve_merges_top_level_extras_into_arguments() -> None:
     # Covers background_after on the wrapper and arguments a weaker model flattened beside the name.
     call = _call("c1", "call_tool", '{"name": "crm_lookup", "customer_id": 7, "background_after": 0}')

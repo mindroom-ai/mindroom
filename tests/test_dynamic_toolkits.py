@@ -1699,3 +1699,35 @@ def test_search_toolkit_construction_failure_does_not_stop_the_agent(
 
     assert "sleep" in {toolkit.name for toolkit in agent.tools}
     assert "dynamic_tools" not in {toolkit.name for toolkit in agent.tools}
+
+
+def test_call_tool_wire_definition_has_a_description() -> None:
+    """Providers read the wrapper's description, and some (Cerebras) fail without one."""
+    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
+    function.process_entrypoint(strict=False)
+
+    assert function.to_dict().get("description")
+
+
+def test_cerebras_accepts_the_call_tool_definition() -> None:
+    """Agno's Cerebras adapter indexes the description directly, so the wrapper must carry one."""
+    pytest.importorskip("cerebras.cloud.sdk")
+    from mindroom.providers.cerebras_model import MindRoomCerebras  # noqa: PLC0415
+
+    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
+    function.process_entrypoint(strict=False)
+
+    params = MindRoomCerebras(id="llama-4.1", api_key="test").get_request_params(
+        tools=[{"type": "function", "function": function.to_dict()}],
+    )
+
+    assert params["tools"][0]["function"]["name"] == "call_tool"
+
+
+def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
+    """Malformed wrapper calls still get the retry guidance instead of a Python signature error."""
+    entrypoint = _search_toolkit().functions["call_tool"].entrypoint
+    assert entrypoint is not None
+
+    assert "tool_search" in _tool_payload(entrypoint(customer_id=7))["message"]
+    assert "'crm_lookpu' was not called" in _tool_payload(entrypoint(name="crm_lookpu", customer_id=7))["message"]

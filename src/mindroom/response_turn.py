@@ -2,7 +2,7 @@
 
 One inbound response turn has the same lifecycle regardless of which entity
 answers it: open the scope session, run prepared attempts, decide whether the
-turn continues after a dynamic-tool call or a discarded empty run, record the
+turn continues after a model switch or a discarded empty run, record the
 outcome on the turn recorder, and persist an interrupted replay when the turn
 is cancelled without a recorder.
 This module owns that lifecycle exactly once; ``mindroom.ai`` and
