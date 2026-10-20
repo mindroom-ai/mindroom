@@ -20,6 +20,7 @@ __all__ = [
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
     "microsoft_token_url",
+    "outlook_calendar_oauth_provider",
     "outlook_mail_oauth_provider",
 ]
 
@@ -139,4 +140,14 @@ def outlook_mail_oauth_provider() -> OAuthProvider:
         display_name="Outlook Mail",
         scopes=("Mail.ReadWrite", "Mail.Send"),
         status_capabilities=("search, read, draft, send, and organize Outlook mail",),
+    )
+
+
+def outlook_calendar_oauth_provider() -> OAuthProvider:
+    """Return the Outlook calendar provider."""
+    return microsoft_oauth_provider(
+        provider_id="outlook_calendar",
+        display_name="Outlook Calendar",
+        scopes=("Calendars.ReadWrite",),
+        status_capabilities=("read and change Outlook calendar events",),
     )

@@ -85,6 +85,15 @@ def test_builtin_oauth_registry_includes_outlook_mail() -> None:
     assert providers["outlook_mail"].shared_client_config_services == ("microsoft_oauth_client",)
 
 
+def test_builtin_oauth_registry_includes_outlook_calendar() -> None:
+    """Outlook calendar shares the Microsoft app client config but keeps its own token and settings services."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["outlook_calendar"].credential_service == "outlook_calendar_oauth"
+    assert providers["outlook_calendar"].tool_config_service == "outlook_calendar"
+    assert providers["outlook_calendar"].shared_client_config_services == ("microsoft_oauth_client",)
+
+
 def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:
     """Dashboard-editable provider settings cannot use the reserved OAuth token suffix."""
     with pytest.raises(ValueError, match=r"tool_config_service.*must not end with '_oauth'"):
