@@ -9181,6 +9181,49 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_todo",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating, updating, completing, and deleting tasks.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "List, create, update, complete, and delete tasks in the connected user's Microsoft To Do",
+      "display_name": "Microsoft To Do",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "microsoft_todo_list_lists",
+        "microsoft_todo_list_tasks",
+        "microsoft_todo_create_task",
+        "microsoft_todo_update_task",
+        "microsoft_todo_delete_task"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "ListTodo",
+      "icon_color": "text-blue-600",
+      "name": "microsoft_todo",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
