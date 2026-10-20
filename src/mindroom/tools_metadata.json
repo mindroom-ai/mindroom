@@ -375,6 +375,52 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_teams",
+      "category": "communication",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow sending channel messages, channel replies, and chat messages.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Read and send Teams channel and chat messages as the connected user",
+      "display_name": "Microsoft Teams",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "microsoft_teams_list_teams",
+        "microsoft_teams_list_channels",
+        "microsoft_teams_list_channel_messages",
+        "microsoft_teams_list_chats",
+        "microsoft_teams_list_chat_messages",
+        "microsoft_teams_send_channel_message",
+        "microsoft_teams_reply_to_channel_message",
+        "microsoft_teams_send_chat_message"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "TbBrandTeams",
+      "icon_color": "text-indigo-600",
+      "name": "microsoft_teams",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
