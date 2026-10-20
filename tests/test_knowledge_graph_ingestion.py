@@ -215,6 +215,13 @@ def _worker(
     )
 
 
+async def _pass(worker: KnowledgeGraphIngestionWorker, config: Config, *, now: float) -> bool:
+    """Run one pass of every maintained graph at once, as the worker's graphs run side by side."""
+    scopes = await worker._maintained_graphs(config)
+    progress = await asyncio.gather(*(worker._ingest_graph(config, scope, now=now) for scope in scopes))
+    return any(progress)
+
+
 def _answers(store: _FakeStore) -> list[str]:
     return [line for _, episode, _ in store.episodes for line in episode.body.splitlines() if line.startswith("Mind:")]
 
@@ -226,9 +233,9 @@ async def test_cycle_ingests_new_runs_and_advances_its_marker(tmp_path: Path) ->
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
     worker = _worker(config, paths, store)
 
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     _seed(config, paths, "!room:x:$t1", ["r1", "r2", "r3"])
-    await worker._run_cycle(config, now=T0 + 20)
+    await _pass(worker, config, now=T0 + 20)
 
     assert _answers(store) == ["Mind: answer r1", "Mind: answer r2", "Mind: answer r3"]
     assert {graph for graph, _, _ in store.episodes} == {graph_scope("mind", config, paths, None).graph_name}
@@ -242,10 +249,10 @@ async def test_marker_survives_a_restart(tmp_path: Path) -> None:
     """A new worker over the same storage does not ingest turns again."""
     config, paths = _config(), _paths(tmp_path)
     _seed(config, paths, "!room:x:$t1", ["r1"])
-    await _worker(config, paths, _FakeStore())._run_cycle(config, now=T0 + 10)
+    await _pass(_worker(config, paths, _FakeStore()), config, now=T0 + 10)
 
     restarted = _FakeStore()
-    await _worker(config, paths, restarted)._run_cycle(config, now=T0 + 20)
+    await _pass(_worker(config, paths, restarted), config, now=T0 + 20)
 
     assert restarted.episodes == []
 
@@ -260,7 +267,7 @@ async def test_failing_session_backs_off_while_others_still_ingest(tmp_path: Pat
     worker = _worker(config, paths, store)
     now = T0 + 10
 
-    await worker._run_cycle(config, now=now)
+    await _pass(worker, config, now=now)
 
     assert store.sessions() == ["!room:x:$good"]
     # The unauthenticated health endpoint gets the failure's kind; error text can quote conversation content.
@@ -269,9 +276,9 @@ async def test_failing_session_backs_off_while_others_still_ingest(tmp_path: Pat
     assert "UnusableExtractionError" in detail
     assert "structured output did not match" not in detail
     store.failing.clear()
-    await worker._run_cycle(config, now=now + 1)
+    await _pass(worker, config, now=now + 1)
     assert store.sessions() == ["!room:x:$good"]
-    await worker._run_cycle(config, now=now + 61)
+    await _pass(worker, config, now=now + 61)
     assert store.sessions() == ["!room:x:$good", "!room:x:$bad"]
     assert knowledge_graph_failure() is None
 
@@ -283,9 +290,9 @@ async def test_active_sessions_wait_for_idle_seconds(tmp_path: Path) -> None:
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
 
-    await worker._run_cycle(config, now=T0 + 60)
+    await _pass(worker, config, now=T0 + 60)
     assert store.episodes == []
-    await worker._run_cycle(config, now=T0 + 122)
+    await _pass(worker, config, now=T0 + 122)
     assert store.sessions() == ["!room:x:$t1"]
 
 
@@ -297,9 +304,9 @@ async def test_max_sessions_per_cycle_is_respected(tmp_path: Path) -> None:
         _seed(config, paths, f"!room:x:$t{index}", [f"r{index}"])
     worker = _worker(config, paths, store)
 
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     assert len(set(store.sessions())) == 2
-    await worker._run_cycle(config, now=T0 + 20)
+    await _pass(worker, config, now=T0 + 20)
     assert len(set(store.sessions())) == 3
 
 
@@ -309,7 +316,7 @@ async def test_new_graph_backfills_only_recent_sessions(tmp_path: Path) -> None:
     config, paths, store = _config(backfill_days=7), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$old", ["r1"])
 
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 30 * DAY)
+    await _pass(_worker(config, paths, store), config, now=T0 + 30 * DAY)
 
     assert store.episodes == []
 
@@ -330,10 +337,10 @@ async def test_another_embedder_or_generation_rebuilds_into_a_new_graph(
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
 
     change(config)
-    await worker._run_cycle(config, now=T0 + 20)
+    await _pass(worker, config, now=T0 + 20)
 
     assert store.sessions() == ["!room:x:$t1", "!room:x:$t1"]
     assert len({graph for graph, _, _ in store.episodes}) == 2
@@ -366,12 +373,12 @@ async def test_a_failing_episode_never_re_adds_the_one_beside_it(tmp_path: Path)
     worker = _worker(config, paths, store)
 
     for attempt in range(7):
-        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+        await _pass(worker, config, now=T0 + 10 + attempt * 4000)
 
     assert [episode.kind for _, episode, _ in store.episodes] == ["conversation"]
     store.failing_kinds.clear()
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
-    await worker._run_cycle(config, now=T0 + 40_000)
+    await _pass(worker, config, now=T0 + 40_000)
     assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "conversation", "tool_results"]
 
 
@@ -380,10 +387,10 @@ async def test_zero_backfill_ingests_conversations_after_the_graph_started(tmp_p
     """With no backfill, conversations from after the graph was turned on are still ingested."""
     config, paths, store = _config(backfill_days=0), _paths(tmp_path), _FakeStore()
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0)
+    await _pass(worker, config, now=T0)
     _seed(config, paths, "!room:x:$t1", ["r1"], at=T0 + 100)
 
-    await worker._run_cycle(config, now=T0 + 200)
+    await _pass(worker, config, now=T0 + 200)
 
     assert store.sessions() == ["!room:x:$t1"]
 
@@ -395,10 +402,10 @@ async def test_a_paused_turn_holds_back_later_turns_until_it_finishes(tmp_path: 
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
     worker = _worker(config, paths, store)
 
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     assert store.episodes == []
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 15)
-    await worker._run_cycle(config, now=T0 + 20)
+    await _pass(worker, config, now=T0 + 20)
 
     assert _answers(store) == ["Mind: answer r1", "Mind: answer r2"]
 
@@ -420,9 +427,9 @@ async def test_one_failing_agent_does_not_stop_the_others(tmp_path: Path) -> Non
 
     worker = _worker(config, paths, store)
     with patch.object(ingestion, "create_session_storage", storage):
-        await worker._run_cycle(config, now=T0 + 10)
+        await _pass(worker, config, now=T0 + 10)
         # A pass that only fails to list adds nothing, so the worker waits instead of retrying at once.
-        assert await worker._run_cycle(config, now=T0 + 20) is False
+        assert await _pass(worker, config, now=T0 + 20) is False
 
     assert store.sessions() == ["!room:x:$t1"]
     assert "OSError" in (knowledge_graph_failure() or "")
@@ -445,9 +452,9 @@ async def test_an_outage_or_setup_error_never_drops_episodes(tmp_path: Path, err
     worker = _worker(config, paths, store)
 
     for attempt in range(8):
-        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+        await _pass(worker, config, now=T0 + 10 + attempt * 4000)
     store.error = None
-    await worker._run_cycle(config, now=T0 + 40_000)
+    await _pass(worker, config, now=T0 + 40_000)
 
     assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
 
@@ -460,11 +467,11 @@ async def test_a_success_resets_the_failure_count(tmp_path: Path) -> None:
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
     for attempt in range(4):
-        await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+        await _pass(worker, config, now=T0 + 10 + attempt * 4000)
     store.failing_kinds = {"tool_results"}
-    await worker._run_cycle(config, now=T0 + 20_000)
+    await _pass(worker, config, now=T0 + 20_000)
     store.failing_kinds = set()
-    await worker._run_cycle(config, now=T0 + 40_000)
+    await _pass(worker, config, now=T0 + 40_000)
 
     assert [episode.kind for _, episode, _ in store.episodes] == ["conversation", "tool_results"]
 
@@ -475,7 +482,7 @@ async def test_a_new_graph_skips_turns_older_than_the_backfill_window(tmp_path: 
     config, paths, store = _config(backfill_days=1), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 - 5 * DAY, spacing=5 * DAY - 60, updated_at=T0)
 
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+    await _pass(_worker(config, paths, store), config, now=T0 + 10)
 
     assert _answers(store) == ["Mind: answer new"]
 
@@ -494,10 +501,10 @@ async def test_a_later_pass_names_a_person_as_their_earlier_turns_did(tmp_path: 
     _seed(config, paths, "!room:x:$t1", ["r1"])
     _edit_runs(config, paths, "!room:x:$t1", tagged)
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
     _edit_runs(config, paths, "!room:x:$t1", tagged)
-    await worker._run_cycle(config, now=T0 + 20)
+    await _pass(worker, config, now=T0 + 20)
 
     conversations = [episode for _, episode, _ in store.episodes if episode.kind == "conversation"]
     assert [episode.body.splitlines()[0] for episode in conversations] == [
@@ -521,9 +528,9 @@ async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
     _edit_runs(config, paths, "!room:x:$t1", long_answers)
     worker = _worker(config, paths, store)
 
-    await worker._run_cycle(config, now=T0 + 100)
+    await _pass(worker, config, now=T0 + 100)
     first = len(store.sessions())
-    await worker._run_cycle(config, now=T0 + 200)
+    await _pass(worker, config, now=T0 + 200)
 
     assert 0 < first < 30
     assert len(store.sessions()) == 30
@@ -535,7 +542,7 @@ async def test_a_turn_resuming_right_after_its_approval_expires_is_still_waited_
     config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
 
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 7 * DAY + 600)
+    await _pass(_worker(config, paths, store), config, now=T0 + 7 * DAY + 600)
 
     assert store.episodes == []
 
@@ -548,11 +555,11 @@ async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
 
-    await worker._run_cycle(config, now=T0 + 10)
-    await worker._run_cycle(config, now=T0 + 10 + 3 * DAY + 1)
+    await _pass(worker, config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10 + 3 * DAY + 1)
     store.error = None
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
-    await worker._run_cycle(config, now=T0 + 10 + 4 * DAY)
+    await _pass(worker, config, now=T0 + 10 + 4 * DAY)
 
     assert _answers(store) == ["Mind: answer r2"]
 
@@ -564,9 +571,9 @@ async def test_a_conversation_held_back_by_an_approval_is_ingested_once_it_expir
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
     worker = _worker(config, paths, store)
 
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     assert store.episodes == []
-    await worker._run_cycle(config, now=T0 + 8 * DAY)
+    await _pass(worker, config, now=T0 + 8 * DAY)
 
     assert _answers(store) == ["Mind: answer r2"]
 
@@ -601,7 +608,7 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
     worker = _worker(config, paths, store)
     with patch.object(store, "add_episode", two_pieces_fail):
         for attempt in range(14):
-            await worker._run_cycle(config, now=T0 + 10 + attempt * 4000)
+            await _pass(worker, config, now=T0 + 10 + attempt * 4000)
 
     assert first_pieces == ["call fetch_0"]
     assert any("fetch_7" in episode.body for _, episode, _ in store.episodes)
@@ -618,7 +625,7 @@ async def test_a_turn_waiting_on_a_recent_approval_still_holds_back(tmp_path: Pa
 
     _edit_runs(config, paths, "!room:x:$t1", asked_on_day_six)
 
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 8 * DAY)
+    await _pass(_worker(config, paths, store), config, now=T0 + 8 * DAY)
 
     assert store.episodes == []
 
@@ -638,7 +645,7 @@ async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_p
         return real(storage, session_id)
 
     with patch.object(ingestion, "session_runs", runs):
-        await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+        await _pass(_worker(config, paths, store), config, now=T0 + 10)
 
     assert store.sessions() == ["!room:x:$good"]
     assert knowledge_graph_failure() is not None
@@ -660,12 +667,12 @@ async def test_a_conversation_whose_redactions_cannot_be_checked_does_not_block_
             raise RuntimeError(msg)
         return frozenset()
 
-    await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
+    await _pass(_worker(config, paths, store, redacted), config, now=T0 + 10)
 
     assert store.sessions() == ["!room:x:$t2"]
     assert knowledge_graph_failure() is not None
     # Once the lookup works again, the conversation is added after its retry wait.
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 100)
+    await _pass(_worker(config, paths, store), config, now=T0 + 100)
     assert store.sessions() == ["!room:x:$t2", "!room:x:$t1"]
 
 
@@ -676,14 +683,14 @@ async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_pa
     _seed(config, paths, "api-1", ["x1"], at=T0 - 5, matrix=False)
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     assert store.sessions() == ["!room:x:$t1"]
 
     # A pass that only sees such a conversation still records it, so it is not read again until it changes.
     _seed(config, paths, "api-2", ["x2"], at=T0 + 15, matrix=False)
-    await worker._run_cycle(config, now=T0 + 20)
+    await _pass(worker, config, now=T0 + 20)
     with patch.object(ingestion, "session_runs", wraps=ingestion.session_runs) as read:
-        await worker._run_cycle(config, now=T0 + 30)
+        await _pass(worker, config, now=T0 + 30)
     read.assert_not_called()
 
 
@@ -712,20 +719,20 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
 
     worker = _worker(config, paths, store, redacted)
     with patch.object(ingestion, "session_runs", runs):
-        await worker._run_cycle(config, now=T0 + 10)
+        await _pass(worker, config, now=T0 + 10)
         # A new turn sorts the failed conversation last, so the next passes spend their budget before reaching it.
         _seed(config, paths, "!room:x:$t1", ["a1", "a2"], at=T0 - 5, updated_at=T0 + 25)
         _seed(config, paths, "!room:x:$t3", ["c1"], at=T0 + 12)
         for now in (T0 + 30, T0 + 31):
-            await worker._run_cycle(config, now=now)
+            await _pass(worker, config, now=now)
         assert store.sessions() == ["!room:x:$t2", "!room:x:$t3"]
         assert knowledge_graph_failure() is not None
 
         failing = False
         # Fixed, it still waits out its retry before it is tried again.
-        await worker._run_cycle(config, now=T0 + 40)
+        await _pass(worker, config, now=T0 + 40)
         assert store.sessions() == ["!room:x:$t2", "!room:x:$t3"]
-        await worker._run_cycle(config, now=T0 + 100)
+        await _pass(worker, config, now=T0 + 100)
     assert store.sessions() == ["!room:x:$t2", "!room:x:$t3", "!room:x:$t1"]
     assert knowledge_graph_failure() is None
 
@@ -740,7 +747,7 @@ async def test_a_busy_agent_does_not_hold_up_the_others(tmp_path: Path) -> None:
         _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"])
     _seed(config, paths, "!room:x:$p1", ["rp1"], agent="pal")
 
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+    await _pass(_worker(config, paths, store), config, now=T0 + 10)
 
     assert "!room:x:$p1" in store.sessions()
     assert len(set(store.sessions())) == 2
@@ -770,7 +777,7 @@ async def test_graphs_are_ingested_at_the_same_time(tmp_path: Path) -> None:
     _seed(config, paths, "!room:x:$m1", ["m1"])
     _seed(config, paths, "!room:x:$p1", ["p1"], agent="pal")
 
-    await asyncio.wait_for(_worker(config, paths, store)._run_cycle(config, now=T0 + 10), timeout=10)
+    await asyncio.wait_for(_pass(_worker(config, paths, store), config, now=T0 + 10), timeout=10)
 
     assert sorted(store.sessions()) == ["!room:x:$m1", "!room:x:$p1"]
 
@@ -803,7 +810,7 @@ async def test_no_more_graphs_than_the_limit_are_ingested_at_once(tmp_path: Path
     _seed(config, paths, "!room:x:$p1", ["p1"], agent="pal")
 
     with patch.object(ingestion, "_CONCURRENT_GRAPHS", 1):
-        await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+        await _pass(_worker(config, paths, store), config, now=T0 + 10)
 
     assert sorted(store.sessions()) == ["!room:x:$m1", "!room:x:$p1"]
     assert not store.overlapped.is_set()
@@ -830,6 +837,158 @@ async def test_a_pass_that_ingested_something_starts_the_next_at_once(tmp_path: 
         await asyncio.gather(task, return_exceptions=True)
 
 
+@dataclass
+class _HeldStore(_FakeStore):
+    """Holds one graph's episodes until released, as a long extraction would, and counts how many are in flight."""
+
+    held_graph: str = ""
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    holding: asyncio.Event = field(default_factory=asyncio.Event)
+    in_flight: int = 0
+    most_in_flight: int = 0
+
+    async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
+        if scope.graph_name == self.held_graph:
+            self.in_flight += 1
+            self.most_in_flight = max(self.most_in_flight, self.in_flight)
+            self.holding.set()
+            try:
+                await self.release.wait()
+            finally:
+                self.in_flight -= 1
+        await super().add_episode(scope, episode, usage)
+
+
+@pytest.mark.asyncio
+async def test_a_graph_still_extracting_does_not_hold_up_another_graphs_next_pass(tmp_path: Path) -> None:
+    """Each graph runs its passes on its own, so one long extraction cannot keep another graph's backlog waiting."""
+    config = _config(max_sessions_per_cycle=1, interval_seconds=3600)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths = _paths(tmp_path)
+    store = _HeldStore(held_graph=graph_scope("mind", config, paths, None).graph_name)
+    at = int(time.time()) - 10
+    _seed(config, paths, "!room:x:$m1", ["m1"], at=at)
+    for thread in ("$p1", "$p2", "$p3"):
+        _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"], at=at, agent="pal")
+    task = asyncio.create_task(_worker(config, paths, store).run())
+
+    async def pal_backlog_ingested() -> None:
+        while len(set(store.sessions())) < 3:
+            store.added.clear()
+            await store.added.wait()
+
+    try:
+        await asyncio.wait_for(pal_backlog_ingested(), timeout=10)
+        assert sorted(store.sessions()) == ["!room:x:$p1", "!room:x:$p2", "!room:x:$p3"]
+    finally:
+        store.release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_wake_does_not_start_a_second_pass_loop_for_a_graph_still_filling(tmp_path: Path) -> None:
+    """A graph adds one episode at a time even when a wake arrives while its pass is still running."""
+    config = _config(max_sessions_per_cycle=1, interval_seconds=3600)
+    paths = _paths(tmp_path)
+    store = _HeldStore(held_graph=graph_scope("mind", config, paths, None).graph_name)
+    at = int(time.time()) - 10
+    for thread in ("$t1", "$t2"):
+        _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"], at=at)
+    task = asyncio.create_task(_worker(config, paths, store).run())
+    try:
+        await asyncio.wait_for(store.holding.wait(), timeout=10)
+        wake_knowledge_graph_ingestion(after_seconds=0)
+        # Long enough for a second pass loop to reach its first episode, were one started.
+        await asyncio.sleep(0.2)
+        assert store.most_in_flight == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    # Stopping the worker stops the graph's pass too, instead of leaving it extracting.
+    assert store.in_flight == 0
+
+
+@pytest.mark.asyncio
+async def test_a_graph_no_longer_maintained_stops_filling_after_its_current_pass(tmp_path: Path) -> None:
+    """After a generation change, the old graph finishes the pass it is in and takes no further pass."""
+    config = _config(max_sessions_per_cycle=1)
+    paths, store = _paths(tmp_path), _FakeStore()
+    for thread in ("$t1", "$t2"):
+        _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"], at=int(time.time()) - 10)
+    changed = config.model_copy(deep=True)
+    changed.knowledge_graph.generation = 1
+    current = config
+    worker = KnowledgeGraphIngestionWorker(
+        runtime_paths=paths,
+        config_provider=lambda: current,
+        store=store,
+        redacted_event_ids=_no_redactions,
+    )
+    real = worker._ingest_graph
+
+    async def then_raise_the_generation(config: Config, scope: GraphScope, *, now: float) -> bool:
+        nonlocal current
+        progressed = await real(config, scope, now=now)
+        current = changed
+        return progressed
+
+    with patch.object(worker, "_ingest_graph", then_raise_the_generation):
+        await asyncio.wait_for(worker._fill(graph_scope("mind", config, paths, None).graph_name), timeout=10)
+
+    assert len(set(store.sessions())) == 1
+    # The worker looks again at once, so the next generation's graph starts without waiting the interval.
+    assert worker._wake_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_one_graphs_clean_pass_does_not_clear_another_graphs_failure(tmp_path: Path) -> None:
+    """Health keeps failing while any graph's conversation waits to retry, however cleanly the other graphs ingest."""
+    config = _config()
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths = _paths(tmp_path)
+    store = _FakeStore(failing={"!room:x:$bad"})
+    _seed(config, paths, "!room:x:$bad", ["b1"])
+    worker = _worker(config, paths, store)
+    await _pass(worker, config, now=T0 + 10)
+    assert knowledge_graph_failure() is not None
+
+    _seed(config, paths, "!room:x:$good", ["g1"], at=T0 + 20, agent="pal")
+    pal = graph_scope("pal", config, paths, None)
+    assert await worker._ingest_graph(config, pal, now=T0 + 40) is True
+
+    assert store.sessions() == ["!room:x:$good"]
+    assert knowledge_graph_failure() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_graph_that_recovers_with_nothing_to_add_stops_keeping_health_failing(tmp_path: Path) -> None:
+    """Once an agent's conversations can be read again, another graph's clean pass clears the failure it left."""
+    config = _config()
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1"])
+    real = ingestion.create_session_storage
+
+    def storage(agent_name: str, *args: object, **kwargs: object) -> object:
+        if agent_name == "pal":
+            msg = "unreadable session store"
+            raise OSError(msg)
+        return real(agent_name, *args, **kwargs)
+
+    worker = _worker(config, paths, store)
+    with patch.object(ingestion, "create_session_storage", storage):
+        await _pass(worker, config, now=T0 + 10)
+    assert knowledge_graph_failure() is not None
+
+    _seed(config, paths, "!room:x:$t2", ["r2"], at=T0 + 20)
+    await _pass(worker, config, now=T0 + 40)
+
+    assert store.sessions() == ["!room:x:$t1", "!room:x:$t2"]
+    assert knowledge_graph_failure() is None
+
+
 @pytest.mark.asyncio
 async def test_a_pass_that_added_nothing_waits_for_the_interval(tmp_path: Path) -> None:
     """The worker does not spin while there is nothing to add; only a wake or the interval starts the next pass."""
@@ -838,15 +997,15 @@ async def test_a_pass_that_added_nothing_waits_for_the_interval(tmp_path: Path) 
     passes = 0
     first_pass = asyncio.Event()
 
-    async def empty_pass(config: Config, *, now: float) -> bool:
-        del config, now
+    async def empty_pass(config: Config, scope: GraphScope, *, now: float) -> bool:
+        del config, scope, now
         nonlocal passes
         passes += 1
         first_pass.set()
         await asyncio.sleep(0)
         return False
 
-    with patch.object(worker, "_run_cycle", empty_pass):
+    with patch.object(worker, "_ingest_graph", empty_pass):
         task = asyncio.create_task(worker.run())
         try:
             await asyncio.wait_for(first_pass.wait(), timeout=10)
@@ -866,7 +1025,7 @@ async def test_a_pass_whose_every_attempt_failed_added_nothing(tmp_path: Path) -
     for thread in ("$t1", "$t2"):
         _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"])
 
-    assert await _worker(config, paths, store)._run_cycle(config, now=T0 + 10) is False
+    assert await _pass(_worker(config, paths, store), config, now=T0 + 10) is False
     assert knowledge_graph_failure() is not None
 
 
@@ -881,7 +1040,7 @@ async def test_a_redacted_message_is_never_added(tmp_path: Path) -> None:
         asked.append((agent_name, room_id, event_ids))
         return frozenset({"$event-r2"})
 
-    await _worker(config, paths, store, redacted)._run_cycle(config, now=T0 + 10)
+    await _pass(_worker(config, paths, store, redacted), config, now=T0 + 10)
 
     assert _answers(store) == ["Mind: answer r1"]
     assert asked == [("mind", "!room:x", ("$event-r1", "$event-r2", "$event-r3"))]
@@ -897,9 +1056,9 @@ async def test_a_conversation_waits_while_its_agent_cannot_say_what_was_redacted
         del agent_name, room_id, event_ids
         return None
 
-    await _worker(config, paths, store, not_running)._run_cycle(config, now=T0 + 10)
+    await _pass(_worker(config, paths, store, not_running), config, now=T0 + 10)
     assert store.episodes == []
-    await _worker(config, paths, store)._run_cycle(config, now=T0 + 20)
+    await _pass(_worker(config, paths, store), config, now=T0 + 20)
     assert _answers(store) == ["Mind: answer r1"]
 
 
@@ -910,10 +1069,10 @@ async def test_health_keeps_failing_while_a_conversation_waits_to_retry(tmp_path
     store = _FakeStore(failing={"!room:x:$bad"})
     _seed(config, paths, "!room:x:$bad", ["b1"])
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
 
     _seed(config, paths, "!room:x:$good", ["g1"], at=T0 + 20)
-    await worker._run_cycle(config, now=T0 + 40)
+    await _pass(worker, config, now=T0 + 40)
 
     assert store.sessions() == ["!room:x:$good"]
     assert knowledge_graph_failure() is not None
@@ -926,11 +1085,11 @@ async def test_a_failing_conversation_left_without_matrix_turns_stops_keeping_he
     store = _FakeStore(failing={"!room:x:$t1"})
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     assert knowledge_graph_failure() is not None
 
     _seed(config, paths, "!room:x:$t1", ["r1"], updated_at=T0 + 4000, matrix=False)
-    await worker._run_cycle(config, now=T0 + 5000)
+    await _pass(worker, config, now=T0 + 5000)
 
     assert store.episodes == []
     assert knowledge_graph_failure() is None
@@ -941,13 +1100,13 @@ async def test_a_conversation_first_recorded_empty_still_starts_after_the_backfi
     """Turns from before a new graph's backfill window stay out, even when their conversation was first seen empty."""
     config, paths, store = _config(backfill_days=0), _paths(tmp_path), _FakeStore()
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     # A turn that has not finished, such as one still running when the graph started, is not a Matrix turn yet.
     _seed(config, paths, "!room:x:$t1", ["old"], at=T0 + 5, updated_at=T0 + 20, matrix=False)
-    await worker._run_cycle(config, now=T0 + 30)
+    await _pass(worker, config, now=T0 + 30)
 
     _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 + 5, spacing=35)
-    await worker._run_cycle(config, now=T0 + 60)
+    await _pass(worker, config, now=T0 + 60)
 
     assert _answers(store) == ["Mind: answer new"]
 
@@ -959,13 +1118,13 @@ async def test_a_graph_no_longer_maintained_stops_keeping_health_failing(tmp_pat
     store = _FakeStore(failing={"!room:x:$t1"})
     _seed(config, paths, "!room:x:$t1", ["r1"])
     worker = _worker(config, paths, store)
-    await worker._run_cycle(config, now=T0 + 10)
+    await _pass(worker, config, now=T0 + 10)
     assert knowledge_graph_failure() is not None
 
     store.failing.clear()
     changed = config.model_copy(deep=True)
     changed.memory.embedder.config.dimensions = 256
-    await worker._run_cycle(changed, now=T0 + 20)
+    await _pass(worker, changed, now=T0 + 20)
 
     assert store.sessions() == ["!room:x:$t1"]
     assert knowledge_graph_failure() is None
@@ -985,11 +1144,11 @@ async def test_a_conversation_whose_agent_is_not_running_counts_for_nothing(tmp_
         return frozenset() if agent_name == "pal" else None
 
     # Nor does it start the next pass at once, which would spin while the agent stays down.
-    assert await _worker(config, paths, store, only_pal_runs)._run_cycle(config, now=T0 + 10) is False
+    assert await _pass(_worker(config, paths, store, only_pal_runs), config, now=T0 + 10) is False
     assert knowledge_graph_failure() is not None
 
     _seed(config, paths, "!room:x:$pal", ["p1"], agent="pal")
-    assert await _worker(config, paths, store, only_pal_runs)._run_cycle(config, now=T0 + 20) is True
+    assert await _pass(_worker(config, paths, store, only_pal_runs), config, now=T0 + 20) is True
     assert store.sessions() == ["!room:x:$pal"]
 
 
@@ -1002,7 +1161,7 @@ async def test_a_failing_tool_result_is_dropped_while_the_conversation_keeps_suc
 
     for day in range(7):
         _seed(config, paths, "!room:x:$t1", [f"r{index}" for index in range(day + 1)], spacing=7200)
-        await worker._run_cycle(config, now=T0 + day * 7200 + 100)
+        await _pass(worker, config, now=T0 + day * 7200 + 100)
 
     assert [episode.kind for _, episode, _ in store.episodes].count("tool_results") >= 1
 
@@ -1020,7 +1179,7 @@ async def test_episodes_are_rendered_off_the_event_loop(tmp_path: Path) -> None:
         return real(*args, **kwargs)
 
     with patch.object(ingestion, "render_episodes", render):
-        await _worker(config, paths, store)._run_cycle(config, now=T0 + 10)
+        await _pass(_worker(config, paths, store), config, now=T0 + 10)
 
     assert rendered_on
     assert all(thread is not threading.main_thread() for thread in rendered_on)

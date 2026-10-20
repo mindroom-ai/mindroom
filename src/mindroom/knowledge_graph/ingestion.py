@@ -157,86 +157,122 @@ def _report_failure(message: str, exc: Exception, **context: str) -> None:
 
 @dataclass
 class KnowledgeGraphIngestionWorker:
-    """Periodically ingest the new finished turns of every graph-enabled agent and private instance."""
+    """Keep the graph of every graph-enabled agent and private instance filled with its new finished turns."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     store: GraphStore
     redacted_event_ids: RedactedEventIds
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(_CONCURRENT_GRAPHS), init=False)
+    # Whether each maintained graph's last pass that tried something was clean, so one graph's clean pass never hides
+    # another's failure.
+    _clean: dict[str, bool] = field(default_factory=dict, init=False)
 
     async def run(self) -> None:
-        """Run ingestion passes until cancelled."""
+        """Start a pass loop for every maintained graph that is not filling, every interval or wake, until cancelled."""
         _WAKE_EVENTS.add(self._wake_event)
+        fills: dict[str, asyncio.Task[None]] = {}
         try:
             while True:
-                # Cleared before the pass, so a wake that arrives during it starts the next one at once.
+                # Cleared before looking, so a wake that arrives meanwhile looks again at once.
                 self._wake_event.clear()
                 config = self.config_provider()
                 interval = _IDLE_POLL_SECONDS
-                progressed = False
                 if config is not None and config.knowledge_graph_agents():
+                    interval = config.knowledge_graph.ingest.interval_seconds
                     try:
-                        progressed = await self._run_cycle(config, now=time.time())
+                        scopes = await self._maintained_graphs(config)
                     except Exception as exc:
                         _report_failure("Knowledge graph ingestion pass failed", exc)
-                    interval = config.knowledge_graph.ingest.interval_seconds
-                # A pass that added something may have left a backlog, which the next pass works on at once.
-                if not progressed:
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
+                        scopes = []
+                    for scope in scopes:
+                        fill = fills.get(scope.graph_name)
+                        if fill is None or fill.done():
+                            fills[scope.graph_name] = asyncio.create_task(self._fill(scope.graph_name))
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
         finally:
             _WAKE_EVENTS.discard(self._wake_event)
+            for fill in fills.values():
+                fill.cancel()
+            await asyncio.gather(*fills.values(), return_exceptions=True)
 
-    async def _run_cycle(self, config: Config, *, now: float) -> bool:
-        """Ingest up to ``max_sessions_per_cycle`` idle conversations with new turns from each graph, several at once.
+    async def _fill(self, graph_name: str) -> None:
+        """Run one graph's passes back to back, so a long backlog in another graph never holds it up.
 
-        Return whether any conversation added something, so a backlog is worked through without waiting.
+        Stop after a pass that added nothing, or once the graph is no longer maintained, for example after an embedder
+        or generation change, leaving the next look to ``run``.
         """
-        # These read files, including every private instance's records, so they stay off the event loop.
-        automation_thread_ids = await asyncio.to_thread(automation_threads, self.runtime_paths)
-        agent_keys = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
-        names = entity_names(config, agent_keys)
+        while (config := self.config_provider()) is not None:
+            try:
+                scopes = await self._maintained_graphs(config)
+            except Exception as exc:
+                _report_failure("Knowledge graph ingestion pass failed", exc)
+                return
+            scope = next((scope for scope in scopes if scope.graph_name == graph_name), None)
+            if scope is None:
+                # The config that replaced this graph maintains another, such as its next generation, which starts now.
+                self._wake_event.set()
+                return
+            if not await self._ingest_graph(config, scope, now=time.time()):
+                return
+
+    async def _maintained_graphs(self, config: Config) -> list[GraphScope]:
+        """Return the graphs the current config maintains, and stop counting the others toward health."""
+        # This reads every private instance's records, so it stays off the event loop.
         scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
-        budget = config.knowledge_graph.ingest.max_sessions_per_cycle
+        names = {scope.graph_name for scope in scopes}
+        self._clean = {name: clean for name, clean in self._clean.items() if name in names}
+        return scopes
+
+    async def _ingest_graph(self, config: Config, scope: GraphScope, *, now: float) -> bool:
+        """Ingest up to ``max_sessions_per_cycle`` of one graph's idle conversations with new turns.
+
+        Return whether any conversation added something, so the graph's backlog is worked through without waiting.
+        """
         outcomes: list[bool] = []
-        slots = asyncio.Semaphore(_CONCURRENT_GRAPHS)
-
-        async def ingest_graph(scope: GraphScope) -> bool:
-            """Ingest one graph's due conversations and return whether any of them added something."""
-            async with slots:
-                # One agent or private instance whose conversations cannot be read must not stop the others.
-                try:
-                    state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
-                    due, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
-                    if changed:
-                        await self._persist(scope.graph_name, state)
-                        # A conversation finished while listing is a clean outcome; one it could not read saved its failure.
-                        outcomes.append(True)
-                    results = [
-                        await self._ingest(config, scope, state, session, automation_thread_ids, names, now)
-                        for session in due
-                    ]
-                    # A conversation that added nothing, such as one whose agent is not running or whose first episode
-                    # failed, is looked at again later and is not counted.
-                    progressed = [result for result in results if result is not None]
-                    outcomes.extend(progressed)
-                    # A conversation's failure is saved with it, so health stays failing until it succeeds, even across
-                    # passes in which it is not due.
-                    if any(entry["failures"] for entry in state["sessions"].values()):
-                        outcomes.append(False)
-                except Exception as exc:
-                    _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
+        progressed: list[bool] = []
+        async with self._slots:
+            # One agent or private instance whose conversations cannot be read must not stop the others.
+            try:
+                # These read files, including every private instance's records, so they stay off the event loop.
+                automation_thread_ids = await asyncio.to_thread(automation_threads, self.runtime_paths)
+                agent_keys = await asyncio.to_thread(prepared_entity_names_by_user_id, config, self.runtime_paths)
+                names = entity_names(config, agent_keys)
+                budget = config.knowledge_graph.ingest.max_sessions_per_cycle
+                state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
+                due, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
+                if changed:
+                    await self._persist(scope.graph_name, state)
+                    # A conversation finished while listing is a clean outcome; one it could not read saved its failure.
+                    outcomes.append(True)
+                results = [
+                    await self._ingest(config, scope, state, session, automation_thread_ids, names, now)
+                    for session in due
+                ]
+                # A conversation that added nothing, such as one whose agent is not running or whose first episode
+                # failed, is looked at again later and is not counted.
+                progressed = [result for result in results if result is not None]
+                outcomes.extend(progressed)
+                # A conversation's failure is saved with it, so health stays failing until it succeeds, even across
+                # passes in which it is not due.
+                if any(entry["failures"] for entry in state["sessions"].values()):
                     outcomes.append(False)
-                    return False
-                return bool(progressed)
-
-        progress = await asyncio.gather(*(ingest_graph(scope) for scope in scopes))
-        # Health reports a failure until a pass ingests something, nothing in it fails, and no conversation's last
-        # attempt failed.
-        if outcomes and all(outcomes):
+            except Exception as exc:
+                _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
+                outcomes.append(False)
+                progressed = []
+        # A pass that tried nothing says nothing about the graph, so it neither holds nor clears a failure.
+        if outcomes:
+            self._clean[scope.graph_name] = all(outcomes)
+        else:
+            self._clean.pop(scope.graph_name, None)
+        # Health reports a failure until a pass ingests something cleanly while every other graph's last pass that
+        # tried something was clean too, and no conversation's last attempt failed.
+        if self._clean and all(self._clean.values()):
             record_knowledge_graph_failure(None)
-        return any(progress)
+        return bool(progressed)
 
     def _due_sessions(
         self,
