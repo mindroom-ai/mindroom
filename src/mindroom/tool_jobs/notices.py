@@ -108,7 +108,7 @@ async def _turn_start_job_note() -> str | None:
 
 
 async def append_turn_start_job_note(items: Sequence[EnrichmentItem]) -> tuple[EnrichmentItem, ...]:
-    """Open the reply's prompt with its turn-start job note, when jobs ended before it."""
+    """Add the turn-start job note to the reply's turn context, when jobs ended before it."""
     note = await _turn_start_job_note()
     if note is None:
         return tuple(items)
