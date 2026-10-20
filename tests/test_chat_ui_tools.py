@@ -249,6 +249,19 @@ async def test_room_level_request_uses_null_thread_without_relation(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_room_version_12_room_without_a_server_name_gets_the_request(tmp_path: Path) -> None:
+    """Room version 12 room IDs have no server name, and UI actions still reach the room."""
+    room_id = "!nZYmvV0rQMLKHh5sSEhvOzXFF3rOsPDxzWkbWBAdZDM"
+    context = _context(tmp_path, room_id=room_id)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().open_panel(panel="members"))
+
+    assert result["status"] == "ok"
+    assert _sent_content(context)["io.mindroom.ui_action"]["room_id"] == room_id
+
+
+@pytest.mark.asyncio
 async def test_thread_continuation_uses_latest_projected_event_for_fallback(
     tmp_path: Path,
     computer_request: Callable[[], Awaitable[str]],

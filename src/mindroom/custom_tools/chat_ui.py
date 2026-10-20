@@ -219,7 +219,7 @@ class ChatUITools(Toolkit):
                 action=action,
                 message="Chat UI actions do not support delegated transport identity mismatches.",
             )
-        if not context.room_id.startswith("!") or ":" not in context.room_id:
+        if not context.room_id.startswith("!"):  # room version 12 IDs carry no ":server" part
             return cls._payload(
                 "error",
                 action=action,
