@@ -1947,14 +1947,12 @@ async def _ensure_attempt_team_members(
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    session_id: str | None,
     reason_prefix: str,
     configured_team_name: str | None,
 ) -> ResolvedExactTeamMembers:
     """Return the turn's member set, rebuilding released members.
 
-    A continuation releases the spent members; the rebuild bakes the loaded
-    dynamic-tool schema into fresh member agents.
+    A continuation releases the spent members; the rebuild gives fresh member agents the switched model.
     """
     members = holder.team_members
     if members is None:
@@ -1963,7 +1961,6 @@ async def _ensure_attempt_team_members(
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
             active_model_names=holder.member_model_names,
@@ -2079,24 +2076,16 @@ def materialize_exact_team_members(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    session_id: str | None = None,
     include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
-    dynamic_tool_continuation: bool = False,
     supports_native_tool_approval: bool = False,
     active_model_names: Mapping[str, str] | None = None,
     required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResolvedExactTeamMembers:
-    """Materialize the exact team-member set without silent fallback.
-
-    ``dynamic_tool_continuation`` must only be enabled by callers that run the
-    members under a continuation-capable response-turn driver; other callers
-    (for example the OpenAI-compatible API) leave it off so a load/unload does
-    not truncate the run.
-    """
+    """Materialize the exact team-member set without silent fallback."""
     if not requested_agent_names:
         raise ValueError(_NO_AGENTS_RESPONSE)
 
@@ -2128,17 +2117,11 @@ def materialize_exact_team_members(
             config,
             runtime_paths,
             execution_identity=execution_identity,
-            session_id=session_id
-            if session_id is not None
-            else execution_identity.session_id
-            if execution_identity
-            else None,
             active_model_name=model_name,
             knowledge=knowledge_resolution.knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
-            dynamic_tool_continuation=dynamic_tool_continuation,
             supports_native_tool_approval=supports_native_tool_approval,
             required_tool_names=(required_tool_names or {}).get(agent_name, ()),
         )
@@ -2190,7 +2173,6 @@ def _materialize_team_members(
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    session_id: str | None = None,
     configured_team_name: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     reason_prefix: str = "Team request",
@@ -2213,11 +2195,9 @@ def _materialize_team_members(
         config=orchestrator.config,
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
-        session_id=session_id,
         materializable_agent_names=materializable_agent_names,
         unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
-        dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
         active_model_names=active_model_names,
         reason_prefix=reason_prefix,
@@ -2750,9 +2730,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            session_id=session_id,
             refresh_scheduler=refresh_scheduler,
-            dynamic_tool_continuation=True,
             supports_native_tool_approval=True,
             active_model_names=member_model_names,
             required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
@@ -3025,7 +3003,6 @@ async def team_response(  # noqa: C901, PLR0915
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
@@ -3068,7 +3045,6 @@ async def team_response(  # noqa: C901, PLR0915
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
         )
@@ -3499,7 +3475,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             requested_agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
@@ -3542,7 +3517,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             requested_agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
         )

@@ -26,7 +26,13 @@ from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import (
+    DelegationModel,
+    _call,
+    _deferred_call,
+    _delegate_runtime_context,
+    _runtime_paths,
+)
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity, _only_run
 
@@ -223,13 +229,14 @@ def _continuation_responses(continuation: str) -> list[ModelResponse]:
             0,
             ModelResponse(tool_calls=[_call("run_subagent", "nested", agent_name="child", task="Add then list files")]),
         )
-    if continuation in {"deferred_tool", "nested_deferred_tool", "preparation_error"}:
-        responses.extend(
-            [
-                ModelResponse(tool_calls=[_call("load_tool", "load-file", tool_name="file")]),
-                # A later run may reuse the approved call's local ID.
-                ModelResponse(tool_calls=[_call("list_files", "approved-add")]),
-            ],
+    if continuation in {"deferred_tool", "nested_deferred_tool"}:
+        responses.append(ModelResponse(tool_calls=[_deferred_call("list-files", "list_files")]))
+    if continuation == "preparation_error":
+        # The continuation after this switch rebuilds the child, whose model preparation then fails.
+        responses.append(
+            ModelResponse(
+                tool_calls=[_call("switch_thread_model", "switch-model", model_name="default", when="next-turn")],
+            ),
         )
     if continuation == "nested_subagent":
         responses.extend(

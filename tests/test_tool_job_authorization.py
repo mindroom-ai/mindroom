@@ -55,7 +55,6 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         runtime_overrides=None,
         tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
         execution_identity=_OWNER,
-        session_id=_OWNER.session_id,
     )
     assert toolkit is not None
     bind_toolkit_authority(toolkit, authored_name=entry.name)
@@ -97,7 +96,6 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
         runtime_overrides=None,
         tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
         execution_identity=_OWNER,
-        session_id=_OWNER.session_id,
     )
     assert toolkit is not None
     bind_toolkit_authority(toolkit, authored_name=entry.name)

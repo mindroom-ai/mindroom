@@ -577,7 +577,6 @@ async def _aexecute_room_agent_participant(
         context.config,
         context.runtime_paths,
         execution_identity=execution_identity,
-        session_id=session_id,
         hook_registry=context.hook_registry,
         knowledge=None,
         active_model_name=active_model_name,
@@ -884,7 +883,6 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
             runtime_overrides=entity_view.tool_runtime_overrides(tool_name),
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
-            session_id=context.session_id,
         )
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."

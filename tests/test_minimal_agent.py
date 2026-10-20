@@ -278,7 +278,6 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
         agent_mode="minimal",
-        session_id=context.session_id,
     )
     agent.response_context = _turn_context()
     run = RunOutput(run_id="generation-1")
@@ -363,7 +362,6 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             runtime.runtime_paths,
             identity,
             agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
-            session_id=runtime.session_id,
         )
         resources.callback(close_agent_runtime_state_dbs, agent)
         agent.response_context = _turn_context()
@@ -446,7 +444,6 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
         runtime.runtime_paths,
         identity,
         agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
-        session_id=runtime.session_id,
     )
     agent.response_context = _turn_context()
     try:
@@ -558,7 +555,6 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
-        session_id=runtime.session_id,
     )
     with tool_runtime_context(runtime):
         catalog = await agent.prepare_execution_catalog(
@@ -778,7 +774,6 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
-        session_id=runtime.session_id,
     )
     agent.response_context = _turn_context()
     assert agent_static_token_estimator(agent).estimate("budget input") > 0

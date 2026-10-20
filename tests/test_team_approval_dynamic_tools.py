@@ -45,7 +45,6 @@ from mindroom.teams import (
     continue_paused_team_run,
     materialize_exact_team_members,
 )
-from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
@@ -217,9 +216,10 @@ async def _exercise_team_member_assembly(
         Config.model_validate(
             {
                 "defaults": {"tools": [], "learning": False},
+                # Each member owns a different deferred toolkit, so a sibling never gains the paused owner's tools.
                 "agents": {
-                    name: {"display_name": name.title(), "tools": [{"calculator": {"defer": True}}]}
-                    for name in ("alpha", "beta")
+                    "alpha": {"display_name": "Alpha", "tools": [{"calculator": {"defer": True}}]},
+                    "beta": {"display_name": "Beta", "tools": [{"sleep": {"defer": True}}]},
                 },
                 "teams": {
                     "research": {
@@ -261,10 +261,8 @@ async def _exercise_team_member_assembly(
         assert set(functions) == {"alpha", "beta"}
         assert "add" in functions["alpha"]
         assert "add" not in functions["beta"]
-        assert dynamic_toolkits._loaded_tools == {}
         raise _MemberAssemblyObservedError
 
-    dynamic_toolkits._loaded_tools.clear()
     with open_resolved_scope_session_context(
         agent_name="alpha",
         scope=HistoryScope(kind="team", scope_id="research"),
@@ -294,35 +292,32 @@ async def _exercise_team_member_assembly(
             user_id=identity.requester_id,
         )
     monkeypatch.setattr("mindroom.teams.build_materialized_team_instance", inspect_members)
-    try:
-        with pytest.raises(_MemberAssemblyObservedError):
-            await continue_paused_team_run(
-                member_names=("alpha", "beta"),
-                mode=TeamMode.COORDINATE,
-                config=config,
-                runtime_paths=paths,
-                execution_identity=identity,
-                session_id="team-session",
-                run_id="paused-team-run",
-                user_id=identity.requester_id,
-                configured_team_name="research",
-                model_name="default",
-                decisions={"call-one": True},
-                denial_reasons={"call-one": None},
-                refresh_scheduler=None,
-                approval_calls=(
-                    ApprovalCall(
-                        tool_call_id="call-one",
-                        tool_name="add",
-                        invoking_agent="alpha",
-                        toolkit_name="calculator",
-                        expires_at_ns=2**62,
-                    ),
+    with pytest.raises(_MemberAssemblyObservedError):
+        await continue_paused_team_run(
+            member_names=("alpha", "beta"),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=paths,
+            execution_identity=identity,
+            session_id="team-session",
+            run_id="paused-team-run",
+            user_id=identity.requester_id,
+            configured_team_name="research",
+            model_name="default",
+            decisions={"call-one": True},
+            denial_reasons={"call-one": None},
+            refresh_scheduler=None,
+            approval_calls=(
+                ApprovalCall(
+                    tool_call_id="call-one",
+                    tool_name="add",
+                    invoking_agent="alpha",
+                    toolkit_name="calculator",
+                    expires_at_ns=2**62,
                 ),
-                progress=None,
-            )
-    finally:
-        dynamic_toolkits._loaded_tools.clear()
+            ),
+            progress=None,
+        )
 
 
 @pytest.mark.asyncio
@@ -338,9 +333,10 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
         Config.model_validate(
             {
                 "defaults": {"tools": [], "learning": False},
+                # Each member owns a different deferred toolkit, so a sibling never gains the paused owner's tools.
                 "agents": {
-                    name: {"display_name": name.title(), "tools": [{"calculator": {"defer": True}}]}
-                    for name in ("alpha", "beta")
+                    "alpha": {"display_name": "Alpha", "tools": [{"calculator": {"defer": True}}]},
+                    "beta": {"display_name": "Beta", "tools": [{"sleep": {"defer": True}}]},
                 },
                 "teams": {
                     "research": {
@@ -391,7 +387,6 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
         events += _event("response.completed", response=_response([_ANSWER]))
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=events)
 
-    dynamic_toolkits._loaded_tools.clear()
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         client = AsyncOpenAI(api_key="test-key", http_client=http_client)
         monkeypatch.setattr(
@@ -403,17 +398,11 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
             ),
         )
         monkeypatch.setattr(CalculatorTools, "add", add)
-        dynamic_toolkits.save_loaded_tools_for_session(
-            agent_name="alpha",
-            session_id="team-session",
-            loaded_tools=["calculator"],
-        )
         members = materialize_exact_team_members(
             ["alpha", "beta"],
             config=config,
             runtime_paths=paths,
             execution_identity=identity,
-            session_id="team-session",
             supports_native_tool_approval=True,
         )
         history_scope = HistoryScope(kind="team", scope_id="research")
@@ -459,7 +448,6 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
             )
             close_team_runtime_state_dbs(agents=members.agents, team_db=team.db, shared_scope_storage=scope.storage)
         assert executed == []
-        dynamic_toolkits._loaded_tools.clear()
         if scenario != "approved":
             config.agents["alpha"].tools = []
         calls = tuple(
@@ -507,7 +495,6 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
                 assert "Declined by requester" in results[0]["output"]
                 assert all(tool.get("name") != "add" for tool in requests[2].get("tools", []))
         assert executed == ([(2, 3)] if scenario == "approved" else [])
-        assert dynamic_toolkits._loaded_tools == {}
 
 
 @pytest.mark.asyncio

@@ -2965,16 +2965,14 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Load and unload deferred tools for the current session",
+      "description": "Search deferred tools and call them",
       "display_name": "Dynamic Tools",
       "docs_url": null,
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_tools",
-        "load_tool",
-        "unload_tool",
-        "tool_search"
+        "tool_search",
+        "call_tool"
       ],
       "helper_text": null,
       "icon": "PackagePlus",

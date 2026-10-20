@@ -472,12 +472,10 @@ class AgentApprovalExecution:
                 config,
                 self.runtime_paths,
                 execution_identity,
-                session_id=continuation.session_id,
                 history_storage=history_storage,
                 active_model_name=continuation.runtime_model_name,
                 knowledge=knowledge,
                 refresh_scheduler=self.refresh_scheduler(),
-                dynamic_tool_continuation=True,
                 supports_native_tool_approval=True,
                 required_tool_names=required_tool_names,
                 agent_mode=(

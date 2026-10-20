@@ -70,12 +70,14 @@ _ANSWER = "The real answer."
 
 
 def _load_tool_execution() -> ToolExecution:
-    """Return the dynamic-tool call that forces one more attempt."""
+    """Return a next-turn model switch, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-load",
-        tool_name="load_tool",
-        tool_args={"tool_name": "sleep"},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": "sleep"}),
+        tool_call_id="call-switch-next-turn",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": "next-turn"},
+        result=json.dumps(
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+        ),
         stop_after_tool_call=True,
     )
 

@@ -2110,23 +2110,19 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
+        switch_execution = ToolExecution(
             tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
 
         first_run_output = MagicMock()
         first_run_output.content = ""
-        first_run_output.tools = [load_tool_execution]
+        first_run_output.tools = [switch_execution]
         first_run_output.status = RunStatus.completed
         first_agent.arun = AsyncMock(return_value=first_run_output)
 
@@ -2335,22 +2331,18 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
+        switch_execution = ToolExecution(
             tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
         first_run_output = MagicMock()
         first_run_output.content = ""
-        first_run_output.tools = [load_tool_execution]
+        first_run_output.tools = [switch_execution]
         first_run_output.status = RunStatus.completed
         first_agent.arun = AsyncMock(return_value=first_run_output)
 
@@ -2391,7 +2383,7 @@ class TestUserIdPassthrough:
         snapshot = recorder.interrupted_snapshot()
         assert snapshot.user_message == "test"
         assert snapshot.partial_text == "Half done"
-        assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
@@ -2410,22 +2402,18 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
+        switch_execution = ToolExecution(
             tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
 
         async def first_stream() -> AsyncIterator[object]:
-            yield ToolCallCompletedEvent(tool=load_tool_execution)
+            yield ToolCallCompletedEvent(tool=switch_execution)
             yield RunCompletedEvent(content=None)
 
         async def second_stream() -> AsyncIterator[object]:
@@ -2487,22 +2475,18 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
+        switch_execution = ToolExecution(
             tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
 
         async def first_stream() -> AsyncIterator[object]:
-            yield ToolCallCompletedEvent(tool=load_tool_execution)
+            yield ToolCallCompletedEvent(tool=switch_execution)
             yield RunCompletedEvent(content=None)
 
         async def second_stream() -> AsyncIterator[object]:
@@ -2540,7 +2524,7 @@ class TestUserIdPassthrough:
 
         snapshot = recorder.interrupted_snapshot()
         assert snapshot.partial_text == "Half done"
-        assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
     async def test_ai_response_returns_message_after_dynamic_tool_limit(self, tmp_path: Path) -> None:
@@ -2555,22 +2539,16 @@ class TestUserIdPassthrough:
             agent.name = "GeneralAgent"
             agent.add_history_to_context = False
 
-            load_tool_execution = ToolExecution(
-                tool_call_id=f"call-load-{index}",
-                tool_name="load_tool",
-                tool_args={"tool_name": "missing_tool"},
-                result=json.dumps(
-                    {
-                        "status": "unknown",
-                        "tool": "dynamic_tools",
-                        "tool_name": "missing_tool",
-                    },
-                ),
+            switch_execution = ToolExecution(
+                tool_call_id=f"call-switch-{index}",
+                tool_name="switch_thread_model",
+                tool_args={"model_name": "missing", "when": "next-turn"},
+                result=json.dumps({"status": "error", "tool": "thread_model", "message": "Unknown model"}),
                 stop_after_tool_call=True,
             )
             run_output = MagicMock()
             run_output.content = ""
-            run_output.tools = [load_tool_execution]
+            run_output.tools = [switch_execution]
             run_output.status = RunStatus.completed
             agent.arun = AsyncMock(return_value=run_output)
 
@@ -2586,9 +2564,7 @@ class TestUserIdPassthrough:
                 config=_config(),
             )
 
-        assert "Dynamic tool calls did not produce a final answer" in response
-        assert "`load_tool` for `missing_tool`" in response
-        assert "`unknown`" in response
+        assert "Model switching did not produce a final answer" in response
         assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
         assert all(agent.arun.await_count == 1 for agent in agents)
 
@@ -2605,21 +2581,15 @@ class TestUserIdPassthrough:
             agent.name = "GeneralAgent"
             agent.add_history_to_context = False
 
-            load_tool_execution = ToolExecution(
-                tool_call_id=f"call-load-{index}",
-                tool_name="load_tool",
-                tool_args={"tool_name": "missing_tool"},
-                result=json.dumps(
-                    {
-                        "status": "unknown",
-                        "tool": "dynamic_tools",
-                        "tool_name": "missing_tool",
-                    },
-                ),
+            switch_execution = ToolExecution(
+                tool_call_id=f"call-switch-{index}",
+                tool_name="switch_thread_model",
+                tool_args={"model_name": "missing", "when": "next-turn"},
+                result=json.dumps({"status": "error", "tool": "thread_model", "message": "Unknown model"}),
                 stop_after_tool_call=True,
             )
 
-            async def stream(execution: ToolExecution = load_tool_execution) -> AsyncIterator[object]:
+            async def stream(execution: ToolExecution = switch_execution) -> AsyncIterator[object]:
                 yield ToolCallCompletedEvent(tool=execution)
                 yield RunCompletedEvent(content=None)
 
@@ -2642,9 +2612,7 @@ class TestUserIdPassthrough:
 
         content_chunks = [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)]
         assert len(content_chunks) == 1
-        assert "Dynamic tool calls did not produce a final answer" in content_chunks[0]
-        assert "`load_tool` for `missing_tool`" in content_chunks[0]
-        assert "`unknown`" in content_chunks[0]
+        assert "Model switching did not produce a final answer" in content_chunks[0]
         assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
         assert all(agent.arun.call_count == 1 for agent in agents)
 

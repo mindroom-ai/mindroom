@@ -81,7 +81,6 @@ async def test_ai_stream_can_finish_in_another_task(  # noqa: PLR0915
             def create_agent(*_args: object, **kwargs: object) -> Agent:
                 database = kwargs["history_storage"]
                 assert isinstance(database, SqliteDb)
-                assert kwargs["session_id"] == session_id
                 agent = Agent(
                     id="calculator",
                     name="calculator",

@@ -15,7 +15,6 @@ from agno.team import Team
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
-from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
@@ -122,14 +121,6 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
                 schema = model._format_tools([function])[0]["function"]["parameters"]
                 assert "background_after" not in schema["properties"]
-                dynamic = DynamicToolsToolkit(
-                    agent_name="leader",
-                    config=config,
-                    session_id="session",
-                    stop_after_tool_call=True,
-                )
-                loader_schema = model._format_tools([dynamic.functions["load_tool"]])[0]["function"]["parameters"]
-                assert "background_after" not in loader_schema["properties"]
     finally:
         release.set()
         if pending is not None:

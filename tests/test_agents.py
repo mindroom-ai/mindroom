@@ -4477,7 +4477,6 @@ def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
-        session_id="session-1",
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
     )

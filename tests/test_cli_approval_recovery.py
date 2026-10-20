@@ -81,14 +81,14 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_approval_tool_restore_requires_current_dynamic_manager_assignment(tmp_path: Path) -> None:
-    """Native and hidden approvals can restore a loader only while deferred tools remain assigned."""
+async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp_path: Path) -> None:
+    """A saved approval owned by the search toolkit restores only while deferred tools remain assigned."""
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         tools=["shell", {"sleep": {"defer": True}}],
     )
-    call = ApprovalCall("loader", "load_tool", "helper", 100, toolkit_name="dynamic_tools")
+    call = ApprovalCall("search", "tool_search", "helper", 100, toolkit_name="dynamic_tools")
     identity = build_execution_identity_from_runtime_context(runtime)
     required = await approval_tools.required_approval_tool_names(
         "helper",
@@ -112,7 +112,7 @@ async def test_approval_tool_restore_requires_current_dynamic_manager_assignment
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize("continuation_count", [2, 4])
-async def test_recovered_dynamic_call_retains_response_lifecycle(
+async def test_recovered_model_switch_call_retains_response_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     continuation_count: int,
@@ -123,7 +123,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        tools=["shell", {"sleep": {"defer": True}}],
+        tools=["shell", "thread_model"],
         memory_backend="file",
         learning=False,
     )
@@ -162,7 +162,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         session_id=runtime.session_id,
         agent_id="helper",
         metadata={"agent_mode": "minimal"},
-        messages=[Message(role="user", content="Load sleep and answer using knowledge")],
+        messages=[Message(role="user", content="Keep this model and answer using knowledge")],
     )
     session = AgentSession(
         session_id=runtime.session_id,
@@ -173,11 +173,12 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
     storage.upsert_session(session)
     storage.upsert_run(persisted, session_id=runtime.session_id)
     storage.close()
+    switch_arguments = {"model_name": "default", "when": "next-turn"}
     requirement = RunRequirement(
         ToolExecution(
             tool_call_id="loader",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+            tool_name="switch_thread_model",
+            tool_args=switch_arguments,
             requires_confirmation=True,
         ),
     )
@@ -191,25 +192,25 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         requester_id=runtime.requester_id,
         sources=ResponseSources((runtime.reply_to_event_id,), (runtime.reply_to_event_id,)),
         state="claimed",
-        request_body="Load sleep and answer using knowledge",
+        request_body="Keep this model and answer using knowledge",
         continuation_count=continuation_count,
         calls=(
             ApprovalCall(
                 "loader",
-                "load_tool",
+                "switch_thread_model",
                 "helper",
                 100,
-                toolkit_name="dynamic_tools",
-                arguments_digest=approval_arguments_digest({"tool_name": "sleep"}),
+                toolkit_name="thread_model",
+                arguments_digest=approval_arguments_digest(switch_arguments),
             ),
         ),
         cli_call={
             "kind": "agent_cli",
-            "toolkit": "dynamic_tools",
-            "function": "load_tool",
+            "toolkit": "thread_model",
+            "function": "switch_thread_model",
             "call_id": "loader",
             "parent_bash_call_id": "interrupted-bash",
-            "arguments": {"tool_name": "sleep"},
+            "arguments": switch_arguments,
             "requirements": [requirement.to_dict()],
             "delegation_depth": 2,
         },
@@ -241,7 +242,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         run_id_callback=run_ids.append,
     )
     if continuation_count == 4:
-        assert "Dynamic tool calls did not produce a final answer" in result.response_text
+        assert "Model switching did not produce a final answer" in result.response_text
         assert requests == []
         assert run_ids == []
     else:
@@ -256,7 +257,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [True, False])
-@pytest.mark.parametrize("control", [None, "after-toolcall", "next-turn", "invalid", "dynamic"])
+@pytest.mark.parametrize("control", [None, "after-toolcall", "next-turn", "invalid"])
 async def test_restart_resolves_hidden_call_and_never_replays_parent(
     tmp_path: Path,
     approved: bool,
@@ -265,9 +266,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     """Real prepared execution keeps arguments, while normal response gets an honest notice."""
     effects = []
     control_result = json.dumps(
-        {"tool": "dynamic_tools", "status": "loaded", "tool_name": "file"}
-        if control == "dynamic"
-        else {
+        {
             "tool": "thread_model",
             "action": "switch",
             "status": "error" if control == "invalid" else "ok",
@@ -284,7 +283,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     function = Function.from_callable(action)
     function.owning_toolkit = "actions"
     if control:
-        function.name = "load_tool" if control == "dynamic" else "switch_thread_model"
+        function.name = "switch_thread_model"
         function.stop_after_tool_call = True
     function.requires_confirmation = True
     catalog = await _catalog(tmp_path, [function])
@@ -670,7 +669,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         runtime.config,
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
-        session_id=runtime.session_id,
         agent_mode="minimal",
         supports_native_tool_approval=True,
     )
@@ -809,7 +807,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             runtime.config,
             runtime.runtime_paths,
             build_execution_identity_from_runtime_context(runtime),
-            session_id=runtime.session_id,
             agent_mode="minimal",
             supports_native_tool_approval=True,
         )

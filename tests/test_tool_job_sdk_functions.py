@@ -98,7 +98,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
     _write_skill(workspace.root / "skills", "demo", "Sample skill")
     model = _SdkFunctionModel(id="test")
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
-    agent = create_agent("lead", config, paths, owner, session_id=owner.session_id, knowledge=Knowledge(name="probe"))
+    agent = create_agent("lead", config, paths, owner, knowledge=Knowledge(name="probe"))
 
     async def retrieve(query: str, num_documents: int | None = None) -> list[dict[str, str]]:
         del num_documents

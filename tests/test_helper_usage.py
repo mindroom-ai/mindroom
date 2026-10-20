@@ -191,7 +191,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 config=config,
                 runtime_paths=paths,
                 execution_identity=identity,
-                session_id="approval-session",
                 supports_native_tool_approval=True,
             )
             actor = build_materialized_team_instance(
@@ -212,7 +211,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 config,
                 paths,
                 identity,
-                session_id="approval-session",
                 history_storage=scope_context.storage,
                 supports_native_tool_approval=True,
             )

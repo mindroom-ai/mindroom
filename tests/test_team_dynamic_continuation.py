@@ -24,7 +24,6 @@ from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
     _build_team_runtime_db_callbacks,
-    _materialize_team_members,
     _TeamTurnHolder,
     materialize_exact_team_members,
     team_response,
@@ -48,12 +47,15 @@ if TYPE_CHECKING:
     from agno.team import Team as AgnoTeam
 
 
-def _load_tool_execution(tool_name: str = "sleep") -> ToolExecution:
+def _load_tool_execution() -> ToolExecution:
+    """Return a next-turn model switch, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-load",
-        tool_name="load_tool",
-        tool_args={"tool_name": tool_name},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": tool_name}),
+        tool_call_id="call-switch-next-turn",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": "next-turn"},
+        result=json.dumps(
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+        ),
         stop_after_tool_call=True,
     )
 
@@ -156,7 +158,7 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
     # The continuation rebuilds member agents so the loaded tool's schema is baked in.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.await_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     assert "Continue the same task" in second_prompt[-1].content
     assert run_ids[0] == "run-1"
     assert len(run_ids) == 2
@@ -164,7 +166,7 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
     assert recorder.outcome == "completed"
     assert "Used the loaded tool." in recorder.assistant_text
     # The turn-level trace still carries the first attempt's dynamic tool call.
-    assert any(entry.tool_name == "load_tool" for entry in recorder.completed_tools)
+    assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
 
 @pytest.mark.asyncio
@@ -431,7 +433,7 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
     # The streamed continuation rebuilds member agents like the blocking path.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.call_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Used the loaded tool." in rendered
     # The superseded first attempt's fallback document must not leak.
@@ -487,12 +489,12 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
     assert mock_instance.call_args_list[0].kwargs["agents"] == [first_agent]
     assert mock_instance.call_args_list[1].kwargs["agents"] == [second_agent]
     second_prompt = mock_team.arun.call_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Used the loaded tool." in rendered
     assert recorder.outcome == "completed"
     assert "Used the loaded tool." in recorder.assistant_text
-    assert any(entry.tool_name == "load_tool" for entry in recorder.completed_tools)
+    assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
 
 @pytest.mark.asyncio
@@ -565,8 +567,8 @@ def test_release_attempt_members_resets_snapshot_state() -> None:
     assert holder.tool_tracker is not stale_tracker
 
 
-def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
-    """Callers without a continuation-capable driver keep load/unload non-truncating."""
+def test_materialize_exact_team_members_defaults_to_no_native_approval() -> None:
+    """Callers without a pause-capable driver build members that hide approval-gated functions."""
     config = _build_test_config()
     fake_agent = _make_test_agent("GeneralAgent")
     with (
@@ -578,33 +580,9 @@ def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
-            session_id="session-1",
         )
 
-    assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is False
     assert mock_create.call_args.kwargs["supports_native_tool_approval"] is False
-
-
-def test_team_members_are_built_with_dynamic_tool_continuation() -> None:
-    """Materialized team members opt into same-turn dynamic-tool continuation."""
-    orchestrator, _config = _make_orchestrator()
-    fake_agent = _make_test_agent("GeneralAgent")
-    with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create,
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-    ):
-        _materialize_team_members(
-            ["general"],
-            orchestrator,
-            None,
-            session_id="session-1",
-            unavailable_bases={},
-            reason_prefix="Team request",
-            configured_team_name=None,
-        )
-
-    assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is True
-    assert mock_create.call_args.kwargs["supports_native_tool_approval"] is True
 
 
 @pytest.mark.asyncio
@@ -643,7 +621,7 @@ async def test_team_response_logs_continuation_prompt_in_request_log_context() -
         )
 
     assert logged_prompts[0] == "Load the sleep tool and use it."
-    assert "DYNAMIC TOOL CALL COMPLETED" in str(logged_prompts[1])
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in str(logged_prompts[1])
 
 
 @pytest.mark.asyncio
@@ -687,4 +665,4 @@ async def test_team_response_stream_logs_continuation_prompt_in_request_log_cont
         ]
 
     assert logged_prompts[0] == "Load the sleep tool and use it."
-    assert "DYNAMIC TOOL CALL COMPLETED" in str(logged_prompts[1])
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in str(logged_prompts[1])

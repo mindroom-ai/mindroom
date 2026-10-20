@@ -311,7 +311,6 @@ async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorizatio
         runtime_overrides=None,
         tool_config_overrides=context.config.resolve_entity("general").authored_tool_configs[0].tool_config_overrides,
         execution_identity=build_execution_identity_from_runtime_context(context),
-        session_id=context.session_id,
     )
     assert isinstance(toolkit, DynamicWorkflowTools)
     bind_toolkit_authority(toolkit, authored_name="dynamic_workflow")

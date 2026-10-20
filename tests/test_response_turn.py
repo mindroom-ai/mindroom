@@ -142,16 +142,6 @@ def _trace(tool_name: str) -> ToolTraceEntry:
     return ToolTraceEntry(type="tool_call_completed", tool_name=tool_name)
 
 
-def _dynamic_tool_execution(tool_name: str = "sleep") -> ToolExecution:
-    return ToolExecution(
-        tool_call_id="call-load_tool",
-        tool_name="load_tool",
-        tool_args={"tool_name": tool_name},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": tool_name}),
-        stop_after_tool_call=True,
-    )
-
-
 def _model_switch_execution(when: str) -> ToolExecution:
     return ToolExecution(
         tool_call_id="call-switch-model",
@@ -1155,7 +1145,7 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     prompts: list[str] = []
-    first_trace = _trace("load_tool")
+    first_trace = _trace("switch_thread_model")
 
     async def _attempt(
         _run: TurnRunState,
@@ -1165,7 +1155,7 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
         if len(prompts) == 1:
             return CompletedAttempt(
                 attempt_run_id="run-1",
-                tool_executions=(_dynamic_tool_execution(),),
+                tool_executions=(_model_switch_execution("next-turn"),),
                 completed_tools=(first_trace,),
             )
         return CompletedAttempt(
@@ -1187,7 +1177,7 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert result == "final"
     assert len(prompts) == 2
     assert prompts[0] == "original ask"
-    assert "DYNAMIC TOOL CALL COMPLETED" in prompts[1]
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in prompts[1]
     assert log.released == 1
     assert log.finalized == 2
     # The continuation reset synced empty partial state carrying the prior tools.
@@ -1268,7 +1258,7 @@ def test_blocking_continuation_limit_returns_limit_message() -> None:
     async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
         return CompletedAttempt(
             attempt_run_id="run-1",
-            tool_executions=(_dynamic_tool_execution(),),
+            tool_executions=(_model_switch_execution("next-turn"),),
         )
 
     result = asyncio.run(
@@ -1354,7 +1344,7 @@ def test_blocking_empty_retry_borrows_continuation_slot_within_shared_budget() -
             return CompletedAttempt(is_empty=True, run_id="run-empty")
         return CompletedAttempt(
             attempt_run_id=f"run-{attempts}",
-            tool_executions=(_dynamic_tool_execution(),),
+            tool_executions=(_model_switch_execution("next-turn"),),
         )
 
     result = asyncio.run(
@@ -1424,7 +1414,7 @@ def test_blocking_superseded_continuation_metadata_stays_out_of_collector() -> N
         if attempts == 1:
             return CompletedAttempt(
                 attempt_run_id="run-1",
-                tool_executions=(_dynamic_tool_execution(),),
+                tool_executions=(_model_switch_execution("next-turn"),),
                 metadata_content={"io.mindroom.ai_run": {"run_id": "run-1"}},
             )
         return CompletedAttempt(
@@ -1781,8 +1771,8 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
             yield AttemptResolved(
                 CompletedAttempt(
                     attempt_run_id="run-1",
-                    tool_executions=() if hidden else (_dynamic_tool_execution(),),
-                    control_executions=(_dynamic_tool_execution(),) if hidden else (),
+                    tool_executions=() if hidden else (_model_switch_execution("next-turn"),),
+                    control_executions=(_model_switch_execution("next-turn"),) if hidden else (),
                 ),
             )
             return
@@ -1802,7 +1792,7 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
 
     assert chunks == ["loading tool", "final answer"]
     assert len(prompts) == 2
-    assert "DYNAMIC TOOL CALL COMPLETED" in prompts[1]
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in prompts[1]
     assert log.released == 1
     assert log.finalized == 2
 
@@ -1816,7 +1806,7 @@ def test_streaming_continuation_limit_yields_limit_message() -> None:
         _c: DynamicContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(
-            CompletedAttempt(attempt_run_id="run-1", tool_executions=(_dynamic_tool_execution(),)),
+            CompletedAttempt(attempt_run_id="run-1", tool_executions=(_model_switch_execution("next-turn"),)),
         )
 
     chunks = asyncio.run(
@@ -1848,13 +1838,13 @@ def test_resumed_schema_change_uses_remaining_budget(saved_count: int, expected_
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         prompts.append(continuation.active_prompt)
         yield AttemptResolved(
-            CompletedAttempt(attempt_run_id="fresh", tool_executions=(_dynamic_tool_execution(),)),
+            CompletedAttempt(attempt_run_id="fresh", tool_executions=(_model_switch_execution("next-turn"),)),
         )
 
     restored = CompletedAttempt(
         response_text="stale",
         attempt_run_id="saved",
-        tool_executions=(_dynamic_tool_execution(),),
+        tool_executions=(_model_switch_execution("next-turn"),),
     )
     chunks = asyncio.run(
         _collect(
@@ -1868,7 +1858,7 @@ def test_resumed_schema_change_uses_remaining_budget(saved_count: int, expected_
         ),
     )
     assert len(prompts) == expected_attempts
-    assert all("DYNAMIC TOOL CALL COMPLETED" in prompt for prompt in prompts)
+    assert all("MODEL SWITCH TOOL CALL COMPLETED" in prompt for prompt in prompts)
     assert len(chunks) == 1
     assert "did not produce a final answer" in chunks[0]
     assert "stale" not in chunks[0]
@@ -1899,7 +1889,7 @@ def test_resumed_schema_change_preserves_count_on_next_pause() -> None:
                     TurnSinks(on_completed=completed.append),
                     continuation=_continuation(),
                     resumed_attempt=response_turn_module.ResumedAttempt(
-                        CompletedAttempt(tool_executions=(_dynamic_tool_execution(),)),
+                        CompletedAttempt(tool_executions=(_model_switch_execution("next-turn"),)),
                         continuation_count=2,
                     ),
                 ),
@@ -1923,7 +1913,7 @@ def test_fresh_schema_change_saves_count_before_first_approval(streaming: bool) 
         nonlocal calls
         calls += 1
         if calls == 1:
-            return CompletedAttempt(tool_executions=(_dynamic_tool_execution(),))
+            return CompletedAttempt(tool_executions=(_model_switch_execution("next-turn"),))
         return response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={})
 
     async def streamed_attempt(
@@ -2119,7 +2109,7 @@ def test_streaming_continuation_does_not_emit_first_attempt_terminal_text() -> N
                 CompletedAttempt(
                     response_text="stale first-attempt text",
                     attempt_run_id="run-1",
-                    tool_executions=(_dynamic_tool_execution(),),
+                    tool_executions=(_model_switch_execution("next-turn"),),
                 ),
             )
             return

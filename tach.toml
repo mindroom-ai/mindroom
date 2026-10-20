@@ -881,6 +881,7 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.providers.model_loading",
     "mindroom.providers.openai_tool_search",
+    "mindroom.providers.portable_tool_search",
     "mindroom.prompt_templates",
     "mindroom.runtime_resolution",
     "mindroom.timing",
@@ -7147,16 +7148,10 @@ from = ["mindroom.tool_system.skills"]
 
 [[interfaces]]
 expose = [
-    "LoadToolResult",
-    "LoadToolValidationFailure",
+    "DeferredToolkit",
     "VisibleToolSurface",
-    "deferred_tool_catalog_entries",
-    "get_loaded_tools_for_session",
     "has_deferred_tools",
-    "load_tool_for_session",
-    "save_loaded_tools_for_session",
     "suppress_fully_deferred_toolkit_instructions",
-    "unload_tool_for_session",
     "visible_tool_surface",
 ]
 from = ["mindroom.tool_system.dynamic_toolkits"]
@@ -9299,6 +9294,7 @@ depends_on = [
     "mindroom.native_compaction",
     "mindroom.providers.claude_prompt_cache",
     "mindroom.providers.openai_tool_search",
+    "mindroom.providers.portable_tool_search",
     "mindroom.token_budget",
     "mindroom.usage.storage",
 ]

@@ -54,13 +54,15 @@ if TYPE_CHECKING:
     from mindroom.history.turn_recorder import TurnRecorder
 
 
-def _dynamic_tool_execution(tool_name: str = "sleep") -> ToolExecution:
-    """Return the dynamic-tools manager call that stops the provider loop."""
+def _dynamic_tool_execution() -> ToolExecution:
+    """Return a next-turn model switch, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-load_tool",
-        tool_name="load_tool",
-        tool_args={"tool_name": tool_name},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": tool_name}),
+        tool_call_id="call-switch-next-turn",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": "next-turn"},
+        result=json.dumps(
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+        ),
         stop_after_tool_call=True,
     )
 
@@ -199,7 +201,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
-    assert "DYNAMIC TOOL CALL COMPLETED" in attempts[1]
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in attempts[1]
     assert len(delivered) == 1
     assert delivered[0].response_text == "final answer"
     assert events == ["attempt:1", "attempt:2", "deliver_final"]
@@ -296,7 +298,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
-    assert "DYNAMIC TOOL CALL COMPLETED" in attempts[1]
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in attempts[1]
     # The first attempt's terminal text is superseded by the rerun and never delivered.
     assert streamed_chunks == ["loading tool… ", "final answer"]
     assert len(finalize_requests) == 1

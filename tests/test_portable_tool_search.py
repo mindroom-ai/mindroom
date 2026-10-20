@@ -11,6 +11,7 @@ from agno.agent import Agent
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
+from agno.tools.function import Function
 
 from mindroom.providers.portable_tool_search import (
     install_portable_deferred_tool_search,
@@ -115,6 +116,23 @@ def test_resolve_missing_arguments_means_empty_object() -> None:
     assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
 
 
+def test_resolve_merges_top_level_extras_into_arguments() -> None:
+    # Covers background_after on the wrapper and arguments a weaker model flattened beside the name.
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "customer_id": 7, "background_after": 0}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"customer_id": 7, "background_after": 0}
+
+
+def test_resolve_prefers_nested_arguments_over_top_level_extras() -> None:
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "customer_id": 1, "arguments": {"customer_id": 7}}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"customer_id": 7}
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -213,3 +231,29 @@ async def test_installed_model_routes_call_tool_and_keeps_real_names_in_history(
     assert _call_names(model.requests[2][0]) == ["call_tool", "call_tool"]
     assert {message.tool_name for message in model.requests[2][0] if message.role == "tool"} == {"call_tool"}
     assert _call_names(output.messages or []) == ["crm_lookup", "crm_lookup"]
+
+
+@pytest.mark.asyncio
+async def test_approval_gated_deferred_call_pauses_under_its_real_name() -> None:
+    def crm_delete(customer_id: int) -> str:
+        return f"deleted {customer_id}"
+
+    def call_tool(name: str, arguments: dict[str, Any] | None = None) -> str:
+        return f"fallback {name} {arguments}"
+
+    model = _ScriptedModel(
+        [
+            ModelResponse(
+                tool_calls=[_call("c1", "call_tool", '{"name": "crm_delete", "arguments": {"customer_id": 7}}')],
+            ),
+        ],
+    )
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_delete"}))
+    gated = Function.from_callable(crm_delete)
+    gated.requires_confirmation = True
+    agent = Agent(name="Assistant", model=model, tools=[gated, call_tool], telemetry=False)
+
+    output = await agent.arun("Delete customer 7")
+
+    assert output.is_paused
+    assert [(tool.tool_name, tool.tool_args) for tool in output.tools or []] == [("crm_delete", {"customer_id": 7})]

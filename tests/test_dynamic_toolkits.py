@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Event
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,10 +15,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.agents import (
-    _build_dynamic_tooling_instruction_block,
-    _build_dynamic_tooling_state_suffix,
     _context_hidden_toolkits,
-    build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
 )
@@ -34,15 +29,13 @@ from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
 )
-from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
+from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.providers.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
+from mindroom.providers.portable_tool_search import portable_deferred_tool_names
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
-from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
-    get_loaded_tools_for_session,
-    load_tool_for_session,
-    save_loaded_tools_for_session,
+    DeferredToolkit,
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
@@ -51,7 +44,6 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -85,13 +77,6 @@ def _base_config_data() -> dict[str, object]:
             },
         },
     }
-
-
-@pytest.fixture(autouse=True)
-def _clear_loaded_tools_state() -> Generator[None, None, None]:
-    dynamic_toolkits_module._loaded_tools.clear()
-    yield
-    dynamic_toolkits_module._loaded_tools.clear()
 
 
 def _validated_config(tmp_path: Path, raw: dict[str, object], **env: str) -> Config:
@@ -323,131 +308,38 @@ def test_effective_tool_configs_keep_defer_initial_and_authored_order(tmp_path: 
     ]
 
 
-def test_loaded_state_is_agent_and_session_scoped_for_matrix_threads(tmp_path: Path) -> None:
-    """Agents and Matrix threads should not share loaded dynamic tools."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
-    raw["agents"]["worker"] = {
-        "display_name": "Worker",
-        "role": "Also writes code",
-        "tools": [{"shell": {"defer": True}}],
-    }
-    config = _validated_config(tmp_path, raw)
-
-    save_loaded_tools_for_session(
-        agent_name="code",
-        session_id="!room:example.org:$event-a",
-        loaded_tools=["shell"],
-    )
-
-    assert get_loaded_tools_for_session(
-        agent_name="code",
-        config=config,
-        session_id="!room:example.org:$event-a",
-    ) == ["shell"]
-    assert (
-        get_loaded_tools_for_session(
-            agent_name="code",
-            config=config,
-            session_id="!room:example.org:$event-b",
-        )
-        == []
-    )
-    assert (
-        get_loaded_tools_for_session(
-            agent_name="worker",
-            config=config,
-            session_id="!room:example.org:$event-a",
-        )
-        == []
-    )
-    assert dynamic_toolkits_module._loaded_tools[("code", "!room:example.org:$event-a")] == ["shell"]
-
-
-def test_loaded_state_is_isolated_by_scope_and_persists_for_same_agent_scope(tmp_path: Path) -> None:
-    """One agent should keep dynamic tool state isolated per normalized scope."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
-    config = _validated_config(tmp_path, raw)
-
-    save_loaded_tools_for_session(agent_name="code", session_id="thread-a", loaded_tools=["shell"])
-
-    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == ["shell"]
-    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-b") == []
-
-
-def test_initial_deferred_tools_seed_loaded_state_and_expand_implied_runtime_tools(tmp_path: Path) -> None:
-    """Initial deferred tools should seed loaded state and expand implied runtime tools."""
+def test_initial_deferred_tools_attach_under_a_restricted_selection_with_implied_tools(tmp_path: Path) -> None:
+    """Initial deferred tools attach even when a selection names no deferred tool, with their implied tools."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": True, "initial": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    loaded = get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a")
-    runtime_names = [
-        entry.name
-        for entry in _runtime_tool_configs(
-            agent_name="code",
-            config=config,
-            loaded_tools=loaded,
-            enable_dynamic_tools_manager=False,
-        )
-    ]
+    surface = visible_tool_surface(agent_name="code", config=config, loaded_tools=[])
 
-    assert loaded == ["matrix_message"]
-    assert runtime_names == ["matrix_message", "attachments", "matrix_room"]
-    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+    assert surface.loaded_tools == ("matrix_message",)
+    assert [entry.name for entry in surface.runtime_tool_configs] == ["matrix_message", "attachments", "matrix_room"]
 
 
-def test_new_initial_deferred_tool_is_loaded_for_existing_session_after_reload(tmp_path: Path) -> None:
-    """Existing loaded state should union current config initial tools after hot reload."""
+def test_unrestricted_selection_attaches_every_deferred_tool(tmp_path: Path) -> None:
+    """Without a selection every authored deferred tool is attached, and the search toolkit only on request."""
     raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = ["sleep", {"shell": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
-    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
-    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
-    reloaded_raw = _base_config_data()
-    reloaded_raw["agents"]["code"]["tools"] = [{"shell": {"defer": True, "initial": True}}]  # type: ignore[index]
-    reloaded_config = _validated_config(tmp_path, reloaded_raw)
-    manager = DynamicToolsToolkit(agent_name="code", config=reloaded_config, session_id="thread-a")
+    plain = visible_tool_surface(agent_name="code", config=config)
+    searchable = visible_tool_surface(agent_name="code", config=config, enable_dynamic_tools_manager=True)
 
-    assert get_loaded_tools_for_session(agent_name="code", config=reloaded_config, session_id="thread-a") == ["shell"]
-    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
-    assert _tool_payload(manager.load_tool("shell"))["status"] == "already_loaded"
-    assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
-    assert get_loaded_tools_for_session(agent_name="code", config=reloaded_config, session_id="thread-a") == ["shell"]
-    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+    assert [entry.name for entry in plain.runtime_tool_configs] == ["sleep", "shell"]
+    assert [entry.name for entry in searchable.runtime_tool_configs] == ["sleep", "shell", "dynamic_tools"]
 
 
-def test_get_agent_toolkit_names_matches_sessionless_dynamic_tool_manager_visibility(tmp_path: Path) -> None:
-    """Sessionless toolkit-name introspection should not advertise unavailable mutation tools."""
+def test_get_agent_toolkit_names_lists_deferred_toolkits_without_the_search_toolkit(tmp_path: Path) -> None:
+    """The minimal-mode roster names every callable toolkit, deferred ones included, but no search toolkit."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    assert "dynamic_tools" not in get_agent_toolkit_names("code", config)
-    assert "dynamic_tools" in get_agent_toolkit_names("code", config, session_id="thread-a")
-
-
-def test_sessionless_initial_deferred_tools_are_runtime_visible_without_manager(tmp_path: Path) -> None:
-    """Sessionless agent construction should expose initial tools without enabling mutation tools."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True, "initial": True}}]  # type: ignore[index]
-    config = _validated_config(tmp_path, raw)
-
-    loaded = get_loaded_tools_for_session(agent_name="code", config=config, session_id=None)
-    runtime_names = [
-        entry.name
-        for entry in _runtime_tool_configs(
-            agent_name="code",
-            config=config,
-            loaded_tools=loaded,
-            enable_dynamic_tools_manager=False,
-        )
-    ]
-
-    assert loaded == ["sleep"]
-    assert runtime_names == ["sleep"]
+    assert get_agent_toolkit_names("code", config) == ["shell"]
 
 
 def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_path: Path) -> None:
@@ -484,11 +376,10 @@ def test_loaded_deferred_concrete_tool_preserves_override_over_preset_child(tmp_
         loaded_tools=[],
         enable_dynamic_tools_manager=False,
     )
-    save_loaded_tools_for_session(agent_name="code", session_id="thread-a", loaded_tools=["shell"])
     loaded_configs = _runtime_tool_configs(
         agent_name="code",
         config=config,
-        loaded_tools=get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a"),
+        loaded_tools=["shell"],
         enable_dynamic_tools_manager=False,
     )
     unloaded_names = [entry.name for entry in unloaded_configs]
@@ -603,59 +494,6 @@ def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None
     assert loaded_names == ["sleep", "shell", "dynamic_tools"]
 
 
-def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initial(tmp_path: Path) -> None:
-    """The manager should list, search, load, unload, and protect sticky tools."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
-        {"shell": {"defer": True, "initial": True}},
-        {"sleep": {"defer": True}},
-    ]
-    config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-
-    listed = _tool_payload(manager.list_tools())
-    assert listed["loaded_tools"] == ["shell"]
-    assert listed["tools"] == [
-        {
-            "description": TOOL_METADATA["shell"].description,
-            "loaded": True,
-            "name": "shell",
-            "sticky": True,
-        },
-        {
-            "description": TOOL_METADATA["sleep"].description,
-            "loaded": False,
-            "name": "sleep",
-            "sticky": False,
-        },
-    ]
-
-    search_payload = _tool_payload(manager.tool_search("sleep"))
-    assert [match["name"] for match in search_payload["matches"]] == ["sleep"]
-
-    loaded_payload = _tool_payload(manager.load_tool("sleep"))
-    assert loaded_payload["status"] == "loaded"
-    assert "takes_effect" not in loaded_payload
-    assert "is now loaded" in loaded_payload["message"]
-    assert "becomes callable once it appears" in loaded_payload["message"]
-    assert "same parallel tool-call batch" in loaded_payload["message"]
-    assert "next request" not in loaded_payload["message"]
-
-    already_loaded_payload = _tool_payload(manager.load_tool("sleep"))
-    assert already_loaded_payload["status"] == "already_loaded"
-    assert "takes_effect" not in already_loaded_payload
-    assert already_loaded_payload["message"] == "Tool 'sleep' is already loaded for this session."
-
-    assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
-    unloaded_payload = _tool_payload(manager.unload_tool("sleep"))
-    assert unloaded_payload["status"] == "unloaded"
-    assert "takes_effect" not in unloaded_payload
-    assert unloaded_payload["message"] == "Tool 'sleep' is now unloaded for this session."
-
-    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
-    assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("private", [False, True])
 async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: Path, private: bool) -> None:
@@ -678,27 +516,16 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
     }
     credentials_manager.shared_manager().save_credentials("desktop", shared_identity)
 
-    alice_unpaired = create_agent(
+    alice_agent = create_agent(
         "code",
         config,
         runtime_paths,
         execution_identity=alice_identity,
-        session_id="alice-session",
     )
-    alice_manager = next(tool for tool in alice_unpaired.tools if tool.name == "dynamic_tools")
 
-    assert any(tool.name == "calculator" for tool in alice_unpaired.tools)
-    assert not any(tool.name == "desktop" for tool in alice_unpaired.tools)
-    assert _tool_payload(alice_manager.load_tool("desktop"))["status"] == "loaded"
-
-    alice_loaded = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=alice_identity,
-        session_id="alice-session",
-    )
-    alice_desktop = next(tool for tool in alice_loaded.tools if tool.name == "desktop")
+    assert any(tool.name == "calculator" for tool in alice_agent.tools)
+    assert "desktop" in portable_deferred_tool_names(alice_agent.model)
+    alice_desktop = next(tool for tool in alice_agent.tools if tool.name == "desktop")
     result = await alice_desktop.desktop("status")  # type: ignore[attr-defined]
     assert _tool_payload(result.content)["status"] == "setup_required"
 
@@ -760,7 +587,6 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         config,
         runtime_paths,
         execution_identity=identity,
-        session_id="native-session",
     )
     unpaired_desktop = next(tool for tool in unpaired.tools if tool.name == "desktop")
     result = await unpaired_desktop.desktop("status")  # type: ignore[attr-defined]
@@ -782,70 +608,12 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         config,
         runtime_paths,
         execution_identity=identity,
-        session_id="native-session",
     )
     paired_desktop = next(tool for tool in paired.tools if tool.name == "desktop")
     paired_configuration = paired_desktop._current_configuration()  # type: ignore[attr-defined]
     assert paired_configuration.target is not None
     assert paired_configuration.target.user_id == "@alice-desktop:example.org"
     assert "desktop" in vars(paired.model)[_DEFERRED_TOOL_NAMES_ATTR]
-
-
-def test_dynamic_tools_stop_after_tool_call_only_when_continuation_enabled(tmp_path: Path) -> None:
-    """The manager stops the Agno loop only for the standalone continuation path."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
-        {"shell": {"defer": True}},
-    ]
-    config = _validated_config(tmp_path, raw)
-
-    continuation_manager = DynamicToolsToolkit(
-        agent_name="code",
-        config=config,
-        session_id="thread-a",
-        stop_after_tool_call=True,
-    )
-    assert continuation_manager.functions["load_tool"].stop_after_tool_call is True
-    assert continuation_manager.functions["unload_tool"].stop_after_tool_call is True
-    assert continuation_manager.functions["list_tools"].stop_after_tool_call is False
-    assert continuation_manager.functions["tool_search"].stop_after_tool_call is False
-
-    # Team members and other embedded agents run without the continuation loop,
-    # so the manager must not truncate their run after a load/unload.
-    member_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-    assert member_manager.functions["load_tool"].stop_after_tool_call is False
-    assert member_manager.functions["unload_tool"].stop_after_tool_call is False
-
-
-def test_build_agent_toolkit_gates_dynamic_tool_continuation(tmp_path: Path) -> None:
-    """The continuation stop flag survives the build pipeline into the live toolkit."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
-    config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
-
-    def _build(*, dynamic_tool_continuation: bool) -> object:
-        return build_agent_toolkit(
-            "dynamic_tools",
-            agent_name="code",
-            config=config,
-            runtime_paths=runtime_paths,
-            worker_tools=[],
-            runtime_overrides=None,
-            execution_identity=None,
-            session_id="thread-a",
-            dynamic_tool_continuation=dynamic_tool_continuation,
-        )
-
-    standalone = _build(dynamic_tool_continuation=True)
-    assert standalone is not None
-    assert standalone.functions["load_tool"].stop_after_tool_call is True
-    assert standalone.functions["unload_tool"].stop_after_tool_call is True
-
-    member = _build(dynamic_tool_continuation=False)
-    assert member is not None
-    assert member.functions["load_tool"].stop_after_tool_call is False
-    assert member.functions["unload_tool"].stop_after_tool_call is False
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
@@ -858,7 +626,7 @@ def test_deferred_egress_credentials_is_discoverable_only_while_the_broker_is_on
     *,
     broker_on: bool,
 ) -> None:
-    """With the broker off the deferred egress tool is not listed, searchable, or loadable."""
+    """With the broker off the deferred egress tool is neither attached nor searchable."""
     env = _egress_broker_env(broker_on=broker_on)
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
@@ -867,47 +635,26 @@ def test_deferred_egress_credentials_is_discoverable_only_while_the_broker_is_on
     ]
     config = _validated_config(tmp_path, raw, **env)
 
-    manager = build_agent_toolkit(
-        "dynamic_tools",
-        agent_name="code",
-        config=config,
-        runtime_paths=_runtime_paths(tmp_path, **env),
-        worker_tools=[],
-        runtime_overrides=None,
-        execution_identity=None,
-        session_id="thread-a",
-    )
+    agent = create_agent("code", config, _runtime_paths(tmp_path, **env), execution_identity=None)
+    search = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
 
-    assert manager is not None
-    listed = _tool_payload(manager.list_tools())
-    searched = _tool_payload(manager.tool_search("egress"))
-    loaded = _tool_payload(manager.load_tool("egress_credentials"))
-    assert [entry["name"] for entry in listed["tools"]] == (["egress_credentials", "sleep"] if broker_on else ["sleep"])
-    assert [match["name"] for match in searched["matches"]] == (["egress_credentials"] if broker_on else [])
-    assert loaded["status"] == ("loaded" if broker_on else "unknown")
-    assert ("egress_credentials" in loaded["loaded_tools"]) is broker_on
+    searched = _tool_payload(search.tool_search("egress"))
+    assert ({match["toolkit"] for match in searched["matches"]} == {"egress_credentials"}) is broker_on
+    assert ("egress_credentials" in {toolkit.name for toolkit in agent.tools}) is broker_on
 
 
 def test_a_lone_deferred_egress_credentials_tool_gives_no_dynamic_tools_while_the_broker_is_off(
     tmp_path: Path,
 ) -> None:
-    """An agent whose only deferred tool is unavailable gets no empty dynamic tools manager."""
+    """An agent whose only deferred tool is unavailable gets no empty search toolkit."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"egress_credentials": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    manager = build_agent_toolkit(
-        "dynamic_tools",
-        agent_name="code",
-        config=config,
-        runtime_paths=_runtime_paths(tmp_path),
-        worker_tools=[],
-        runtime_overrides=None,
-        execution_identity=None,
-        session_id="thread-a",
-    )
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    assert manager is None
+    assert "dynamic_tools" not in {toolkit.name for toolkit in agent.tools}
+    assert portable_deferred_tool_names(agent.model) == frozenset()
 
 
 @pytest.mark.parametrize("native_tool_search", [False, True])
@@ -935,7 +682,6 @@ def test_deferred_prompt_names_egress_credentials_only_while_the_broker_is_on(
         config,
         _runtime_paths(tmp_path, **env),
         execution_identity=None,
-        session_id="thread-a",
     )
 
     prompt = _render_system_prompt(agent)
@@ -960,221 +706,9 @@ def test_an_eager_egress_credentials_tool_is_attached_only_while_the_broker_is_o
         config,
         _runtime_paths(tmp_path, **env),
         execution_identity=None,
-        session_id="thread-a",
     )
 
     assert ("egress_credentials" in {toolkit.name for toolkit in agent.tools}) is broker_on
-
-
-def test_dynamic_tools_manager_catalog_responses_use_one_loaded_state_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Manager catalog payloads should not mix loaded state from multiple reads."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
-        {"shell": {"defer": True}},
-        {"sleep": {"defer": True}},
-    ]
-    config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-    loaded_snapshots = iter([["shell"], ["sleep"]])
-
-    monkeypatch.setattr(manager, "_loaded_tools", lambda: next(loaded_snapshots))
-
-    payload = _tool_payload(manager.list_tools())
-
-    assert payload["loaded_tools"] == ["shell"]
-    assert {entry["name"]: entry["loaded"] for entry in payload["tools"]} == {
-        "shell": True,
-        "sleep": False,
-    }
-
-    loaded_snapshots = iter([["shell"], ["sleep"]])
-    monkeypatch.setattr(manager, "_loaded_tools", lambda: next(loaded_snapshots))
-
-    search_payload = _tool_payload(manager.tool_search("sleep"))
-
-    assert search_payload["loaded_tools"] == ["shell"]
-    assert search_payload["matches"] == [
-        {
-            "description": "Sleep utility for introducing delays and pauses in execution",
-            "loaded": False,
-            "name": "sleep",
-            "sticky": False,
-        },
-    ]
-
-
-def test_dynamic_tools_manager_concurrent_loads_do_not_drop_updates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Concurrent load_tool calls should merge with current state under the state lock."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
-        {"shell": {"defer": True}},
-        {"sleep": {"defer": True}},
-    ]
-    config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-    barrier = Barrier(2)
-    original_loaded_tools = manager._loaded_tools
-
-    def blocked_loaded_tools() -> list[str]:
-        loaded_tools = original_loaded_tools()
-        barrier.wait(timeout=5)
-        return loaded_tools
-
-    monkeypatch.setattr(manager, "_loaded_tools", blocked_loaded_tools)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(manager.load_tool, ("shell", "sleep")))
-
-    assert {_tool_payload(result)["status"] for result in results} == {"loaded"}
-    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == [
-        "shell",
-        "sleep",
-    ]
-
-
-def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_path: Path) -> None:
-    """Concurrent load_tool calls should validate combined provider-visible state under the lock."""
-    raw = _base_config_data()
-    raw["mcp_servers"] = {
-        "demo": {
-            "transport": "stdio",
-            "command": "npx",
-        },
-    }
-    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
-        {"mcp_demo": {"defer": True}},
-        {"shell": {"defer": True}},
-    ]
-    config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
-
-    class _FakeMCPManager:
-        def mcp_tool_unavailable_messages_for_loaded_tools(
-            self,
-            _agent_name: str,
-            _loaded_tools: list[str],
-        ) -> list[str]:
-            return []
-
-        def function_name_collision_messages_for_loaded_tools(
-            self,
-            _agent_name: str,
-            loaded_tools: list[str],
-            *,
-            worker_target: object | None = None,
-        ) -> list[str]:
-            del worker_target
-            if {"mcp_demo", "shell"} <= set(loaded_tools):
-                return ["MCP/local collision"]
-            return []
-
-    bind_mcp_server_manager(_FakeMCPManager())  # type: ignore[arg-type]
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = [_tool_payload(result) for result in executor.map(manager.load_tool, ("mcp_demo", "shell"))]
-
-    assert {payload["status"] for payload in results} == {"loaded", "function_name_collision"}
-    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") in (
-        ["mcp_demo"],
-        ["shell"],
-    )
-
-
-def test_blocked_load_validation_does_not_block_visible_tool_surface(tmp_path: Path) -> None:
-    """Reading visible tools should not wait for an in-progress load validation."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
-    config = _validated_config(tmp_path, raw)
-    validation_started = Event()
-    continue_validation = Event()
-
-    def blocked_validator(_loaded_tools: list[str]) -> None:
-        validation_started.set()
-        assert continue_validation.wait(timeout=30)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        load_future = executor.submit(
-            load_tool_for_session,
-            agent_name="code",
-            config=config,
-            session_id="thread-a",
-            tool_name="shell",
-            validate_loaded_tools=blocked_validator,
-        )
-        assert validation_started.wait(timeout=10)
-        try:
-            surface_future = executor.submit(
-                visible_tool_surface,
-                agent_name="code",
-                config=config,
-                session_id="thread-a",
-            )
-            surface = surface_future.result(timeout=10)
-        finally:
-            continue_validation.set()
-
-        result = load_future.result(timeout=30)
-
-    assert surface.loaded_tools == ()
-    assert result.status == "loaded"
-
-
-def test_load_revalidates_after_concurrent_session_mutation(tmp_path: Path) -> None:
-    """A load should merge with state committed while its first validation is blocked."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
-        {"shell": {"defer": True}},
-        {"sleep": {"defer": True}},
-    ]
-    config = _validated_config(tmp_path, raw)
-    first_validation_started = Event()
-    continue_first_validation = Event()
-    validated_candidates: list[tuple[str, ...]] = []
-
-    def validator(loaded_tools: list[str]) -> None:
-        candidate = tuple(loaded_tools)
-        validated_candidates.append(candidate)
-        if candidate == ("shell",) and not continue_first_validation.is_set():
-            first_validation_started.set()
-            assert continue_first_validation.wait(timeout=30)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        shell_future = executor.submit(
-            load_tool_for_session,
-            agent_name="code",
-            config=config,
-            session_id="thread-a",
-            tool_name="shell",
-            validate_loaded_tools=validator,
-        )
-        assert first_validation_started.wait(timeout=10)
-        try:
-            sleep_future = executor.submit(
-                load_tool_for_session,
-                agent_name="code",
-                config=config,
-                session_id="thread-a",
-                tool_name="sleep",
-                validate_loaded_tools=validator,
-            )
-            sleep_result = sleep_future.result(timeout=10)
-        finally:
-            continue_first_validation.set()
-
-        shell_result = shell_future.result(timeout=30)
-
-    assert shell_result.status == "loaded"
-    assert sleep_result.status == "loaded"
-    assert ("shell", "sleep") in validated_candidates
-    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == [
-        "shell",
-        "sleep",
-    ]
 
 
 def test_deferred_scope_validation_builds_authored_tools_once(
@@ -1224,26 +758,22 @@ def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path
     raw["agents"]["code"]["tools"] = [{"homeassistant": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
     config.agents["code"].worker_scope = "user"
-    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
 
-    payload = _tool_payload(manager.load_tool("homeassistant"))
+    surface = visible_tool_surface(agent_name="code", config=config)
 
-    assert payload["status"] == "scope_incompatible"
-    assert payload["unsupported_tools"] == ["homeassistant"]
-    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
+    assert surface.loaded_tools == ()
+    assert "homeassistant" not in {entry.name for entry in surface.runtime_tool_configs}
 
 
-def test_matrix_metadata_injection_is_loaded_state_aware(tmp_path: Path) -> None:
-    """Matrix prompt metadata should appear only when matrix_message is loaded."""
+@pytest.mark.parametrize("defer", [False, True])
+def test_matrix_metadata_injection_follows_configured_matrix_message(tmp_path: Path, *, defer: bool) -> None:
+    """Matrix prompt metadata appears whenever matrix_message is configured, deferred or not."""
     raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": True}}]  # type: ignore[index]
-    config = _validated_config(tmp_path, raw)
+    assert not _agent_has_matrix_messaging_tool(_validated_config(tmp_path, raw), "code")
 
-    assert not _agent_has_matrix_messaging_tool(config, "code", "thread-a")
+    raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": defer}}]  # type: ignore[index]
 
-    save_loaded_tools_for_session(agent_name="code", session_id="thread-a", loaded_tools=["matrix_message"])
-
-    assert _agent_has_matrix_messaging_tool(config, "code", "thread-a")
+    assert _agent_has_matrix_messaging_tool(_validated_config(tmp_path, raw), "code")
 
 
 def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
@@ -1252,7 +782,7 @@ def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
     raw["agents"]["code"]["tools"] = ["openclaw_compat"]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    assert _agent_has_matrix_messaging_tool(config, "code", None)
+    assert _agent_has_matrix_messaging_tool(config, "code")
 
 
 def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
@@ -1266,19 +796,17 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
     function_names = {
         name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
     }
     assert "sleep" in function_names
     assert "add" in function_names
-    assert "load_tool" not in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
     assert vars(agent.model)[_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"sleep"})
-    assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
-    assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
-    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+    assert "tool_search" not in function_names
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
 
 
 @pytest.mark.parametrize(
@@ -1303,7 +831,7 @@ def test_native_tool_search_prompt_lists_deferred_capability_domains(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
     discovery_block = next(block for block in agent.instructions if block.startswith("## Deferred Tool Discovery"))
     assert discovery_block in _render_system_prompt(agent)
@@ -1372,7 +900,7 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
 
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
 
-    agent = create_agent("code", config, runtime_paths, execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, runtime_paths, execution_identity=None)
 
     expected_deferred_names = frozenset() if collide_all else frozenset({"demo_call_tool", "demo_connection_status"})
     assert vars(agent.model).get(deferred_names_attr, frozenset()) == expected_deferred_names
@@ -1396,7 +924,7 @@ def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
     toolkit = next(tool for tool in agent.tools if tool.name == "update_awareness")
 
     assert toolkit.instructions is not None
@@ -1492,7 +1020,7 @@ def test_native_tool_search_keeps_initial_toolkit_instructions(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
     toolkit = next(tool for tool in agent.tools if tool.name == "update_awareness")
 
     assert toolkit.add_instructions is True
@@ -1514,46 +1042,29 @@ def test_native_tool_search_drops_toolkit_emptied_by_include_filter(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
     assert not any(tool.name == "update_awareness" for tool in agent.tools)
     assert instruction_marker not in _render_system_prompt(agent)
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
 
 
-def test_homegrown_load_tool_makes_toolkit_instructions_available(
+def test_portable_tool_search_returns_rendered_toolkit_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rebuilding load path should add a deferred toolkit's instructions after load."""
+    """A deferred toolkit's instructions leave the system prompt and arrive with its search results."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
-    runtime_paths = _runtime_paths(tmp_path)
 
-    unloaded_agent = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=None,
-        session_id="thread-a",
-    )
-    manager = next(tool for tool in unloaded_agent.tools if tool.name == "dynamic_tools")
-    assert instruction_marker not in _render_system_prompt(unloaded_agent)
-    assert _tool_payload(manager.load_tool("update_awareness"))["status"] == "loaded"
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    search = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
 
-    loaded_agent = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=None,
-        session_id="thread-a",
-    )
-    loaded_toolkit = next(tool for tool in loaded_agent.tools if tool.name == "update_awareness")
-
-    assert loaded_toolkit.add_instructions is True
-    assert instruction_marker in _render_system_prompt(loaded_agent)
+    assert instruction_marker not in _render_system_prompt(agent)
+    payload = _tool_payload(search.tool_search("update_awareness"))
+    assert instruction_marker in payload["instructions"]["update_awareness"]
 
 
 @pytest.mark.parametrize(
@@ -1577,7 +1088,7 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     raw["agents"]["code"]["tools"] = [tool_entry]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
     prompt = _render_system_prompt(agent)
 
     assert "chat_ui shows parts of MindRoom Chat to the user." in prompt
@@ -1606,7 +1117,7 @@ def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases
     raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
     prompt = _render_system_prompt(agent)
 
     assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
@@ -1618,7 +1129,7 @@ def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path)
     raw["agents"]["code"]["tools"] = [{"chat_ui": {"exclude_tools": ["show_canvas"]}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
     toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
 
     assert sorted(toolkit.async_functions) == ["open_panel", "open_settings", "show_computer"]
@@ -1641,7 +1152,7 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
     raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
     toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
     instructions = toolkit.instructions
     description = toolkit.async_functions[available].entrypoint.__doc__
@@ -1668,27 +1179,25 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrow
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
     function_names = {
         name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
     }
     assert "sleep" in function_names
     assert "add" in function_names
-    assert "load_tool" not in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
     assert vars(agent.model)[_OPENAI_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"sleep"})
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
-    assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
-    assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
-    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+    assert "tool_search" not in function_names
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
 
 
 @pytest.mark.parametrize(
     ("api", "base_url"),
     [("chat_completions", None), ("responses", "http://localhost:9292/v1")],
 )
-def test_explicit_openai_api_keeps_homegrown_tool_discovery_when_native_is_unavailable(
+def test_explicit_openai_api_uses_portable_tool_search_when_native_is_unavailable(
     tmp_path: Path,
     api: str,
     base_url: str | None,
@@ -1705,13 +1214,9 @@ def test_explicit_openai_api_keeps_homegrown_tool_discovery_when_native_is_unava
     raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    function_names = {
-        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
-    assert "load_tool" in function_names
-    assert "sleep" not in function_names
+    assert portable_deferred_tool_names(agent.model) == frozenset({"sleep"})
     assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
 
 
@@ -1723,7 +1228,7 @@ def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) 
     raw["agents"]["code"]["tools"] = [{"browser": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
     function_names = {
         name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
@@ -1747,7 +1252,6 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
         config,
         _runtime_paths(tmp_path),
         execution_identity=None,
-        session_id="call-room",
         eager_deferred_tools=True,
     )
 
@@ -1756,12 +1260,11 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
     }
     assert "sleep" in function_names
     assert "add" in function_names
-    assert "load_tool" not in function_names
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
     assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
-    assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
-    assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
-    assert ("code", "call-room") not in dynamic_toolkits_module._loaded_tools
+    assert portable_deferred_tool_names(agent.model) == frozenset()
+    assert "tool_search" not in function_names
+    assert not any(block.startswith("## Deferred Tools\n") for block in agent.instructions)
 
 
 def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path) -> None:
@@ -1775,7 +1278,6 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         config,
         _runtime_paths(tmp_path),
         execution_identity=None,
-        session_id="call-room",
         eager_deferred_tools=True,
         tool_function_filter=lambda _function: False,
     )
@@ -1798,13 +1300,13 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         ("anthropic", "claude-opus-4-1", None),
     ],
 )
-def test_unsupported_models_keep_homegrown_dynamic_tools_path(
+def test_unsupported_models_use_portable_tool_search(
     tmp_path: Path,
     provider: str,
     model_id: str,
     extra_kwargs: dict[str, object] | None,
 ) -> None:
-    """Unsupported providers and models keep the load_tool machinery."""
+    """Models without native search register deferred tools but send only tool_search and call_tool for them."""
     raw = _base_config_data()
     raw["models"]["default"] = {"provider": provider, "id": model_id, "extra_kwargs": extra_kwargs}  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
@@ -1813,83 +1315,149 @@ def test_unsupported_models_keep_homegrown_dynamic_tools_path(
     ]
     config = _validated_config(tmp_path, raw)
 
-    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
     function_names = {
         name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
     }
-    assert "load_tool" in function_names
-    assert "sleep" not in function_names
-    assert "add" in function_names
+    assert {"sleep", "add", "tool_search", "call_tool"} <= function_names
+    assert "load_tool" not in function_names
+    # initial tools stay ordinary eager tools, so only sleep is hidden behind call_tool.
+    assert portable_deferred_tool_names(agent.model) == frozenset({"sleep"})
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
     assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
-    assert any(block.startswith("## Dynamic Tools") for block in agent.instructions)
-    assert any("Dynamic tools currently loaded" in block for block in agent.instructions)
+    catalog = next(block for block in agent.instructions if block.startswith("## Deferred Tools\n"))
+    assert f"sleep - {TOOL_METADATA['sleep'].description}" in catalog
+    assert "calculator" not in catalog
+    assert "call_tool(name, arguments)" in catalog
+    assert catalog in _render_system_prompt(agent)
 
 
-def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_path: Path) -> None:
-    """Prompt catalog text should remain stable while loaded-state suffix changes."""
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
-        {"shell": {"defer": True, "initial": True}},
-        {"sleep": {"defer": True}},
-    ]
-    config = _validated_config(tmp_path, raw)
-
-    static_before = _build_dynamic_tooling_instruction_block(
-        config,
-        "code",
-        enable_dynamic_tools_manager=True,
-    )
-    suffix_before = _build_dynamic_tooling_state_suffix(
-        config,
-        "code",
-        loaded_tools=("shell",),
-        enable_dynamic_tools_manager=True,
-    )
-    suffix_after = _build_dynamic_tooling_state_suffix(
-        config,
-        "code",
-        loaded_tools=("shell", "sleep"),
-        enable_dynamic_tools_manager=True,
-    )
-    static_after = _build_dynamic_tooling_instruction_block(
-        config,
-        "code",
-        enable_dynamic_tools_manager=True,
-    )
-
-    assert static_before == static_after
-    assert f"shell - {TOOL_METADATA['shell'].description}" in static_before
-    assert "becomes callable once it appears in your available tools" in static_before
-    assert "same parallel tool-call batch" in static_before
-    assert "each member manages its own dynamic tool state" in static_before
-    assert "next request" not in static_before
-    assert "Do not wait for another user message" not in static_before
-    assert suffix_before != suffix_after
-    assert (
-        suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"
-        "Sticky initial dynamic tools that cannot be unloaded: shell"
-    )
-
-
-def test_browser_search_discovers_chat_ui_before_loading(tmp_path: Path) -> None:
-    """A browser query must expose the display tool and canonical call while both tools are deferred."""
+def test_browser_catalog_points_at_the_deferred_chat_ui_panel(tmp_path: Path) -> None:
+    """The deferred catalog keeps the browser's pointer to the Computer panel when both tools are deferred."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"browser": {"defer": True}},
         {"chat_ui": {"defer": True}},
     ]
     config = _validated_config(tmp_path, raw)
-    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="browser-discovery")
 
-    payload = _tool_payload(manager.tool_search("browser"))
-    matches = {match["name"]: match for match in payload["matches"]}
-    assert set(matches) == {"browser", "chat_ui"}
-    assert payload["loaded_tools"] == []
-    assert all(not match["loaded"] for match in matches.values())
-    assert "chat_ui.open_panel(panel='computer')" in matches["browser"]["description"]
-    assert "Computer panel" in matches["chat_ui"]["description"]
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+    search = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
 
-    prompt = _build_dynamic_tooling_instruction_block(config, "code", enable_dynamic_tools_manager=True)
-    assert "chat_ui.open_panel(panel='computer')" in prompt
+    catalog = next(block for block in agent.instructions if block.startswith("## Deferred Tools\n"))
+    assert "chat_ui.open_panel(panel='computer')" in catalog
+    assert "Computer panel" in catalog
+    assert _tool_payload(search.tool_search("browser"))["matches"][0]["toolkit"] == "browser"
+
+
+class _CrmTools(Toolkit):
+    """Deferred-toolkit stand-in with two documented functions and toolkit instructions."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="crm",
+            tools=[self.crm_lookup, self.crm_notes],
+            instructions="Prefer exact customer IDs.",
+            add_instructions=True,
+        )
+
+    def crm_lookup(self, customer_id: int) -> str:
+        """Look up one customer record by ID."""
+        return f"customer {customer_id}"
+
+    def crm_notes(self, customer_id: int, limit: int = 5) -> str:
+        """Read recent support notes about an account lookup."""
+        return f"{limit} notes for {customer_id}"
+
+
+class _WeatherTools(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="weather", tools=[self.forecast])
+
+    def forecast(self, city: str) -> str:
+        """Return the forecast for a city."""
+        return city
+
+
+def _deferred(toolkit: Toolkit, description: str) -> DeferredToolkit:
+    instructions = toolkit.instructions if toolkit.add_instructions else None
+    return DeferredToolkit(toolkit.name, description, instructions, toolkit)
+
+
+def _search_toolkit(*deferred: DeferredToolkit) -> DynamicToolsToolkit:
+    return DynamicToolsToolkit(deferred_toolkits=deferred)
+
+
+def test_tool_search_returns_definitions_and_toolkit_instructions() -> None:
+    """Search results carry each function's full definition and its toolkit's rendered instructions."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    payload = _tool_payload(toolkit.tool_search("crm_lookup"))
+
+    match = payload["matches"][0]
+    assert match["name"] == "crm_lookup"
+    assert match["toolkit"] == "crm"
+    assert match["description"] == "Look up one customer record by ID."
+    assert set(match["parameters"]["properties"]) == {"customer_id"}
+    assert payload["instructions"] == {"crm": "Prefer exact customer IDs."}
+    assert "call_tool(name, arguments)" in payload["usage"]
+
+
+def test_tool_search_ranks_name_hits_over_description_hits() -> None:
+    """A function-name hit ranks above a description-only hit."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    payload = _tool_payload(toolkit.tool_search("lookup"))
+
+    assert [match["name"] for match in payload["matches"]] == ["crm_lookup", "crm_notes"]
+
+
+def test_tool_search_matches_toolkit_names_and_omits_unrelated_toolkits() -> None:
+    """A toolkit-name query returns that toolkit's functions and no instructions from unmatched toolkits."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"), _deferred(_WeatherTools(), "Forecasts"))
+
+    payload = _tool_payload(toolkit.tool_search("weather"))
+
+    assert [match["name"] for match in payload["matches"]] == ["forecast"]
+    assert payload["instructions"] == {}
+
+
+def test_tool_search_clamps_max_results() -> None:
+    """max_results is clamped to at least one and at most the search limit."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    assert len(_tool_payload(toolkit.tool_search("crm", max_results=0))["matches"]) == 1
+    assert len(_tool_payload(toolkit.tool_search("crm", max_results=99))["matches"]) == 2
+
+
+def test_tool_search_without_matches_suggests_other_keywords() -> None:
+    """An empty result tells the model how to search again."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    payload = _tool_payload(toolkit.tool_search("spreadsheet"))
+
+    assert payload["matches"] == []
+    assert "toolkit name" in payload["message"]
+
+
+def test_tool_search_skips_functions_removed_after_build() -> None:
+    """Functions hidden after the build, such as MCP collision losers, are not offered."""
+    crm = _CrmTools()
+    toolkit = _search_toolkit(_deferred(crm, "Customer records"))
+    del crm.functions["crm_lookup"]
+
+    payload = _tool_payload(toolkit.tool_search("crm"))
+
+    assert [match["name"] for match in payload["matches"]] == ["crm_notes"]
+
+
+def test_call_tool_fallback_returns_retry_guidance() -> None:
+    """An unresolved call_tool call returns guidance instead of running anything."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    payload = _tool_payload(toolkit.call_tool("crm_lookpu", {"customer_id": 7}))
+
+    assert payload["status"] == "error"
+    assert "'crm_lookpu' was not called" in payload["message"]
+    assert "tool_search" in payload["message"]

@@ -233,8 +233,6 @@ def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
         config,
         runtime_paths,
         None,
-        session_id="call-session",
-        dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
     )
 

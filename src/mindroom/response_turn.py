@@ -1250,14 +1250,6 @@ def _settle_completed_attempt(
     recorded_text = resolution.replayable_text
     response_text = resolution.response_text
     if decision.limit_message is not None:
-        if decision.continuation is not None:
-            logger.warning(
-                "Dynamic tool continuation limit reached",
-                entity=ctx.entity_label,
-                function_name=decision.continuation.function_name,
-                tool_name=decision.continuation.tool_name,
-                status=decision.continuation.status,
-            )
         if not resolution.has_visible_content:
             recorded_text = decision.limit_message
             response_text = decision.limit_message

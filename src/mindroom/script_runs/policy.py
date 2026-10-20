@@ -141,7 +141,6 @@ def _build_script_toolkits(
             agent_runtime=agent_runtime,
             tool_config_overrides=tool_entry.tool_config_overrides,
             execution_identity=execution_identity,
-            session_id=context.session_id,
         )
         if toolkit is not None:
             toolkits[tool_entry.name] = toolkit

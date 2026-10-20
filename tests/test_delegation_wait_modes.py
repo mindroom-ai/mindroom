@@ -92,7 +92,6 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
             worker_tools=[],
             runtime_overrides=None,
             execution_identity=owner,
-            session_id=owner.session_id,
         )
         assert toolkit is not None
         bind_toolkit_authority(toolkit, authored_name="delegate")

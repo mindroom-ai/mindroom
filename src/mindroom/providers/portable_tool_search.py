@@ -139,7 +139,11 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     arguments = {} if raw_arguments is None else _json_object(raw_arguments)
     if arguments is None:
         return call
-    return {**call, "function": {**function, "name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}
+    # Keys beside name and arguments, such as background_after or arguments flattened by a weaker model, belong to
+    # the call too; nested arguments win a conflict.
+    extras = {key: value for key, value in payload.items() if key not in {"name", "arguments"}}
+    resolved_arguments = json.dumps({**extras, **arguments}, ensure_ascii=False)
+    return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 
 
 def _json_object(value: object) -> dict[str, Any] | None:

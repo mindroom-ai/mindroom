@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -29,9 +28,7 @@ from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
-from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session, save_loaded_tools_for_session
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation
@@ -41,7 +38,7 @@ from tests.test_openai_native_compaction import _ANSWER, _event, _response
 from tests.test_plugins import _preserved_plugin_loader_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -109,34 +106,17 @@ class _ScopedCatalogTransport:
         self.executed.append((server_id, remote_tool_name, arguments))
         return ToolResult(content="Synthetic record")
 
-    def mcp_tool_unavailable_messages_for_loaded_tools(self, *_args: object) -> list[str]:
-        """The synthetic configured server is available."""
-        return []
-
-    def function_name_collision_messages_for_loaded_tools(self, *_args: object, **_kwargs: object) -> list[str]:
-        """The fixture has no colliding function names."""
-        return []
-
-
-@pytest.fixture(autouse=True)
-def _isolate_dynamic_caches() -> Iterator[None]:
-    dynamic_toolkits._loaded_tools.clear()
-    yield
-    dynamic_toolkits._loaded_tools.clear()
-
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cache_state", ["cold", "newer_load", "newer_unload"])
 @pytest.mark.parametrize("approved", [True, False], ids=["approved", "denied"])
-async def test_saved_approval_restores_deferred_oauth_tool_with_both_caches_cold(
+async def test_saved_approval_restores_deferred_oauth_tool_with_a_cold_catalog_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    cache_state: str,
     *,
     approved: bool,
 ) -> None:
-    """A real persisted pause must resume after losing toolkit and OAuth catalog caches."""
-    await _exercise_saved_approval(tmp_path, monkeypatch, cache_state=cache_state, approved=approved)
+    """A real persisted pause must resume after losing the OAuth catalog cache."""
+    await _exercise_saved_approval(tmp_path, monkeypatch, approved=approved)
 
 
 @pytest.mark.asyncio
@@ -286,7 +266,6 @@ async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
             plugin_path=plugin_path,
             unrelated_tool_name="unavailable_plugin",
         )
-        assert not (plugin_path / "constructed").exists()
 
 
 @pytest.mark.asyncio
@@ -364,7 +343,6 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     monkeypatch: pytest.MonkeyPatch,
     *,
     tool_name: str = "mcp_example",
-    cache_state: str = "cold",
     approved: bool = True,
     restriction: str | None = None,
     mixed_calls: bool = False,
@@ -484,18 +462,12 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             "mindroom.agents._load_agent_model_instance",
             lambda *_args, **_kwargs: MindRoomOpenAIResponses(id="test-model", async_client=client, store=False),
         )
-        save_loaded_tools_for_session(
-            agent_name="general",
-            session_id=identity.session_id,
-            loaded_tools=[tool_name],
-        )
         storage = create_session_storage("general", config, paths, identity)
         initial = create_agent(
             "general",
             config,
             paths,
             identity,
-            session_id=identity.session_id,
             history_storage=storage,
             supports_native_tool_approval=True,
         )
@@ -516,7 +488,6 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             config,
             paths,
             identity,
-            session_id=identity.session_id,
             history_storage=storage,
             supports_native_tool_approval=True,
         )
@@ -546,21 +517,8 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         storage.close()
         _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.paused)
 
-        dynamic_toolkits._loaded_tools.clear()
         transport.cached_catalog = None
         transport.discoveries.clear()
-        if cache_state != "cold":
-            save_loaded_tools_for_session(
-                agent_name="general",
-                session_id=identity.session_id,
-                loaded_tools=["sleep"] if cache_state == "newer_load" else [],
-            )
-        selection_before = get_loaded_tools_for_session(
-            agent_name="general",
-            config=config,
-            session_id=identity.session_id,
-        )
-        cache_before = deepcopy(dynamic_toolkits._loaded_tools)
         _apply_current_tool_restriction(config, tool_name, restriction)
         before_resume()
         if replacement_tool_name is not None:
@@ -630,7 +588,6 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
                 await continue_saved_run()
             assert transport.executed == []
             assert len(requests) == 1
-            assert dynamic_toolkits._loaded_tools == cache_before
             _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.paused)
             if restriction == "removed":
                 assert transport.discoveries == []
@@ -679,16 +636,6 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             ]
             assert len(denied_results) == 1
             assert "Declined by requester" in denied_results[0]["output"]
-        assert dynamic_toolkits._loaded_tools == cache_before
-        if restriction is None:
-            assert (
-                get_loaded_tools_for_session(
-                    agent_name="general",
-                    config=config,
-                    session_id=identity.session_id,
-                )
-                == selection_before
-            )
         _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.completed)
         assert ordinary_calls == ([(2, 3)] if mixed_calls else [])
 

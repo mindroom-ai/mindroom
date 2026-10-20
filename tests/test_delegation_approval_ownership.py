@@ -35,7 +35,6 @@ from mindroom.history.types import HistoryScope
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import TeamMode, _attach_team_pause_presentation, continue_paused_team_run
-from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
@@ -194,14 +193,6 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
                 expires_at_ns=2**62,
                 arguments_digest=approval_arguments_digest(paused.tools[0].tool_args),
             )
-            if not gate:
-                child = DelegationState.from_metadata(response.metadata).children[0]
-                dynamic_toolkits.save_loaded_tools_for_session(
-                    agent_name=child_name,
-                    session_id=child.session_id,
-                    loaded_tools=[],
-                )
-            dynamic_toolkits._loaded_tools.clear()
             if decision.endswith("removed"):
                 config.agents[child_name].tools = []
             if decision == "rewrite_gate":
