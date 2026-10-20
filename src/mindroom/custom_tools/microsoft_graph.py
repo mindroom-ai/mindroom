@@ -11,6 +11,7 @@ import base64
 import os
 import re
 from contextlib import ExitStack, contextmanager
+from html.parser import HTMLParser
 from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -138,6 +139,55 @@ def page_offset(page_token: object | None, maximum: int) -> int:
 def share_id(url: str) -> str:
     """Encode a sharing or web link as a Graph share ID."""
     return "u!" + base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+_HTML_BLOCK_TAGS = frozenset(
+    {"blockquote", "div", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "li", "ol", "p", "pre", "table", "tr", "ul"},
+)
+_HTML_HIDDEN_TAGS = frozenset({"head", "script", "style", "title"})
+
+
+class _HtmlText(HTMLParser):
+    """Collect an HTML fragment's visible text, breaking lines at `br` and around block elements."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._line_start = True
+        self._hidden = 0
+
+    def _break_line(self) -> None:
+        self.parts.append("\n")
+        self._line_start = True
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:  # noqa: ARG002
+        if tag in _HTML_HIDDEN_TAGS:
+            self._hidden += 1
+        elif tag == "br" or (tag in _HTML_BLOCK_TAGS and not self._line_start):
+            self._break_line()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_HIDDEN_TAGS:
+            self._hidden = max(self._hidden - 1, 0)
+        elif tag in _HTML_BLOCK_TAGS and not self._line_start:
+            self._break_line()
+
+    def handle_data(self, data: str) -> None:
+        # Source whitespace, line breaks included, renders as one space, and none at the start of a line.
+        text = re.sub(r"\s+", " ", data)
+        if self._line_start:
+            text = text.lstrip()
+        if not self._hidden and text:
+            self.parts.append(text)
+            self._line_start = False
+
+
+def html_to_text(html: str) -> str:
+    """Return the readable text of an HTML body: tags dropped, entities decoded, and line breaks kept."""
+    parser = _HtmlText()
+    parser.feed(html)
+    parser.close()
+    return "\n".join(line.rstrip() for line in "".join(parser.parts).split("\n")).strip("\n")
 
 
 def _unsafe_filename(name: str) -> bool:
