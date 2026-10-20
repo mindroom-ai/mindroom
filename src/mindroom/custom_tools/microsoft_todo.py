@@ -21,6 +21,7 @@ from mindroom.custom_tools.microsoft_graph import (
     next_page_token,
     page_path,
     path_segment,
+    time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_todo_oauth_provider
 
@@ -90,8 +91,8 @@ def _title(value: object) -> str:
     return value
 
 
-def _due(value: object) -> dict[str, str]:
-    """Return Graph's due date for a YYYY-MM-DD calendar date, as midnight UTC."""
+def _due(value: object, zone: object) -> dict[str, str]:
+    """Return Graph's due date for a YYYY-MM-DD calendar date, as midnight in the given zone."""
     try:
         day = date.fromisoformat(value) if isinstance(value, str) and _DATE.fullmatch(value) else None
     except ValueError:
@@ -101,7 +102,7 @@ def _due(value: object) -> dict[str, str]:
             code="invalid_argument",
             message="due_date must be a calendar date in YYYY-MM-DD format.",
         )
-    return {"dateTime": f"{day.isoformat()}T00:00:00", "timeZone": "UTC"}
+    return {"dateTime": f"{day.isoformat()}T00:00:00", "timeZone": time_zone_name(zone)}
 
 
 def _notes(value: object) -> dict[str, str]:
@@ -255,8 +256,8 @@ class MicrosoftTodoTools(Toolkit):
         """List the tasks in one Microsoft To Do list; completed tasks are left out unless include_completed is true.
 
         Each task's notes are cut at 2,000 characters, and notes_truncated is true when they were cut.
-        A task's due is the date, time, and zone Graph reports; a due date set in a To Do app is midnight in that
-        person's zone, usually reported in UTC, so convert it to the requester's zone before naming the day.
+        A task's due is the date, time, and zone Graph reports; a due date is midnight in the zone of whoever set
+        it, usually reported in UTC, so convert it to the requester's zone before naming the day.
 
         Args:
             list_id: The list's id from microsoft_todo_list_lists.
@@ -289,6 +290,7 @@ class MicrosoftTodoTools(Toolkit):
         due_date: str | None = None,
         notes: str | None = None,
         importance: Literal["low", "normal", "high"] = "normal",
+        time_zone: str = "UTC",
     ) -> str:
         """Create a task in one Microsoft To Do list.
 
@@ -301,13 +303,15 @@ class MicrosoftTodoTools(Toolkit):
             due_date: The due date as YYYY-MM-DD.
             notes: Notes for the task, as plain text.
             importance: low, normal, or high.
+            time_zone: The requester's time zone, so the due date is their midnight: a Windows name such as
+                "Pacific Standard Time" or an IANA name such as "America/Los_Angeles". Defaults to UTC.
 
         """
 
         def build() -> _Request:
             body: dict[str, object] = {"title": _title(title), "importance": _importance(importance)}
             if due_date is not None:
-                body["dueDateTime"] = _due(due_date)
+                body["dueDateTime"] = _due(due_date, time_zone)
             if notes is not None:
                 body["body"] = _notes(notes)
             return _Request("POST", f"{_list_path(list_id)}/tasks", body=body)
@@ -323,6 +327,7 @@ class MicrosoftTodoTools(Toolkit):
         notes: str | None = None,
         importance: Literal["low", "normal", "high"] | None = None,
         completed: bool | None = None,
+        time_zone: str = "UTC",
     ) -> str:
         """Change a Microsoft To Do task's title, due date, notes, importance, or completion; omitted fields stay unchanged.
 
@@ -337,6 +342,7 @@ class MicrosoftTodoTools(Toolkit):
             notes: The complete new notes, which replace the current notes; an empty string removes them.
             importance: low, normal, or high.
             completed: True marks the task completed; False reopens it as not started.
+            time_zone: The requester's time zone for due_date, as for microsoft_todo_create_task.
 
         """
 
@@ -346,7 +352,7 @@ class MicrosoftTodoTools(Toolkit):
             if title is not None:
                 body["title"] = _title(title)
             if due_date is not None:
-                body["dueDateTime"] = _due(due_date) if due_date != "" else None
+                body["dueDateTime"] = _due(due_date, time_zone) if due_date != "" else None
             if notes is not None:
                 body["body"] = _notes(notes)
             if importance is not None:

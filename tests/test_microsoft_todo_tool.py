@@ -412,12 +412,13 @@ def test_create_task_sends_due_date_notes_and_importance(tmp_path: Path, monkeyp
         due_date="2026-10-22",
         notes="Attach <figures> & totals\r\nThanks",
         importance="high",
+        time_zone="Europe/Berlin",
     )
 
     assert json.loads(graph.requests[0].content) == {
         "title": 'Ask O\'Brien about "Q3"',
         "importance": "high",
-        "dueDateTime": {"dateTime": "2026-10-22T00:00:00", "timeZone": "UTC"},
+        "dueDateTime": {"dateTime": "2026-10-22T00:00:00", "timeZone": "Europe/Berlin"},
         "body": {"content": "Attach &lt;figures&gt; &amp; totals<br>Thanks", "contentType": "html"},
     }
     assert graph.requests[0].url.query == b""
@@ -432,6 +433,8 @@ def test_create_task_sends_due_date_notes_and_importance(tmp_path: Path, monkeyp
         {"title": "x", "due_date": "10/22/2026"},
         {"title": "x", "due_date": "2026-10-22T00:00:00"},
         {"title": "x", "due_date": ""},
+        {"title": "x", "due_date": "2026-10-22", "time_zone": "UTC "},
+        {"title": "x", "due_date": "2026-10-22", "time_zone": "Europe/Berlin;x"},
         {"title": "x", "importance": "urgent"},
         {"title": "x", "notes": 5},
     ],
@@ -454,6 +457,10 @@ def test_create_task_refuses_malformed_arguments_before_any_request(
         ({"completed": True}, {"status": "completed"}),
         ({"completed": False}, {"status": "notStarted"}),
         ({"due_date": "2026-11-01"}, {"dueDateTime": {"dateTime": "2026-11-01T00:00:00", "timeZone": "UTC"}}),
+        (
+            {"due_date": "2026-11-01", "time_zone": "Pacific Standard Time"},
+            {"dueDateTime": {"dateTime": "2026-11-01T00:00:00", "timeZone": "Pacific Standard Time"}},
+        ),
         ({"due_date": ""}, {"dueDateTime": None}),
         ({"notes": ""}, {"body": {"content": "", "contentType": "html"}}),
         (
@@ -480,7 +487,15 @@ def test_update_task_patches_only_the_given_fields(
 
 @pytest.mark.parametrize(
     "arguments",
-    [{}, {"title": ""}, {"due_date": "tomorrow"}, {"importance": "urgent"}, {"completed": "yes"}, {"notes": 1}],
+    [
+        {},
+        {"title": ""},
+        {"due_date": "tomorrow"},
+        {"due_date": "2026-11-01", "time_zone": ""},
+        {"importance": "urgent"},
+        {"completed": "yes"},
+        {"notes": 1},
+    ],
 )
 def test_update_task_refuses_nothing_to_change_or_malformed_fields(
     tmp_path: Path,
