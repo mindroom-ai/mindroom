@@ -596,6 +596,11 @@ def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, t
             "<body><div>Line  one\n  continues <b>bold</b></div></body></html>",
             "Line one continues bold",
         ),
+        ("<html><head><title>Note</title><body><p>Kept</p></body></html>", "Kept"),
+        (
+            "<table><tr><th>Name</th><th>Value</th></tr>\n<tr><td> Alpha </td> <td>1</td><td></td><td>x</td></tr></table>",
+            "Name | Value\nAlpha | 1 | | x",
+        ),
     ],
 )
 def test_html_to_text_keeps_readable_text_and_line_breaks(html: str, text: str) -> None:
