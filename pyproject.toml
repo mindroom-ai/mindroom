@@ -338,6 +338,7 @@ openclaw_compat = []
 openweather = [
   "requests",
 ]
+outlook_mail = []
 oxylabs = [
   "oxylabs",
 ]
