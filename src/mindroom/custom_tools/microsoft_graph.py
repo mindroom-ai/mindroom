@@ -144,11 +144,14 @@ def share_id(url: str) -> str:
 _HTML_BLOCK_TAGS = frozenset(
     {"blockquote", "div", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "li", "ol", "p", "pre", "table", "tr", "ul"},
 )
+_HTML_CELL_TAGS = frozenset({"td", "th"})
 _HTML_HIDDEN_TAGS = frozenset({"head", "script", "style", "title"})
+# Text collapses its whitespace to spaces, so a tab in the collected text can only be a cell boundary.
+_HTML_CELL_BREAK = "\t"
 
 
 class _HtmlText(HTMLParser):
-    """Collect an HTML fragment's visible text, breaking lines at `br` and around block elements."""
+    """Collect an HTML fragment's visible text, breaking lines at `br`, rows, and block elements and marking cells."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -163,8 +166,13 @@ class _HtmlText(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:  # noqa: ARG002
         if tag in _HTML_HIDDEN_TAGS:
             self._hidden += 1
+        elif tag == "body":
+            # The closing `head` tag is optional, so the body ends anything hidden before it.
+            self._hidden = 0
         elif tag == "br" or (tag in _HTML_BLOCK_TAGS and not self._line_start):
             self._break_line()
+        elif tag in _HTML_CELL_TAGS and not self._line_start:
+            self.parts.append(_HTML_CELL_BREAK)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _HTML_HIDDEN_TAGS:
@@ -183,11 +191,12 @@ class _HtmlText(HTMLParser):
 
 
 def html_to_text(html: str) -> str:
-    """Return the readable text of an HTML body: tags dropped, entities decoded, and line breaks kept."""
+    """Return the readable text of an HTML body: tags dropped, entities decoded, line breaks kept, cells split by `|`."""
     parser = _HtmlText()
     parser.feed(html)
     parser.close()
-    return "\n".join(line.rstrip() for line in "".join(parser.parts).split("\n")).strip("\n")
+    lines = "".join(parser.parts).split("\n")
+    return "\n".join(" ".join(line.replace(_HTML_CELL_BREAK, " | ").split()) for line in lines).strip("\n")
 
 
 def _unsafe_filename(name: str) -> bool:
