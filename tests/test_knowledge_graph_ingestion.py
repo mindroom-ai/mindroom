@@ -934,6 +934,79 @@ async def test_a_wake_does_not_start_a_second_pass_loop_for_a_graph_still_fillin
 
 
 @pytest.mark.asyncio
+async def test_a_wake_during_a_pass_that_adds_nothing_still_starts_another(tmp_path: Path) -> None:
+    """Turns stored while their graph's pass had already listed its conversations are added without waiting the interval."""
+    config = _config(interval_seconds=3600)
+    paths, store = _paths(tmp_path), _FakeStore()
+    worker = _worker(config, paths, store)
+    graph_name = graph_scope("mind", config, paths, None).graph_name
+    first_pass = asyncio.Event()
+    release = asyncio.Event()
+    passes = 0
+    real = worker._ingest_graph
+
+    async def first_pass_finds_nothing(config: Config, scope: GraphScope, *, now: float) -> bool:
+        nonlocal passes
+        passes += 1
+        if passes > 1:
+            return await real(config, scope, now=now)
+        first_pass.set()
+        await release.wait()
+        return False
+
+    looked = asyncio.Event()
+    real_looks = worker._maintained_graphs
+
+    async def signalled_looks(config: Config) -> list[GraphScope]:
+        scopes = await real_looks(config)
+        looked.set()
+        return scopes
+
+    with (
+        patch.object(worker, "_ingest_graph", first_pass_finds_nothing),
+        patch.object(worker, "_maintained_graphs", signalled_looks),
+    ):
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(first_pass.wait(), timeout=10)
+            _seed(config, paths, "!room:x:$t1", ["r1"], at=int(time.time()) - 10)
+            looked.clear()
+            wake_knowledge_graph_ingestion(after_seconds=0)
+            # The look the wake starts finds the graph still in its first pass.
+            await asyncio.wait_for(looked.wait(), timeout=10)
+            assert graph_name in worker._looked_again
+            release.set()
+            await asyncio.wait_for(store.added.wait(), timeout=10)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert store.sessions() == ["!room:x:$t1"]
+
+
+@pytest.mark.asyncio
+async def test_a_look_during_a_pass_costs_one_more_pass_and_no_more(tmp_path: Path) -> None:
+    """The graph stops once the pass after the look adds nothing too, instead of passing again without end."""
+    config, paths = _config(), _paths(tmp_path)
+    worker = _worker(config, paths, _FakeStore())
+    graph_name = graph_scope("mind", config, paths, None).graph_name
+    passes = 0
+    real = worker._ingest_graph
+
+    async def looked_at_during_the_first(config: Config, scope: GraphScope, *, now: float) -> bool:
+        nonlocal passes
+        passes += 1
+        if passes == 1:
+            worker._looked_again.add(graph_name)
+        return await real(config, scope, now=now)
+
+    with patch.object(worker, "_ingest_graph", looked_at_during_the_first):
+        await asyncio.wait_for(worker._fill(graph_name), timeout=10)
+
+    assert passes == 2
+
+
+@pytest.mark.asyncio
 async def test_a_graph_no_longer_maintained_stops_filling_after_its_current_pass(tmp_path: Path) -> None:
     """After a generation change, the old graph finishes the pass it is in and takes no further pass."""
     config = _config(max_sessions_per_cycle=1)

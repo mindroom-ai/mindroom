@@ -168,6 +168,8 @@ class KnowledgeGraphIngestionWorker:
     # Whether each maintained graph's last pass that tried something was clean, so one graph's clean pass never hides
     # another's failure.
     _clean: dict[str, bool] = field(default_factory=dict, init=False)
+    # Graphs a look found still in a pass, which take one more pass before they stop, so a wake is never lost.
+    _looked_again: set[str] = field(default_factory=set, init=False)
 
     async def run(self) -> None:
         """Start a pass loop for every maintained graph that is not filling, every interval or wake, until cancelled."""
@@ -186,9 +188,11 @@ class KnowledgeGraphIngestionWorker:
                     except Exception as exc:
                         _report_failure("Knowledge graph ingestion pass failed", exc)
                         scopes = []
+                    fills = {name: fill for name, fill in fills.items() if not fill.done()}
                     for scope in scopes:
-                        fill = fills.get(scope.graph_name)
-                        if fill is None or fill.done():
+                        if scope.graph_name in fills:
+                            self._looked_again.add(scope.graph_name)
+                        else:
                             fills[scope.graph_name] = asyncio.create_task(self._fill(scope.graph_name))
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
@@ -201,10 +205,11 @@ class KnowledgeGraphIngestionWorker:
     async def _fill(self, graph_name: str) -> None:
         """Run one graph's passes back to back, so a long backlog in another graph never holds it up.
 
-        Stop after a pass that added nothing, or once the graph is no longer maintained, for example after an embedder
-        or generation change, leaving the next look to ``run``.
+        Stop after a pass that added nothing, unless a look arrived during it, or once the graph is no longer maintained,
+        for example after an embedder or generation change, leaving the next look to ``run``.
         """
         while (config := self.config_provider()) is not None:
+            self._looked_again.discard(graph_name)
             try:
                 scopes = await self._maintained_graphs(config)
             except Exception as exc:
@@ -215,7 +220,7 @@ class KnowledgeGraphIngestionWorker:
                 # The config that replaced this graph maintains another, such as its next generation, which starts now.
                 self._wake_event.set()
                 return
-            if not await self._ingest_graph(config, scope, now=time.time()):
+            if not await self._ingest_graph(config, scope, now=time.time()) and graph_name not in self._looked_again:
                 return
 
     async def _maintained_graphs(self, config: Config) -> list[GraphScope]:

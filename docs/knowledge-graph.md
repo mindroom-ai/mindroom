@@ -46,7 +46,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.generation` | `0` (integer, min 0) | Raise it to start every graph over without restarting MindRoom |
 
 With the defaults, new turns reach the graph 2 to 12 minutes after a conversation goes quiet, plus extraction time, and later when many conversations are waiting.
-Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once; a graph with a long backlog does not hold up the others.
+Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once; each graph starts its next pass without waiting for the others to finish theirs.
 Facts are embedded with [`memory.embedder`](memory.md#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder or raising `knowledge_graph.generation` starts new, empty graphs that fill again from conversations active within `backfill_days`, which pays for that extraction again, charged to each conversation's requester.
