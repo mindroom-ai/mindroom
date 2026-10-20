@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import gc
-from typing import TYPE_CHECKING
+import os
+import socket
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -12,15 +15,15 @@ import pytest_asyncio
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.knowledge_graph.store import _GraphLoop, run_on_loop
 from mindroom.orchestrator import _finish_runtime_shutdown
 from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client
-from mindroom.providers.model_http_client import aclose_model_http_client
+from mindroom.providers.model_http_client import aclose_model_http_client, closing_model_connections
 from mindroom.providers.model_loading import get_model_instance
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
@@ -34,10 +37,12 @@ class _ModelsServer:
     def __init__(self) -> None:
         self.url = ""
         self.connections = 0
+        self.peer: tuple[str, int] = ("", 0)
         self.closed = asyncio.Event()
 
     async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connections += 1
+        self.peer = writer.get_extra_info("peername")[:2]
         try:
             while True:
                 await reader.readuntil(b"\r\n\r\n")
@@ -66,6 +71,25 @@ def _model_config(tmp_path: Path, provider: str, base_url: str) -> tuple[Config,
     extra_kwargs = {"api_key": "test", "client_params": client_params}
     model = ModelConfig(provider=provider, id="test-model", extra_kwargs=extra_kwargs)
     return bind_runtime_paths(Config(models={"default": model}), runtime_paths), runtime_paths
+
+
+def _keepalive_option(local_address: tuple[str, int], option: int) -> int:
+    """Read one keep-alive option from this process's socket bound to the given address."""
+    level = socket.SOL_SOCKET if option == socket.SO_KEEPALIVE else socket.IPPROTO_TCP
+    for path in Path("/dev/fd").iterdir():
+        try:
+            sock = socket.socket(fileno=os.dup(int(path.name)))
+        except OSError:
+            continue
+        with sock:
+            if sock.family == socket.AF_INET and sock.getsockname() == local_address:
+                return sock.getsockopt(level, option)
+    msg = f"no socket bound to {local_address}"
+    raise AssertionError(msg)
+
+
+async def _list_models(client: Any) -> None:  # noqa: ANN401 - either SDK's client
+    await client.models.list()
 
 
 @pytest.mark.asyncio
@@ -101,6 +125,66 @@ async def test_models_built_in_one_loop_share_one_connection(tmp_path: Path, ser
     client = second.get_async_client()
     await client.models.list()
     assert not client.is_closed()
+    assert server.connections == 1
+
+
+@pytest.mark.asyncio
+async def test_one_model_sends_from_the_runtime_loop_and_a_finishing_thread_loop(
+    tmp_path: Path,
+    server: _ModelsServer,
+) -> None:
+    """Each loop gets its own connection, and a loop that finishes closes its own before it ends."""
+    config, runtime_paths = _model_config(tmp_path, "openai", server.url)
+    client = get_model_instance(config, runtime_paths).get_async_client()
+    await client.models.list()
+    await asyncio.to_thread(asyncio.run, closing_model_connections(client.models.list()))
+    await asyncio.wait_for(server.closed.wait(), timeout=5)
+    await client.models.list()
+    assert server.connections == 2
+
+
+@pytest.mark.asyncio
+async def test_finished_loop_pool_is_dropped(tmp_path: Path, server: _ModelsServer) -> None:
+    """A loop that ended without closing its pool loses it at the next request, so its sockets get collected."""
+    config, runtime_paths = _model_config(tmp_path, "openai", server.url)
+    client = get_model_instance(config, runtime_paths).get_async_client()
+    await asyncio.to_thread(asyncio.run, _list_models(client))
+    await client.models.list()
+    gc.collect()
+    await asyncio.wait_for(server.closed.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_graph_loop_closes_its_pool_when_it_stops(tmp_path: Path, server: _ModelsServer) -> None:
+    """Stopping the knowledge graph's loop closes the model connections it opened."""
+    config, runtime_paths = _model_config(tmp_path, "openai", server.url)
+    graph = _GraphLoop()
+    await run_on_loop(graph.loop, _list_models(get_model_instance(config, runtime_paths).get_async_client()))
+    await graph.stop()
+    await asyncio.wait_for(server.closed.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_pooled_connections_probe_idle_tcp_connections(tmp_path: Path, server: _ModelsServer) -> None:
+    """Pooled connections send TCP keep-alive probes, as the Anthropic SDK's own client does, to survive NAT timeouts."""
+    config, runtime_paths = _model_config(tmp_path, "anthropic", server.url)
+    await _list_models(get_model_instance(config, runtime_paths).get_async_client())
+    assert _keepalive_option(server.peer, socket.SO_KEEPALIVE)
+    assert _keepalive_option(server.peer, socket.TCP_KEEPIDLE) == 60
+
+
+@pytest.mark.asyncio
+async def test_pooled_connections_honor_proxy_environment(
+    tmp_path: Path,
+    server: _ModelsServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pools send through the proxy that the environment names, as the SDKs' own clients do."""
+    for name in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", server.url)
+    config, runtime_paths = _model_config(tmp_path, "openai", "http://models.invalid")
+    await _list_models(get_model_instance(config, runtime_paths).get_async_client())
     assert server.connections == 1
 
 

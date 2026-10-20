@@ -3,24 +3,44 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import socket
+from typing import TYPE_CHECKING, Any
 
 import httpx
+from httpx._utils import get_environment_proxies
 
-# The connection limits the OpenAI and Anthropic SDKs give the client they build when none is passed in.
-_SDK_CONNECTION_LIMITS = httpx.Limits(max_connections=1000, max_keepalive_connections=100)
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
+# The connection limits and TCP keep-alive probes the Anthropic SDK gives the client it builds when none is passed
+# in; the probes keep long silent requests alive through NAT idle timeouts.
+_TRANSPORT_OPTIONS: dict[str, Any] = {
+    "limits": httpx.Limits(max_connections=1000, max_keepalive_connections=100),
+    "socket_options": [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    + [
+        (socket.IPPROTO_TCP, getattr(socket, name), value)
+        for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 60), ("TCP_KEEPCNT", 5))
+        if hasattr(socket, name)
+    ],
+}
 _LOOP_CLIENTS: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
 
 
 def _loop_client() -> httpx.AsyncClient:
     """Return the running event loop's pooled client, since pooled connections belong to one loop."""
+    # A finished loop's client cannot be closed anymore; dropping it lets its idle sockets be collected.
+    for finished in [other for other in list(_LOOP_CLIENTS) if other.is_closed()]:
+        _LOOP_CLIENTS.pop(finished, None)
     loop = asyncio.get_running_loop()
     client = _LOOP_CLIENTS.get(loop)
     if client is None:
-        # A finished loop's client cannot be closed anymore; dropping it lets its idle sockets be collected.
-        for finished in [other for other in list(_LOOP_CLIENTS) if other.is_closed()]:
-            _LOOP_CLIENTS.pop(finished, None)
-        client = _LOOP_CLIENTS[loop] = httpx.AsyncClient(limits=_SDK_CONNECTION_LIMITS, follow_redirects=True)
+        # A custom transport turns off httpx's proxy environment variables, so mount them as the SDKs do.
+        mounts = {
+            key: None if url is None else httpx.AsyncHTTPTransport(proxy=url, **_TRANSPORT_OPTIONS)
+            for key, url in get_environment_proxies().items()
+        }
+        transport = httpx.AsyncHTTPTransport(**_TRANSPORT_OPTIONS)
+        client = _LOOP_CLIENTS[loop] = httpx.AsyncClient(transport=transport, mounts=mounts, follow_redirects=True)
     return client
 
 
@@ -46,7 +66,15 @@ MODEL_HTTP_CLIENT: httpx.AsyncClient = _ModelHttpClient(transport=httpx.AsyncBas
 
 
 async def aclose_model_http_client() -> None:
-    """Close the running event loop's pooled model connections at runtime shutdown."""
+    """Close the running event loop's pooled model connections before the loop stops."""
     client = _LOOP_CLIENTS.pop(asyncio.get_running_loop(), None)
     if client is not None:
         await client.aclose()
+
+
+async def closing_model_connections[T](work: Awaitable[T]) -> T:
+    """Await work on a loop that finishes afterwards, then close that loop's pooled model connections."""
+    try:
+        return await work
+    finally:
+        await aclose_model_http_client()

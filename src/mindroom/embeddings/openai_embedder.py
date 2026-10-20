@@ -18,8 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from openai import AsyncOpenAI
-
 from mindroom.embeddings.agno_compat_openai_embedder import OpenAIEmbedderWithHooks
 from mindroom.embeddings.embedder_health import EmbedderHealthRecorder, capture_embedder_health_recorder
 from mindroom.embeddings.errors import (
@@ -29,7 +27,6 @@ from mindroom.embeddings.errors import (
     embedder_retry_after_seconds,
 )
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
-from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 
 if TYPE_CHECKING:
     from openai.types.create_embedding_response import CreateEmbeddingResponse
@@ -79,19 +76,6 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedderWithHooks):
         self._dimensions_explicit = self.dimensions is not None
         if self.dimensions is None:
             self.dimensions = OPENAI_EMBEDDING_DIMENSIONS.get(self.id)
-
-    @property
-    def aclient(self) -> AsyncOpenAI:
-        """Build the async SDK client on the runtime's shared model HTTP client instead of one of its own."""
-        if self.async_client is None:
-            self.async_client = AsyncOpenAI(
-                api_key=self.api_key,
-                organization=self.organization,
-                base_url=self.base_url,
-                http_client=MODEL_HTTP_CLIENT,
-                **(self.client_params or {}),
-            )
-        return self.async_client
 
     def _should_send_dimensions(self) -> bool:
         return self.dimensions is not None and (self._dimensions_explicit or self.id in OPENAI_EMBEDDING_DIMENSIONS)
