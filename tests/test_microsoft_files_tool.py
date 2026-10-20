@@ -1,5 +1,5 @@
 """Tests for the OneDrive and SharePoint files toolkit."""
-# ruff: noqa: D103, S105
+# ruff: noqa: D103, S105, S106
 
 from __future__ import annotations
 
