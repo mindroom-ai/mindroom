@@ -68,6 +68,7 @@
 - [Access Control](https://docs.mindroom.chat/authorization/)
 - [Tool Approval](https://docs.mindroom.chat/tool-approval/)
 - [Credentials & OAuth](https://docs.mindroom.chat/oauth-framework/)
+- [Connections Portal](https://docs.mindroom.chat/connections-portal/)
 - [Connect Google Accounts](https://docs.mindroom.chat/deployment/google-services-user-oauth/)
 - [Google OAuth Apps & Scopes](https://docs.mindroom.chat/deployment/google-services-oauth/)
 - [Security Model](https://docs.mindroom.chat/architecture/security-posture/)

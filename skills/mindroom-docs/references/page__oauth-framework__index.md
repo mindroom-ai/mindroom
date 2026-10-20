@@ -73,7 +73,7 @@ Providers, built in or from plugins, supply only provider-specific details such 
 
 ### Connect An Account
 
-Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal) (signed in through trusted upstream auth or [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat)), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
+Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/connections-portal/) (opened from MindRoom Chat or signed in through trusted upstream auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
 The API routes are:
 
 | Method | Route | Purpose |
@@ -109,8 +109,8 @@ Standalone installs identify the dashboard user through `MINDROOM_OWNER_USER_ID`
 
 Room-independent access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply, because a browser request has no current room or team.
 Managing a personal connection grants no general dashboard access and no authority over shared credentials.
-With the Connections portal enabled, eligible users manage their connections there, and under trusted upstream auth ordinary dashboard routes require administrator authority.
-A portal session from Matrix sign-in covers the portal, the OAuth callback for flows it starts, and the OAuth success page, and reaches dashboard routes only for an administrator whose token the homeserver bound to this deployment ([Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat)).
+Eligible users manage their connections on the Connections portal, and under trusted upstream auth with `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard routes require administrator authority.
+A portal session from MindRoom Chat covers the portal, the OAuth callback for flows it starts, and the OAuth success page, and reaches dashboard routes only for an administrator whose token the homeserver bound to this deployment ([Sessions and dashboard access](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access)).
 Unauthorized connect, authorize, status, disconnect, and callback requests return HTTP 403 before any credential is exposed or changed.
 See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-credential-authority) for administrators and credential managers.
 

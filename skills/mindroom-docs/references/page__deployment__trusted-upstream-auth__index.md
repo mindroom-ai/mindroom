@@ -4,7 +4,7 @@ Use trusted upstream auth when the MindRoom API and dashboard sit behind a deplo
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
 The [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service), and the [budget service](https://docs.mindroom.chat/budgets/#budget-service) also build on this mode.
-The [Connections portal](#connections-portal) can use this mode or [Matrix sign-in from MindRoom Chat](#matrix-sign-in-from-mindroom-chat), which needs no identity gateway.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use strict JWT mode, and users signed in to MindRoom Chat can open it without a gateway.
 
 Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
 Enable it only when every network path to MindRoom removes client-supplied copies of the trusted headers and injects verified values itself; never expose such an instance directly to browsers or the public internet.
@@ -76,119 +76,6 @@ Headers must agree with the verified claims:
 - Without one, the Matrix identity can only come from the email-to-Matrix template applied to the verified email, which works without an email header, and a Matrix user ID header must equal the derived ID.
 - With neither a Matrix claim nor a template, any Matrix user ID header is rejected because no signature backs it.
 
-## Connections Portal
-
-The Connections portal at `/connections` lets each signed-in user connect and disconnect their OAuth accounts without administrator dashboard access.
-Enable it by naming a private agent:
-
-```bash
-MINDROOM_CONNECTIONS_AGENT=personal
-MINDROOM_PUBLIC_URL=https://assistant.example.org
-```
-
-The named agent must use `private.per: user` or `private.per: user_agent`:
-
-```yaml
-agents:
-  personal:
-    display_name: Personal Mind
-    role: Personal assistant
-    private:
-      per: user_agent
-    access:
-      users: ["@*:example.org"]
-    tools:
-      - google_drive
-      - name: google_calendar
-        defer: true
-```
-
-Users sign in to the portal in one of two ways, and both can be enabled together:
-
-- **Trusted upstream:** [strict JWT mode](#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
-- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway, and the dashboard keeps its own authentication except for administrators on a homeserver that binds tokens.
-
-Portal API requests without a valid sign-in return `401`.
-Connect and disconnect requests also require `MINDROOM_PUBLIC_URL`, or the request URL when unset, to be an HTTPS origin, and the browser's `Origin` header to match it.
-
-The portal groups OAuth services by agent, covering the named private agent and the shared agents the user may use or manage credentials for.
-Services come from each agent's tools, including deferred tools and plugin or MCP OAuth providers; tools that need no browser sign-in are listed too, and room-dependent tools are marked **MindRoom only**.
-Each service's status loads independently, so one failing or unconnected service does not block the others.
-Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
-Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
-Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
-Disconnecting a shared connection affects every agent using its [credential scope](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored).
-While the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) is on, the portal and its Agent Keys page link to each other.
-The portal never shows tokens, model configuration, generic credential editing, or OAuth client settings; operators still configure OAuth clients.
-When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
-Users choose the agents and tools the optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#choose-exposed-agents-and-tools) exposes on the same page.
-Matrix sign-in users have no email, so when MCP accounts are [SCIM-provisioned](https://docs.mindroom.chat/deployment/mcp-gateway/#managed-account-provisioning), that section uses the one active account whose `userName` maps to the signed-in Matrix user through `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` and `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN`, the mapping a trusted upstream sign-in with that email uses.
-Without that mapping, when `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` is set (a signed Matrix claim takes precedence over the template), or when more than one active account maps to the same Matrix user, it still needs trusted upstream sign-in.
-
-To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
-Exclude `/connections` from the other application's service-worker navigation fallback.
-Portal assets are served under `/connections/assets/`, so root `/assets/` can keep serving the other application.
-
-### Matrix Sign-In From MindRoom Chat
-
-Users signed in to MindRoom Chat can open the portal without an identity gateway.
-Chat's **Connections** card in Settings, General opens `/connections/` on the runtime origin that Chat uses for [Computers](https://docs.mindroom.chat/tools/worker-computer/#connect-mindroom-chat).
-Chat finds that origin through its Computers backend setting: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
-Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their runtime's URL under Computers before the card works.
-Enable it with the portal settings and the origins of the Chat deployments allowed to sign users in:
-
-```bash
-MINDROOM_CONNECTIONS_AGENT=personal
-MINDROOM_PUBLIC_URL=https://assistant.example.org
-MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.example.org"]'
-```
-
-- `MINDROOM_CONNECTIONS_AGENT` names a private agent with `private.per: user` or `user_agent`.
-- `MINDROOM_PUBLIC_URL`, or the request URL when unset, is an HTTPS origin.
-  The sign-in request's `Origin` must equal that public origin, so Chat's Computers URL must be the `MINDROOM_PUBLIC_URL` origin and the portal must be opened there.
-- `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` is a JSON list of exact Chat origins, with the same rules as `MINDROOM_COMPUTER_ALLOWED_ORIGINS` in [Connect MindRoom Chat](https://docs.mindroom.chat/tools/worker-computer/#connect-mindroom-chat).
-  Entries are HTTPS origins, loopback HTTP origins, or `capacitor://localhost`, without a path or wildcard, and one invalid entry disables the whole list.
-  The list accepts `capacitor://localhost`, but native MindRoom Chat builds do not offer Connections yet, so only web Chat origins can sign users in.
-
-Sign-in works as follows:
-
-1. In MindRoom Chat, the user opens **Connections** in Settings, General, which opens `/connections/` in a new window.
-2. The portal signs the user in with the account that Chat is signed in to, and shows `Signed in as <Matrix ID>`.
-   It shows nothing until that succeeds and ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
-   When the portal is opened directly rather than from MindRoom Chat, as with trusted upstream sign-in, or reloaded after the Chat tab that opened it closed, it uses the existing session or signed upstream identity, or asks the user to open Connections from Chat.
-3. MindRoom accepts only users of its configured homeserver, and only from Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`.
-
-If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
-The request-by-request exchange is described in [Connections portal sign-in](https://docs.mindroom.chat/architecture/security-posture/#connections-portal-sign-in).
-
-MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience.
-A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
-MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 until `MINDROOM_PUBLIC_URL` is set.
-Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
-On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
-Roll out in this order: first MindRoom backends, then MindRoom Chat clients including the iOS app, and only then the homeserver release that binds tokens.
-Older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
-Older Chat clients, including iOS app versions that are still in App Store review, send unbound tokens that a new backend rejects with 401 once the homeserver binds.
-
-The session lasts one hour.
-A restart signs everyone out; opening Connections from Chat again signs the user in again.
-The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
-
-Apart from the dashboard rule below, a session authenticates only these paths:
-
-- `/connections` and its sub-paths.
-- `/api/connections` and its sub-paths.
-- The OAuth callback, `/api/oauth/{provider}/callback`, for flows started under the session.
-- The OAuth success page, `/api/oauth/{provider}/success`.
-
-For a user listed in `administrators`, the session also opens the dashboard and its APIs, with no API key, when the homeserver binds tokens: MindRoom's Tuwunel fork with `mindroom_openid_audience` on, which MindRoom detects from `/_matrix/client/versions` at sign-in.
-Without binding, a token could have been replayed from another deployment on the same homeserver, and the dashboard is full control of this one.
-So the session reaches the dashboard only when it was started while the homeserver bound tokens and `MINDROOM_PUBLIC_URL` was set, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
-The Connections header links the dashboard for administrators only.
-Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
-Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
-`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
-
 ## Helm Charts
 
 For the hosted instance chart, set the equivalent values:
@@ -219,9 +106,9 @@ Both charts fail to render when `enabled` is true without `userIdHeader`, when `
 
 Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
-With the Connections portal enabled, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the portal and the OAuth callback, success, and reset pages keep their own access checks.
+With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal and the OAuth callback, success, and reset pages keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
-A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
+A [Connections session from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
 Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.
 A personal OAuth link opened by a browser signed in as anyone other than the requester who received it fails with `403`; see [Connect An Account](https://docs.mindroom.chat/oauth-framework/#connect-an-account) for link rules.
@@ -248,17 +135,7 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `401 Trusted upstream Matrix identity does not match JWT claim`, `does not match verified email`, or `is not signed` | Make the Matrix user ID header match the signed or derived ID, configure a Matrix claim or template, or stop sending the header |
 | `401 Invalid trusted upstream email identity` | The email is outside `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` |
 | `401 Invalid trusted upstream Matrix user id` | The Matrix header or claim is not a valid Matrix user ID |
-| `403 Administrator access required` | With the portal enabled, only `administrators` reach ordinary dashboard routes |
+| `403 Administrator access required` | With `MINDROOM_CONNECTIONS_AGENT` set, only `administrators` reach ordinary dashboard routes |
 | `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
-| `401 Connections sign-in required` | Open Connections from MindRoom Chat with Matrix sign-in configured, or enable strict JWT mode |
-| `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
-| `404 Connections are not enabled` | Set `MINDROOM_CONNECTIONS_AGENT` |
-| `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
-| `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, and fix any invalid entry because one disables the whole list |
-| `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
-| An administrator's Dashboard link from Connections asks for the API key | Check that `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true` and `MINDROOM_PUBLIC_URL` is set; the warning `Could not check whether the homeserver binds OpenID tokens` means MindRoom could not read `/versions`, and `Dashboard access check failed after the binding probe` means the second token check failed. Open Connections from Chat again afterwards, because the session records dashboard access at sign-in |
-| `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
-| `403 Connections require a configured private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent` |
-| `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |
-| `403 Connections require an HTTPS public origin` or `Connection changes require a same-origin request` | Set an HTTPS `MINDROOM_PUBLIC_URL` and open the portal from that origin |
+| Connections portal errors | See [Connections troubleshooting](https://docs.mindroom.chat/connections-portal/#troubleshooting) |

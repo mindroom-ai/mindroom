@@ -357,10 +357,10 @@ A connection that everyone using an agent shares never gets a link; connect it a
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
 On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](../authorization.md#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects their own account.
 
-The personal egress page and its API need a verified Matrix identity on the request, from [trusted upstream auth](trusted-upstream-auth.md) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`) or from [Matrix sign-in from MindRoom Chat](trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat).
-Without either sign-in, the personal page is not served and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
+The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](../connections-portal.md#open-it-from-mindroom-chat) or from [trusted upstream auth](trusted-upstream-auth.md) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`).
+With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no JWT, the personal page is not served and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
 A `user` or `user_agent` agent, private agents included, then has no page where its keys can be set: until an administrator enables one of those sign-ins or gives the agent a shared worker scope, its brokered calls to a service without a key are refused, and the refusal names no page.
-When more than one user can sign in through the gateway, set `MINDROOM_CONNECTIONS_AGENT` as well, or every user the gateway admits gets full dashboard access, including configuration edits, shared keys, and every requester's log; with it set, non-administrators who open the dashboard are sent to the Connections portal (see [Security Boundary](trusted-upstream-auth.md#security-boundary)).
+When more than one user can sign in through a trusted upstream gateway, set `MINDROOM_CONNECTIONS_AGENT` as well, or every user the gateway admits gets full dashboard access, including configuration edits, shared keys, and every requester's log; with it set, non-administrators who open the dashboard are sent to the Connections portal (see [Security Boundary](trusted-upstream-auth.md#security-boundary)).
 
 ## User services
 
@@ -615,7 +615,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
 4. Add the services you use to `config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
 5. Remove the `agent-vault-bridge` plugin from the config.
 6. Set the keys or connect the accounts of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
-   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which needs trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat; without either, give those agents a shared worker scope, or their brokered calls that need a key are refused.
+   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth with JWT; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
 7. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the request log records it, and the worker environment and workspace contain no trace of the token.
 8. After a grace period, remove the Agent Vault CA from wherever you pinned it for workers, and stop Agent Vault.
 

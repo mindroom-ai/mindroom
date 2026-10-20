@@ -91,7 +91,7 @@ Set the trusted origin of the MindRoom runtime API, without a path, in Chat's op
 ```
 
 The shipped value is empty, which hides the Computer action.
-Remote origins require HTTPS; loopback HTTP works for local development.
+Remote origins require HTTPS; plain HTTP works for `localhost` and loopback or private IP addresses.
 Chat shows the Computer action when this origin is set and the room has a joined MindRoom agent; with several agents, the user picks one first.
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
@@ -103,12 +103,12 @@ Origins with non-ASCII hostnames are refused.
 The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
 Each entry must be a scheme and host with an optional port, and no wildcard.
 An optional single trailing `/` is accepted, and any other path is invalid.
-HTTP is allowed only for `localhost` and literal loopback addresses.
+HTTP is allowed only for `localhost` and literal loopback or private IP addresses, such as `http://192.168.1.10:8080`.
 One invalid entry disables the whole list.
-The Connections portal's [Matrix sign-in](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules, and Chat uses the same runtime origin for both.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#settings) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules but its own defaults, and Chat uses the same runtime origin for both.
 
 Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
-Audience binding, its `MINDROOM_PUBLIC_URL` requirement, and the rollout order are described under [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat).
+Audience binding, its `MINDROOM_PUBLIC_URL` requirement, and the rollout order are described under [Token binding](https://docs.mindroom.chat/connections-portal/#token-binding).
 Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](https://docs.mindroom.chat/authorization/#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.

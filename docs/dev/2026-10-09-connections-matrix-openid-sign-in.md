@@ -11,9 +11,27 @@ Everyone who would use the portal is already signed in to MindRoom Chat with a M
 ### Hand the token over with `postMessage`, never in a URL
 
 Chat opens the portal, the portal asks `window.opener` for a token, and Chat answers only that window at the backend origin.
-The portal reports the origin of Chat's message, and the backend accepts only origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`.
+The portal reports the origin of Chat's message, and the backend accepts only allowed Chat origins (see [the default list](#default-the-allowlist-to-mindrooms-own-chat)).
 Rejected: a token in the URL fragment, which lands in browser history and lets anyone send a victim a link that signs them in as the attacker (login CSRF), after which the victim may connect their Google account to the attacker's agent.
 Rejected: a one-time code minted by a cross-origin request, which keeps the token out of the URL, but an attacker can still mint a code for their own account.
+
+### Turn the portal on by default, with no named agent
+
+The portal shows only what a user can already reach: the agents they may use and the shared agents whose credentials they manage, and each connect is authorized by its own credential scope rules.
+So the opt-in switch protected nothing, and the single named private agent was left over from the first portal, which served one private agent only.
+`MINDROOM_CONNECTIONS_AGENT` keeps two jobs: the MCP gateway's first selection, and under trusted upstream auth the dashboard's administrator check.
+Rejected: an administrator-only dashboard for every trusted upstream deployment, because header-only gateways may send no Matrix ID, which would lock their operators out.
+
+### Default the allowlist to MindRoom's own Chat
+
+The allowlist exists only against login CSRF, where a page hands the portal an attacker's token.
+Unset, it allows MindRoom's hosted Chat, which MindRoom operates, plus any Chat on a local address while the portal itself is on one, so a Docker stack on a home network works without knowing the host's address.
+The local rule never applies to a portal on a public address, and `[]` still turns sign-in from Chat off.
+
+### Allow plain HTTP on local addresses
+
+A local Docker stack serves Matrix and Chat over plain HTTP, so requiring HTTPS for the portal alone protected nothing there; the rule matches the one Chat applies to Computers URLs.
+Browsers refuse `Secure` cookies over HTTP, so the session cookie drops the `__Host-` prefix there, and an HTTPS portal ignores that plain name so a sibling host cannot plant a session.
 
 ### Sign a process-local cookie instead of storing sessions
 
@@ -44,11 +62,11 @@ MindRoom takes the audience only from `MINDROOM_PUBLIC_URL`, never from the requ
 Unbound tokens keep working for Element Call, LiveKit, provisioning pairing, and stock homeservers.
 MindRoom sends the audience on every verification instead of first checking the homeserver's `io.mindroom.openid_audience` capability, because the fork ignores it while binding is off and Synapse and upstream Tuwunel ignore unknown userinfo parameters.
 Rejected: probing `/versions` and caching the answer, the first version, which needed a retry for a stale cache and guarded only against a homeserver that refuses unknown parameters.
-The rollout order is an operator constraint and lives in [Matrix sign-in from MindRoom Chat](../deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat).
+The rollout order is an operator constraint and lives in [Token binding](../connections-portal.md#token-binding).
 
 ## Limitations
 
 - Native Chat builds do not offer Connections, because the shells have no pop-up window to hand a token to.
-- The MCP Gateway still needs trusted upstream, because SCIM-provisioned MCP accounts are looked up by email, which Matrix sign-in does not provide.
+- The MCP Gateway still needs trusted upstream strict JWT; sessions from Chat reach its portal controls only through the email-to-Matrix template mapping, because they carry no email.
 - Chat reaches only the backend set under Computers.
 - Without binding, a token stays replayable within its lifetime.
