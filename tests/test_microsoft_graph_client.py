@@ -590,6 +590,8 @@ def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, t
         ("Paragraph<br><br>after a blank line", "Paragraph\n\nafter a blank line"),
         ("<p>First</p><p>Second &amp; third</p>", "First\nSecond & third"),
         ("<ul><li>one</li><li>two</li></ul>", "one\ntwo"),
+        ("<p>a   b</p>\n\n\n<p></p><p>c</p>", "a b\nc"),
+        ('<attachment id="ee8d"></attachment>', ""),
         ("Tom &lt;tom@contoso.com&gt;&nbsp;wrote", "Tom <tom@contoso.com> wrote"),
         (
             "<html><head><title>Note</title><style>p { color: red; }</style></head>"
