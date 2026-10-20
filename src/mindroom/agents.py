@@ -1984,9 +1984,7 @@ def create_agent(  # noqa: PLR0915
             )
         )
     )
-    portable_deferred_tools = (
-        agent_mode == "standard" and persona_tools is None and not eager_deferred_tools and not native_deferred_tools
-    )
+    portable_deferred_tools = agent_mode == "standard" and not eager_deferred_tools and not native_deferred_tools
 
     tool_function_filter, disabled_tool_names = persona_tool_policy(
         persona_tools,

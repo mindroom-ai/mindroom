@@ -56,6 +56,7 @@ Toolkit instructions are omitted from the system prompt when every function in t
 ## MindRoom Tool Search
 
 On every other model, an agent with at least one deferred tool gets the `dynamic_tools` toolkit, with `tool_search(query, max_results)` and `call_tool(name, arguments)`.
+Voice calls and subagent personas with their own tool list send deferred tools as ordinary tools instead.
 The system prompt lists the deferred toolkits with their descriptions.
 `tool_search` matches function names, toolkit names, and keywords in descriptions and parameter names, and returns the full definitions of up to `max_results` functions (default 5, at most 20) with the instructions they and their toolkit would otherwise add to the system prompt.
 Without a query, `tool_search` lists each deferred function's name, toolkit, and description, without definitions; when they do not fit in one result it leaves out the descriptions, and if the names still do not fit it says how many functions it left out.
