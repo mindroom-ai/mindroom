@@ -587,6 +587,24 @@ def test_attachments_over_the_request_limit_are_refused_before_encoding(
     assert graph.requests == []
 
 
+def test_a_non_ascii_body_is_measured_as_the_bytes_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # "é" is two bytes in the UTF-8 request body, so this message is just under the request limit.
+    body = "é" * ((outlook_mail._MAX_REQUEST_BYTES - 1000) // 2)
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "Notes", body))
+
+    assert result == {"sent": True, "status": "ok", "tool": "outlook_mail"}
+    [request] = graph.requests
+    assert _body(request)["message"]["body"]["content"] == body
+    assert int(request.headers["content-length"]) <= outlook_mail._MAX_REQUEST_BYTES
+
+    over = _payload(tools.outlook_mail_send(["sam@contoso.com"], "Notes", body + "é" * 1000))
+
+    assert over["code"] == "too_large"
+    assert len(graph.requests) == 1
+
+
 def test_an_attachment_outside_the_workspace_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "secret.txt").write_bytes(b"secret")
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())

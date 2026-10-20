@@ -183,7 +183,8 @@ def _check_request_size(size: int) -> None:
 
 
 def _check_payload_size(payload: Mapping[str, object]) -> None:
-    _check_request_size(len(json.dumps(payload).encode()))
+    # Measure the body as httpx encodes it: UTF-8 text without escapes or spaces.
+    _check_request_size(len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()))
 
 
 def _filename(name: object) -> str:
