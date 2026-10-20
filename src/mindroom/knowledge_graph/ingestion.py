@@ -63,6 +63,8 @@ _MAX_EPISODES_PER_PASS = 20
 _CONCURRENT_GRAPHS = 4
 _EPISODE_KINDS = ("conversation", "tool_results")
 _WAKE_EVENTS: set[asyncio.Event] = set()
+# Stands for listing the maintained graphs in the worker's health outcomes; no graph is named like it.
+_LISTING = ""
 
 
 class _SessionState(TypedDict):
@@ -230,9 +232,14 @@ class KnowledgeGraphIngestionWorker:
                 return
 
     async def _maintained_graphs(self, config: Config) -> list[GraphScope]:
-        """Return the graphs the current config maintains, and stop counting the others toward health."""
+        """Return the graphs the current config maintains, and stop counting the others, or a failed listing, toward health."""
         # This reads every private instance's records, so it stays off the event loop.
-        scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
+        try:
+            scopes = await asyncio.to_thread(graph_scopes, config, self.runtime_paths)
+        except Exception:
+            # Until a listing succeeds, so a clean pass of a graph listed earlier cannot clear the failure.
+            self._clean[_LISTING] = False
+            raise
         names = {scope.graph_name for scope in scopes}
         self._clean = {name: clean for name, clean in self._clean.items() if name in names}
         return scopes

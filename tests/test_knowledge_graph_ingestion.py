@@ -1102,11 +1102,15 @@ async def test_graphs_that_cannot_be_listed_are_reported_and_looked_for_again(tm
         real_report(message, exc, **context)
         reported.set()
 
+    _seed(config, paths, "!room:x:$t1", ["r1"])
     with (
         patch.object(ingestion, "graph_scopes", unlisted),
         patch.object(ingestion, "_report_failure", signalled_report),
     ):
         await asyncio.wait_for(worker._fill(graph_scope("mind", config, paths, None).graph_name), timeout=10)
+        assert "OSError" in (knowledge_graph_failure() or "")
+        # A pass of a graph listed before, finishing cleanly meanwhile, does not clear the listing failure.
+        assert await worker._ingest_graph(config, graph_scope("mind", config, paths, None), now=T0 + 10) is True
         assert "OSError" in (knowledge_graph_failure() or "")
 
         reported.clear()
@@ -1121,6 +1125,11 @@ async def test_graphs_that_cannot_be_listed_are_reported_and_looked_for_again(tm
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    # Once the graphs can be listed again, the next clean pass clears it.
+    _seed(config, paths, "!room:x:$t2", ["r2"], at=T0 + 20)
+    await _pass(worker, config, now=T0 + 40)
+    assert knowledge_graph_failure() is None
 
 
 @pytest.mark.asyncio
