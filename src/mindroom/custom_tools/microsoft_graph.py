@@ -8,9 +8,7 @@ Authorization header when a redirect leaves Graph, so the token never reaches an
 from __future__ import annotations
 
 import base64
-import logging
 import os
-import re
 from contextlib import ExitStack, contextmanager
 from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Any
@@ -70,7 +68,6 @@ _STATUS_ERRORS = {
     413: ("too_large", "Microsoft Graph refused the request as too large."),
     423: ("locked", "The item is locked, for example open for editing or checked out; try again later."),
 }
-_SHARE_PATH = re.compile(r"/shares/[^/]+")
 
 
 class MicrosoftGraphError(Exception):
@@ -81,33 +78,6 @@ class MicrosoftGraphError(Exception):
         self.code = code
         self.message = message
         self.details = details
-
-
-def _loggable_url(url: httpx.URL) -> httpx.URL:
-    """Return the URL without the parts that grant access on their own.
-
-    A Graph share ID is the base64 of a sharing link, and a personal OneDrive download URL carries its
-    credential in the path; SharePoint download URLs carry `tempauth`, which log redaction already removes.
-    """
-    if url.host == _GRAPH_HOST and "/shares/" in url.path:
-        return url.copy_with(path=_SHARE_PATH.sub("/shares/redacted", url.path))
-    if url.host.endswith(".1drv.com"):
-        return url.copy_with(path="/redacted", query=None)
-    return url
-
-
-class _CapabilityUrlLogFilter(logging.Filter):
-    """Redact capability-bearing Microsoft URLs in httpx request logs."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.args, tuple):
-            record.args = tuple(_loggable_url(arg) if isinstance(arg, httpx.URL) else arg for arg in record.args)
-        return True
-
-
-_HTTPX_LOGGER = logging.getLogger("httpx")
-if not any(isinstance(log_filter, _CapabilityUrlLogFilter) for log_filter in _HTTPX_LOGGER.filters):
-    _HTTPX_LOGGER.addFilter(_CapabilityUrlLogFilter())
 
 
 def path_segment(value: object, field_name: str) -> str:
@@ -173,6 +143,15 @@ def _check_upload_size(source: AuthorizedFile, size: int, max_bytes: int) -> Non
     if size > max_bytes:
         msg = f"{source.display_path} is {size} bytes; the limit is {max_bytes} bytes."
         raise MicrosoftGraphError(code="too_large", message=msg)
+
+
+def _unwritable(directory: str, exc: OSError) -> MicrosoftGraphError:
+    # A workspace replaced by a link, an inaccessible directory, a name too long for the disk, or a full disk.
+    reason = exc.strerror or type(exc).__name__
+    return MicrosoftGraphError(
+        code="workspace_unavailable",
+        message=f"The download could not be written to {directory}: {reason}.",
+    )
 
 
 def _chunks(handle: BinaryIO) -> Iterator[bytes]:
@@ -270,6 +249,8 @@ class GraphSession:
                 code="unsafe_name",
                 message="The download target escapes its directory.",
             ) from None
+        except OSError as exc:
+            raise _unwritable(directory, exc) from None
         with self.client.stream("GET", path, follow_redirects=True) as response:
             self.check(response)
             try:
@@ -285,10 +266,7 @@ class GraphSession:
                         remaining -= len(chunk)
                         handle.write(chunk)
             except OSError as exc:
-                # A workspace replaced by a link, a full disk, or a directory in the file's place.
-                reason = exc.strerror or type(exc).__name__
-                msg = f"The download could not be written to {directory}: {reason}."
-                raise MicrosoftGraphError(code="workspace_unavailable", message=msg) from None
+                raise _unwritable(directory, exc) from None
         return target
 
     def upload(

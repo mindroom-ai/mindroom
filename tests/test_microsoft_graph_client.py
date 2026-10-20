@@ -21,6 +21,7 @@ from mindroom.custom_tools.microsoft_graph import (
     share_id,
 )
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
+from mindroom.redaction import redact_sensitive_text
 from tests.microsoft_graph_test_support import (
     TOKEN,
     FakeGraph,
@@ -385,8 +386,10 @@ def test_share_ids_stay_out_of_httpx_logs(
     with caplog.at_level(logging.INFO, logger="httpx"):
         _result(tmp_path, lambda session: session.json("GET", f"/shares/{share_id(SHARE_LINK)}/driveItem"))
 
-    assert "/v1.0/shares/redacted/driveItem" in caplog.text
-    assert share_id(SHARE_LINK)[:24] not in caplog.text
+    # MindRoom's log formatter applies central redaction to every record, httpx's included.
+    logged = redact_sensitive_text(caplog.text)
+    assert "/v1.0/shares/***redacted***/driveItem" in logged
+    assert share_id(SHARE_LINK)[:24] not in logged
 
 
 def test_personal_onedrive_download_links_stay_out_of_httpx_logs(
@@ -420,8 +423,9 @@ def test_personal_onedrive_download_links_stay_out_of_httpx_logs(
             },
         )
 
-    assert "public.ch.files.1drv.com/redacted" in caplog.text
-    assert "CAPABILITY-SECRET" not in caplog.text
+    logged = redact_sensitive_text(caplog.text)
+    assert "public.ch.files.1drv.com/***redacted***" in logged
+    assert "CAPABILITY-SECRET" not in logged
 
 
 def test_a_tenant_change_retires_connections_made_for_another_tenant(
@@ -478,5 +482,62 @@ def test_a_download_that_cannot_be_written_is_reported(tmp_path: Path, monkeypat
             ),
         },
     )
+
+    assert result["code"] == "workspace_unavailable"
+
+
+@pytest.mark.parametrize("filename", ["報告" * 60 + ".docx", "x" * 300 + ".docx"])
+def test_a_download_name_too_long_for_the_disk_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+) -> None:
+    FakeGraph(_answer(200, content=b"bytes")).install(monkeypatch)
+    workspace = _workspace(tmp_path)
+
+    result = _result(
+        tmp_path,
+        lambda session: {
+            "path": str(
+                session.save_download(
+                    "/drives/d/items/i/content",
+                    workspace_root=workspace,
+                    directory="downloads",
+                    filename=filename,
+                    max_bytes=100,
+                ),
+            ),
+        },
+    )
+
+    assert result["code"] == "workspace_unavailable"
+
+
+def test_a_download_into_an_inaccessible_directory_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeGraph(_answer(200, content=b"bytes")).install(monkeypatch)
+    workspace = _workspace(tmp_path)
+    locked = workspace / "downloads"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        result = _result(
+            tmp_path,
+            lambda session: {
+                "path": str(
+                    session.save_download(
+                        "/drives/d/items/i/content",
+                        workspace_root=workspace,
+                        directory="downloads",
+                        filename="report.docx",
+                        max_bytes=100,
+                    ),
+                ),
+            },
+        )
+    finally:
+        locked.chmod(0o700)
 
     assert result["code"] == "workspace_unavailable"

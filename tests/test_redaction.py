@@ -101,6 +101,30 @@ def test_redact_sensitive_text_redacts_sharepoint_tempauth_download_urls() -> No
     )
 
 
+def test_redact_sensitive_text_redacts_personal_onedrive_download_paths_in_header_dumps() -> None:
+    """A personal OneDrive download URL carries its credential in the path, also in httpcore's header logs."""
+    line = (
+        "receive_response_headers.complete return_value=(b'HTTP/1.1', 302, b'Found', "
+        "[(b'Location', b'https://public.ch.files.1drv.com/y4mCAPABILITY/report.docx?psid=1')])"
+    )
+
+    redacted = redact_sensitive_text(line)
+
+    assert "y4mCAPABILITY" not in redacted
+    assert "https://public.ch.files.1drv.com/***redacted***" in redacted
+
+
+def test_redact_sensitive_text_redacts_microsoft_graph_share_ids() -> None:
+    """A Graph share ID is the base64 of a sharing link, which may grant access to anyone holding it."""
+    line = (
+        'HTTP Request: GET https://graph.microsoft.com/v1.0/shares/u!aHR0cHM6Ly9jb250b3Nv/driveItem "HTTP/1.1 200 OK"'
+    )
+
+    assert redact_sensitive_text(line) == (
+        'HTTP Request: GET https://graph.microsoft.com/v1.0/shares/***redacted***/driveItem "HTTP/1.1 200 OK"'
+    )
+
+
 @pytest.mark.parametrize(
     "dsn",
     [

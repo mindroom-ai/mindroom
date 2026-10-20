@@ -34,8 +34,7 @@ Microsoft's Work IQ MCP server can read most Microsoft 365 data, but its writes 
   Graph answers a content download with a redirect to a pre-authenticated SharePoint URL until Microsoft retires those URLs on 2027-04-01 (MC1492958), and with the content itself afterwards.
   The client follows the redirect without the bearer token, so the same code works before and after the change.
 - **No credential in logs.**
-  `tempauth` joins the query keys that log redaction removes, because a pre-authenticated download URL grants access to the file on its own.
-  Graph share IDs (`/shares/u!…`) are the base64 of a sharing link, so the Graph client's request log replaces them.
+  Log redaction removes `tempauth` queries, personal OneDrive download paths, and Graph share IDs (`/shares/u!…`, the base64 of a sharing link) from every log line, including httpcore's DEBUG header dumps, because each grants access to a file on its own.
 - **Excel ranges through the files connection.**
   Reading and updating worksheet ranges uses the same `Files.ReadWrite.All` grant, so those functions live in the files toolkit instead of a separate provider that would need its own connection.
 - **Optimistic concurrency for replaces.**
