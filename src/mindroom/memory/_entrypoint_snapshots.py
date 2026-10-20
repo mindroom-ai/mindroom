@@ -54,7 +54,8 @@ def stable_entrypoint_preamble(
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
     ``fresh_text`` is the file's inlined text this turn.
-    A compaction rewrites the replayed history, so the conversation's cache misses after the system prompt anyway.
+    A changed history summary means a compaction rewrote the replayed history; callers ask again with the new summary
+    for the request that carries it, whose cache misses after the system prompt anyway.
     An edited or deleted line loads at once, so a memory the user asked to forget is not shown again.
     Keying by the file keeps one requester's private memory out of another requester's turns.
     """

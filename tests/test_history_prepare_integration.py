@@ -16,6 +16,7 @@ from agno.run.agent import RunOutput
 from agno.session.summary import SessionSummary
 from defusedxml.ElementTree import fromstring
 
+import mindroom.memory._entrypoint_snapshots as entrypoint_snapshots
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
@@ -30,15 +31,17 @@ from mindroom.history.replay import is_compaction_summary
 from mindroom.history.session_context import open_resolved_scope_session_context, resolve_history_scope
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
+    set_force_compaction_state,
     update_scope_seen_event_ids,
 )
 from mindroom.history.summary_input import build_summary_input
-from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.history.types import HistoryScope, HistoryScopeState, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
@@ -860,6 +863,78 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     final_user_message = recording_model.seen_messages[-1]
     assert final_user_message.role == "user"
     assert final_user_message.content == "Current prompt"
+
+
+@pytest.mark.asyncio
+async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Added memory waits for a request whose history changes anyway, so the cached system prompt survives."""
+    monkeypatch.setattr(entrypoint_snapshots, "_snapshots", {})
+    config, runtime_paths = _make_config(tmp_path)
+    config.memory.backend = "file"
+    memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    recording_model = RecordingModel(id="recording-model", provider="fake")
+
+    async def system_prompt_of_turn(prompt: str) -> str:
+        live_agent = _agent(model=recording_model, db=storage)
+        with (
+            open_resolved_scope_session_context(
+                scope=resolve_history_scope(live_agent),
+                agent_name="test_agent",
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            ) as scope_context,
+            patch("mindroom.ai.create_agent", return_value=live_agent),
+        ):
+            prepared_run = await _prepare_agent_and_prompt(
+                make_turn_context("test_agent", session_id="session-1"),
+                prompt=prompt,
+                runtime_paths=runtime_paths,
+                config=config,
+                scope_context=scope_context,
+            )
+            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
+        assert recording_model.seen_messages[0].role == "system"
+        return str(recording_model.seen_messages[0].content)
+
+    assert "Fact one." in await system_prompt_of_turn("First prompt")
+    with memory_path.open("a", encoding="utf-8") as memory_file:
+        memory_file.write("Fact two.\n")
+    assert "Fact two." not in await system_prompt_of_turn("Second prompt")
+
+    session = get_agent_session(storage, "session-1")
+    assert session is not None
+    set_force_compaction_state(
+        session,
+        HistoryScope(kind="agent", scope_id="test_agent"),
+        HistoryScopeState(),
+        force=True,
+    )
+    storage.upsert_session(session)
+    with (
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        compacted_turn = await system_prompt_of_turn("Third prompt")
+    assert "Fact two." in compacted_turn
+    assert any("merged summary" in str(message.content) for message in recording_model.seen_messages)
+
+    with memory_path.open("a", encoding="utf-8") as memory_file:
+        memory_file.write("Fact three.\n")
+    assert await system_prompt_of_turn("Fourth prompt") == compacted_turn
 
 
 @pytest.mark.asyncio

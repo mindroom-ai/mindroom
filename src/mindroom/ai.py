@@ -87,6 +87,7 @@ from mindroom.memory import (
     ConversationRef,
     MemoryPromptParts,
     build_memory_prompt_parts,
+    conversation_entrypoint_preamble,
     strip_user_turn_time_prefix,
 )
 from mindroom.metadata_merge import deep_merge_metadata
@@ -1071,16 +1072,29 @@ def _memory_conversation(
 ) -> ConversationRef | None:
     """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
 
-    A minimal agent reads its memory on demand rather than in its system prompt, and a replay limit moves the history
-    after the system prompt every turn and can drop the agent's own memory writes, so neither has a cache to keep.
+    An authored persona recalls no memory, a minimal agent reads its memory on demand rather than in its system
+    prompt, and a replay limit moves the history after the system prompt every turn and can drop the agent's own
+    memory writes, so none of them has a cache to keep.
     """
-    if ctx.agent_mode == "minimal" or scope_context is None or scope_context.session_id is None:
+    if (
+        ctx.persona is not None
+        or ctx.agent_mode == "minimal"
+        or scope_context is None
+        or scope_context.session_id is None
+    ):
         return None
     history_settings = config.resolve_entity(ctx.entity_label).history_settings
     if history_settings.policy.mode != "all" or history_settings.max_tool_calls_from_history is not None:
         return None
     session = scope_context.session
     return ConversationRef(scope_context.session_id, current_summary_text(session) if session is not None else None)
+
+
+def _turn_enrichment(agent: Agent, ctx: ResponseTurnContext, prompt_parts: MemoryPromptParts) -> str:
+    """Install the turn's memory and enrichment on the agent, and return its transient turn context."""
+    if isinstance(agent, MinimalAgent):
+        return _minimal_turn_enrichment(agent, ctx, prompt_parts.session_preamble, prompt_parts.transient_turn_context)
+    return _standard_turn_enrichment(agent, ctx, prompt_parts.session_preamble, prompt_parts.transient_turn_context)
 
 
 async def _prepare_turn_memory(
@@ -1103,6 +1117,42 @@ async def _prepare_turn_memory(
         execution_identity=execution_identity,
         conversation=conversation,
     )
+
+
+async def _reload_memory_with_compaction(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    scope_context: ScopeSessionContext | None,
+    conversation: ConversationRef | None,
+    sent_preamble: str,
+) -> None:
+    """Send the current MEMORY.md with the compaction this turn's history preparation just made.
+
+    That compaction already changes the request after the system prompt, so reloading here costs nothing, while
+    waiting for the next turn would make it miss the cache on the whole compacted history.
+    """
+    compacted = _memory_conversation(ctx, config, scope_context)
+    context = agent.additional_context
+    if (
+        compacted is None
+        or compacted == conversation
+        or not sent_preamble
+        or not context
+        or sent_preamble not in context
+    ):
+        return
+    fresh = await conversation_entrypoint_preamble(
+        ctx.entity_label,
+        runtime_paths.storage_root,
+        config,
+        runtime_paths,
+        execution_identity,
+        conversation=compacted,
+    )
+    agent.additional_context = context.replace(sent_preamble, fresh, 1)
 
 
 @timed("system_prompt_assembly")
@@ -1180,6 +1230,7 @@ async def _prepare_agent_and_prompt(
         return runtime_model, agent
 
     memory_backend = config.resolve_entity(agent_name).memory_backend
+    memory_conversation = _memory_conversation(ctx, config, scope_context)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None
     if memory_backend == "file":
@@ -1213,7 +1264,7 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         execution_identity,
-                        _memory_conversation(ctx, config, scope_context),
+                        memory_conversation,
                     ),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
@@ -1235,7 +1286,7 @@ async def _prepare_agent_and_prompt(
             config,
             runtime_paths,
             execution_identity,
-            _memory_conversation(ctx, config, scope_context),
+            memory_conversation,
         )
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
@@ -1256,20 +1307,7 @@ async def _prepare_agent_and_prompt(
         shared_scope_storage=scope_context.storage if scope_context is not None else None,
         caller_owned_agent=reusable_agent,
     ):
-        if isinstance(agent, MinimalAgent):
-            transient_turn_context = _minimal_turn_enrichment(
-                agent,
-                ctx,
-                prompt_parts.session_preamble,
-                prompt_parts.transient_turn_context,
-            )
-        else:
-            transient_turn_context = _standard_turn_enrichment(
-                agent,
-                ctx,
-                prompt_parts.session_preamble,
-                prompt_parts.transient_turn_context,
-            )
+        transient_turn_context = _turn_enrichment(agent, ctx, prompt_parts)
 
         prepared_execution = await prepare_agent_execution_context(
             ctx,
@@ -1298,6 +1336,16 @@ async def _prepare_agent_and_prompt(
             current_prompt_is_structured=current_prompt_is_structured,
             include_openai_compat_guidance=include_openai_compat_guidance,
             pipeline_timing=pipeline_timing,
+        )
+        await _reload_memory_with_compaction(
+            agent,
+            ctx,
+            config,
+            runtime_paths,
+            execution_identity,
+            scope_context,
+            memory_conversation,
+            prompt_parts.session_preamble,
         )
         prepared_history = prepared_execution.prepared_history
         if prepared_execution.replay_plan is not None:

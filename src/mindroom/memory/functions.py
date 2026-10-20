@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+    from ._backend import ResolvedMemoryBackend
     from ._entrypoint_snapshots import ConversationRef
     from ._shared import MemoryResult
 
@@ -211,6 +212,53 @@ def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Con
     return "\n".join(part for part in (header, entrypoint.text, truncation_notice) if part)
 
 
+async def _entrypoint_preamble(
+    backend: ResolvedMemoryBackend,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    conversation: ConversationRef | None,
+) -> str:
+    """Render the agent's `MEMORY.md` preamble, or the copy ``conversation`` keeps of it."""
+    # The file backend reads the scoped MEMORY.md from disk; keep it off the
+    # event loop (#1260).
+    entrypoint = await asyncio.to_thread(
+        backend.load_entrypoint_context,
+        agent_name,
+        storage_path,
+        config,
+        execution_identity=execution_identity,
+    )
+    preamble = _render_entrypoint_preamble(entrypoint, config) if entrypoint.text or entrypoint.omitted_lines else ""
+    if conversation is None or entrypoint.source_path is None:
+        return preamble
+    return stable_entrypoint_preamble(
+        agent_name,
+        conversation,
+        entrypoint.source_path,
+        entrypoint.text,
+        preamble,
+        now=time.monotonic(),
+    )
+
+
+async def conversation_entrypoint_preamble(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    conversation: ConversationRef,
+) -> str:
+    """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history summary changed."""
+    backend = resolve_memory_backend(agent_name, config, runtime_paths)
+    if backend is None:
+        return ""
+    return await _entrypoint_preamble(backend, agent_name, storage_path, config, execution_identity, conversation)
+
+
 @timed("system_prompt_assembly.memory_enhancement")
 async def build_memory_prompt_parts(
     prompt: str,
@@ -243,27 +291,14 @@ async def build_memory_prompt_parts(
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
-    session_preamble = ""
-    # The file backend reads the scoped MEMORY.md from disk; keep it off the
-    # event loop (#1260).
-    agent_entrypoint = await asyncio.to_thread(
-        backend.load_entrypoint_context,
+    session_preamble = await _entrypoint_preamble(
+        backend,
         agent_name,
         storage_path,
         config,
-        execution_identity=execution_identity,
+        execution_identity,
+        conversation,
     )
-    if agent_entrypoint.text or agent_entrypoint.omitted_lines:
-        session_preamble = _render_entrypoint_preamble(agent_entrypoint, config)
-    if conversation is not None and agent_entrypoint.source_path is not None:
-        session_preamble = stable_entrypoint_preamble(
-            agent_name,
-            conversation,
-            agent_entrypoint.source_path,
-            agent_entrypoint.text,
-            session_preamble,
-            now=time.monotonic(),
-        )
 
     # The automatic per-turn path must not silently drop the degradation
     # signal: a broken embedder would otherwise look like an agent with no
