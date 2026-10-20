@@ -11,7 +11,7 @@ from agno.agent import Agent
 from agno.exceptions import RetryableModelProviderError
 from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
+from agno.run.agent import RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.tools.function import Function
 
 from mindroom.agent_cli.agno_compat_cli_checkpoint import _install_capture
@@ -334,6 +334,36 @@ async def test_retry_guidance_the_provider_drops_stays_out_of_history(*, stream:
     assert [message.content for message in model.requests[1][0] if message.temporary] == ["Retry with valid JSON."]
     assert [message.content for message in output.messages or [] if message.role == "user"] == [
         "Look up customers 7 and 8",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_events_name_the_deferred_function() -> None:
+    """The chat display renders tool events, so a call_tool call shows as a call of the function it names."""
+
+    def crm_lookup(customer_id: int) -> str:
+        return f"customer {customer_id}"
+
+    model = _ScriptedModel(
+        [
+            ModelResponse(
+                tool_calls=[_call("c1", "call_tool", '{"name": "crm_lookup", "arguments": {"customer_id": 7}}')],
+            ),
+            ModelResponse(content="done"),
+        ],
+    )
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_lookup"}))
+    agent = Agent(name="Assistant", model=model, tools=[crm_lookup], telemetry=False)
+
+    events = [
+        (type(event).__name__, event.tool.tool_name, event.tool.tool_args)
+        async for event in agent.arun("Look up customer 7", stream=True, stream_events=True)
+        if isinstance(event, ToolCallStartedEvent | ToolCallCompletedEvent) and event.tool is not None
+    ]
+
+    assert events == [
+        ("ToolCallStartedEvent", "crm_lookup", {"customer_id": 7}),
+        ("ToolCallCompletedEvent", "crm_lookup", {"customer_id": 7}),
     ]
 
 
