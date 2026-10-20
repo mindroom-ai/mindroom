@@ -20,6 +20,7 @@ from mindroom.custom_tools.microsoft_graph import (
     next_page_token,
     page_path,
     path_segment,
+    time_zone_name,
 )
 from mindroom.oauth.microsoft import outlook_calendar_oauth_provider
 
@@ -55,8 +56,6 @@ _EVENT_SELECT = (
     "id,subject,start,end,isAllDay,location,organizer,attendees,isOnlineMeeting,onlineMeeting,showAs,webLink,"
     "bodyPreview,isOrganizer,responseStatus,isCancelled,type,seriesMasterId"
 )
-# Windows zone names ("W. Europe Standard Time", "UTC-11") and IANA names ("America/New_York").
-_TIME_ZONE = re.compile(r"[A-Za-z][A-Za-z0-9 ._+/-]{0,63}")
 _EMAIL = re.compile(r'[^@\s<>,;"]+@[^@\s<>,;"]+\.[^@\s<>,;"]+')
 _RESPONSE_ACTIONS = {"accept": "accept", "tentative": "tentativelyAccept", "decline": "decline"}
 
@@ -127,13 +126,6 @@ def _local(value: object, field_name: str) -> datetime:
         )
         raise _invalid(msg)
     return moment
-
-
-def _time_zone(value: object) -> str:
-    if not isinstance(value, str) or not _TIME_ZONE.fullmatch(value) or value != value.strip():
-        msg = 'time_zone must be a Windows or IANA time zone name, such as "Pacific Standard Time" or "Europe/Berlin".'
-        raise _invalid(msg)
-    return value
 
 
 def _zoned(moment: datetime, zone: str) -> dict[str, str]:
@@ -496,7 +488,7 @@ class OutlookCalendarTools(Toolkit):
             if start is None or end is None:
                 msg = "start and end are required."
                 raise _invalid(msg)
-            payload: dict[str, Any] = {"subject": _subject(subject), **_times(start, end, _time_zone(time_zone))}
+            payload: dict[str, Any] = {"subject": _subject(subject), **_times(start, end, time_zone_name(time_zone))}
             if invitees := _attendees(attendees):
                 payload["attendees"] = invitees
             if location is not None:
@@ -548,7 +540,7 @@ class OutlookCalendarTools(Toolkit):
 
         def build() -> _GraphRequest:
             changes: dict[str, Any] = {} if subject is None else {"subject": _subject(subject)}
-            changes |= _times(start, end, _time_zone(time_zone))
+            changes |= _times(start, end, time_zone_name(time_zone))
             if location is not None:
                 changes["location"] = {"displayName": _text(location, "location")}
             if body is not None:

@@ -60,6 +60,8 @@ logger = get_logger(__name__)
 
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
 _GRAPH_HOST = "graph.microsoft.com"
+# Windows zone names ("W. Europe Standard Time", "UTC-11") and IANA names ("America/New_York").
+_TIME_ZONE = re.compile(r"[A-Za-z][A-Za-z0-9 ._+/-]{0,63}")
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _CHUNK_BYTES = 1024 * 1024
 _OFFSET = re.compile(r"[0-9]{1,10}")
@@ -95,6 +97,14 @@ def path_segment(value: object, field_name: str) -> str:
         msg = f"{field_name} must be a Microsoft Graph ID."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return quote(value, safe="!:@=")
+
+
+def time_zone_name(value: object) -> str:
+    """Return a model-supplied Windows or IANA time zone name for a Graph `dateTimeTimeZone`."""
+    if not isinstance(value, str) or not _TIME_ZONE.fullmatch(value) or value != value.strip():
+        msg = 'time_zone must be a Windows or IANA time zone name, such as "Pacific Standard Time" or "Europe/Berlin".'
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return value
 
 
 def next_page_token(payload: Mapping[str, Any]) -> str | None:
