@@ -9087,6 +9087,53 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_files",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow replacing and uploading files and writing Excel ranges.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": true,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Search, read, and save OneDrive and SharePoint files and Excel ranges as the connected user",
+      "display_name": "Microsoft OneDrive and SharePoint",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "agent",
+      "function_names": [
+        "microsoft_files_search",
+        "microsoft_files_list_folder",
+        "microsoft_files_get_file",
+        "microsoft_files_download_file",
+        "microsoft_files_replace_file",
+        "microsoft_files_upload_file",
+        "microsoft_files_excel_list_worksheets",
+        "microsoft_files_excel_read_range",
+        "microsoft_files_excel_update_range"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "TbBrandOnedrive",
+      "icon_color": "text-sky-600",
+      "name": "microsoft_files",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [

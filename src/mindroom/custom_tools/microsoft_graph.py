@@ -339,6 +339,11 @@ def graph_session(
         raise MicrosoftGraphError("graph_unreachable", msg, error_type=type(exc).__name__) from None
 
 
+def graph_error_payload(tool_name: str, exc: MicrosoftGraphError) -> str:
+    """Render one Graph error as the tool's JSON payload."""
+    return custom_tool_payload(tool_name, "error", code=exc.code, message=exc.message, **exc.details)
+
+
 def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, object]]) -> str:
     """Run one tool operation and render it, its connect prompt, or its error as the tool's JSON payload."""
     try:
@@ -346,5 +351,5 @@ def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, objec
     except OAuthConnectionRequired as exc:
         return custom_tool_payload(tool_name, "error", **oauth_connection_required_payload(exc))
     except MicrosoftGraphError as exc:
-        return custom_tool_payload(tool_name, "error", code=exc.code, message=exc.message, **exc.details)
+        return graph_error_payload(tool_name, exc)
     return custom_tool_payload(tool_name, "ok", **fields)
