@@ -123,15 +123,12 @@ def resolve_connection_user(
         if is_sender_allowed_for_responder(requester_id, name, None, config, paths, memberships)
     )
     personal_agent_name = agent_name if agent_name in usable else None
-    # A private agent's connections hold only its requester's own credentials; shared ones need explicit authority.
+    # Users manage their own connections on every agent they may use; shared ones need explicit authority.
     managed = tuple(
         name
         for name, agent in config.agents.items()
-        if (agent.private is not None and name in usable)
-        or (
-            agent.private is None
-            and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
-        )
+        if agent.private is None
+        and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
     )
     # With a shared or unset worker scope, every requester runs tools with the same credentials and worker.
     # The gateway runs tools without the agent's instructions, so those agents need an explicit opt-in.

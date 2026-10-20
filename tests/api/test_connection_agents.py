@@ -227,10 +227,11 @@ def test_every_usable_private_agent_is_listed_without_a_named_agent(personal_sna
     )
     snapshot = replace(personal_snapshot, runtime_paths=replace(personal_snapshot.runtime_paths, process_env={}))
     alice = connection_agents.resolve_connection_user(snapshot, "@alice:example.org")
-    assert (alice.agent_names, alice.credential_agent_names, alice.personal_agent_name) == (
+    # Credential management covers only shared agents, so Alice's grant on the private one shows her nothing.
+    assert (alice.visible_agent_names, alice.credential_agent_names, alice.personal_agent_name) == (
         ("personal",),
-        ("personal",),
+        (),
         None,
     )
     bob = connection_agents.resolve_connection_user(snapshot, "@bob:example.org")
-    assert bob.agent_names == bob.credential_agent_names == bob.gateway_agent_names == ("personal", "other")
+    assert bob.visible_agent_names == bob.gateway_agent_names == ("personal", "other")
