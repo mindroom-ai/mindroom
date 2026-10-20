@@ -14249,7 +14249,7 @@ Providers, built in or from plugins, supply only provider-specific details such 
 
 ### Connect An Account
 
-Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/connections-portal/) (opened from MindRoom Chat or signed in through trusted upstream auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
+Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/connections-portal/) (opened from MindRoom Chat or signed in through trusted upstream strict JWT auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
 The API routes are:
 
 | Method | Route | Purpose |
@@ -14438,7 +14438,7 @@ If two Connections tabs, on the Agents or Agent Keys page, are signed in as diff
 A configured allowlist replaces both defaults.
 Its entries are HTTPS origins, HTTP origins on a local address, or `capacitor://localhost`, without a path or wildcard, and one invalid entry disables the whole list.
 A local address is `localhost`, a loopback address, or a private address in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or `fc00::/7`, such as `http://192.168.1.10:8080`; DNS names need HTTPS even when they resolve to a private address.
-Sign-in, connect, and disconnect requests must come from the `MINDROOM_PUBLIC_URL` origin, so Chat's Computers URL must be that origin.
+Sign-in, connect, and disconnect requests must come from MindRoom's own origin, `MINDROOM_PUBLIC_URL` when set and otherwise the address the request was sent to, so Chat's Computers URL must be that origin.
 Over plain HTTP, OAuth providers decide which redirect addresses they accept; Google, for example, accepts plain HTTP only for `localhost`.
 
 ## What The Portal Shows
@@ -14980,7 +14980,7 @@ Do not report or "fix" these; they are deliberate.
 - The Connections portal signs users in either through trusted upstream strict JWT auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
   Under the default list, a portal on a public address accepts that sign-in only while the homeserver binds tokens, because otherwise any backend a user opens from Chat could replay their token to it; a portal on a local address is out of a remote backend's reach, and an explicit list is the operator's choice.
   The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page.
-  It also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
+  Outside hosted platform mode, it also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
   Binding is proven by the homeserver's `/_matrix/client/versions` and a second verification of the token after reading it, so turning binding on or off once during a sign-in cannot promote an unbound token; turning it on and off again within that one sign-in is not covered.
   An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust; with the default list, a page served from any local address can do so for a portal on a local address.
   Over plain HTTP on a local address, the session cookie and the OAuth flow cross that network unencrypted, as the rest of a plain-HTTP stack does.
@@ -19149,7 +19149,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
    The chart refuses both being on at once.
    If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in the same upgrade.
 3. Have users and credential managers enter their keys or connect their accounts on `/connections/egress` or the dashboard.
-   The personal page needs trusted upstream auth with JWT; without it, `user` and `user_agent` agents get no keys until it is enabled or they get a shared worker scope.
+   Users open the personal page from MindRoom Chat or through trusted upstream auth with JWT; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
 4. Verify against real workers: a brokered call succeeds, the request log records it, and `env` and `/proc/self/environ` hold only the placeholder values and the per-call proxy token, never a secret.
    Replaying the proxy URL after the token TTL returns 407.
 5. Delete the Agent Vault bootstrap Secret and PVC after a grace period.

@@ -36,7 +36,7 @@ If two Connections tabs, on the Agents or Agent Keys page, are signed in as diff
 A configured allowlist replaces both defaults.
 Its entries are HTTPS origins, HTTP origins on a local address, or `capacitor://localhost`, without a path or wildcard, and one invalid entry disables the whole list.
 A local address is `localhost`, a loopback address, or a private address in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or `fc00::/7`, such as `http://192.168.1.10:8080`; DNS names need HTTPS even when they resolve to a private address.
-Sign-in, connect, and disconnect requests must come from the `MINDROOM_PUBLIC_URL` origin, so Chat's Computers URL must be that origin.
+Sign-in, connect, and disconnect requests must come from MindRoom's own origin, `MINDROOM_PUBLIC_URL` when set and otherwise the address the request was sent to, so Chat's Computers URL must be that origin.
 Over plain HTTP, OAuth providers decide which redirect addresses they accept; Google, for example, accepts plain HTTP only for `localhost`.
 
 ## What The Portal Shows
