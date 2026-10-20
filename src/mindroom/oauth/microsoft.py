@@ -175,7 +175,8 @@ def microsoft_teams_oauth_provider() -> OAuthProvider:
             "Channel.ReadBasic.All",
             "ChannelMessage.Read.All",
             "ChannelMessage.Send",
-            "Chat.ReadWrite",
+            "Chat.Read",
+            "ChatMessage.Send",
         ),
         status_capabilities=("read and send Teams channel and chat messages",),
     )
