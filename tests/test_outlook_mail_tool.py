@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 MESSAGE_ID = "AAMkAGI2-msg_1="
 ATTACHMENT_ID = "AAMkAGI2-att_1="
 MESSAGE_PATH = f"/v1.0/me/messages/{MESSAGE_ID}"
+GRAPH = "https://graph.microsoft.com/v1.0"
+NEXT_MESSAGES = "/me/messages?$top=25&$skiptoken=page2"
+NEXT_ATTACHMENTS = f"/me/messages/{MESSAGE_ID}/attachments?$skiptoken=page2"
 READ_FUNCTIONS = (
     "outlook_mail_search",
     "outlook_mail_get_message",
@@ -54,6 +57,9 @@ def _message(**overrides: object) -> dict[str, object]:
         "from": {"emailAddress": {"name": "Alex Example", "address": "alex@contoso.com"}},
         "toRecipients": [{"emailAddress": {"name": "Sam Example", "address": "sam@contoso.com"}}],
         "ccRecipients": [{"emailAddress": {"address": "team@contoso.com"}}],
+        "bccRecipients": [{"emailAddress": {"address": "audit@contoso.com"}}],
+        "replyTo": [{"emailAddress": {"name": "Plans Desk", "address": "plans@contoso.com"}}],
+        "parentFolderId": "AAMk-inbox=",
         "receivedDateTime": "2026-10-20T10:00:00Z",
         "sentDateTime": "2026-10-20T09:59:58Z",
         "isRead": False,
@@ -79,8 +85,17 @@ def _attachment(kind: str = "fileAttachment", **overrides: object) -> dict[str, 
     }
 
 
+def _selected(resource: dict[str, object], request: httpx.Request) -> dict[str, object]:
+    """Return only the fields the request's `$select` names, as Graph does."""
+    select = request.url.params.get("$select")
+    if select is None:
+        return resource
+    fields = set(select.split(","))
+    return {key: value for key, value in resource.items() if key in fields or key.startswith("@odata.")}
+
+
 class _Graph:
-    """Answer messages, attachments, and writes; record every request."""
+    """Answer messages, attachments, and writes with the selected fields; record every request."""
 
     def __init__(self) -> None:
         self.message = _message()
@@ -94,16 +109,23 @@ class _Graph:
             return answer
         if request.method in {"POST", "PATCH"}:
             return self.write
-        listing = httpx.Response(200, json={"value": [self.message], "@odata.nextLink": "https://next"})
+        listing = httpx.Response(
+            200,
+            json={"value": [_selected(self.message, request)], "@odata.nextLink": f"{GRAPH}{NEXT_MESSAGES}"},
+        )
+        attachments = [self.attachment, _attachment("itemAttachment", id="item")]
         routes = {
             "/v1.0/me/messages": listing,
             "/v1.0/me/mailFolders/inbox/messages": listing,
-            MESSAGE_PATH: httpx.Response(200, json=self.message),
+            MESSAGE_PATH: httpx.Response(200, json=_selected(self.message, request)),
             f"{MESSAGE_PATH}/attachments": httpx.Response(
                 200,
-                json={"value": [self.attachment, _attachment("itemAttachment", id="item")]},
+                json={"value": [_selected(attachment, request) for attachment in attachments]},
             ),
-            f"{MESSAGE_PATH}/attachments/{ATTACHMENT_ID}": httpx.Response(200, json=self.attachment),
+            f"{MESSAGE_PATH}/attachments/{ATTACHMENT_ID}": httpx.Response(
+                200,
+                json=_selected(self.attachment, request),
+            ),
             f"{MESSAGE_PATH}/attachments/{ATTACHMENT_ID}/$value": httpx.Response(200, content=self.content),
         }
         not_found = httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
@@ -195,6 +217,8 @@ def test_write_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monk
     for name in WRITE_FUNCTIONS:
         assert "Before calling, tell the requester" in _description(tools, name), name
     assert "untrusted" in _description(tools, "outlook_mail_get_message")
+    assert "read the draft with outlook_mail_get_message" in _description(tools, "outlook_mail_send_draft")
+    assert "goes to the original's reply_to addresses when it has them" in _description(tools, "outlook_mail_reply")
 
 
 def test_search_without_a_query_lists_the_newest_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,7 +231,7 @@ def test_search_without_a_query_lists_the_newest_messages(tmp_path: Path, monkey
     assert request.url.params["$orderby"] == "receivedDateTime desc"
     assert request.url.params["$top"] == "25"
     assert "$search" not in request.url.params
-    assert result["more_available"] is True
+    assert result["next_page_token"] == NEXT_MESSAGES
     assert result["messages"] == [
         {
             "id": MESSAGE_ID,
@@ -220,22 +244,64 @@ def test_search_without_a_query_lists_the_newest_messages(tmp_path: Path, monkey
             "is_draft": False,
             "has_attachments": True,
             "conversation_id": "AAQkConv=",
+            "parent_folder_id": "AAMk-inbox=",
             "web_link": "https://outlook.office365.com/owa/?ItemID=AAMk",
             "preview": "Here is the plan",
         },
     ]
 
 
+def test_search_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(tools.outlook_mail_search(query="ignored", folder="inbox", page_token=NEXT_MESSAGES))
+
+    [request] = graph.requests
+    assert (request.method, request.url.path) == ("GET", "/v1.0/me/messages")
+    assert dict(request.url.params) == {"$top": "25", "$skiptoken": "page2"}
+    assert result["next_page_token"] == NEXT_MESSAGES
+
+
+@pytest.mark.parametrize(
+    "page_token",
+    [
+        "/me/events?$skiptoken=abc",
+        f"{GRAPH}{NEXT_MESSAGES}",
+        "/me/messages/../../me/events/messages?x=1",
+        "/me/messagesX?$skiptoken=abc",
+        "/me/messages",
+        "",
+    ],
+)
+def test_search_refuses_a_foreign_page_token_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.outlook_mail_search(page_token=page_token))["code"] == "invalid_page_token"
+    assert graph.requests == []
+
+
 def test_search_quotes_the_query_and_drops_the_sort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    tools.outlook_mail_search(query='from:alex "budget" OR x\\', folder="inbox", limit=5)
+    tools.outlook_mail_search(query=' from:alex subject:"quarterly plan" ', folder="inbox", limit=5)
 
     [request] = graph.requests
     assert request.url.path == "/v1.0/me/mailFolders/inbox/messages"
-    assert request.url.params["$search"] == '"from:alex budget OR x"'
+    assert request.url.params["$search"] == '"from:alex subject:\\"quarterly plan\\""'
     assert "$orderby" not in request.url.params
     assert request.url.params["$top"] == "5"
+
+
+def test_search_escapes_a_backslash_in_the_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    tools.outlook_mail_search(query="C:\\Reports")
+
+    assert graph.requests[0].url.params["$search"] == '"C:\\\\Reports"'
 
 
 def test_search_escapes_a_folder_id_as_one_path_segment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,7 +319,6 @@ def test_search_escapes_a_folder_id_as_one_path_segment(tmp_path: Path, monkeypa
         {"limit": 51},
         {"limit": True},
         {"query": "   "},
-        {"query": '""'},
         {"query": "x" * 1001},
         {"folder": "../inbox"},
         {"folder": "inbox/child"},
@@ -279,10 +344,18 @@ def test_get_message_reads_the_text_body_and_attachments(tmp_path: Path, monkeyp
     get, attachments = graph.requests
     assert unquote(get.url.path) == MESSAGE_PATH
     assert get.headers["prefer"] == 'outlook.body-content-type="text"'
-    assert "body" in get.url.params["$select"].split(",")
+    assert get.url.params["$select"] == (
+        "id,subject,from,toRecipients,receivedDateTime,sentDateTime,isRead,isDraft,hasAttachments,conversationId,"
+        "parentFolderId,webLink,ccRecipients,bccRecipients,replyTo,body"
+    )
     assert unquote(attachments.url.path) == f"{MESSAGE_PATH}/attachments"
     assert attachments.url.params["$select"] == "id,name,size,contentType,isInline"
+    assert message["from"] == "Alex Example <alex@contoso.com>"
+    assert message["reply_to"] == ["Plans Desk <plans@contoso.com>"]
     assert message["cc"] == ["team@contoso.com"]
+    assert message["bcc"] == ["audit@contoso.com"]
+    assert message["parent_folder_id"] == "AAMk-inbox="
+    assert message["attachments_truncated"] is False
     assert message["body"] == "Here is the plan.\nThanks"
     assert message["truncated"] is False
     assert message["attachments"] == [
@@ -303,6 +376,44 @@ def test_get_message_reads_the_text_body_and_attachments(tmp_path: Path, monkeyp
             "type": "item",
         },
     ]
+
+
+def test_get_message_follows_attachment_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mail = _Graph()
+    first = {"value": [_attachment(id="first")], "@odata.nextLink": f"{GRAPH}{NEXT_ATTACHMENTS}"}
+    second = {"value": [_attachment(id="second")]}
+    mail.override = lambda request: (
+        httpx.Response(200, json=second if "$skiptoken" in request.url.params else first)
+        if unquote(request.url.path) == f"{MESSAGE_PATH}/attachments"
+        else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
+
+    assert [attachment["id"] for attachment in message["attachments"]] == ["first", "second"]
+    assert message["attachments_truncated"] is False
+    continued = graph.requests[-1]
+    assert unquote(continued.url.path) == f"{MESSAGE_PATH}/attachments"
+    assert dict(continued.url.params) == {"$skiptoken": "page2"}
+
+
+def test_get_message_stops_listing_attachments_at_the_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mail = _Graph()
+    page = {
+        "value": [_attachment(id=f"a{index}") for index in range(outlook_mail._MAX_ATTACHMENTS)],
+        "@odata.nextLink": f"{GRAPH}{NEXT_ATTACHMENTS}",
+    }
+    mail.override = lambda request: (
+        httpx.Response(200, json=page) if unquote(request.url.path) == f"{MESSAGE_PATH}/attachments" else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
+
+    assert len(message["attachments"]) == outlook_mail._MAX_ATTACHMENTS
+    assert message["attachments_truncated"] is True
+    assert len(graph.requests) == 2
 
 
 def test_get_message_truncates_a_long_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -458,15 +569,21 @@ def test_an_attachment_over_the_inline_limit_is_refused(tmp_path: Path, monkeypa
     assert graph.requests == []
 
 
-def test_attachments_over_the_request_limit_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_attachments_over_the_request_limit_are_refused_before_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _workspace_file(tmp_path, "a.bin", b"x" * (2 * 1024 * 1024))
     _workspace_file(tmp_path, "b.bin", b"x" * (2 * 1024 * 1024))
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+    encoded: list[int] = []
+    monkeypatch.setattr(outlook_mail.base64, "b64encode", lambda content: encoded.append(len(content)) or b"")
 
     result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=["a.bin", "b.bin"]))
 
     assert result["code"] == "too_large"
     assert "OneDrive" in result["message"]
+    assert encoded == []
     assert graph.requests == []
 
 
