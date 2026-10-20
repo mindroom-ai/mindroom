@@ -195,7 +195,7 @@ Updating a task's notes replaces them completely.
 | `microsoft_teams_list_teams` | no | List the teams the requester is a member of, and whether each is archived. |
 | `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see, and whether each is archived. |
 | `microsoft_teams_list_channel_messages` | no | List up to 50 top-level posts of one channel, without their replies, most recently active thread first. |
-| `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post, newest first. |
+| `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
 | `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names, most recent message first. |
 | `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
 | `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
@@ -205,7 +205,8 @@ Updating a task's notes replaces them completely.
 Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
 Channel, chat, and message listings return a `next_page_token` while more results exist; passing it back continues the same listing.
-Sent messages appear under the requester's name and are plain text of up to 28,000 bytes, so HTML in the text is not rendered as formatting.
+Sent messages appear under the requester's name and keep their line breaks, and HTML in the text shows as typed instead of as formatting.
+A sent message holds up to 28,000 bytes once its text is HTML-escaped.
 The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
