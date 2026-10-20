@@ -8,7 +8,6 @@ import pytest
 
 from mindroom.memory import ConversationRef
 from mindroom.memory import _entrypoint_snapshots as snapshots
-from mindroom.memory._shared import MemoryEntrypointContext
 
 MEMORY = Path("/workspace/MEMORY.md")
 
@@ -24,14 +23,15 @@ def _preamble(
     agent: str = "mind",
     session: str = "thread-1",
     summary: str | None = None,
-    path: Path | None = MEMORY,
+    path: Path = MEMORY,
     now: float = 0.0,
 ) -> str:
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text."""
     return snapshots.stable_entrypoint_preamble(
         agent,
         ConversationRef(session, summary),
-        MemoryEntrypointContext(text=text, source_path=path),
+        path,
+        text,
         f"preamble of {text!r}",
         now=now,
     )

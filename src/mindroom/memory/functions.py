@@ -255,11 +255,12 @@ async def build_memory_prompt_parts(
     )
     if agent_entrypoint.text or agent_entrypoint.omitted_lines:
         session_preamble = _render_entrypoint_preamble(agent_entrypoint, config)
-    if conversation is not None:
+    if conversation is not None and agent_entrypoint.source_path is not None:
         session_preamble = stable_entrypoint_preamble(
             agent_name,
             conversation,
-            agent_entrypoint,
+            agent_entrypoint.source_path,
+            agent_entrypoint.text,
             session_preamble,
             now=time.monotonic(),
         )

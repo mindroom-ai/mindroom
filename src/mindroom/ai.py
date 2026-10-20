@@ -1064,9 +1064,20 @@ def _minimal_turn_enrichment(
     )
 
 
-def _memory_conversation(scope_context: ScopeSessionContext | None) -> ConversationRef | None:
-    """Name the conversation whose prompt cache the turn's inlined MEMORY.md keeps warm."""
-    if scope_context is None or scope_context.session_id is None:
+def _memory_conversation(
+    ctx: ResponseTurnContext,
+    config: Config,
+    scope_context: ScopeSessionContext | None,
+) -> ConversationRef | None:
+    """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
+
+    A minimal agent reads its memory on demand rather than in its system prompt, and a replay limit moves the history
+    after the system prompt every turn and can drop the agent's own memory writes, so neither has a cache to keep.
+    """
+    if ctx.agent_mode == "minimal" or scope_context is None or scope_context.session_id is None:
+        return None
+    history_settings = config.resolve_entity(ctx.entity_label).history_settings
+    if history_settings.policy.mode != "all" or history_settings.max_tool_calls_from_history is not None:
         return None
     session = scope_context.session
     return ConversationRef(scope_context.session_id, current_summary_text(session) if session is not None else None)
@@ -1202,7 +1213,7 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         execution_identity,
-                        _memory_conversation(scope_context),
+                        _memory_conversation(ctx, config, scope_context),
                     ),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
@@ -1224,7 +1235,7 @@ async def _prepare_agent_and_prompt(
             config,
             runtime_paths,
             execution_identity,
-            _memory_conversation(scope_context),
+            _memory_conversation(ctx, config, scope_context),
         )
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,

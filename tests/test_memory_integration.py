@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Generator  # noqa: TC003
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.models.ollama import Ollama
+from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 
-from mindroom.ai import ai_response
+from mindroom.ai import _memory_conversation, ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import render_transient_context
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from tests.conftest import make_turn_context
@@ -215,3 +220,25 @@ class TestMemoryIntegration:
 
             # Memory search should have been called
             mock_memory.search.assert_called_with("What is A?", filters={"user_id": "agent_general"}, top_k=3)
+
+
+@pytest.mark.parametrize("history_limit", [{"num_history_runs": 5}, {"max_tool_calls_from_history": 3}])
+def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(history_limit: dict[str, int]) -> None:
+    """A minimal agent reads memory on demand, and a replay limit shifts history after the system prompt each turn."""
+    session = AgentSession(session_id="thread", summary=SessionSummary(summary=" Earlier work. "))
+    scope_context = ScopeSessionContext(
+        scope=HistoryScope("agent", "general"),
+        storage=MagicMock(),
+        session=session,
+        session_id="thread",
+    )
+    ctx = make_turn_context("general", session_id="thread")
+    config = TestMemoryIntegration._config()
+    limited = Config(
+        agents={"general": AgentConfig(display_name="General", **history_limit)},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+    assert _memory_conversation(ctx, config, scope_context) == ConversationRef("thread", "Earlier work.")
+    assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
+    assert _memory_conversation(ctx, limited, scope_context) is None
