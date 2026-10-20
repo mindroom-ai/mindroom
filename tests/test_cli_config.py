@@ -324,7 +324,12 @@ class TestConfigInit:
         assert mind["skill_learning"] == {"enabled": True}
         assert mind["automations"] == ["prompt_curation", "dreaming"]
         assert config["mcp_servers"]["matrix_mcp"]["args"] == ["matrix-mcp", "serve"]
-        assert config["tool_approval"]["rules"] == [{"match": "resolve_thread", "action": "require_approval"}]
+        assert config["tool_approval"]["rules"] == [
+            {"match": "resolve_thread", "action": "require_approval"},
+            {"match": "manage_config", "action": "require_approval"},
+            {"match": "manage_agent", "action": "require_approval"},
+            {"match": "manage_team", "action": "require_approval"},
+        ]
         assert config["background_tool_jobs"] == {"enabled": True}
         config_manager_entry = next(
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
