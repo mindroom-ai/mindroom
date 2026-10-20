@@ -184,7 +184,7 @@ CONTEXT_TRUNCATION_MARKER_TEMPLATE = (
 CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE = "[Truncated - {omitted_chars} chars omitted. Read {title} for the rest.]"
 
 DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Deferred Tools
-These toolkits are available, but the definitions of their functions are not loaded:
+These toolkits are available, but the definitions of their functions are not included:
 <available-deferred-tools>
 {tool_catalog}
 </available-deferred-tools>

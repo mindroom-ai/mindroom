@@ -12,7 +12,7 @@ from agno.tools import Toolkit
 from mindroom.tool_system.tool_schema_cache import processed_function_definition
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from mindroom.tool_system.dynamic_toolkits import DeferredToolkit
 
@@ -80,17 +80,13 @@ class DynamicToolsToolkit(Toolkit):
                     scored.append((score, len(scored), deferred, definition))
         scored.sort(key=lambda item: (-item[0], item[1]))
         matches = scored[: max(1, min(max_results, _MAX_RESULTS_LIMIT))]
-        # One authored entry can expand to several toolkits, so each domain joins its toolkits' instructions.
-        toolkit_instructions: dict[str, dict[str, None]] = {}
-        for _score, _order, deferred, _definition in matches:
-            if deferred.instructions:
-                toolkit_instructions.setdefault(deferred.domain_name, {})[deferred.instructions] = None
-        instructions = {domain: "\n\n".join(texts) for domain, texts in toolkit_instructions.items()}
+        instructions = _domain_instructions(deferred for _score, _order, deferred, _definition in matches)
         payload: dict[str, object] = {
             "matches": [_match(deferred, definition) for _score, _order, deferred, definition in matches],
-            "instructions": instructions,
             "usage": "Call a match with call_tool(name, arguments), passing arguments as a JSON object.",
         }
+        if instructions:
+            payload["instructions"] = instructions
         if not matches:
             payload["message"] = (
                 "No deferred function matched. Try other keywords or a toolkit name from the system prompt, "
@@ -155,6 +151,16 @@ def _within_listing_limit(entries: list[dict[str, str]]) -> list[dict[str, str]]
             break
         listed.append(entry)
     return listed
+
+
+def _domain_instructions(matched: Iterable[DeferredToolkit]) -> dict[str, str]:
+    """Join the instructions of the matched toolkits per authored domain, each text once."""
+    # One authored entry can expand to several toolkits, so each domain joins its toolkits' instructions.
+    texts: dict[str, dict[str, None]] = {}
+    for deferred in matched:
+        if deferred.instructions:
+            texts.setdefault(deferred.domain_name, {})[deferred.instructions] = None
+    return {domain: "\n\n".join(domain_texts) for domain, domain_texts in texts.items()}
 
 
 def _match(deferred: DeferredToolkit, definition: dict[str, Any]) -> dict[str, Any]:

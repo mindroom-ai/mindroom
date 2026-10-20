@@ -1418,7 +1418,7 @@ def test_tool_search_matches_toolkit_names_and_omits_unrelated_toolkits() -> Non
     payload = _tool_payload(toolkit.tool_search("weather"))
 
     assert [match["name"] for match in payload["matches"]] == ["forecast"]
-    assert payload["instructions"] == {}
+    assert "instructions" not in payload
 
 
 def test_tool_search_clamps_max_results() -> None:
