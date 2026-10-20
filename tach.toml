@@ -565,6 +565,7 @@ depends_on = [
 visibility = [
     "mindroom.api.config_lifecycle",
     "mindroom.bot",
+    "mindroom.cli.agent_rename_command",
     "mindroom.cli.agents",
     "mindroom.cli.main",
     "mindroom.commands.config_commands",
@@ -1048,6 +1049,7 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
+    "mindroom.agent_rename.indexes",
     "mindroom.bot",
     "mindroom.handled_turns",
 ]
@@ -3331,6 +3333,8 @@ visibility = [
 path = "mindroom.memory_scope_ids"
 depends_on = []
 visibility = [
+    "mindroom.agent_rename.indexes",
+    "mindroom.agent_rename.memory",
     "mindroom.knowledge.file_memory_knowledge",
     "mindroom.memory._file_backend",
     "mindroom.memory._mem0_backend",
@@ -4774,6 +4778,8 @@ path = "mindroom.cli.agents"
 depends_on = [
     # Mostly deferred imports, so `mindroom --help` does not load the rename engine.
     "mindroom.agent_rename.account_files",
+    "mindroom.agent_rename.config_edit",
+    "mindroom.agent_rename.journal",
     "mindroom.cli.config",
     "mindroom.config.main",
     "mindroom.constants",
@@ -4782,12 +4788,37 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
 ]
+visibility = ["mindroom.cli.agent_rename_command", "mindroom.cli.main"]
+
+[[modules]]
+path = "mindroom.cli.agent_rename_command"
+depends_on = [
+    # Mostly deferred imports, so `mindroom --help` does not load the rename engine.
+    "mindroom.agent_rename.config_edit",
+    "mindroom.agent_rename.entity_files",
+    "mindroom.agent_rename.entity_state",
+    "mindroom.agent_rename.indexes",
+    "mindroom.agent_rename.journal",
+    "mindroom.agent_rename.journal_entity",
+    "mindroom.agent_rename.memory",
+    "mindroom.agent_rename.side_stores",
+    "mindroom.agent_rename.teams",
+    "mindroom.agent_rename.workers",
+    "mindroom.cli.agents",
+    "mindroom.cli.config",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.event_journal.opening",
+    "mindroom.matrix_identifiers",
+    "mindroom.tool_system.worker_routing",
+]
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
     "mindroom.api.auth",
+    "mindroom.cli.agent_rename_command",
     "mindroom.cli.agents",
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
@@ -6762,6 +6793,7 @@ expose = [
     "visible_workspace_roots",
     "written_by_other_workers",
     "worker_dir_name",
+    "worker_key_agent_name",
     "worker_log_id",
     "worker_root_path",
     "worker_scope_allows_shared_only_integrations",
@@ -7567,6 +7599,8 @@ depends_on = [
     "mindroom.tool_jobs.resources",
 ]
 visibility = [
+    "mindroom.agent_rename.side_stores",
+    "mindroom.agent_rename.teams",
     "mindroom.delegation.execution",
     "mindroom.ai",
     "mindroom.ai_runtime",
@@ -8995,7 +9029,7 @@ visibility = [
 [[modules]]
 path = "mindroom.automations.threads"
 depends_on = ["mindroom.constants", "mindroom.path_confinement"]
-visibility = ["mindroom.automations", "mindroom.automations.dreaming", "mindroom.automations.runner", "mindroom.knowledge_graph.ingestion", "mindroom.automations.exploration"]
+visibility = ["mindroom.agent_rename.side_stores", "mindroom.automations", "mindroom.automations.dreaming", "mindroom.automations.runner", "mindroom.knowledge_graph.ingestion", "mindroom.automations.exploration"]
 
 [[modules]]
 path = "mindroom.automations.steps"
@@ -9341,9 +9375,147 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_rename.account_files"
 depends_on = [
+    "mindroom.agent_rename.workers",
     "mindroom.constants",
     "mindroom.desktop.native_config",
     "mindroom.matrix.client_session",
     "mindroom.private_storage.private_instance_identity_store",
     "mindroom.tool_system.worker_routing",
 ]
+
+# Moves the worker roots whose worker keys a rename changes; shared by account and agent renames.
+[[modules]]
+path = "mindroom.agent_rename.workers"
+depends_on = ["mindroom.constants", "mindroom.tool_system.worker_routing"]
+
+# Moves the files keyed by an agent's config name when the agent is renamed.
+[[modules]]
+path = "mindroom.agent_rename.entity_files"
+depends_on = ["mindroom.agent_rename.workers", "mindroom.tool_system.worker_routing"]
+
+# The providers `mindroom agents rename` plans with.
+[[interfaces]]
+expose = ["entity_credential_steps", "rewrite_worker_key_agent", "unknown_worker_reports"]
+from = ["mindroom.agent_rename.entity_files"]
+
+# Moves the tracking records and side stores keyed by an agent's config name when the agent is renamed.
+[[modules]]
+path = "mindroom.agent_rename.side_stores"
+depends_on = [
+    "mindroom.agent_rename.entity_files",
+    "mindroom.agent_rename.workers",
+    "mindroom.automations.threads",
+    "mindroom.constants",
+    "mindroom.delegation.state",
+    "mindroom.dynamic_workflows",
+    "mindroom.history.session_context",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[interfaces]]
+expose = ["entity_file_steps"]
+from = ["mindroom.agent_rename.side_stores"]
+
+# Renames an agent inside an Agno session store; shared by the agent's own stores and its team stores.
+[[modules]]
+path = "mindroom.agent_rename.session_store"
+depends_on = ["mindroom.agent_rename.workers", "mindroom.constants"]
+visibility = ["mindroom.agent_rename.entity_state", "mindroom.agent_rename.teams"]
+
+[[interfaces]]
+expose = ["StoreRename", "database_steps", "rename_session_database"]
+from = ["mindroom.agent_rename.session_store"]
+
+# Moves an agent's state root and renames its session and learning databases and its Matrix account key.
+[[modules]]
+path = "mindroom.agent_rename.entity_state"
+depends_on = [
+    "mindroom.agent_rename.session_store",
+    "mindroom.agent_rename.workers",
+    "mindroom.constants",
+    "mindroom.history.types",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[interfaces]]
+expose = ["entity_state_steps", "matrix_state_key_step"]
+from = ["mindroom.agent_rename.entity_state"]
+
+# Renames the memory scopes naming an agent in mem0's Chroma stores and file memory.
+[[modules]]
+path = "mindroom.agent_rename.memory"
+depends_on = ["mindroom.agent_rename.workers", "mindroom.memory_scope_ids", "mindroom.tool_system.worker_routing"]
+
+[[interfaces]]
+expose = ["memory_steps"]
+from = ["mindroom.agent_rename.memory"]
+
+# Moves the team history scopes that include an agent and renames the agent inside them.
+[[modules]]
+path = "mindroom.agent_rename.teams"
+depends_on = [
+    "mindroom.agent_rename.session_store",
+    "mindroom.agent_rename.workers",
+    "mindroom.constants",
+    "mindroom.history.session_context",
+    "mindroom.history.team_scope",
+    "mindroom.history.types",
+]
+
+[[interfaces]]
+expose = ["renamed_ad_hoc_scope_id", "team_steps"]
+from = ["mindroom.agent_rename.teams"]
+
+# Rewrites the event journal after a server-side account rename; its principal helpers serve the agent rename too.
+[[modules]]
+path = "mindroom.agent_rename.journal"
+depends_on = []
+
+[[interfaces]]
+expose = [
+    "PRINCIPAL_COLUMNS",
+    "format_counts",
+    "journal_account_steps",
+    "other_principal_user_ids",
+    "principal_row_counts",
+    "principal_user_ids",
+]
+from = ["mindroom.agent_rename.journal"]
+
+# Renames an agent's journal principal and every journal value keyed by its config name.
+[[modules]]
+path = "mindroom.agent_rename.journal_entity"
+depends_on = ["mindroom.agent_rename.journal", "mindroom.agent_rename.teams"]
+
+[[interfaces]]
+expose = ["journal_entity_steps"]
+from = ["mindroom.agent_rename.journal_entity"]
+
+# Edits the config, its includes, and its `.env` as text for both rename commands.
+[[modules]]
+path = "mindroom.agent_rename.config_edit"
+depends_on = ["mindroom.config.yaml_includes"]
+
+[[interfaces]]
+expose = ["config_entity_steps", "config_value_steps", "env_value_steps"]
+from = ["mindroom.agent_rename.config_edit"]
+
+# Drops or moves the derived state named after an agent and reports the state its rename leaves as it is.
+[[modules]]
+path = "mindroom.agent_rename.indexes"
+depends_on = [
+    "mindroom.agent_rename.config_edit",
+    "mindroom.agent_rename.workers",
+    "mindroom.config.yaml_includes",
+    "mindroom.constants",
+    "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge_graph.scope",
+    "mindroom.legacy_handled_turns",
+    "mindroom.memory_scope_ids",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[interfaces]]
+expose = ["index_steps"]
+from = ["mindroom.agent_rename.indexes"]

@@ -7,6 +7,7 @@ icon: lucide/user-pen
 `mindroom agents rename-account` moves MindRoom's state over to a new Matrix ID after your homeserver renamed an agent's account in place.
 The agent's name in `config.yaml` does not change.
 Only its Matrix ID does, for example from `@mindroom_atlas:example.org` to `@mindroom_nova:example.org`.
+To rename the agent's key in `config.yaml` instead, and keep its Matrix ID, see [Renaming an Agent](rename-agent.md).
 
 MindRoom keeps credentials, workers, journal rows, and other state under the Matrix ID.
 After a server-side rename it would look for all of them under the new ID and find nothing.

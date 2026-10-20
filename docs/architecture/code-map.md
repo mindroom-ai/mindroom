@@ -156,7 +156,7 @@ Matrix sync callback
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |
-| `agent_rename/` | Reversible, backed-up adoption of an agent's Matrix account after the homeserver renamed it in place: event journal, config values, and the files keyed by the Matrix ID |
+| `agent_rename/` | Reversible, backed-up identity renames on disk: adopting an agent's Matrix account after the homeserver renamed it in place, and renaming an agent's config key with the state keyed by its name |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
@@ -369,7 +369,8 @@ Matrix sync callback
 | `cli/help_format.py` | Help-page panel order, green help theme, and the examples epilog shared by CLI commands |
 | `cli/interactive.py` | Arrow-key prompts and step headers for terminal setup, with line prompts for piped input |
 | `cli/local_stack.py` | Local stack setup command |
-| `cli/agents.py` | `mindroom agents` commands that change an agent's identity on disk |
+| `cli/agents.py` | `mindroom agents rename-account`, and the plan, apply and output helpers both rename commands share |
+| `cli/agent_rename_command.py` | `mindroom agents rename`: renames an agent's config key and carries its state over to the new name |
 | `credentials/sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |

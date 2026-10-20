@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 _AGENT_SCOPE_PREFIX = "agent_"
+_TEAM_SCOPE_PREFIX = "team_"
 
 
 def agent_scope_user_id(agent_name: str) -> str:
@@ -15,3 +16,8 @@ def agent_name_from_scope_user_id(scope_user_id: str) -> str | None:
     if scope_user_id.startswith(_AGENT_SCOPE_PREFIX):
         return scope_user_id[len(_AGENT_SCOPE_PREFIX) :]
     return None
+
+
+def build_team_user_id(agent_names: list[str]) -> str:
+    """Create a stable team scope user ID from a set of agent names."""
+    return f"{_TEAM_SCOPE_PREFIX}{'+'.join(sorted(agent_names))}"

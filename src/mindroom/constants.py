@@ -1146,6 +1146,8 @@ MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
 MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
+# Agno session_state key listing the history scope keys queued to compact before their next run.
+PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"

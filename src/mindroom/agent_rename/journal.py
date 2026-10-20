@@ -4,6 +4,7 @@ The journal keys each bot's state by its principal, ``<agent>@<Matrix ID>``, and
 After the server rename, every event the server re-delivers carries the new ID.
 A stored sender that differs from the re-delivered one fails ingestion with ``IngestionBatchIntegrityError``,
 so the journal must hold the new ID everywhere the server now shows it.
+Renaming an agent's config name rewrites the journal too (``journal_entity.py``), with the principal helpers here.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from mindroom.agent_rename.steps import RenameRefusedError, SqliteEdit
 if TYPE_CHECKING:
     from pathlib import Path
 
-_PRINCIPAL_COLUMNS = frozenset({"principal_id", "responder_principal_id"})
+PRINCIPAL_COLUMNS = frozenset({"principal_id", "responder_principal_id"})
 # Rows for replies MindRoom already sent to Matrix; discarding them would lose track of messages in the rooms.
 _SENT_REPLY_TABLES = ("reply_messages", "matrix_delivery_outbox")
 # Grants hash the old principal into their scope key, so a renamed grant could never match again.
@@ -66,8 +67,8 @@ def journal_account_steps(
     try:
         with read_only_connection(database) as connection:
             columns = text_columns(connection)
-            old_rows = _principal_row_counts(connection, columns, old_principal)
-            new_rows = _principal_row_counts(connection, columns, new_principal)
+            old_rows = principal_row_counts(connection, columns, old_principal)
+            new_rows = principal_row_counts(connection, columns, new_principal)
             old_cells = [] if old_rows else _cells_holding(connection, columns, old_user_id)
     except (sqlite3.Error, OSError) as exc:
         msg = f"Cannot read the event journal {database}: {exc}"
@@ -82,10 +83,10 @@ def journal_account_steps(
         )
         kept = {table: count for table, count in new_rows.items() if new_device_kept and table in _SYNC_STREAM_TABLES}
         discarded = {table: count for table, count in new_rows.items() if table not in kept}
-        deletion = f"delete the rows already under {new_principal} ({_format_counts(discarded)}), " if discarded else ""
+        deletion = f"delete the rows already under {new_principal} ({format_counts(discarded)}), " if discarded else ""
         stream = (
             f"drop the sync stream state of {old_principal} and keep that of {new_principal} "
-            f"({_format_counts(kept)}), whose device continues that stream"
+            f"({format_counts(kept)}), whose device continues that stream"
             if kept
             else "drop the principal's sync stream state, so the next start binds a fresh stream"
         )
@@ -100,7 +101,7 @@ def journal_account_steps(
             f"{old_principal} has no rows, so the rows of {new_principal} stay"
         )
     else:
-        kept = f"; its rows for {new_principal} ({_format_counts(new_rows)}) are kept" if new_rows else ""
+        kept = f"; its rows for {new_principal} ({format_counts(new_rows)}) are kept" if new_rows else ""
         return [], [f"The event journal {database} has no rows for {old_principal}, so it stays as it is{kept}."]
     edit = partial(
         _rewrite,
@@ -122,6 +123,14 @@ def other_principal_user_ids(database: Path, *, agent: str, user_id: str) -> dic
     holds state from before the stored account took ``user_id``.
     A journal that was never created holds none.
     """
+    return {other: counts for other, counts in principal_user_ids(database, agent=agent).items() if other != user_id}
+
+
+def principal_user_ids(database: Path, *, agent: str) -> dict[str, str]:
+    """Return every Matrix ID that ``agent``'s journal principals ``<agent>@<Matrix ID>`` name, with their row counts.
+
+    A journal that was never created holds none.
+    """
     if not database.exists():
         return {}
     prefix = f"{agent}@"
@@ -131,16 +140,15 @@ def other_principal_user_ids(database: Path, *, agent: str, user_id: str) -> dic
             principals: set[str] = set()
             for table, names in columns.items():
                 for column in names:
-                    if column not in _PRINCIPAL_COLUMNS:
+                    if column not in PRINCIPAL_COLUMNS:
                         continue
                     quoted = quote_identifier(column)
                     # substr instead of LIKE: `_` in an agent name is a LIKE wildcard.
                     query = f"SELECT DISTINCT {quoted} FROM {quote_identifier(table)} WHERE substr({quoted}, 1, ?) = ?"  # noqa: S608 - quoted schema identifiers
                     principals.update(principal for (principal,) in connection.execute(query, (len(prefix), prefix)))
             return {
-                principal.removeprefix(prefix): _format_counts(_principal_row_counts(connection, columns, principal))
+                principal.removeprefix(prefix): format_counts(principal_row_counts(connection, columns, principal))
                 for principal in sorted(principals)
-                if principal != f"{prefix}{user_id}"
             }
     except (sqlite3.Error, OSError) as exc:
         msg = f"Cannot read the event journal {database}: {exc}"
@@ -165,10 +173,10 @@ def _holds_user_id(quoted_column: str) -> str:
 
 def _principal_match(columns: tuple[str, ...]) -> str:
     """Return a condition matching rows whose principal columns name ``:principal``, or ``""`` if there are none."""
-    return " OR ".join(f"{quote_identifier(column)} = :principal" for column in columns if column in _PRINCIPAL_COLUMNS)
+    return " OR ".join(f"{quote_identifier(column)} = :principal" for column in columns if column in PRINCIPAL_COLUMNS)
 
 
-def _principal_row_counts(
+def principal_row_counts(
     connection: sqlite3.Connection,
     columns: dict[str, tuple[str, ...]],
     principal: str,
@@ -186,7 +194,8 @@ def _principal_row_counts(
     return counts
 
 
-def _format_counts(counts: dict[str, int]) -> str:
+def format_counts(counts: dict[str, int]) -> str:
+    """Return per-table row counts as ``table: count`` pairs in table order."""
     return ", ".join(f"{table}: {count}" for table, count in sorted(counts.items()))
 
 
@@ -205,8 +214,8 @@ def _refuse_new_principal_rows(
     if not new_counts:
         return
     both = (
-        f"The event journal has rows for both {old_principal} ({_format_counts(old_counts)}) "
-        f"and {new_principal} ({_format_counts(new_counts)}), "
+        f"The event journal has rows for both {old_principal} ({format_counts(old_counts)}) "
+        f"and {new_principal} ({format_counts(new_counts)}), "
         "because MindRoom ran under the new ID before the journal was moved"
     )
     if any(table in new_counts for table in _SENT_REPLY_TABLES):
@@ -246,7 +255,7 @@ def _rewrite(
     """
     _register_matchers(connection)
     columns = text_columns(connection)
-    old_rows = _principal_row_counts(connection, columns, old_principal)
+    old_rows = principal_row_counts(connection, columns, old_principal)
     if bool(old_rows) != move_principal:
         # Never decide about deleting the new principal's rows on a journal the plan did not see.
         change = "no longer has" if move_principal else "now has"
@@ -256,7 +265,7 @@ def _rewrite(
         )
         raise RenameRefusedError(msg)
     if move_principal:
-        new_rows = _principal_row_counts(connection, columns, new_principal)
+        new_rows = principal_row_counts(connection, columns, new_principal)
         _refuse_new_principal_rows(
             old_rows,
             new_rows,
@@ -309,7 +318,7 @@ def _replace_identity(
     for table, table_columns in columns.items():
         for column in table_columns:
             quoted_table, quoted = quote_identifier(table), quote_identifier(column)
-            if column in _PRINCIPAL_COLUMNS:
+            if column in PRINCIPAL_COLUMNS:
                 renames.append(f"UPDATE {quoted_table} SET {quoted} = :new_principal WHERE {quoted} = :old_principal")  # noqa: S608 - quoted schema identifiers
             else:
                 # A row whose rewrite would collide keeps the old ID, and the leftover check refuses it.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import signal
 import sqlite3
 from contextlib import closing
@@ -16,6 +17,7 @@ import pytest
 from mindroom.agent_rename import steps as steps_module
 from mindroom.agent_rename.steps import (
     ApplyResult,
+    DirectoryEdit,
     DropPath,
     FileRewrite,
     FinalAction,
@@ -24,6 +26,7 @@ from mindroom.agent_rename.steps import (
     RenamePlan,
     RenameRefusedError,
     RenameUndoError,
+    RetargetLink,
     SqliteEdit,
     apply_plan,
 )
@@ -554,3 +557,266 @@ def test_describe_leaves_the_filesystem_untouched(tmp_path: Path) -> None:
     _four_step_plan(storage).describe()
 
     assert tree_snapshot(tmp_path) == before
+
+
+def _make_store(storage: Path) -> Path:
+    store = storage / "agents" / "old" / "store"
+    (store / "segment").mkdir(parents=True)
+    (store / "index.txt").write_text("user_id=@old:x")
+    (store / "segment" / "data.bin").write_bytes(b"vectors")
+    store.chmod(0o750)
+    return store
+
+
+def _rewrite_store(directory: Path) -> None:
+    (directory / "index.txt").write_text("user_id=@new:x")
+    (directory / "segment" / "added.bin").write_bytes(b"new")
+
+
+def test_directory_edit_swaps_in_an_edited_copy_and_keeps_a_backup(tmp_path: Path) -> None:
+    """The edit runs on a copy that replaces the directory; the backup holds the original and the manifest names it."""
+    storage = _make_storage(tmp_path)
+    store = _make_store(storage)
+    edited: list[Path] = []
+
+    def record_and_rewrite(directory: Path) -> None:
+        edited.append(directory)
+        _rewrite_store(directory)
+
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(DirectoryEdit(store, record_and_rewrite, "edit store"),),
+        reports=(),
+    )
+
+    result = apply_plan(plan, kind="rename", now=NOW)
+
+    # The edit ran on a copy in a scratch directory beside the store, never on the store itself.
+    assert len(edited) == 1
+    assert edited[0] != store
+    assert edited[0].name == store.name
+    assert edited[0].parent.parent == store.parent
+    assert tree_snapshot(store) == {
+        "segment": "dir",
+        "index.txt": b"user_id=@new:x",
+        "segment/data.bin": b"vectors",
+        "segment/added.bin": b"new",
+    }
+    assert store.stat().st_mode & 0o777 == 0o750
+    assert tree_snapshot(result.backup_dir / "000" / "store") == {
+        "segment": "dir",
+        "index.txt": b"user_id=@old:x",
+        "segment/data.bin": b"vectors",
+    }
+    assert sorted(path.name for path in store.parent.iterdir()) == ["state.txt", "store"]
+    assert json.loads((result.backup_dir / "manifest.json").read_text())["steps"] == [
+        {
+            "type": "DirectoryEdit",
+            "description": "edit store",
+            "source": str(store),
+            "destination": None,
+            "backup": str(result.backup_dir / "000"),
+        },
+    ]
+
+
+def test_failing_directory_edit_changes_nothing(tmp_path: Path) -> None:
+    """An edit that fails halfway leaves the directory as it was and no copy beside it."""
+    storage = _make_storage(tmp_path)
+    store = _make_store(storage)
+    original = tree_snapshot(storage)
+
+    def rewrite_then_fail(directory: Path) -> None:
+        _rewrite_store(directory)
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(
+            MovePath(storage / "accounts.json", storage / "moved.json", "move accounts"),
+            DirectoryEdit(store, rewrite_then_fail, "edit store"),
+        ),
+        reports=(),
+    )
+
+    with pytest.raises(RenameApplyError, match="edit store"):
+        apply_plan(plan, kind="rename", now=NOW)
+
+    assert _without_backups(tree_snapshot(storage)) == original
+    assert store.stat().st_mode & 0o777 == 0o750
+
+
+def test_directory_edit_is_undone_when_a_later_step_fails(tmp_path: Path) -> None:
+    """Undo puts the backup copy back in the directory's place, with its mode."""
+    storage = _make_storage(tmp_path)
+    store = _make_store(storage)
+    original = tree_snapshot(storage)
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(
+            DirectoryEdit(store, _rewrite_store, "edit store"),
+            FileRewrite(storage / "accounts.json", _fail_rewrite, "rewrite accounts"),
+        ),
+        reports=(),
+    )
+
+    with pytest.raises(RenameApplyError, match="rewrite accounts"):
+        apply_plan(plan, kind="rename", now=NOW)
+
+    assert _without_backups(tree_snapshot(storage)) == original
+    assert store.stat().st_mode & 0o777 == 0o750
+
+
+def test_interrupt_after_the_directory_swap_cannot_split_the_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C while the replaced original is removed neither keeps the edit with earlier steps undone nor loses it.
+
+    The swap commits the edit, so the plan must go on recording it as done.
+    """
+    storage = _make_storage(tmp_path)
+    store = _make_store(storage)
+    remove_tree = shutil.rmtree
+
+    def ctrl_c_while_removing_the_original(path: Path, *args: object, **kwargs: object) -> None:
+        # A Ctrl-C raises KeyboardInterrupt in the main thread unless SIGINT is ignored.
+        if (Path(path) / "store.replaced").exists() and signal.getsignal(signal.SIGINT) is not signal.SIG_IGN:
+            raise KeyboardInterrupt
+        remove_tree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(steps_module.shutil, "rmtree", ctrl_c_while_removing_the_original)
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(
+            MovePath(storage / "accounts.json", storage / "moved.json", "move accounts"),
+            DirectoryEdit(store, _rewrite_store, "edit store"),
+        ),
+        reports=(),
+    )
+
+    interrupted = False
+    try:
+        apply_plan(plan, kind="rename", now=NOW)
+    except KeyboardInterrupt:
+        interrupted = True
+
+    assert (interrupted, (storage / "moved.json").exists(), (store / "index.txt").read_text()) == (
+        False,
+        True,
+        "user_id=@new:x",
+    )
+    assert sorted(path.name for path in store.parent.iterdir()) == ["state.txt", "store"]
+
+
+def test_interrupt_after_the_link_is_replaced_cannot_split_the_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C while the scratch directory beside a retargeted link is removed keeps the plan recording the step."""
+    storage = _make_storage(tmp_path)
+    link = storage / "agents" / "alias"
+    link.symlink_to("old")
+    (storage / "agents" / "new").mkdir()
+    remove_tree = shutil.rmtree
+
+    def ctrl_c_while_removing_the_scratch(path: Path, *args: object, **kwargs: object) -> None:
+        # A Ctrl-C raises KeyboardInterrupt in the main thread unless SIGINT is ignored.
+        scratch = Path(path)
+        if (
+            scratch.name.startswith(".alias.")
+            and scratch.exists()
+            and signal.getsignal(signal.SIGINT) is not signal.SIG_IGN
+        ):
+            raise KeyboardInterrupt
+        remove_tree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(steps_module.shutil, "rmtree", ctrl_c_while_removing_the_scratch)
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(
+            MovePath(storage / "accounts.json", storage / "moved.json", "move accounts"),
+            RetargetLink(link, "old", "new", "retarget alias"),
+        ),
+        reports=(),
+    )
+
+    interrupted = False
+    try:
+        apply_plan(plan, kind="rename", now=NOW)
+    except KeyboardInterrupt:
+        interrupted = True
+
+    assert (interrupted, (storage / "moved.json").exists(), str(link.readlink())) == (False, True, "new")
+
+
+def test_retarget_link_points_the_link_elsewhere_and_records_both_targets(tmp_path: Path) -> None:
+    """The link is replaced by one with the new text, and the manifest names the link with its old and new text."""
+    storage = _make_storage(tmp_path)
+    link = storage / "agents" / "alias"
+    link.symlink_to("old")
+    (storage / "agents" / "new").mkdir()
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(RetargetLink(link, "old", "new", "retarget alias"),),
+        reports=(),
+    )
+
+    result = apply_plan(plan, kind="rename", now=NOW)
+
+    assert link.readlink().as_posix() == "new"
+    assert sorted(path.name for path in link.parent.iterdir()) == ["alias", "new", "old"]
+    assert json.loads((result.backup_dir / "manifest.json").read_text())["steps"] == [
+        {
+            "type": "RetargetLink",
+            "description": "retarget alias",
+            "source": str(link),
+            "destination": None,
+            "backup": None,
+            "old_target": "old",
+            "new_target": "new",
+        },
+    ]
+
+
+def test_retarget_link_is_undone_when_a_later_step_fails(tmp_path: Path) -> None:
+    """Undo puts the original link text back."""
+    storage = _make_storage(tmp_path)
+    (storage / "agents" / "alias").symlink_to("old")
+    original = tree_snapshot(storage)
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(
+            RetargetLink(storage / "agents" / "alias", "old", "new", "retarget alias"),
+            FileRewrite(storage / "accounts.json", _fail_rewrite, "rewrite accounts"),
+        ),
+        reports=(),
+    )
+
+    with pytest.raises(RenameApplyError, match="rewrite accounts"):
+        apply_plan(plan, kind="rename", now=NOW)
+
+    assert _without_backups(tree_snapshot(storage)) == original
+
+
+@pytest.mark.parametrize("current", ["other", "file", "missing"])
+def test_retarget_link_refuses_a_link_that_changed_since_planning(tmp_path: Path, current: str) -> None:
+    """A path that is no longer a link with the planned text refuses the step and is left as it is."""
+    storage = _make_storage(tmp_path)
+    link = storage / "agents" / "alias"
+    if current == "other":
+        link.symlink_to("other")
+    elif current == "file":
+        link.write_text("not a link")
+    before = tree_snapshot(storage)
+    plan = RenamePlan(
+        storage_root=storage,
+        steps=(RetargetLink(link, "old", "new", "retarget alias"),),
+        reports=(),
+    )
+
+    with pytest.raises(RenameRefusedError, match="changed since the rename was planned"):
+        apply_plan(plan, kind="rename", now=NOW)
+
+    assert _without_backups(tree_snapshot(storage)) == before

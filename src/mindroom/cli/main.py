@@ -16,6 +16,7 @@ from rich.markup import escape
 
 from mindroom.constants import ensure_writable_config_path
 
+from .agent_rename_command import rename
 from .agents import rename_account
 from .api import is_loopback_host
 from .banner import make_banner
@@ -89,6 +90,13 @@ avatars_app = typer.Typer(help="Generate and sync agent, room, and space avatars
 threads_app = typer.Typer(help="Export Matrix threads to searchable files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
 agents_app = typer.Typer(help="Manage agents.")
+agents_app.command(
+    "rename",
+    epilog=examples(
+        ("mindroom agents rename atlas nova", "Show the plan"),
+        ("mindroom agents rename atlas nova --apply", "Apply it"),
+    ),
+)(rename)
 agents_app.command(
     "rename-account",
     epilog=examples(

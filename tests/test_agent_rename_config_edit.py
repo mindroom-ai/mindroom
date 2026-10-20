@@ -95,7 +95,7 @@ def test_plain_scalar_that_needs_quoting_is_written_double_quoted(tmp_path: Path
     _edit(config, old="old", new=new)
 
     document = config_edit._compose(config.read_text())
-    assert [(node.value, node.style) for node, _ in config_edit._walk(document) if node.value == new] == [
+    assert [(node.value, node.style) for node, _, _ in config_edit._occurrences(document, ()) if node.value == new] == [
         (new, '"'),
         (new, '"'),
         (new, '"'),
@@ -169,6 +169,20 @@ def test_leaves_substrings_and_keys_alone(tmp_path: Path) -> None:
     _edit(config)
 
     assert config.read_text() == text + "  value: '@new:example.org'\n"
+
+
+def test_mapping_key_reused_as_a_value_through_an_alias_refuses(tmp_path: Path) -> None:
+    """Keys are never edited, so a key that an alias also uses as a value refuses instead of being rewritten."""
+    config = _write(tmp_path / "config.yaml", "map:\n  &k '@old:example.org': 1\nother: *k\n")
+    before = tree_snapshot(tmp_path)
+
+    with pytest.raises(
+        RenameRefusedError,
+        match=r"config\.yaml \(line 2\) is used both as a mapping key and as a value",
+    ):
+        config_value_steps(config, old_value=OLD, new_value=NEW)
+
+    assert tree_snapshot(tmp_path) == before
 
 
 def test_no_occurrence_means_no_step(tmp_path: Path) -> None:
@@ -247,7 +261,7 @@ def test_verification_failure_refuses_at_plan_time_and_at_apply(
     """A rewrite whose reparse differs from the intended edit is refused when planning and again when applying."""
     config = _write(tmp_path / "config.yaml", "owner: '@old:example.org'\n")
     steps = config_value_steps(config, old_value=OLD, new_value=NEW)
-    monkeypatch.setattr(config_edit, "_render_scalar", lambda _value, _style: "'@wrong:example.org'")
+    monkeypatch.setattr(config_edit, "_render_scalar", lambda *_args, **_kwargs: "'@wrong:example.org'")
 
     with pytest.raises(RenameRefusedError, match=r"Config edit could not be verified in .*config\.yaml"):
         config_value_steps(config, old_value=OLD, new_value=NEW)
@@ -263,7 +277,7 @@ def test_verification_failure_leaves_the_disk_untouched_when_applying(
     config = _write(tmp_path / "config.yaml", "owner: '@old:example.org'\n")
     steps = config_value_steps(config, old_value=OLD, new_value=NEW)
     before = tree_snapshot(tmp_path)
-    monkeypatch.setattr(config_edit, "_render_scalar", lambda _value, _style: "[broken")
+    monkeypatch.setattr(config_edit, "_render_scalar", lambda *_args, **_kwargs: "[broken")
 
     with pytest.raises(RenameRefusedError, match="could not be verified"):
         _apply(steps, tmp_path / "storage")

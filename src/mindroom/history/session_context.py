@@ -39,7 +39,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-_TEAM_STATE_ROOT_DIRNAME = "teams"
+# The directory of the storage root that holds one state root per team history scope.
+TEAM_STATE_ROOT_DIRNAME = "teams"
 
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 
@@ -222,7 +223,7 @@ def create_scope_session_storage(
             execution_identity=execution_identity,
         )
 
-    storage_name = _scope_session_storage_name(scope)
+    storage_name = scope_session_storage_name(scope)
     return create_state_storage(
         storage_name=storage_name,
         state_root=resolve_session_state_root(
@@ -289,7 +290,8 @@ def close_team_runtime_state_dbs(
     )
 
 
-def _scope_session_storage_name(scope: HistoryScope) -> str:
+def scope_session_storage_name(scope: HistoryScope) -> str:
+    """Return the name of a scope's session store: its state root, database file and table prefix."""
     if scope.kind == "agent":
         return scope.scope_id
     normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
@@ -302,7 +304,7 @@ def _team_scope_state_root(
     storage_name: str,
     runtime_paths: RuntimePaths,
 ) -> Path:
-    return runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name
+    return runtime_paths.storage_root / TEAM_STATE_ROOT_DIRNAME / storage_name
 
 
 def ad_hoc_team_agent_names(agents: list[Agent]) -> tuple[str, ...]:

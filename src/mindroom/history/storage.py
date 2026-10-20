@@ -43,6 +43,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+    PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY,
 )
 from mindroom.history import summary_rows
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
@@ -67,7 +68,6 @@ if TYPE_CHECKING:
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
-_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 
 
 async def record_summary_usage(
@@ -185,7 +185,7 @@ def add_pending_force_compaction_scope(
     scope_keys = _pending_scope_keys(next_session_state)
     if scope.key not in scope_keys:
         scope_keys.append(scope.key)
-    next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
+    next_session_state[PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
     return next_session_state
 
 
@@ -201,9 +201,9 @@ def consume_pending_force_compaction_scope(
     remaining_scope_keys = [scope_key for scope_key in scope_keys if scope_key != scope.key]
     next_session_state = dict(session_state)
     if remaining_scope_keys:
-        next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = remaining_scope_keys
+        next_session_state[PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = remaining_scope_keys
     else:
-        next_session_state.pop(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY, None)
+        next_session_state.pop(PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY, None)
 
     next_session_data = dict(session.session_data or {})
     if next_session_state:
@@ -260,7 +260,7 @@ def _session_state(session: AgentSession | TeamSession) -> dict[str, object] | N
 
 def _pending_scope_keys(session_state: dict[str, object] | None) -> list[str]:
     """Return the scopes with a queued next-run compaction request."""
-    raw_scope_keys = session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY) if session_state else None
+    raw_scope_keys = session_state.get(PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY) if session_state else None
     if not isinstance(raw_scope_keys, list):
         return []
     return [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]

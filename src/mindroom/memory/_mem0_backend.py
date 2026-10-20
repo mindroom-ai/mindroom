@@ -14,14 +14,13 @@ from mindroom.embeddings.embedder_health import (
 from mindroom.embeddings.errors import EmbedderRequestError, classified_embedder_error
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage, record_system_usage
 from mindroom.logging_config import get_logger
-from mindroom.memory_scope_ids import agent_scope_user_id
+from mindroom.memory_scope_ids import agent_scope_user_id, build_team_user_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.timing import timed
 
 from ._mem0_usage import counted_mem0_usage, mem0_usage_run
 from ._policy import (
     allowed_scope_storage_paths,
-    build_team_user_id,
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,

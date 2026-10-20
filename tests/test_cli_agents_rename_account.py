@@ -629,7 +629,7 @@ def test_from_must_match_a_stored_account_not_yet_renamed(
 
 def _commit_journal_step_only(runtime_paths: RuntimePaths, *, stored_user_id: str, discard: bool) -> None:
     """Leave the install the way a run killed right after its journal step does: journal moved, nothing else."""
-    config = cli_agents._load_config_or_exit(runtime_paths)
+    config = cli_agents.load_config_or_exit(runtime_paths)
     adoption = cli_agents._Adoption(AGENT, OLD, NEW, stored_user_id, PASSWORD)
     journal_step = cli_agents._plan(runtime_paths, config, adoption, discard_new_principal=discard).steps[0]
     assert journal_step.description.startswith("Rewrite the event journal")

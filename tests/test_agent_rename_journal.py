@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from mindroom.agent_rename.journal import journal_account_steps, other_principal_user_ids
+from mindroom.agent_rename.journal import journal_account_steps, other_principal_user_ids, principal_user_ids
 from mindroom.agent_rename.steps import RenamePlan, RenameRefusedError, SqliteEdit, apply_plan
 from mindroom.event_journal import (
     DepartureSource,
@@ -702,6 +702,27 @@ async def test_other_principal_user_ids_lists_ids_the_agent_was_keyed_by(tmp_pat
     }
     assert tree_snapshot(tmp_path) == before
     assert other_principal_user_ids(event_journal_sqlite_path(tmp_path / "none"), agent=AGENT, user_id=NEW) == {}
+
+
+@pytest.mark.asyncio
+async def test_principal_user_ids_lists_every_id_the_agent_is_keyed_by(tmp_path: Path) -> None:
+    """Every principal of the agent is listed by its ID with row counts; agents matching only as a pattern are not."""
+    database = await _journal(tmp_path)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        _event(connection, NEW_PRINCIPAL, "$after-rename", sender=NEW)
+        _event(connection, "hXrry@@other:x", "$other-agent", sender="@other:x")
+    before = tree_snapshot(tmp_path)
+
+    found = principal_user_ids(database, agent=AGENT)
+
+    assert found == {
+        NEW: "journal_events: 1",
+        OLD: "approval_grant_cards: 1, approval_grants: 2, journal_events: 1, matrix_delivery_outbox: 1, "
+        "matrix_sync_consumers: 1, room_member_joins: 1",
+    }
+    assert principal_user_ids(database, agent="h_rry") == {}
+    assert tree_snapshot(tmp_path) == before
+    assert principal_user_ids(event_journal_sqlite_path(tmp_path / "none"), agent=AGENT) == {}
 
 
 def _drop_principal(database: Path, principal: str) -> None:

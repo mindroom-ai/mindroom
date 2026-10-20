@@ -114,6 +114,7 @@ nav = [
     { "Approved Egress" = "deployment/approved-egress.md" },
     { "Trusted Upstream Auth" = "deployment/trusted-upstream-auth.md" },
     { "Data Storage & Journal" = "deployment/storage.md" },
+    { "Rename Agent" = "deployment/rename-agent.md" },
     { "Rename Agent Account" = "deployment/rename-agent-account.md" },
     { "Config Bundles" = "deployment/config-bundles.md" },
     { "Logs & Monitoring" = "deployment/operational-log-events.md" },

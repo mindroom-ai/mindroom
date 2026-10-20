@@ -125,9 +125,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 # Keep synchronized with todo_poke._SAFE_ASSIGNEE_PATTERN without importing runtime tools into config.
-_AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 # "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
-_RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
+RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config", "skill_manage"},
 )
@@ -677,9 +677,9 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:
         """Ensure agent and team names contain only alphanumeric characters and underscores."""
-        invalid_agents = [name for name in self.agents if not _AGENT_NAME_PATTERN.fullmatch(name)]
-        invalid_teams = [name for name in self.teams if not _AGENT_NAME_PATTERN.fullmatch(name)]
-        invalid_mcp_servers = [name for name in self.mcp_servers if not _AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_agents = [name for name in self.agents if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_teams = [name for name in self.teams if not AGENT_NAME_PATTERN.fullmatch(name)]
+        invalid_mcp_servers = [name for name in self.mcp_servers if not AGENT_NAME_PATTERN.fullmatch(name)]
         invalid = sorted(invalid_agents + invalid_teams + invalid_mcp_servers)
         if invalid:
             msg = f"Agent, team, and MCP server names must be alphanumeric/underscore only, got: {', '.join(invalid)}"
@@ -688,7 +688,7 @@ class Config(BaseModel):
         if overlapping_names:
             msg = f"Agent and team names must be distinct, overlapping keys: {', '.join(overlapping_names)}"
             raise ValueError(msg)
-        reserved_entity_names = sorted((set(self.agents) | set(self.teams)) & _RESERVED_ENTITY_NAMES)
+        reserved_entity_names = sorted((set(self.agents) | set(self.teams)) & RESERVED_ENTITY_NAMES)
         if reserved_entity_names:
             msg = (
                 f"Agent and team names must not use reserved internal entity names: {', '.join(reserved_entity_names)}"

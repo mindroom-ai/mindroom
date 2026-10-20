@@ -51,7 +51,7 @@ type _TodoPokeSender = Callable[[str, str, str, str | None, str | None], Awaitab
 type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
-# Keep synchronized with config.main._AGENT_NAME_PATTERN without importing the config graph here.
+# Keep synchronized with config.main.AGENT_NAME_PATTERN without importing the config graph here.
 _SAFE_ASSIGNEE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5

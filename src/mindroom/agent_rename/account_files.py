@@ -12,15 +12,20 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom import yaml_io
 from mindroom.agent_rename.matching import replace_user_id
-from mindroom.agent_rename.steps import DropPath, FileRewrite, FinalAction, MovePath, RenameRefusedError, SqliteEdit
+from mindroom.agent_rename.steps import DropPath, FileRewrite, RenameRefusedError
+from mindroom.agent_rename.workers import (
+    DestinationExistsError,
+    known_worker_keys,
+    move_steps,
+    oauth_store_edits,
+    worker_move_steps,
+)
 from mindroom.constants import matrix_state_file, primary_records_dir, resolve_session_state_root
 from mindroom.credentials.manager import PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME, scoped_credentials_dir_part
 from mindroom.desktop.native_config import native_config_path
@@ -40,11 +45,8 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     private_instances_root_path,
     worker_dir_name,
-    worker_log_id,
 )
-from mindroom.workers.backends.docker import WORKER_CONTROL_DIRNAME
-from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME
-from mindroom.workers.runtime import lease_configured_primary_worker_manager, primary_worker_backend_name
+from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -55,7 +57,6 @@ if TYPE_CHECKING:
 
 _REQUESTER_SCOPES = frozenset({"user", "user_agent"})
 _REQUESTER_OAUTH_STORES = ("*/*_credentials.sqlite3",)
-_WORKER_OAUTH_STORES = ("credentials/*_credentials.sqlite3", ".shared_credentials/*_credentials.sqlite3")
 
 
 def _rewrite_worker_key(worker_key: str, *, old_user_id: str, new_user_id: str) -> str | None:
@@ -125,70 +126,32 @@ def account_file_steps(
     a destination holding no credentials is dropped into the backup before the move instead.
     """
     rename = _AccountRename(old_user_id, new_user_id, discard_new_identity_state)
-    oauth_steps, requester_keys = _requester_oauth_steps(runtime_paths.storage_root, rename)
-    worker_steps, worker_reports = _worker_steps(runtime_paths, config, rename, requester_keys=requester_keys)
-    steps: list[Step] = [
-        *oauth_steps,
-        *worker_steps,
-        *_private_instance_steps(runtime_paths, rename),
-        *_personal_room_steps(runtime_paths, agent, rename),
-        *_message_send_intent_steps(runtime_paths, rename),
-    ]
-    return steps, [*worker_reports, *_reports(runtime_paths, old_user_id)]
-
-
-def _move(source: Path, destination: Path, label: str, rename: _AccountRename) -> list[Step]:
-    """Move ``source`` to ``destination``, first dropping a destination that is discardable new-ID state."""
-    move = MovePath(source, destination, f"Move {label} {source} to {destination}")
-    if not os.path.lexists(destination):
-        return [move]
-    if not rename.discard_new_identity_state:
-        msg = (
-            f"Cannot move {source} to {destination}: {destination} already exists. "
-            "--discard-new-principal drops new-ID state that holds no credentials."
-        )
-        raise RenameRefusedError(msg)
-    blocker = _credential_free_blocker(destination)
-    if blocker is not None:
-        msg = f"Cannot move {source} to {destination}: {destination} already exists and holds {blocker}."
-        raise RenameRefusedError(msg)
-    return [DropPath(destination, f"Drop {destination}, new-ID state that holds no credentials"), move]
-
-
-def _credential_free_blocker(path: Path) -> str | None:
-    """Describe the first thing under ``path`` beyond credential-free OAuth stores, lock files and empty directories.
-
-    Returns ``None`` when there is nothing else, so dropping ``path`` loses no credentials or data.
-    """
-    # rglob lists symlinks without following them, so a symlink below is reported, never walked through.
-    entries = sorted(path.rglob("*")) if path.is_dir() and not path.is_symlink() else [path]
-    for entry in entries:
-        if entry.is_symlink():
-            return f"the symlink {entry}"
-        if entry.is_dir() or entry.name.endswith(".lock"):
-            continue
-        if not entry.name.endswith("_credentials.sqlite3"):
-            return f"the file {entry}"
-        if _oauth_store_holds_credentials(entry):
-            return f"credentials in {entry}"
-    return None
-
-
-def _oauth_store_holds_credentials(database: Path) -> bool:
     try:
-        with closing(sqlite3.connect(f"{database.absolute().as_uri()}?immutable=1", uri=True)) as connection:
-            if not _has_oauth_state(connection):
-                return False
-            query = "SELECT 1 FROM oauth_credential_state WHERE credential_present != 0 LIMIT 1"
-            return connection.execute(query).fetchone() is not None
-    except sqlite3.Error as exc:
-        msg = f"Cannot read the OAuth credential store {database}: {exc}"
+        oauth_steps = _requester_oauth_steps(runtime_paths.storage_root, rename)
+        worker_steps, worker_reports = worker_move_steps(
+            runtime_paths,
+            config=config,
+            rewrite=rename.worker_key,
+            discard_new_state=discard_new_identity_state,
+            # Passed from this module so the account-rename tests can replace it here.
+            lease_worker_manager=lease_configured_primary_worker_manager,
+        )
+        steps: list[Step] = [
+            *oauth_steps,
+            *worker_steps,
+            *_private_instance_steps(runtime_paths, rename),
+            *_personal_room_steps(runtime_paths, agent, rename),
+            *_message_send_intent_steps(runtime_paths, rename),
+        ]
+    except DestinationExistsError as exc:
+        msg = f"{exc} --discard-new-principal drops new-ID state that holds no credentials."
         raise RenameRefusedError(msg) from exc
-
-
-def _has_oauth_state(connection: sqlite3.Connection) -> bool:
-    query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'oauth_credential_state'"
-    return connection.execute(query).fetchone() is not None
+    reports = [
+        *worker_reports,
+        *_unknown_worker_reports(runtime_paths.storage_root, old_user_id),
+        *_reports(runtime_paths, old_user_id),
+    ]
+    return steps, reports
 
 
 def _read_json(path: Path) -> object:
@@ -260,176 +223,40 @@ def _adopt_matrix_account(content: bytes, *, account_key: str, username: str) ->
     return yaml_io.safe_dump(state, default_flow_style=False, sort_keys=False).encode()
 
 
-def _oauth_worker_keys(database: Path) -> list[str]:
-    """Read the worker keys an OAuth credential store is bound to, without writing anything next to it."""
-    try:
-        with closing(sqlite3.connect(f"{database.absolute().as_uri()}?immutable=1", uri=True)) as connection:
-            if not _has_oauth_state(connection):
-                return []
-            return [key for (key,) in connection.execute("SELECT worker_key FROM oauth_credential_state")]
-    except sqlite3.Error as exc:
-        msg = f"Cannot read the OAuth credential store {database}: {exc}"
-        raise RenameRefusedError(msg) from exc
-
-
-def _rewrite_oauth_worker_keys(connection: sqlite3.Connection, *, rename: _AccountRename) -> None:
-    rows = connection.execute("SELECT singleton, worker_key FROM oauth_credential_state").fetchall()
-    for singleton, worker_key in rows:
-        new_key = rename.worker_key(worker_key)
-        if new_key is not None:
-            connection.execute(
-                "UPDATE oauth_credential_state SET worker_key = ? WHERE singleton = ?",
-                (new_key, singleton),
-            )
-
-
-def _oauth_store_edits(
-    source_root: Path,
-    destination_root: Path,
-    patterns: tuple[str, ...],
-    rename: _AccountRename,
-) -> tuple[list[SqliteEdit], set[str]]:
-    """Return edits for the stores under ``source_root`` bound to the old requester, applied once moved.
-
-    Also returns the old worker keys those stores are bound to.
-    """
-    edits: list[SqliteEdit] = []
-    old_keys: set[str] = set()
-    for store in sorted(path for pattern in patterns for path in source_root.glob(pattern)):
-        keys = {key for key in _oauth_worker_keys(store) if rename.worker_key(key) is not None}
-        if not keys:
-            continue
-        old_keys |= keys
-        database = destination_root / store.relative_to(source_root)
-        edits.append(
-            SqliteEdit(
-                database,
-                partial(_rewrite_oauth_worker_keys, rename=rename),
-                f"Replace {rename.old_user_id} with {rename.new_user_id} in the worker key of the OAuth store {database}",
-            ),
-        )
-    return edits, old_keys
-
-
-def _requester_oauth_steps(storage_root: Path, rename: _AccountRename) -> tuple[list[Step], set[str]]:
+def _requester_oauth_steps(storage_root: Path, rename: _AccountRename) -> list[Step]:
     """Move the old requester's primary-runtime OAuth directory and rebind its stores to the new requester."""
     oauth_root = storage_root / PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME
     source = oauth_root / scoped_credentials_dir_part(rename.old_user_id)
     if not os.path.lexists(source):
-        return [], set()
-    destination = oauth_root / scoped_credentials_dir_part(rename.new_user_id)
-    moves = _move(source, destination, f"the OAuth credentials of {rename.old_user_id}", rename)
-    edits, old_keys = _oauth_store_edits(source, destination, _REQUESTER_OAUTH_STORES, rename)
-    return [*moves, *edits], old_keys
-
-
-def _metadata_worker_key(path: Path) -> str | None:
-    worker_key = _field(_read_json(path), "worker_key")
-    return worker_key if isinstance(worker_key, str) else None
-
-
-def _rewrite_worker_metadata(content: bytes, *, old_key: str, new_key: str) -> bytes:
-    metadata = json.loads(content)
-    metadata["worker_key"] = new_key
-    if metadata.get("worker_id") == worker_dir_name(old_key):
-        metadata["worker_id"] = worker_dir_name(new_key)
-    # Written like workers/backends/_metadata_store.py's save_worker_metadata.
-    return json.dumps(metadata, sort_keys=True).encode()
-
-
-def _worker_state_steps(old_root: Path, new_root: Path, rename: _AccountRename) -> list[Step]:
-    """Move one worker root, drop its venv, and rewrite the metadata and OAuth stores inside it at their new place."""
-    if not os.path.lexists(old_root):
         return []
-    steps = _move(old_root, new_root, "the worker", rename)
-    # The venv's console scripts name the old root in their shebangs, so the moved copy is dropped.
-    # MindRoom rebuilds a missing venv on the worker's next use (workers/backends/local.py's venv_dir).
-    if os.path.lexists(old_root / "venv"):
-        venv = new_root / "venv"
-        steps.append(
-            DropPath(
-                venv,
-                f"Drop the moved worker's virtual environment {venv}; MindRoom rebuilds it on the worker's next use, "
-                "so packages installed into it must be installed again",
-            ),
-        )
-    metadata_key = _metadata_worker_key(old_root / "metadata" / "worker.json")
-    new_metadata_key = None if metadata_key is None else rename.worker_key(metadata_key)
-    if metadata_key is not None and new_metadata_key is not None:
-        metadata = new_root / "metadata" / "worker.json"
-        steps.append(
-            FileRewrite(
-                metadata,
-                partial(_rewrite_worker_metadata, old_key=metadata_key, new_key=new_metadata_key),
-                f"Rewrite the worker key in {metadata}",
-            ),
-        )
-    edits, _keys = _oauth_store_edits(old_root, new_root, _WORKER_OAUTH_STORES, rename)
-    return [*steps, *edits]
+    destination = oauth_root / scoped_credentials_dir_part(rename.new_user_id)
+    moves = move_steps(
+        source,
+        destination,
+        f"the OAuth credentials of {rename.old_user_id}",
+        discard_new_state=rename.discard_new_identity_state,
+    )
+    edits = oauth_store_edits(
+        source,
+        destination,
+        _REQUESTER_OAUTH_STORES,
+        rewrite=rename.worker_key,
+        description=f"Replace {rename.old_user_id} with {rename.new_user_id} in the worker key of the OAuth store",
+    )
+    return [*moves, *edits]
 
 
-def _retire_docker_worker(runtime_paths: RuntimePaths, config: Config, worker_key: str) -> None:
-    """Remove the old key's container; its state already moved, so the backend only finds the container."""
-    lease = lease_configured_primary_worker_manager(runtime_paths, runtime_config=config)
-    if lease is None:
-        msg = "the Docker worker backend is not configured"
-        raise RuntimeError(msg)
-    with lease as manager:
-        retire_worker = getattr(manager, "retire_worker", None)
-        if retire_worker is None:
-            msg = f"the {manager.backend_name} worker backend cannot retire workers"
-            raise RuntimeError(msg)
-        retire_worker(worker_key)
-
-
-def _worker_steps(
-    runtime_paths: RuntimePaths,
-    config: Config,
-    rename: _AccountRename,
-    *,
-    requester_keys: set[str],
-) -> tuple[list[Step], list[str]]:
-    """Move every worker whose key names the old requester.
-
-    A worker's key comes from its metadata (the root's own, or the Docker control record) or, for a root
-    without metadata, from the requester's OAuth stores. Roots that look like the old requester's but whose
-    key is unknown are reported and left in place.
-    """
-    workers = runtime_paths.storage_root / "workers"
-    control = workers / WORKER_CONTROL_DIRNAME
-    projections = workers / PROJECTED_CONFIGS_DIRNAME
-    metadata_files = (*workers.glob("*/metadata/worker.json"), *control.glob("*/metadata/worker.json"))
-    keys = requester_keys | {key for path in metadata_files if (key := _metadata_worker_key(path)) is not None}
-    docker = primary_worker_backend_name(runtime_paths) == "docker"
-    steps: list[Step] = []
-    for old_key in sorted(keys):
-        new_key = rename.worker_key(old_key)
-        old_dir = worker_dir_name(old_key)
-        backend_paths = [path for path in (control / old_dir, projections / old_dir) if os.path.lexists(path)]
-        if new_key is None or not (os.path.lexists(workers / old_dir) or backend_paths):
-            continue
-        steps += _worker_state_steps(workers / old_dir, workers / worker_dir_name(new_key), rename)
-        steps += [DropPath(path, f"Drop the old worker's Docker record {path}") for path in backend_paths]
-        if docker:
-            steps.append(
-                FinalAction(
-                    partial(_retire_docker_worker, runtime_paths, config, old_key),
-                    f"Retire the old Docker worker {worker_log_id(old_key)} of {rename.old_user_id}",
-                ),
-            )
-    known = {worker_dir_name(key) for key in keys}
-    return steps, _unknown_worker_reports(workers, known, rename.old_user_id)
-
-
-def _unknown_worker_reports(workers: Path, known: set[str], old_user_id: str) -> list[str]:
+def _unknown_worker_reports(storage_root: Path, old_user_id: str) -> list[str]:
     """Report worker roots whose key is unknown and whose name could hold the old requester.
 
     A worker directory name turns every run of other characters in the key into ``_``,
     so the old requester appears normalized, followed by ``_`` and the agent or by ``-`` and the digest.
     Anything else after it, like ``.example.org``, belongs to another user.
     """
+    workers = storage_root / "workers"
     if not workers.is_dir():
         return []
+    known = {worker_dir_name(key) for key in known_worker_keys(storage_root)}
     requester = normalize_worker_key_part(encode_worker_requester_part(old_user_id))
     old_requester = re.compile(re.escape(requester) + "[_-]")
     return [
@@ -497,7 +324,12 @@ def _private_instance_steps(runtime_paths: RuntimePaths, rename: _AccountRename)
         for old_root, new_root, owner_key in moves:
             if not os.path.lexists(old_root):
                 continue
-            steps += _move(old_root, new_root, "the private instance", rename)
+            steps += move_steps(
+                old_root,
+                new_root,
+                "the private instance",
+                discard_new_state=rename.discard_new_identity_state,
+            )
             if owner_key is not None:
                 record = new_root / PRIVATE_INSTANCE_RECORD_FILENAME
                 steps.append(
@@ -536,7 +368,12 @@ def _personal_room_steps(runtime_paths: RuntimePaths, agent: str, rename: _Accou
         destination = path
         if _field(record, "user_id") == rename.old_user_id:
             destination = path.with_name(f"{personal_room_digest(rename.new_user_id)}.json")
-            steps += _move(path, destination, "the personal-room record", rename)
+            steps += move_steps(
+                path,
+                destination,
+                "the personal-room record",
+                discard_new_state=rename.discard_new_identity_state,
+            )
         steps.append(
             FileRewrite(
                 destination,
