@@ -70,11 +70,12 @@ class DynamicToolsToolkit(Toolkit):
                     scored.append((score, len(scored), deferred, definition))
         scored.sort(key=lambda item: (-item[0], item[1]))
         matches = scored[: max(1, min(max_results, _MAX_RESULTS_LIMIT))]
-        instructions = {
-            deferred.domain_name: deferred.instructions
-            for _score, _order, deferred, _definition in matches
-            if deferred.instructions
-        }
+        # One authored entry can expand to several toolkits, so each domain joins its toolkits' instructions.
+        toolkit_instructions: dict[str, dict[str, None]] = {}
+        for _score, _order, deferred, _definition in matches:
+            if deferred.instructions:
+                toolkit_instructions.setdefault(deferred.domain_name, {})[deferred.instructions] = None
+        instructions = {domain: "\n\n".join(texts) for domain, texts in toolkit_instructions.items()}
         payload: dict[str, object] = {
             "matches": [_match(deferred, definition) for _score, _order, deferred, definition in matches],
             "instructions": instructions,
@@ -116,7 +117,7 @@ def _search_score(
     raw_query: str,
 ) -> int:
     """Score one function by the query words it matches, each counted once in its best field."""
-    if raw_query == definition["name"]:
+    if raw_query == definition["name"].lower():
         return _EXACT_NAME_SCORE
     detail_tokens = _tokens(definition["description"])
     for parameter_name in definition["parameters"].get("properties", {}):

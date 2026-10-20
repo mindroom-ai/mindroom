@@ -103,7 +103,7 @@ from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from agno.db.base import BaseDb
@@ -1532,9 +1532,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
         metadata = TOOL_METADATA.get(entry.name)
         cli_deferred.append(DeferredAgentToolkit(entry.name, metadata.description if metadata else "", materialize))
 
-    # The search toolkit is built after every deferred toolkit it searches.
     dynamic_tools_entry = resolved_tool_configs.pop("dynamic_tools", None)
-    for tool_name, tool_entry in resolved_tool_configs.items():
+
+    def tool_entries() -> Iterator[tuple[str, EffectiveToolConfig]]:
+        yield from resolved_tool_configs.items()
+        # The search toolkit comes after every deferred toolkit it searches, and only portable tool search rewrites
+        # call_tool, so an authored dynamic_tools entry is ignored everywhere else.
+        if dynamic_tools_entry is not None and portable_deferred_tools and deferred_toolkits:
+            yield dynamic_tools_entry.name, dynamic_tools_entry
+
+    for tool_name, tool_entry in tool_entries():
         try:
             toolkit = build_entry(tool_entry)
             if toolkit:
@@ -1571,12 +1578,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - loaded and defer
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
-    # Only portable tool search rewrites call_tool, so an authored dynamic_tools entry is ignored everywhere else.
-    if dynamic_tools_entry is not None and portable_deferred_tools and deferred_toolkits:
-        dynamic_toolkit = build_entry(dynamic_tools_entry)
-        if dynamic_toolkit is not None:
-            tools.append(dynamic_toolkit)
-            local_tool_names.append(dynamic_tools_entry.name)
     controls = _job_controls(
         tools,
         runtime_paths,

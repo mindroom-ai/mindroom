@@ -1633,3 +1633,69 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
     deferred = estimate(["sleep", {"github": {"defer": True}}])
 
     assert deferred - base < (eager - base) / 4
+
+
+def test_tool_search_exact_name_match_ignores_case() -> None:
+    """MCP functions often use camelCase, and an exact name query must outrank a function sharing its word."""
+    camel = Toolkit(
+        name="camel",
+        tools=[
+            Function.from_callable(lambda number: str(number), name="getIssue_v2"),
+            Function.from_callable(lambda number: str(number), name="getIssue"),
+        ],
+    )
+    toolkit = _search_toolkit(_deferred(camel, "Camel"))
+
+    matches = _tool_payload(toolkit.tool_search("getIssue"))["matches"]
+
+    assert matches[0]["name"] == "getIssue"
+
+
+def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
+    """One authored entry can expand to several toolkits; none of their instructions may be dropped."""
+    first = Toolkit(
+        name="first",
+        tools=[Function.from_callable(lambda: "a", name="alpha_tool")],
+        instructions="Use alpha.",
+    )
+    second = Toolkit(
+        name="second",
+        tools=[Function.from_callable(lambda: "b", name="beta_tool")],
+        instructions="Use beta.",
+    )
+    first.add_instructions = second.add_instructions = True
+    toolkit = _search_toolkit(defer_toolkit("shared", "Shared", first), defer_toolkit("shared", "Shared", second))
+
+    payload = _tool_payload(toolkit.tool_search("shared"))
+
+    assert payload["instructions"] == {"shared": "Use alpha.\n\nUse beta."}
+
+
+def test_call_tool_fallback_accepts_non_object_arguments() -> None:
+    """An unresolved call with list arguments still gets the retry guidance, not a validation error."""
+    function = _search_toolkit().functions["call_tool"]
+
+    result = function.entrypoint(name="crm_lookup", arguments=[7])  # type: ignore[misc]
+
+    assert "'crm_lookup' was not called" in _tool_payload(result)["message"]
+
+
+def test_search_toolkit_construction_failure_does_not_stop_the_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Like every other toolkit, a failing search toolkit is skipped instead of failing agent creation."""
+
+    def broken(**_kwargs: object) -> DynamicToolsToolkit:
+        msg = "synthetic construction failure"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.custom_tools.dynamic_tools.DynamicToolsToolkit", broken)
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["sleep", {"calculator": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
+
+    assert "sleep" in {toolkit.name for toolkit in agent.tools}
+    assert "dynamic_tools" not in {toolkit.name for toolkit in agent.tools}
