@@ -1330,7 +1330,11 @@ class ConversationHydrator:
         )
         resolved_content = resolved.get("content")
         if isinstance(resolved_content, dict) and not holds_unresolved_sidecar(resolved_content):
-            return resolved_content
+            # An edit's attachment holds the whole edit, so what the message
+            # shows is its new content, and a shown layer has no edit wrapper of
+            # its own, which is what settling an unreadable attachment keeps too.
+            shown = visible_content(resolved_content)
+            return {key: value for key, value in shown.items() if key != "m.new_content"}
         logger.info(
             "conversation_refresh_sidecar_unresolved",
             event_id=event_id,
