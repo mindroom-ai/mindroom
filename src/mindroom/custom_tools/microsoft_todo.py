@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.tools import Toolkit
@@ -16,6 +17,9 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_error_payload,
     graph_session,
     graph_tool_result,
+    html_to_text,
+    next_page_token,
+    page_path,
     path_segment,
 )
 from mindroom.oauth.microsoft import microsoft_todo_oauth_provider
@@ -32,6 +36,7 @@ _WRITE_FUNCTIONS = frozenset(
 # A listing returns up to 50 tasks, so each task's notes stay short.
 _MAX_NOTES_CHARACTERS = 2_000
 _MAX_TASKS = 50
+_MAX_LISTS = 100
 _TOOL_NAME = "microsoft_todo"
 _OPEN_TASKS_FILTER = "status ne 'completed'"
 _IMPORTANCE = frozenset({"low", "normal", "high"})
@@ -89,9 +94,10 @@ def _due(value: object) -> dict[str, str]:
 
 
 def _notes(value: object) -> dict[str, str]:
+    """Return plain-text notes as the HTML body To Do shows, keeping their characters and line breaks."""
     if not isinstance(value, str):
         raise MicrosoftGraphError(code="invalid_argument", message="notes must be text.")
-    return {"content": value, "contentType": "text"}
+    return {"content": html.escape("\n".join(value.splitlines())).replace("\n", "<br>"), "contentType": "html"}
 
 
 def _importance(value: object) -> str:
@@ -111,16 +117,35 @@ def _date_time(value: object) -> dict[str, object] | None:
     return {"date_time": fields["dateTime"], "time_zone": fields.get("timeZone")}
 
 
+def _due_date(value: object) -> str | None:
+    """Return a due date as YYYY-MM-DD, rounding Graph's UTC time to the nearest midnight.
+
+    A due date set in another zone comes back as that zone's midnight in UTC, so October 22 in UTC+2
+    reads `2026-10-21T22:00:00`.
+    """
+    moment = _fields(value).get("dateTime")
+    if not isinstance(moment, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(moment.split(".", 1)[0])
+    except ValueError:
+        return None
+    return (parsed + timedelta(hours=12)).date().isoformat()
+
+
 def _task(task: Mapping[str, Any]) -> dict[str, Any]:
     """Return the fields a caller needs to identify, read, and change one task."""
-    content = _fields(task.get("body")).get("content")
+    body = _fields(task.get("body"))
+    content = body.get("content")
     notes = content if isinstance(content, str) else ""
+    if body.get("contentType") == "html":
+        notes = html_to_text(notes)
     summary = {
         "id": task.get("id"),
         "title": task.get("title"),
         "status": task.get("status"),
         "importance": task.get("importance"),
-        "due": _date_time(task.get("dueDateTime")),
+        "due_date": _due_date(task.get("dueDateTime")),
         "reminder": _date_time(task.get("reminderDateTime")) if task.get("isReminderOn") is True else None,
         "created": task.get("createdDateTime"),
         "last_modified": task.get("lastModifiedDateTime"),
@@ -201,21 +226,37 @@ class MicrosoftTodoTools(Toolkit):
 
         return graph_tool_result(_TOOL_NAME, run)
 
-    def microsoft_todo_list_lists(self) -> str:
+    def microsoft_todo_list_lists(self, page_token: str | None = None) -> str:
         """List the requester's Microsoft To Do task lists.
 
         The list whose wellknown_list_name is defaultList is the requester's default Tasks list, and flaggedEmails
         holds flagged Outlook messages.
+
+        Args:
+            page_token: The next_page_token of the previous call, to continue the same listing.
+
         """
+
+        def build() -> _Request:
+            if page_token is not None:
+                return _Request("GET", page_path(page_token, "/lists"))
+            return _Request("GET", "/me/todo/lists", params={"$top": str(_MAX_LISTS)})
+
         return self._send(
-            lambda: _Request("GET", "/me/todo/lists"),
+            build,
             lambda payload: {
                 "lists": [_list(task_list) for task_list in _records(payload)],
-                "more_available": "@odata.nextLink" in payload,
+                "next_page_token": next_page_token(payload),
             },
         )
 
-    def microsoft_todo_list_tasks(self, list_id: str, include_completed: bool = False, limit: int = 50) -> str:
+    def microsoft_todo_list_tasks(
+        self,
+        list_id: str,
+        include_completed: bool = False,
+        limit: int = 50,
+        page_token: str | None = None,
+    ) -> str:
         """List the tasks in one Microsoft To Do list; completed tasks are left out unless include_completed is true.
 
         Each task's notes are cut at 2,000 characters, and notes_truncated is true when they were cut.
@@ -224,10 +265,13 @@ class MicrosoftTodoTools(Toolkit):
             list_id: The list's id from microsoft_todo_list_lists.
             include_completed: Also return completed tasks.
             limit: Maximum number of tasks to return, from 1 to 50.
+            page_token: The next_page_token of the previous call, to continue the same listing.
 
         """
 
         def build() -> _Request:
+            if page_token is not None:
+                return _Request("GET", page_path(page_token, "/tasks"))
             params = {"$top": str(_limit(limit))}
             if not _flag(include_completed, "include_completed"):
                 params["$filter"] = _OPEN_TASKS_FILTER
@@ -237,7 +281,7 @@ class MicrosoftTodoTools(Toolkit):
             build,
             lambda payload: {
                 "tasks": [_task(task) for task in _records(payload)],
-                "more_available": "@odata.nextLink" in payload,
+                "next_page_token": next_page_token(payload),
             },
         )
 

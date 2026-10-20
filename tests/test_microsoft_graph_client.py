@@ -17,6 +17,7 @@ from mindroom.custom_tools.microsoft_graph import (
     checked_upload_source,
     graph_session,
     graph_tool_result,
+    html_to_text,
     next_page_token,
     path_segment,
     read_upload_source,
@@ -579,3 +580,23 @@ def test_a_download_into_an_inaccessible_directory_is_reported(
 )
 def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, token: str | None) -> None:
     assert next_page_token({"@odata.nextLink": link} if link else {}) == token
+
+
+@pytest.mark.parametrize(
+    ("html", "text"),
+    [
+        ("Plain notes", "Plain notes"),
+        ("First line<br>Second line", "First line\nSecond line"),
+        ("Paragraph<br><br>after a blank line", "Paragraph\n\nafter a blank line"),
+        ("<p>First</p><p>Second &amp; third</p>", "First\nSecond & third"),
+        ("<ul><li>one</li><li>two</li></ul>", "one\ntwo"),
+        ("Tom &lt;tom@contoso.com&gt;&nbsp;wrote", "Tom <tom@contoso.com> wrote"),
+        (
+            "<html><head><title>Note</title><style>p { color: red; }</style></head>"
+            "<body><div>Line  one\n  continues <b>bold</b></div></body></html>",
+            "Line one continues bold",
+        ),
+    ],
+)
+def test_html_to_text_keeps_readable_text_and_line_breaks(html: str, text: str) -> None:
+    assert html_to_text(html) == text
