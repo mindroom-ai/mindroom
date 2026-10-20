@@ -387,3 +387,96 @@ def test_share_ids_stay_out_of_httpx_logs(
 
     assert "/v1.0/shares/redacted/driveItem" in caplog.text
     assert share_id(SHARE_LINK)[:24] not in caplog.text
+
+
+def test_personal_onedrive_download_links_stay_out_of_httpx_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    download_url = "https://public.ch.files.1drv.com/y4mCAPABILITY-SECRET/report.docx?psid=1"
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "graph.microsoft.com":
+            return httpx.Response(302, headers={"Location": download_url})
+        return httpx.Response(200, content=b"file bytes")
+
+    FakeGraph(answer).install(monkeypatch)
+    workspace = _workspace(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        _result(
+            tmp_path,
+            lambda session: {
+                "path": str(
+                    session.save_download(
+                        "/drives/d/items/i/content",
+                        workspace_root=workspace,
+                        directory="downloads",
+                        filename="report.docx",
+                        max_bytes=100,
+                    ),
+                ),
+            },
+        )
+
+    assert "public.ch.files.1drv.com/redacted" in caplog.text
+    assert "CAPABILITY-SECRET" not in caplog.text
+
+
+def test_a_tenant_change_retires_connections_made_for_another_tenant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = FakeGraph(_answer(200, json={"id": "drive-1"})).install(monkeypatch)
+    paths = runtime_paths(tmp_path, {"MICROSOFT_TENANT_ID": "contoso.onmicrosoft.com"})
+    manager = save_client_config(paths)
+    publish_grant(PROVIDER, manager)
+
+    def run() -> Mapping[str, object]:
+        with graph_session(PROVIDER, paths, manager, worker_target(), None) as session:
+            return session.json("GET", "/me/drive")
+
+    result = json.loads(graph_tool_result("microsoft_files", run))
+
+    assert result["oauth_connection_required"] is True
+    assert graph.requests == []
+
+
+def test_a_malformed_tenant_setting_is_reported_not_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    graph = FakeGraph(_answer(200, json={})).install(monkeypatch)
+    paths = runtime_paths(tmp_path, {"MICROSOFT_TENANT_ID": "bad/tenant"})
+    manager = save_client_config(paths)
+    publish_grant(PROVIDER, manager)
+
+    def run() -> Mapping[str, object]:
+        with graph_session(PROVIDER, paths, manager, worker_target(), None) as session:
+            return session.json("GET", "/me/drive")
+
+    result = json.loads(graph_tool_result("microsoft_files", run))
+
+    assert result["code"] == "invalid_tenant"
+    assert graph.requests == []
+
+
+def test_a_download_that_cannot_be_written_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeGraph(_answer(200, content=b"bytes")).install(monkeypatch)
+    workspace = _workspace(tmp_path)
+    (workspace / "downloads").write_text("a file where the directory belongs")
+
+    result = _result(
+        tmp_path,
+        lambda session: {
+            "path": str(
+                session.save_download(
+                    "/drives/d/items/i/content",
+                    workspace_root=workspace,
+                    directory="downloads",
+                    filename="report.docx",
+                    max_bytes=100,
+                ),
+            ),
+        },
+    )
+
+    assert result["code"] == "workspace_unavailable"

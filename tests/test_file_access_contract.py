@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, BinaryIO
 
+import httpx
 import pytest
 
 import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
@@ -24,6 +25,7 @@ import mindroom.custom_tools.coding as coding_module
 import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
+import mindroom.custom_tools.microsoft_graph as microsoft_graph_module
 import mindroom.media_delivery as media_delivery_module
 import mindroom.tools.agno_compat_airflow as airflow_module
 import mindroom.tools.agno_compat_groq as groq_module
@@ -39,6 +41,8 @@ from mindroom.custom_tools.chat_ui import ChatUITools
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
+from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
+from mindroom.oauth.microsoft import microsoft_files_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -47,6 +51,11 @@ from mindroom.tools.agno_compat_groq import MindRoomGroqTools
 from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
 from mindroom.tools.file import file_tools
 from tests.chat_ui_contract_fixture import make_chat_ui_context, sent_chat_ui_content
+from tests.microsoft_graph_test_support import FakeGraph
+from tests.microsoft_graph_test_support import publish_grant as publish_microsoft_grant
+from tests.microsoft_graph_test_support import runtime_paths as microsoft_runtime_paths
+from tests.microsoft_graph_test_support import save_client_config as save_microsoft_client_config
+from tests.microsoft_graph_test_support import worker_target as microsoft_worker_target
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
 from tests.test_e2b_tools import _FakeSandbox
@@ -311,12 +320,37 @@ async def _read_with_coding_tool(
     return _TEXT.strip() in tool.read_file(raw_path)
 
 
+async def _upload_to_microsoft_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    graph = FakeGraph(lambda _request: httpx.Response(201, json={"id": "item-1", "name": "doc.png"})).install(
+        monkeypatch,
+    )
+    paths = microsoft_runtime_paths(tmp_path)
+    manager = save_microsoft_client_config(paths)
+    publish_microsoft_grant(microsoft_files_oauth_provider(), manager)
+    tool = MicrosoftFilesTools(
+        runtime_paths=paths,
+        credentials_manager=manager,
+        worker_target=microsoft_worker_target(),
+        tool_output_workspace_root=workspace,
+        file_access=file_access,
+    )
+    result = json.loads(tool.microsoft_files_upload_file(raw_path))
+    return result["status"] == "ok" and [request.content for request in graph.requests] == [_PNG]
+
+
 _PROBES = (
     _ToolProbe("attachments", "register_attachment", _register_attachment, attachments_module),
     _ToolProbe("attachments", "view_file", _view_file, media_delivery_module),
     _ToolProbe("matrix_message", "send attachments", _send_attachment_path, attachments_module),
     _ToolProbe("gmail", "attachments", _stage_gmail_attachment, gmail_module),
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
+    _ToolProbe("microsoft_files", "upload_file", _upload_to_microsoft_files, microsoft_graph_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
     _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),

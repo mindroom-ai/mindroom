@@ -21,6 +21,7 @@ __all__ = [
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
     "microsoft_tenant",
+    "microsoft_token_url",
 ]
 
 MICROSOFT_CLIENT_CONFIG_SERVICE = "microsoft_oauth_client"
@@ -48,11 +49,16 @@ def microsoft_tenant(runtime_paths: RuntimePaths) -> str:
     return tenant
 
 
+def microsoft_token_url(runtime_paths: RuntimePaths) -> str:
+    """Return the token endpoint of the configured tenant, which every stored connection must be bound to."""
+    return _endpoint(microsoft_tenant(runtime_paths), "token")
+
+
 async def _microsoft_runtime_endpoints(provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
     tenant = microsoft_tenant(runtime_paths)
     return OAuthRuntimeEndpoints(
         authorization_url=_endpoint(tenant, "authorize"),
-        token_url=_endpoint(tenant, "token"),
+        token_url=microsoft_token_url(runtime_paths),
         token_endpoint_auth_method=provider.token_endpoint_auth_method,
     )
 

@@ -83,7 +83,7 @@ Microsoft ends a connection that has not been used for 90 days, and the requeste
 | `microsoft_files_list_folder` | no | List a folder's files and folders, or the requester's OneDrive root, up to 200 entries. |
 | `microsoft_files_get_file` | no | Read a file's details, including its `etag`, web link, size, and last editor. |
 | `microsoft_files_download_file` | no | Save a file, up to 100 MB, into the workspace's `microsoft-files-downloads/` directory. |
-| `microsoft_files_replace_file` | yes | Replace a file's contents with a workspace file, up to 250 MB. |
+| `microsoft_files_replace_file` | yes | Replace a file's contents with a workspace file, up to 250 MB, given the `etag` the edit started from. |
 | `microsoft_files_upload_file` | yes | Upload a workspace file, up to 250 MB, as a new file in a folder or the requester's OneDrive root. |
 | `microsoft_files_excel_list_worksheets` | no | List the worksheets of an Excel workbook. |
 | `microsoft_files_excel_read_range` | no | Read a worksheet range, or its used range, up to 10,000 cells. |
@@ -97,7 +97,8 @@ The replace then fails with `etag_mismatch` if someone changed the file in the m
 A later download of the same name overwrites the copy in `microsoft-files-downloads/`.
 Uploads never overwrite an existing file; a name that already exists returns `name_conflict`.
 
-Excel functions take a worksheet name and an address such as `B2` or `A1:C10` without a worksheet prefix.
+Excel functions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
+They take a worksheet name and an address such as `B2` or `A1:C10` without a worksheet prefix, and written values must have the shape of the address.
 A written string that starts with `=` becomes a formula.
 
 Search uses Microsoft Search, which covers work and school accounts.
@@ -126,6 +127,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `AADSTS50011` on the Microsoft sign-in page | The redirect URI is not registered on the app; add the exact URI from [Set Up The Microsoft Entra App](#set-up-the-microsoft-entra-app). |
 | `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent; an administrator grants it on the app's **API permissions** page. |
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
+| `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
 | `not_found` | The item does not exist or the connected account cannot see it. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
@@ -142,7 +144,7 @@ When Microsoft rejects the connection's access token, the result includes a reco
 
 - The tools run in the primary MindRoom runtime, so worker containers never receive the app client configuration or user tokens.
 - Tokens are sent only to Microsoft Graph, never to another host, including the SharePoint hosts that serve downloads.
-- Logs never contain tokens, pre-authenticated download links, or the sharing links passed to the tools.
+- Request logs never contain tokens or pre-authenticated download links.
 - Error results never contain tokens or raw response bodies.
 
 ## Related Docs

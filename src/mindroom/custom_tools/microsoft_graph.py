@@ -11,7 +11,7 @@ import base64
 import logging
 import os
 import re
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -25,6 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import oauth_credentials_usable, refresh_oauth_credentials_blocking
 from mindroom.oauth.credential_store import OAuthCredentialUnreadableError
+from mindroom.oauth.microsoft import microsoft_token_url
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProviderError,
@@ -79,23 +80,31 @@ class MicrosoftGraphError(Exception):
         self.details = details
 
 
-class _ShareLinkLogFilter(logging.Filter):
-    """Redact Graph share IDs in httpx request logs; a share ID is the base64 of a link that may grant access."""
+def _loggable_url(url: httpx.URL) -> httpx.URL:
+    """Return the URL without the parts that grant access on their own.
+
+    A Graph share ID is the base64 of a sharing link, and a personal OneDrive download URL carries its
+    credential in the path; SharePoint download URLs carry `tempauth`, which log redaction already removes.
+    """
+    if url.host == _GRAPH_HOST and "/shares/" in url.path:
+        return url.copy_with(path=_SHARE_PATH.sub("/shares/redacted", url.path))
+    if url.host.endswith(".1drv.com"):
+        return url.copy_with(path="/redacted", query=None)
+    return url
+
+
+class _CapabilityUrlLogFilter(logging.Filter):
+    """Redact capability-bearing Microsoft URLs in httpx request logs."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple):
-            record.args = tuple(
-                arg.copy_with(path=_SHARE_PATH.sub("/shares/redacted", arg.path))
-                if isinstance(arg, httpx.URL) and arg.host == _GRAPH_HOST and "/shares/" in arg.path
-                else arg
-                for arg in record.args
-            )
+            record.args = tuple(_loggable_url(arg) if isinstance(arg, httpx.URL) else arg for arg in record.args)
         return True
 
 
 _HTTPX_LOGGER = logging.getLogger("httpx")
-if not any(isinstance(log_filter, _ShareLinkLogFilter) for log_filter in _HTTPX_LOGGER.filters):
-    _HTTPX_LOGGER.addFilter(_ShareLinkLogFilter())
+if not any(isinstance(log_filter, _CapabilityUrlLogFilter) for log_filter in _HTTPX_LOGGER.filters):
+    _HTTPX_LOGGER.addFilter(_CapabilityUrlLogFilter())
 
 
 def path_segment(value: object, field_name: str) -> str:
@@ -142,9 +151,19 @@ def checked_upload_source(
         )
     except ValueError as exc:
         raise MicrosoftGraphError(code="invalid_local_path", message=str(exc)) from None
-    with source.open() as handle:
-        _check_upload_size(source, os.fstat(handle.fileno()).st_size, max_bytes)
+    try:
+        with source.open() as handle:
+            size = os.fstat(handle.fileno()).st_size
+    except OSError as exc:
+        raise _unreadable(source, exc) from None
+    _check_upload_size(source, size, max_bytes)
     return source
+
+
+def _unreadable(source: AuthorizedFile, exc: OSError) -> MicrosoftGraphError:
+    # A file or workspace replaced by a link after the check is refused here, without following it.
+    reason = exc.strerror or type(exc).__name__
+    return MicrosoftGraphError(code="invalid_local_path", message=f"{source.display_path} cannot be read: {reason}.")
 
 
 def _check_upload_size(source: AuthorizedFile, size: int, max_bytes: int) -> None:
@@ -250,17 +269,23 @@ class GraphSession:
             ) from None
         with self.client.stream("GET", path, follow_redirects=True) as response:
             self.check(response)
-            with (
-                open_directory_within_root(workspace_root, directory, create=True) as directory_fd,
-                atomic_write_file_at(directory_fd, filename) as handle,
-            ):
-                remaining = max_bytes
-                for chunk in response.iter_bytes(_CHUNK_BYTES):
-                    if len(chunk) > remaining:
-                        msg = f"The download exceeds {max_bytes} bytes."
-                        raise MicrosoftGraphError(code="too_large", message=msg)
-                    remaining -= len(chunk)
-                    handle.write(chunk)
+            try:
+                with (
+                    open_directory_within_root(workspace_root, directory, create=True) as directory_fd,
+                    atomic_write_file_at(directory_fd, filename) as handle,
+                ):
+                    remaining = max_bytes
+                    for chunk in response.iter_bytes(_CHUNK_BYTES):
+                        if len(chunk) > remaining:
+                            msg = f"The download exceeds {max_bytes} bytes."
+                            raise MicrosoftGraphError(code="too_large", message=msg)
+                        remaining -= len(chunk)
+                        handle.write(chunk)
+            except OSError as exc:
+                # A workspace replaced by a link, a full disk, or a directory in the file's place.
+                reason = exc.strerror or type(exc).__name__
+                msg = f"The download could not be written to {directory}: {reason}."
+                raise MicrosoftGraphError(code="workspace_unavailable", message=msg) from None
         return target
 
     def upload(
@@ -273,7 +298,11 @@ class GraphSession:
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Stream one workspace file as the request body and return Graph's JSON answer."""
-        with source.open() as handle:
+        with ExitStack() as stack:
+            try:
+                handle = stack.enter_context(source.open())
+            except OSError as exc:
+                raise _unreadable(source, exc) from None
             # Measure the open file itself, which the body streams; an explicit length avoids chunked encoding.
             size = os.fstat(handle.fileno()).st_size
             _check_upload_size(source, size, max_bytes)
@@ -303,6 +332,10 @@ def _new_http_client(
 def _access_token(provider: OAuthProvider, runtime_paths: RuntimePaths, context: OAuthCredentialContext) -> str:
     """Return a current access token for the requester, refreshing it when it is about to expire."""
     try:
+        token_url = microsoft_token_url(runtime_paths)
+    except OAuthProviderError as exc:
+        raise MicrosoftGraphError(code="invalid_tenant", message=str(exc)) from None
+    try:
         credentials = refresh_oauth_credentials_blocking(context)
     except OAuthCredentialUnreadableError:
         raise oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from None
@@ -314,6 +347,9 @@ def _access_token(provider: OAuthProvider, runtime_paths: RuntimePaths, context:
         raise MicrosoftGraphError(code="oauth_refresh_failed", message=msg) from None
     token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
     if not oauth_credentials_usable(provider, runtime_paths, credentials) or not isinstance(token, str) or not token:
+        raise oauth_connection_required(context)
+    if (credentials or {}).get("token_uri") != token_url:
+        # The connection was made for another tenant; a tenant change must not leave it usable until refresh.
         raise oauth_connection_required(context)
     return token
 

@@ -9,6 +9,8 @@ from urllib.parse import quote, urlsplit
 
 from agno.tools import Toolkit
 
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     GraphSession,
@@ -26,10 +28,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.file_access import AuthorizedFile
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -50,6 +50,8 @@ _LINK_HOSTS = frozenset({"onedrive.live.com", "1drv.ms"})
 _ADDRESS = re.compile(r"\$?[A-Za-z]{1,3}\$?\d{1,7}(?::\$?[A-Za-z]{1,3}\$?\d{1,7})?")
 # Characters OneDrive and SharePoint refuse in file names.
 _INVALID_NAME_CHARACTERS = frozenset('"*:<>?/\\|')
+_INVALID_WORKSHEET_CHARACTERS = frozenset("\\/?*[]:")
+_CELL = re.compile(r"(?P<column>[A-Za-z]{1,3})(?P<row>\d{1,7})")
 _INVALID_FILE = "file must be a Graph item path /drives/{drive-id}/items/{item-id} or a OneDrive or SharePoint link."
 
 
@@ -131,6 +133,13 @@ def _summary(item: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _etag(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        msg = "expected_etag must be the etag of the download or details this edit started from."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return value.strip()
+
+
 def _limit(value: object, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         msg = f"limit must be an integer from 1 to {maximum}."
@@ -153,6 +162,43 @@ def _address(value: object) -> str:
     return value.strip()
 
 
+def _column_number(letters: str) -> int:
+    number = 0
+    for letter in letters.upper():
+        number = number * 26 + ord(letter) - ord("A") + 1
+    return number
+
+
+def _address_shape(address: str) -> tuple[int, int]:
+    """Return the rows and columns an address covers."""
+    corners = [_CELL.fullmatch(corner) for corner in address.replace("$", "").split(":")]
+    first, last = corners[0], corners[-1]
+    if first is None or last is None:
+        msg = "address must be a cell or range such as A1 or A1:C10."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    rows = abs(int(last["row"]) - int(first["row"])) + 1
+    columns = abs(_column_number(last["column"]) - _column_number(first["column"])) + 1
+    return rows, columns
+
+
+def _checked_range_size(rows: int, columns: int) -> None:
+    if rows * columns > _MAX_RANGE_CELLS:
+        msg = f"The range covers more than {_MAX_RANGE_CELLS} cells; use a smaller address."
+        raise MicrosoftGraphError(code="too_large", message=msg)
+
+
+def _worksheet(value: object) -> str:
+    """Return a worksheet name as an escaped path segment; Excel allows `#` but not these characters."""
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 31
+        or any(character in _INVALID_WORKSHEET_CHARACTERS or ord(character) < 32 for character in value)
+    ):
+        msg = r"worksheet must be a worksheet name of 1 to 31 characters without \ / ? * [ ] or :."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return quote(value, safe="")
+
+
 def _cell_count(values: list[Any]) -> int:
     return len(values) * max((len(row) for row in values if isinstance(row, list)), default=0)
 
@@ -172,10 +218,19 @@ def _values(value: object) -> list[list[Any]]:
         or any(cell is not None and not isinstance(cell, str | int | float | bool) for row in rows for cell in row)
     ):
         raise invalid
-    if _cell_count(rows) > _MAX_RANGE_CELLS:
-        msg = f"values cover more than {_MAX_RANGE_CELLS} cells; write a smaller range."
-        raise MicrosoftGraphError(code="too_large", message=msg)
     return rows
+
+
+def _range_write(address: object, values: object) -> tuple[str, list[list[Any]]]:
+    """Return the checked address and rows of a range write; the rows must have the address's shape."""
+    target = _address(address)
+    shape = _address_shape(target)
+    rows = _values(values)
+    if (len(rows), len(rows[0])) != shape:
+        msg = f"values have {len(rows)} rows of {len(rows[0])} cells, but {target} covers {shape[0]} by {shape[1]}."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    _checked_range_size(*shape)
+    return target, rows
 
 
 def _range(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -358,17 +413,18 @@ class MicrosoftFilesTools(Toolkit):
 
         return self._call(operation, validate=lambda: _parse_file(file))
 
-    def microsoft_files_replace_file(self, file: str, local_path: str, expected_etag: str | None = None) -> str:
+    def microsoft_files_replace_file(self, file: str, local_path: str, expected_etag: str) -> str:
         """Replace one OneDrive or SharePoint file's contents with a workspace file, up to 250 MB.
 
         Before calling, tell the requester the file's name and location, such as its web_url, because an approval
-        prompt may show only IDs. Pass the etag this edit started from as expected_etag, so a newer edit by someone
-        else is never overwritten; the file's version history keeps the replaced version.
+        prompt may show only IDs. The replace fails with etag_mismatch when someone changed the file after the
+        download or details whose etag is passed, so a newer edit is never overwritten; the file's version history
+        keeps the replaced version.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
             local_path: The workspace file to upload.
-            expected_etag: The etag from the download or details this edit started from.
+            expected_etag: The etag from the download or details this edit started from; required.
 
         """
 
@@ -377,14 +433,22 @@ class MicrosoftFilesTools(Toolkit):
             item = _resolve(file, session)
             if _summary(self._metadata(item, session))["is_folder"]:
                 raise MicrosoftGraphError(code="is_folder", message="That item is a folder, not a file.")
-            headers = {"If-Match": expected_etag} if expected_etag else {}
             return {
                 "file": _summary(
-                    session.upload("PUT", f"{item.path}/content", source, max_bytes=_MAX_UPLOAD_BYTES, headers=headers),
+                    session.upload(
+                        "PUT",
+                        f"{item.path}/content",
+                        source,
+                        max_bytes=_MAX_UPLOAD_BYTES,
+                        headers={"If-Match": expected_etag.strip()},
+                    ),
                 ),
             }
 
-        return self._call(operation, validate=lambda: (_parse_file(file), self._upload_source(local_path)))
+        return self._call(
+            operation,
+            validate=lambda: (_parse_file(file), _etag(expected_etag), self._upload_source(local_path)),
+        )
 
     def microsoft_files_upload_file(self, local_path: str, folder: str | None = None, name: str | None = None) -> str:
         """Upload a workspace file, up to 250 MB, as a new OneDrive or SharePoint file; it never overwrites a file.
@@ -458,8 +522,13 @@ class MicrosoftFilesTools(Toolkit):
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            sheet = path_segment(worksheet, "worksheet")
-            target = f"range(address='{_address(address)}')" if address is not None else "usedRange(valuesOnly=true)"
+            sheet = _worksheet(worksheet)
+            if address is None:
+                target = "usedRange(valuesOnly=true)"
+            else:
+                checked = _address(address)
+                _checked_range_size(*_address_shape(checked))
+                target = f"range(address='{checked}')"
             item = _resolve(file, session)
             payload = session.json(
                 "GET",
@@ -490,9 +559,8 @@ class MicrosoftFilesTools(Toolkit):
 
         """
         try:
-            sheet = path_segment(worksheet, "worksheet")
-            target = _address(address)
-            rows = _values(values)
+            sheet = _worksheet(worksheet)
+            target, rows = _range_write(address, values)
         except MicrosoftGraphError as exc:
             return graph_error_payload(_TOOL_NAME, exc)
 
