@@ -118,7 +118,6 @@ async def test_hidden_generated_learning_keeps_authenticated_requester(tmp_path:
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
-        session_id=runtime.session_id,
     )
 
     async def tools(user_id: str, session_id: str, agent_id: str, **_kwargs: object) -> list:

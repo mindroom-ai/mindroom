@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import threading
 from typing import TYPE_CHECKING, Any, cast
 
@@ -43,6 +44,8 @@ def effective_knowledge_embedder_signature(
     *,
     host: str | None = None,
     dimensions: int | None = None,
+    query_prefix: str | None = None,
+    document_prefix: str | None = None,
 ) -> tuple[str, str, str, str]:
     """Return the settings that decide whether vectors from MindRoom's own embedder are compatible.
 
@@ -53,7 +56,14 @@ def effective_knowledge_embedder_signature(
     """
     if provider == "sentence_transformers":
         model = f"{model}#query-document-prompts"
-    return effective_mem0_embedder_signature(provider, model, host=host, dimensions=dimensions)
+    return effective_mem0_embedder_signature(
+        provider,
+        model,
+        host=host,
+        dimensions=dimensions,
+        query_prefix=query_prefix,
+        document_prefix=document_prefix,
+    )
 
 
 def effective_mem0_embedder_signature(
@@ -62,14 +72,22 @@ def effective_mem0_embedder_signature(
     *,
     host: str | None = None,
     dimensions: int | None = None,
+    query_prefix: str | None = None,
+    document_prefix: str | None = None,
 ) -> tuple[str, str, str, str]:
-    """Return the Mem0 embedder settings that affect memory collection compatibility."""
+    """Return the Mem0 embedder settings that affect memory collection compatibility.
+
+    Prefixes change every vector the OpenAI-compatible client returns, so they mark the model; without them the
+    signature is unchanged and existing collections keep their names.
+    """
     effective_host = host if provider in {"openai", "ollama"} else ""
     effective_dimensions = dimensions
     if provider == "openai" and effective_dimensions is None:
         effective_dimensions = _default_dimensions(model)
     elif provider in {"ollama", "sentence_transformers"}:
         effective_dimensions = None
+    if provider == "openai" and (query_prefix or document_prefix):
+        model = f"{model}#prefixes={json.dumps([query_prefix or '', document_prefix or ''])}"
     return (
         provider,
         model,

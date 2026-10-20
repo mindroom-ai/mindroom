@@ -81,8 +81,7 @@ apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 - `plan()`, `add_todo()` without an assignee, and template items without an assignee assign the work to the calling agent, so that agent is [auto-poked](#auto-poke) about it.
 - `update_todo()` changes the title, priority, status, dependencies, or assignee, and `list_todos(show_all=True)` includes finished items.
 - Assigning work to an agent, or changing work already assigned to one, is refused unless the requester may address that agent in this room under its [`access`](https://docs.mindroom.chat/authorization/#responder-access) policy.
-- Each item remembers the requester, human or agent, who wrote its title.
-- Reassigning an item without rewriting its title also requires that the title's author may address the new agent.
+- The assigned agent works on an item as the requester, human or agent, who last added or changed it.
 
 ### Templates
 
@@ -127,10 +126,10 @@ A pending scheduled task for the same thread suppresses the poke.
 Changed work is poked again after a cooldown, and unchanged work gets at most three more pokes, one hour apart.
 The poke mentions only the assigned agent and quotes todo titles as plain text.
 
-Work written by a human is poked on that human's behalf, so the agent applies its normal reply access and tool authorization to that human.
-Work written by an agent, team, or the router is poked as the assigned agent's own turn.
-Work is not poked when its author is a human the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
-Items whose author was never recorded are skipped and logged once as `todo_poke_requester_unrecorded` until someone allowed to address the assigned agent updates them.
+Work whose requester is a human is poked on that human's behalf, so the agent applies its normal reply access and tool authorization to that human.
+Work whose requester is an agent, team, or the router is poked as the assigned agent's own turn.
+Work is not poked when its requester is a human, agent, team, or router the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
+Items whose requester was never recorded are skipped and logged once as `todo_poke_requester_unrecorded` until someone allowed to address the assigned agent updates them.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |

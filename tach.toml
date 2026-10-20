@@ -784,7 +784,7 @@ depends_on = [
     "mindroom.ai_turn_state",
     "mindroom.cancellation",
     "mindroom.constants",
-    "mindroom.dynamic_tool_continuation",
+    "mindroom.turn_continuation",
     "mindroom.logging_config",
     "mindroom.streaming",
     "mindroom.delegation.state",
@@ -832,7 +832,7 @@ depends_on = ["mindroom.tool_system.events"]
 visibility = ["mindroom.response_turn"]
 
 [[modules]]
-path = "mindroom.dynamic_tool_continuation"
+path = "mindroom.turn_continuation"
 depends_on = []
 visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
@@ -881,6 +881,7 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.providers.model_loading",
     "mindroom.providers.openai_tool_search",
+    "mindroom.providers.portable_tool_search",
     "mindroom.prompt_templates",
     "mindroom.runtime_resolution",
     "mindroom.timing",
@@ -1427,6 +1428,7 @@ visibility = [
     "mindroom.custom_tools.config_manager",
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
+    "mindroom.custom_tools.microsoft_graph",
     "mindroom.egress_broker",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",
@@ -2487,7 +2489,6 @@ path = "mindroom.edit_regenerator"
 depends_on = [
     "mindroom.coalescing.gate",
     "mindroom.conversation_resolver",
-    "mindroom.entity_resolution",
     "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
@@ -2574,6 +2575,9 @@ depends_on = [
 path = "mindroom.history.prompt_tokens"
 depends_on = [
     "mindroom.agno_compat_prepared_tools",
+    "mindroom.providers.claude_prompt_cache",
+    "mindroom.providers.openai_tool_search",
+    "mindroom.providers.portable_tool_search",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.tool_schema_cache",
@@ -7147,16 +7151,10 @@ from = ["mindroom.tool_system.skills"]
 
 [[interfaces]]
 expose = [
-    "LoadToolResult",
-    "LoadToolValidationFailure",
+    "DeferredToolkit",
     "VisibleToolSurface",
-    "deferred_tool_catalog_entries",
-    "get_loaded_tools_for_session",
-    "has_deferred_tools",
-    "load_tool_for_session",
-    "save_loaded_tools_for_session",
-    "suppress_fully_deferred_toolkit_instructions",
-    "unload_tool_for_session",
+    "defer_toolkit",
+    "drop_shadowed_deferred_functions",
     "visible_tool_surface",
 ]
 from = ["mindroom.tool_system.dynamic_toolkits"]
@@ -7405,7 +7403,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.workspaces",
     "mindroom.delegation.hooks",
-    "mindroom.dynamic_tool_continuation",
+    "mindroom.turn_continuation",
     "mindroom.history.native",
     "mindroom.delegation.storage",
     "mindroom.session_storage.agent_storage",
@@ -8027,6 +8025,7 @@ visibility = [
     "mindroom.providers.media_fallback",
     "mindroom.providers.stream_retry",
     "mindroom.providers.claude_prompt_cache",
+    "mindroom.providers.portable_tool_search",
     "mindroom.tool_call_budget",
     "mindroom.skill_learning.capture",
     "mindroom.skill_learning.reviewer",
@@ -8047,6 +8046,7 @@ expose = [
     "install_retry_cycle_hooks",
     "install_client_factories",
     "install_request_preparation",
+    "install_tool_call_rewrite",
 ]
 
 
@@ -8511,7 +8511,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.state",
-    "mindroom.dynamic_tool_continuation",
+    "mindroom.turn_continuation",
     "mindroom.history.interrupted_replay",
     "mindroom.hooks",
     "mindroom.response_turn",
@@ -9175,6 +9175,7 @@ visibility = ["mindroom.knowledge_graph.store"]
 path = "mindroom.knowledge_graph.clients"
 depends_on = [
     "mindroom.embeddings.errors",
+    "mindroom.embeddings.openai_embedder",
     "mindroom.helper_usage",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",
@@ -9287,6 +9288,7 @@ depends_on = [
     "mindroom.history.agno_compat_message_builder",
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.policy",
+    "mindroom.history.prompt_tokens",
     "mindroom.history.replay",
     "mindroom.history.run_visibility",
     "mindroom.history.summary_rows",
@@ -9298,7 +9300,6 @@ depends_on = [
     "mindroom.model_usage",
     "mindroom.native_compaction",
     "mindroom.providers.claude_prompt_cache",
-    "mindroom.providers.openai_tool_search",
     "mindroom.token_budget",
     "mindroom.usage.storage",
 ]

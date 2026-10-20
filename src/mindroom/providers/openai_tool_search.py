@@ -1,8 +1,8 @@
 """OpenAI server-side tool search (defer_loading) for MindRoom deferred tools.
 
 On supported OpenAI Responses providers, authored ``defer: true`` tools are
-handled by OpenAI's server-side tool search instead of MindRoom's homegrown
-dynamic-tool loading. Every request sends each deferred tool's full definition
+handled by OpenAI's server-side tool search instead of MindRoom's portable
+tool search. Every request sends each deferred tool's full definition
 with ``defer_loading: true`` plus a hosted ``tool_search`` entry, so deferred
 schemas stay out of the model's rendered context up front.
 Discovered tools load at the END of the context window (the opposite
@@ -34,7 +34,7 @@ _OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 # LLM-plugin-style `openai-codex/gpt-N.M` ids match the same way as bare or
 # `-codex`-suffixed ids, so no prefix normalization is needed before the search.
 # A missing minor version counts as .0, so a major-only future release gates
-# native while `gpt-5` stays homegrown.
+# native while `gpt-5` stays on portable tool search.
 _GPT_VERSION_PATTERN = re.compile(r"gpt-(\d+)(?:\.(\d+))?")
 
 

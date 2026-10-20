@@ -2014,6 +2014,32 @@
           "default": null,
           "description": "Optional embedding dimension override for OpenAI-compatible providers",
           "title": "Dimensions"
+        },
+        "query_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text prepended to search queries for OpenAI-compatible providers, for models that expect a query prompt (EmbeddingGemma 2: 'task: search result | query: ')",
+          "title": "Query Prefix"
+        },
+        "document_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text prepended to indexed documents for OpenAI-compatible providers, for models that expect a document prompt (EmbeddingGemma 2: 'title: none | text: ')",
+          "title": "Document Prefix"
         }
       },
       "title": "EmbedderConfig",
@@ -2285,9 +2311,23 @@
         },
         "watch": {
           "default": true,
-          "description": "When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+          "description": "When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations unless poll_interval_seconds is set",
           "title": "Watch",
           "type": "boolean"
+        },
+        "poll_interval_seconds": {
+          "anyOf": [
+            {
+              "minimum": 5,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How often to schedule a background refresh for a local knowledge folder that another host writes to, such as an NFS share, where filesystem watching never sees the writes; unset means no polling; only for semantic mode, and Git-backed bases use git.poll_interval_seconds instead",
+          "title": "Poll Interval Seconds"
         },
         "require_content_before_publish": {
           "default": false,
@@ -2503,6 +2543,13 @@
           },
           "description": "Conversation ingestion settings"
         },
+        "generation": {
+          "default": 0,
+          "description": "Raise to start every graph over from the conversations within backfill_days; new replies and calls read the new graphs",
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
         "aliases": {
           "additionalProperties": {
             "items": {
@@ -2525,7 +2572,7 @@
       "properties": {
         "interval_seconds": {
           "default": 600,
-          "description": "Seconds to wait after an ingestion pass that ingested nothing; one that did is followed at once",
+          "description": "How often to check a graph whose last ingestion pass ingested nothing; one that did is followed at once",
           "minimum": 30,
           "title": "Interval Seconds",
           "type": "integer"
@@ -3193,6 +3240,7 @@
         "extractor": {
           "$ref": "#/$defs/_MemoryAutoFlushExtractorConfig",
           "default": {
+            "model": null,
             "no_reply_token": "NO_REPLY",
             "max_messages_per_flush": 20,
             "max_chars_per_flush": 12000,
@@ -3236,8 +3284,10 @@
               "api_key": null,
               "credentials_service": null,
               "dimensions": null,
+              "document_prefix": null,
               "host": null,
-              "model": "text-embedding-3-small"
+              "model": "text-embedding-3-small",
+              "query_prefix": null
             }
           },
           "description": "Embedder configuration for memory"
@@ -3295,6 +3345,7 @@
               "max_chars_per_flush": 12000,
               "max_extraction_seconds": 30,
               "max_messages_per_flush": 20,
+              "model": null,
               "no_reply_token": "NO_REPLY"
             }
           },
@@ -4721,13 +4772,13 @@
         },
         "defer": {
           "default": false,
-          "description": "Hide the tool schema until the agent loads the tool for the current session",
+          "description": "Keep the tool's function definitions out of the model's context until the agent searches for them",
           "title": "Defer",
           "type": "boolean"
         },
         "initial": {
           "default": false,
-          "description": "Load a deferred tool at session start and keep it loaded; requires defer",
+          "description": "Send a deferred tool as an ordinary tool on every request; requires defer",
           "title": "Initial",
           "type": "boolean"
         }
@@ -4929,6 +4980,19 @@
     "_MemoryAutoFlushExtractorConfig": {
       "description": "Extraction limits for one background memory flush job.",
       "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model config that runs extraction instead of the agent's own model",
+          "title": "Model"
+        },
         "no_reply_token": {
           "default": "NO_REPLY",
           "description": "Token indicating no durable memory should be written",
@@ -4984,7 +5048,9 @@
             "credentials_service": null,
             "api_key": null,
             "host": null,
-            "dimensions": null
+            "dimensions": null,
+            "query_prefix": null,
+            "document_prefix": null
           },
           "description": "Provider-specific config"
         }
@@ -5245,8 +5311,10 @@
             "api_key": null,
             "credentials_service": null,
             "dimensions": null,
+            "document_prefix": null,
             "host": null,
-            "model": "text-embedding-3-small"
+            "model": "text-embedding-3-small",
+            "query_prefix": null
           },
           "provider": "openai"
         },
@@ -5277,6 +5345,7 @@
             "max_chars_per_flush": 12000,
             "max_extraction_seconds": 30,
             "max_messages_per_flush": 20,
+            "model": null,
             "no_reply_token": "NO_REPLY"
           },
           "flush_interval_seconds": 300,
@@ -5301,6 +5370,7 @@
           "max_sessions_per_cycle": 10,
           "max_tool_result_chars": 4000
         },
+        "generation": 0,
         "aliases": {}
       },
       "description": "Knowledge graph built from graph-enabled agents' conversations"

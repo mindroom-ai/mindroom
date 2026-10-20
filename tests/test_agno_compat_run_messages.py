@@ -368,7 +368,7 @@ async def test_default_learning_counts_every_extraction_request(
     persist_entity_accounts(config, paths)
     model = _LearningModel(id="gpt-6-luna", provider="OpenAI")
     monkeypatch.setattr(model_loading, "get_model_instance", lambda *_args, **_kwargs: model)
-    agent = create_agent("status", config, paths, None, session_id="session")
+    agent = create_agent("status", config, paths, None)
 
     run = await agent.arun("I am Robin and I like tea", user_id="@robin:example.org", session_id="session")
 

@@ -299,32 +299,37 @@ class TestConfigInit:
         assert "knowledge_bases" not in mind
         assert mind["tools"] == [
             "shell",
-            "coding",
             "memory",
-            {"name": "config_manager", "defer": True},
-            "duckduckgo",
-            "website",
-            "browser",
             "scheduler",
             "update_awareness",
             "todo",
             "matrix_message",
+            {"name": "config_manager", "defer": True},
+            {"name": "duckduckgo", "defer": True},
+            {"name": "website", "defer": True},
+            {"name": "browser", "defer": True},
             {"name": "matrix_room", "defer": True},
             {"name": "thread_model", "defer": True},
-            "thread_tags",
-            "thread_summary",
-            "thread_resolution",
-            "compact_context",
-            "callback_manager",
-            "chat_ui",
-            "script",
+            {"name": "thread_tags", "defer": True},
+            {"name": "thread_summary", "defer": True},
+            {"name": "thread_resolution", "defer": True},
+            {"name": "compact_context", "defer": True},
+            {"name": "callback_manager", "defer": True},
+            {"name": "chat_ui", "defer": True, "overrides": {"enable_show_canvas": True}},
+            {"name": "usage_stats", "defer": True},
+            {"name": "script", "defer": True},
             {"name": "mcp_matrix_mcp", "defer": True},
         ]
         assert mind["delegate_to"] == ["mind"]
         assert mind["skill_learning"] == {"enabled": True}
         assert mind["automations"] == ["prompt_curation", "dreaming"]
         assert config["mcp_servers"]["matrix_mcp"]["args"] == ["matrix-mcp", "serve"]
-        assert config["tool_approval"]["rules"] == [{"match": "resolve_thread", "action": "require_approval"}]
+        assert config["tool_approval"]["rules"] == [
+            {"match": "resolve_thread", "action": "require_approval"},
+            {"match": "manage_config", "action": "require_approval"},
+            {"match": "manage_agent", "action": "require_approval"},
+            {"match": "manage_team", "action": "require_approval"},
+        ]
         assert config["background_tool_jobs"] == {"enabled": True}
         config_manager_entry = next(
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"

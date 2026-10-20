@@ -84,7 +84,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `debug` | Provider request logging | [Debug Logging](../deployment/operational-log-events.md#debug-logging) |
 | `mindroom_user` | Internal MindRoom user account | [Internal User](../matrix.md#internal-user) |
 
-Optional tools that agents load on demand are configured as described in [Dynamic Tools](../tools/dynamic-tools.md), and skills in [Skills](../skills.md).
+Tools that stay out of the model's context until the agent searches for them are configured as described in [Dynamic Tools](../tools/dynamic-tools.md), and skills in [Skills](../skills.md).
 
 ## Splitting the Configuration Into Multiple Files
 

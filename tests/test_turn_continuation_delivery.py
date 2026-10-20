@@ -1,7 +1,7 @@
-"""Characterization pins: dynamic-tool continuations deliver the final body exactly once.
+"""Characterization pins: same-turn continuations deliver the final body exactly once.
 
-A two-attempt continuation turn (the first attempt ends with a dynamic
-``load_tool`` call, the second completes) is driven through the real
+A two-attempt continuation turn (the first attempt ends with a next-turn
+``switch_thread_model`` call, the second completes) is driven through the real
 response-turn drivers (``run_blocking_response_turn`` /
 ``stream_response_turn``) at the ResponseRunner seam, with a spying
 DeliveryGateway. The pins:
@@ -33,9 +33,9 @@ from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
     CompletedAttempt,
-    DynamicContinuationRunState,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnRunState,
     TurnSinks,
@@ -54,13 +54,15 @@ if TYPE_CHECKING:
     from mindroom.history.turn_recorder import TurnRecorder
 
 
-def _dynamic_tool_execution(tool_name: str = "sleep") -> ToolExecution:
-    """Return the dynamic-tools manager call that stops the provider loop."""
+def _continuing_tool_execution() -> ToolExecution:
+    """Return a next-turn model switch, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-load_tool",
-        tool_name="load_tool",
-        tool_args={"tool_name": tool_name},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": tool_name}),
+        tool_call_id="call-switch-next-turn",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": "next-turn"},
+        result=json.dumps(
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+        ),
         stop_after_tool_call=True,
     )
 
@@ -84,7 +86,7 @@ def _noop(*_args: object) -> None:
 
 
 def _blocking_adapter(
-    run_attempt: Callable[[TurnRunState, DynamicContinuationRunState], Awaitable[CompletedAttempt]],
+    run_attempt: Callable[[TurnRunState, TurnContinuationRunState], Awaitable[CompletedAttempt]],
 ) -> BlockingTurnAdapter:
     return BlockingTurnAdapter(
         open_scope=_open_scope,
@@ -98,7 +100,7 @@ def _blocking_adapter(
 
 def _streaming_adapter(
     run_attempt: Callable[
-        [TurnRunState, DynamicContinuationRunState],
+        [TurnRunState, TurnContinuationRunState],
         AsyncGenerator[str | AttemptResolved, None],
     ],
 ) -> StreamingTurnAdapter[str]:
@@ -119,9 +121,9 @@ def _initial_continuation(
     model_prompt: str | None,
     current_timestamp_ms: float | None,
     current_prompt_is_structured: bool,
-) -> DynamicContinuationRunState:
+) -> TurnContinuationRunState:
     """Mirror ``ai._initial_agent_continuation`` for the plain request prompt."""
-    return DynamicContinuationRunState.initial(
+    return TurnContinuationRunState.initial(
         prompt=prompt,
         model_prompt=model_prompt,
         current_timestamp_ms=current_timestamp_ms,
@@ -146,7 +148,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
         delivered.append(request)
         return _completed_outcome("$response", body=request.response_text)
 
-    async def run_attempt(_run: TurnRunState, continuation: DynamicContinuationRunState) -> CompletedAttempt:
+    async def run_attempt(_run: TurnRunState, continuation: TurnContinuationRunState) -> CompletedAttempt:
         attempts.append(continuation.active_prompt)
         events.append(f"attempt:{len(attempts)}")
         # No final delivery may happen before the last attempt settles.
@@ -157,7 +159,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
                 replayable_text="first-attempt draft",
                 has_visible_content=True,
                 attempt_run_id="run-1",
-                tool_executions=(_dynamic_tool_execution(),),
+                tool_executions=(_continuing_tool_execution(),),
             )
         return CompletedAttempt(
             response_text="final answer",
@@ -199,7 +201,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
-    assert "DYNAMIC TOOL CALL COMPLETED" in attempts[1]
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in attempts[1]
     assert len(delivered) == 1
     assert delivered[0].response_text == "final answer"
     assert events == ["attempt:1", "attempt:2", "deliver_final"]
@@ -236,20 +238,20 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
 
     async def run_attempt(
         _run: TurnRunState,
-        continuation: DynamicContinuationRunState,
+        continuation: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         attempts.append(continuation.active_prompt)
         events.append(f"attempt:{len(attempts)}")
         # No stream finalization may happen between attempts.
         assert not finalize_requests
         if len(attempts) == 1:
-            yield "loading tool… "
+            yield "switching models… "
             yield AttemptResolved(
                 CompletedAttempt(
                     response_text="first-attempt terminal text",
                     replayable_text="first-attempt terminal text",
                     attempt_run_id="run-1",
-                    tool_executions=(_dynamic_tool_execution(),),
+                    tool_executions=(_continuing_tool_execution(),),
                 ),
             )
             return
@@ -296,12 +298,12 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
-    assert "DYNAMIC TOOL CALL COMPLETED" in attempts[1]
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in attempts[1]
     # The first attempt's terminal text is superseded by the rerun and never delivered.
-    assert streamed_chunks == ["loading tool… ", "final answer"]
+    assert streamed_chunks == ["switching models… ", "final answer"]
     assert len(finalize_requests) == 1
     transport = finalize_requests[0].stream_transport_outcome
     assert "first-attempt terminal text" not in transport.visible_body_text
-    assert transport.visible_body_text == "loading tool… final answer"
+    assert transport.visible_body_text == "switching models… final answer"
     assert events == ["deliver_stream", "attempt:1", "attempt:2", "finalize"]
     assert generation.delivery.event_id == "$stream"

@@ -402,7 +402,6 @@ def test_selection_checks_effective_shell_permissions(
         context.config,
         paths,
         identity,
-        session_id=context.session_id,
         persist_runtime_state=False,
     )
     assert isinstance(canonical.tools, list)

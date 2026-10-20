@@ -55,7 +55,6 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         runtime_overrides=None,
         tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
         execution_identity=_OWNER,
-        session_id=_OWNER.session_id,
     )
     assert toolkit is not None
     bind_toolkit_authority(toolkit, authored_name=entry.name)
@@ -97,7 +96,6 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
         runtime_overrides=None,
         tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
         execution_identity=_OWNER,
-        session_id=_OWNER.session_id,
     )
     assert toolkit is not None
     bind_toolkit_authority(toolkit, authored_name=entry.name)
@@ -412,7 +410,7 @@ def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.Monkey
     )
 
 
-def test_deferred_job_policy_survives_unloading_but_rejects_new_filters_and_origin(
+def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Historical reads use authored grants and provenance without constructing tools."""

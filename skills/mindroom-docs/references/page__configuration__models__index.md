@@ -380,6 +380,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
+MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
 
 ## Azure OpenAI
 
@@ -454,6 +455,8 @@ Common options include:
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., [OpenRouter provider routing](#openrouter-provider-routing))
+
+When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
 Some models reject sampling controls:
 

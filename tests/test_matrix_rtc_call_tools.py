@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
@@ -233,8 +234,6 @@ def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
         config,
         runtime_paths,
         None,
-        session_id="call-session",
-        dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
     )
 
@@ -990,6 +989,8 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     knowledge_calls: list[dict[str, object]] = []
 
     def fake_create_agent(*args: object, **kwargs: object) -> FakeAgnoAgent:
+        # Bind the real signature so a stale keyword fails here instead of in production.
+        inspect.signature(create_agent).bind(*args, **kwargs)
         create_calls.append(args)
         create_kwargs.update(kwargs)
         return fake_agent

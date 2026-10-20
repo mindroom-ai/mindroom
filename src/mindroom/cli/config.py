@@ -1226,28 +1226,41 @@ agents:
       - HEARTBEAT.md
     tools:
       - shell
-      - coding
       - memory
-      - name: config_manager
-        defer: true
-      - duckduckgo
-      - website
-      - browser
       - scheduler
       - update_awareness
       - todo
       - matrix_message
+      - name: config_manager
+        defer: true
+      - name: duckduckgo
+        defer: true
+      - name: website
+        defer: true
+      - name: browser
+        defer: true
       - name: matrix_room
         defer: true
       - name: thread_model
         defer: true
-      - thread_tags
-      - thread_summary
-      - thread_resolution
-      - compact_context
-      - callback_manager
-      - chat_ui
-      - script
+      - name: thread_tags
+        defer: true
+      - name: thread_summary
+        defer: true
+      - name: thread_resolution
+        defer: true
+      - name: compact_context
+        defer: true
+      - name: callback_manager
+        defer: true
+      - name: chat_ui
+        defer: true
+        overrides:
+          enable_show_canvas: true
+      - name: usage_stats
+        defer: true
+      - name: script
+        defer: true
       - name: mcp_matrix_mcp
         defer: true
     delegate_to:
@@ -1315,6 +1328,13 @@ authorization:
 tool_approval:
   rules:
     - match: resolve_thread
+      action: require_approval
+    # Ask before config_manager changes the configuration; its inspect and validate calls never ask.
+    - match: manage_config
+      action: require_approval
+    - match: manage_agent
+      action: require_approval
+    - match: manage_team
       action: require_approval
 
 background_tool_jobs:

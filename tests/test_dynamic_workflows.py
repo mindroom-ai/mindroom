@@ -2032,13 +2032,14 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
 
     assert result == "done"
     create_kwargs = create_agent_mock.call_args.kwargs
-    assert create_kwargs["session_id"].endswith(":dynamic_workflow:competitor-research-report:run_1:writer_a")
+    assert create_kwargs["execution_identity"].session_id.endswith(
+        ":dynamic_workflow:competitor-research-report:run_1:writer_a",
+    )
     assert create_kwargs["active_model_name"] == "large"
     assert create_kwargs["knowledge"] is None
     assert create_kwargs["persist_runtime_state"] is False
     assert create_kwargs["disable_runtime_capabilities"] is True
     assert create_kwargs["execution_identity"].agent_name == "specialist"
-    assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]
 
 
 def test_resolve_participant_toolkits_builds_real_instances_with_caller_routing(tmp_path: Path) -> None:

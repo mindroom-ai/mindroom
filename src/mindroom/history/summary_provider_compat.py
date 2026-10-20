@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 import httpx
 
 from mindroom.providers.claude_prompt_cache import as_anthropic_claude
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 
 if TYPE_CHECKING:
     from agno.models.anthropic import Claude
@@ -28,7 +29,8 @@ def _authored_timeouts(model: Claude) -> tuple[object, ...]:
         *(
             client.timeout
             for client in (model.http_client, (model.client_params or {}).get("http_client"))
-            if isinstance(client, httpx.Client | httpx.AsyncClient)
+            # The runtime's shared client carries only httpx's default timeout, which no one authored.
+            if isinstance(client, httpx.Client | httpx.AsyncClient) and client is not MODEL_HTTP_CLIENT
         ),
     )
 

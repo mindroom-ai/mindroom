@@ -66,7 +66,6 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.delegation.storage import freeze_delegation_storage
-from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
@@ -98,6 +97,7 @@ from mindroom.tool_system.runtime_context import current_budget_monitor, get_too
 from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
+from mindroom.turn_continuation import continuation_decision_from_tools
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 logger = get_logger(__name__)
@@ -319,14 +319,12 @@ async def _execute_child(
             config,
             runtime_paths,
             identity,
-            session_id=child.session_id,
             active_model_name=child.model_name,
             knowledge=knowledge.knowledge,
             history_storage=storage,
             refresh_scheduler=refresh_scheduler,
             delegation_depth=child.depth,
             supports_native_tool_approval=True,
-            dynamic_tool_continuation=True,
             include_interactive_questions=False,
             tool_function_filter=context.tool_function_filter,
             required_tool_names=required_tool_names,

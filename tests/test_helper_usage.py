@@ -69,7 +69,7 @@ from tests.history_helpers import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
-from tests.test_approval_dynamic_continuation import _call, _ScriptedModel
+from tests.test_approval_turn_continuation import _call, _ScriptedModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -191,7 +191,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 config=config,
                 runtime_paths=paths,
                 execution_identity=identity,
-                session_id="approval-session",
                 supports_native_tool_approval=True,
             )
             actor = build_materialized_team_instance(
@@ -212,7 +211,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 config,
                 paths,
                 identity,
-                session_id="approval-session",
                 history_storage=scope_context.storage,
                 supports_native_tool_approval=True,
             )

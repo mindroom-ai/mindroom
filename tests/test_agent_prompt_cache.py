@@ -71,7 +71,6 @@ async def _agent_request(
             config,
             runtime_paths,
             execution_identity=None,
-            session_id=session_id,
             history_storage=InMemoryDb(),
         )
     if extra_context:

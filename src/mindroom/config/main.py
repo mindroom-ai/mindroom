@@ -563,6 +563,15 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_memory_auto_flush_model(self) -> Config:
+        """Require the auto-flush extractor model to name a configured model."""
+        extractor_model = self.memory.auto_flush.extractor.model
+        if extractor_model is not None and extractor_model not in self.models:
+            msg = f"Unknown memory.auto_flush.extractor.model: {extractor_model!r}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_personal_rooms(self) -> Config:
         """Require a real target and onboarding rooms observed by the router."""
         if self.personal_rooms is not None:
@@ -1436,7 +1445,7 @@ class Config(BaseModel):
         return policy.scope_label
 
     def _get_agent_eager_tools(self, agent_name: str) -> list[str]:
-        """Return expanded non-deferred tools visible without a dynamic load."""
+        """Return the expanded eager (non-deferred) tools of one agent."""
         tool_names: list[str] = []
         for entry in self._get_agent_authored_tool_configs(agent_name):
             if entry.defer:
@@ -1692,7 +1701,7 @@ class Config(BaseModel):
         return effective_entries
 
     def _agent_available_tools(self, agent_name: str) -> list[str]:
-        """Get all tools the agent may use after dynamic loading."""
+        """Get all tools the agent may use, initial and deferred."""
         agent_config = self.get_agent(agent_name)
         explicit_names = [name for name in agent_config.tool_names if self._tool_name_is_available(name)]
         if agent_config.include_default_tools:

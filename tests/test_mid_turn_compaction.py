@@ -66,8 +66,9 @@ from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import NativeCompactionModel, record_native_checkpoint
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.claude_prompt_cache import install_claude_deferred_tool_search
-from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.providers.openai_tool_search import install_openai_deferred_tool_search
+from mindroom.providers.portable_tool_search import install_portable_deferred_tool_search
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.teams import TeamMode, _create_team_instance, prepare_materialized_team_execution
@@ -520,12 +521,15 @@ def test_request_sizing_never_counts_attached_file_bytes() -> None:
     assert tokens < 10_000
 
 
-@pytest.mark.parametrize("provider", ["openai", "claude"])
+@pytest.mark.parametrize("provider", ["openai", "claude", "portable"])
 def test_request_sizing_leaves_out_deferred_tool_definitions(provider: str) -> None:
     """Tool search keeps deferred definitions out of the context until the model loads them."""
     if provider == "openai":
         model: Any = MindRoomOpenAIResponses(id="gpt-6-luna", store=False)
         install_openai_deferred_tool_search(model, deferred_tool_names=frozenset({"big_tool"}))
+    elif provider == "portable":
+        model = MindRoomOpenAIChat(id="deepseek-v4.1-flash", api_key="test")
+        install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"big_tool"}))
     else:
         model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", api_key="test")
         install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"big_tool"}))
@@ -639,8 +643,9 @@ async def test_unseen_thread_context_is_folded_and_transient_context_kept(
 
     compacted = _first_compacted(model)
     assert "u" * 6000 not in compacted.contents
-    assert compacted.contents[-3:-1] == ["transient turn context", "Do the task"]
-    assert is_compaction_summary(compacted.messages[-1])
+    assert compacted.contents[-3] == "Do the task"
+    assert is_compaction_summary(compacted.messages[-2])
+    assert compacted.contents[-1] == "transient turn context"
     assert "u" * 100 in summary_calls.inputs[0]
     assert "transient turn context" not in summary_calls.inputs[0]
 

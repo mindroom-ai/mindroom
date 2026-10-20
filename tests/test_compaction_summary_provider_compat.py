@@ -11,17 +11,24 @@ from agno.exceptions import ModelProviderError
 from anthropic import AsyncAnthropic, AsyncAnthropicBedrockMantle, AsyncAnthropicVertex
 from google.oauth2.credentials import Credentials
 
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.summary_call import (
     CompactionSummaryIncompleteError,
     CompactionSummaryOutputLimitError,
     generate_compaction_summary,
 )
+from mindroom.history.summary_provider_compat import configure_summary_model
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
+from mindroom.providers.model_loading import get_model_instance
 from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agno.models.anthropic import Claude
 
 
@@ -194,6 +201,15 @@ async def test_summary_single_attempt_disables_nested_sdk_and_model_retries(prov
         await model.async_client.close()
     assert len(requests) == 1
     assert original_client.max_retries == 1
+
+
+async def test_summary_keeps_its_deadline_on_the_runtime_http_client(tmp_path: Path) -> None:
+    """The runtime's shared HTTP client authors no timeout, so a loaded Claude model keeps the summary deadline."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    models = {"default": ModelConfig(provider="anthropic", id="claude-sonnet-5", extra_kwargs={"api_key": "test"})}
+    model = get_model_instance(bind_runtime_paths(Config(models=models), runtime_paths), runtime_paths)
+    configure_summary_model(model, timeout_seconds=120)
+    assert model.request_params["timeout"] == httpx.Timeout(120)
 
 
 @pytest.mark.parametrize("transport_field", ["http_client", "client_params"])

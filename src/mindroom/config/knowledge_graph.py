@@ -1,4 +1,4 @@
-"""Knowledge graph settings: the extraction model, extraction instructions, conversation ingestion, and known names."""
+"""Knowledge graph settings: extraction model and instructions, conversation ingestion, known names, and generation."""
 
 from typing import Self
 
@@ -15,7 +15,7 @@ class KnowledgeGraphIngestConfig(BaseModel):
     interval_seconds: int = Field(
         default=600,
         ge=30,
-        description="Seconds to wait after an ingestion pass that ingested nothing; one that did is followed at once",
+        description="How often to check a graph whose last ingestion pass ingested nothing; one that did is followed at once",
     )
     # At least a second, so a conversation updated after a pass always carries a later update time than it had then.
     idle_seconds: int = Field(
@@ -70,6 +70,14 @@ class KnowledgeGraphConfig(BaseModel):
     ingest: KnowledgeGraphIngestConfig = Field(
         default_factory=KnowledgeGraphIngestConfig,
         description="Conversation ingestion settings",
+    )
+    generation: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Raise to start every graph over from the conversations within backfill_days; new replies and calls read "
+            "the new graphs"
+        ),
     )
     aliases: dict[str, list[str]] = Field(
         default_factory=dict,

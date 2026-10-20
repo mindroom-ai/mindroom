@@ -36,7 +36,9 @@ describe("ToolConfigPanel", () => {
       />,
     );
 
-    expect(screen.queryByLabelText("Load lazily")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Defer until searched"),
+    ).not.toBeInTheDocument();
     expect(screen.getByText(/Toggle fields/)).toBeInTheDocument();
   });
 
@@ -52,7 +54,7 @@ describe("ToolConfigPanel", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Load lazily")).toBeInTheDocument();
+    expect(screen.getByLabelText("Defer until searched")).toBeInTheDocument();
     expect(
       screen.getByText("This tool has no other settings."),
     ).toBeInTheDocument();
@@ -255,7 +257,9 @@ describe("ToolConfigPanel", () => {
           overrideFields={shellFields}
         />,
       );
-      fireEvent.click(screen.getByRole("checkbox", { name: "Load lazily" }));
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: "Defer until searched" }),
+      );
 
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
         "openclaw",
@@ -278,9 +282,11 @@ describe("ToolConfigPanel", () => {
       );
 
       expect(
-        screen.getByRole("checkbox", { name: "Load at session start" }),
+        screen.getByRole("checkbox", { name: "Send on every request" }),
       ).toBeDisabled();
-      fireEvent.click(screen.getByRole("checkbox", { name: "Load lazily" }));
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: "Defer until searched" }),
+      );
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
         "openclaw",
         "browser",
@@ -325,7 +331,9 @@ describe("ToolConfigPanel", () => {
           toolName="browser"
         />,
       );
-      fireEvent.click(screen.getByRole("checkbox", { name: "Load lazily" }));
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: "Defer until searched" }),
+      );
 
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
         "openclaw",
@@ -350,7 +358,7 @@ describe("ToolConfigPanel", () => {
 
     expect(screen.getByText("Discord — Default Settings")).toBeInTheDocument();
     expect(
-      screen.queryByRole("checkbox", { name: "Load lazily" }),
+      screen.queryByRole("checkbox", { name: "Defer until searched" }),
     ).not.toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("checkbox", { name: "Override Bot Token" }),

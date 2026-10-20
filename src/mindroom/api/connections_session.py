@@ -12,7 +12,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import require_connections_user
+from mindroom.api.auth import is_administrator, require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     require_connections_same_origin,
@@ -24,12 +24,21 @@ from mindroom.api.connections_session_cookie import (
     issue_connections_session,
 )
 from mindroom.constants import RuntimePaths
-from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
+from mindroom.logging_config import get_logger
+from mindroom.matrix_openid import (
+    MatrixOpenIDError,
+    MatrixOpenIDToken,
+    homeserver_binds_openid_audience,
+    openid_audience,
+    verify_matrix_openid,
+)
 from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+
+logger = get_logger(__name__)
 
 
 class _SignInRoute(APIRoute):
@@ -83,6 +92,29 @@ def _portal_paths(request: Request) -> RuntimePaths:
 _PortalPaths = Annotated[RuntimePaths, Depends(_portal_paths)]
 
 
+async def _dashboard_allowed(
+    openid_token: MatrixOpenIDToken,
+    matrix_user_id: str,
+    snapshot: config_lifecycle.ApiSnapshot,
+    paths: RuntimePaths,
+) -> bool:
+    """Return whether this sign-in may open the dashboard: an administrator whose token is bound to this deployment.
+
+    The dashboard is full control, and an unbound token could have been replayed from another deployment on the same
+    homeserver. `/versions` shows only that binding was on after the first verification, so the token is verified
+    again afterwards: a binding switch between the requests cannot then pass an unbound token in either direction.
+    """
+    if not is_administrator(matrix_user_id, snapshot) or openid_audience(paths) is None:
+        return False
+    if not await homeserver_binds_openid_audience(paths):
+        return False
+    try:
+        return await verify_matrix_openid(openid_token, paths) == matrix_user_id
+    except MatrixOpenIDError as error:
+        logger.warning("Dashboard access check failed after the binding probe", detail=error.detail)
+        return False
+
+
 @router.post("")
 async def sign_in(body: _SignIn, request: Request, response: Response, paths: _PortalPaths) -> _SignedIn:
     """Trust a Matrix OpenID token only from an allowlisted Chat origin, then start a portal session."""
@@ -96,14 +128,15 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
         raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
     # Any homeserver user can obtain a valid token, so only users with portal access get a session.
     app_state = config_lifecycle.app_state(request.app)
-    user = resolve_connection_user(
-        config_lifecycle.bind_current_request_snapshot(request),
-        matrix_user_id,
-        membership_index=app_state.agent_reply_memberships,
-    )
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    user = resolve_connection_user(snapshot, matrix_user_id, membership_index=app_state.agent_reply_memberships)
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
-    token = issue_connections_session(matrix_user_id, now=time.time())
+    token = issue_connections_session(
+        matrix_user_id,
+        now=time.time(),
+        dashboard=await _dashboard_allowed(body.openid_token, matrix_user_id, snapshot, paths),
+    )
     response.headers.update(CONNECTIONS_HEADERS)
     response.set_cookie(
         CONNECTIONS_SESSION_COOKIE,

@@ -102,6 +102,7 @@ export interface KnowledgeBaseConfig {
   watch: boolean;
   chunk_size?: number;
   chunk_overlap?: number;
+  poll_interval_seconds?: number;
   git?: KnowledgeGitConfig;
 }
 

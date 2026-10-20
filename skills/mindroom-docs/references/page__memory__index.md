@@ -78,6 +78,8 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
+| `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
+| `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
 
 ```yaml
 memory:
@@ -110,7 +112,26 @@ memory:
 ```
 
 MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
-Changing the embedder provider, model, host, or dimensions switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
+
+Some models expect a prompt in front of each text, different for queries and documents.
+With a local `sentence_transformers` model, knowledge, file-memory and knowledge-graph searches get the model's own prompts automatically, while Mem0 embeds without them.
+For the same model behind an OpenAI-compatible server such as llama.cpp, set the prompts as prefixes; the `openai` provider applies them everywhere, Mem0 included.
+For EmbeddingGemma 2:
+
+```yaml
+memory:
+  embedder:
+    provider: openai
+    config:
+      model: embeddinggemma-2
+      host: http://localhost:8080/v1
+      dimensions: 768
+      query_prefix: "task: search result | query: "
+      document_prefix: "title: none | text: "
+```
+
+Knowledge-graph texts all get the query prefix, because Graphiti embeds names, facts and searches through the same calls.
+Changing the embedder provider, model, host, dimensions, or prefixes switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
 
 The `openai` embedder takes its API key from the first of these that is set:
 
@@ -241,7 +262,7 @@ Auto-flush periodically turns the new turns of file-backed agents' conversations
 It applies only to agents whose effective backend is `file`, including each requester's private instance.
 
 1. Every `flush_interval_seconds`, a background worker looks for conversations with new finished turns that have been quiet for `idle_seconds`.
-2. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
+2. The agent's own model, or `extractor.model` when set, reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
 3. When the model answers with the `no_reply_token`, nothing is written.
 4. Results are appended to `memory/YYYY-MM-DD.md`, and a retry never appends the same result twice.
 
@@ -275,6 +296,7 @@ memory:
 | `max_retry_cooldown_seconds` | `300` (min 1) | Upper bound for the growing retry wait |
 | `batch.max_sessions_per_cycle` | `10` (min 1) | Conversations flushed per pass, across all agents |
 | `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Conversations flushed per pass for one agent or private instance |
+| `extractor.model` | none | A key of `models` that runs extraction instead of the agent's own model; set a fast model when extractions time out |
 | `extractor.no_reply_token` | `NO_REPLY` | Reply meaning nothing should be saved |
 | `extractor.max_messages_per_flush` | `20` (min 1) | New messages read per extraction; a longer backlog is read over later passes |
 | `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters read per extraction |

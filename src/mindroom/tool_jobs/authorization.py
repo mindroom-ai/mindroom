@@ -93,9 +93,8 @@ def locally_allowed(
     surface = visible_tool_surface(
         agent_name=owner.agent_name,
         config=config,
-        session_id=owner.session_id,
-        loaded_tools=[entry.name for entry in view.authored_deferred_tool_configs],
         delegation_depth=depth,
+        enable_dynamic_tools_manager=True,
         include_matrix_room_runtime_tools=owner.room_id is not None,
     )
     entry = next(

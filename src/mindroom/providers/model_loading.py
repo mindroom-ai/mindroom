@@ -44,6 +44,12 @@ _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
 # Local servers can stay silent for minutes while a request queues or a model
 # loads, so they and custom endpoints get an idle limit only when configured.
 _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
+# Providers whose models hand `http_client` to their OpenAI, Groq, Cerebras, or Anthropic SDK client,
+# which otherwise builds an HTTP client of its own per model.
+_SHARED_HTTP_CLIENT_PROVIDERS = frozenset(
+    {"openai", "azure", "openrouter", "zai", "deepseek", "llama_cpp", "groq", "cerebras"}
+    | {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER},
+)
 
 
 def canonical_provider(provider: str) -> str:
@@ -483,6 +489,10 @@ def get_model_instance(
 
     if canonical_provider(provider) in {"codex", "openai_codex"}:
         extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))
+    if canonical_provider(provider) in _SHARED_HTTP_CLIENT_PROVIDERS:
+        from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT  # noqa: PLC0415
+
+        extra_kwargs["http_client"] = MODEL_HTTP_CLIENT
 
     model = _create_model_for_provider(
         provider,

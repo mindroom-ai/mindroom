@@ -74,6 +74,7 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](tools/index.md#how-settings-combine).
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
 
 Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
 
@@ -123,7 +124,7 @@ Opening a page that uses a library tells jsDelivr the viewer's IP address and wh
 
 ## What the user sees
 
-Each canvas appears in the conversation as a notice with an **Open canvas** button.
+Each canvas appears in the conversation as its title with an **Open canvas** button.
 Chat opens the panel by itself under the same conditions as other [Chat UI actions](tools/chat-ui.md#what-the-user-sees); otherwise the user chooses **Open canvas**.
 The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
 The room header's **Canvas** button lists the conversation's canvases, newest update first, and reopens one after the user closed it.
@@ -136,7 +137,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 | Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
-Other people in the room, and other Matrix clients, see only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+Other people in the room who use MindRoom Chat on the agent's homeserver see the title without the button; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
 ### Find a canvas again
 

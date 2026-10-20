@@ -230,6 +230,35 @@ async def test_embedder_sends_an_openai_batch_as_batch_requests() -> None:
 
 
 @pytest.mark.asyncio
+async def test_embedder_embeds_every_graph_text_as_a_query() -> None:
+    """Graphiti embeds names, facts and searches through the same calls, so all of them get the query prefix."""
+
+    async def create(**kwargs: object) -> SimpleNamespace:
+        texts = kwargs["input"]
+        count = len(texts) if isinstance(texts, list) else 1
+        return SimpleNamespace(data=[SimpleNamespace(embedding=[1.0])] * count, usage=None)
+
+    async_client = MagicMock()
+    async_client.embeddings.create = AsyncMock(side_effect=create)
+    embedder = MindRoomEmbedder(
+        MindRoomOpenAIEmbedder(
+            id="embeddinggemma-2",
+            api_key="sk-test",
+            base_url="http://local/v1",
+            async_client=async_client,
+            query_prefix="q: ",
+            document_prefix="d: ",
+        ),
+    )
+
+    await embedder.create(["Bas"])
+    await embedder.create_batch(["Harry", "MindRoom"])
+
+    inputs = [call.kwargs["input"] for call in async_client.embeddings.create.await_args_list]
+    assert inputs == ["q: Bas", ["q: Harry", "q: MindRoom"]]
+
+
+@pytest.mark.asyncio
 async def test_embedder_embeds_one_text_per_request_when_a_server_answers_a_batch_with_one_vector() -> None:
     """Some OpenAI-compatible servers accept an array but return one vector; they still embed one text at a time."""
 

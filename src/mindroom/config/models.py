@@ -193,11 +193,11 @@ class ToolConfigEntry(BaseModel):
     )
     defer: bool = Field(
         default=False,
-        description="Hide the tool schema until the agent loads the tool for the current session",
+        description="Keep the tool's function definitions out of the model's context until the agent searches for them",
     )
     initial: bool = Field(
         default=False,
-        description="Load a deferred tool at session start and keep it loaded; requires defer",
+        description="Send a deferred tool as an ordinary tool on every request; requires defer",
     )
 
     @model_validator(mode="before")
@@ -646,6 +646,20 @@ class EmbedderConfig(BaseModel):
         default=None,
         ge=1,
         description="Optional embedding dimension override for OpenAI-compatible providers",
+    )
+    query_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Text prepended to search queries for OpenAI-compatible providers, for models that expect a query "
+            "prompt (EmbeddingGemma 2: 'task: search result | query: ')"
+        ),
+    )
+    document_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Text prepended to indexed documents for OpenAI-compatible providers, for models that expect a document "
+            "prompt (EmbeddingGemma 2: 'title: none | text: ')"
+        ),
     )
 
     @field_validator("credentials_service")

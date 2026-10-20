@@ -40,6 +40,16 @@ def test_table_after_heading() -> None:
     assert "<h2>" in html
 
 
+def test_quoted_table_renders_at_every_streamed_prefix() -> None:
+    """A streamed quoted table cut off on a bare quote marker renders instead of raising IndexError."""
+    quoted_table = "> | A | B |\n> | - | - |\n> | 1 | 2 |\n>\n> after"
+    for end in range(1, len(quoted_table) + 1):
+        assert markdown_to_html(quoted_table[:end]).startswith("<blockquote>")
+    html = markdown_to_html("> | A | B |\n> | - | - |\n> | 1 | 2 |\n>")
+    assert "<td>1</td>" in html
+    assert html.endswith("</table>\n</blockquote>\n")
+
+
 # --- nl2br replacement (breaks: True) ---
 
 

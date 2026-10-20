@@ -164,11 +164,21 @@ Limitations: a person whose display name changes gets the new name in later epis
 Two people with one display name, a person named like an agent, or anyone named like an entry that links nobody share an entity unless an entry names one of them through their Matrix ID.
 Every entry is in every episode's instructions, so a long list lengthens every extraction prompt.
 
-### Graphs are filled side by side, each one episode at a time, without waiting while a backlog remains
+### Graphs are filled side by side, each one episode at a time and each in its own pass loop, without waiting while a backlog remains
 
 The first build on a deployment with four graphs took 37.6 hours, 85% of it extracting one episode after another across all graphs (a median of 60 seconds and about 23 model calls each) and 15% waiting between passes.
 Graphs can share the Graphiti client because the pinned Graphiti gives each `add_episode` call its own database handle; versions before that fix switched the shared client's database, which corrupted concurrent graphs ([graphiti#1676](https://github.com/getzep/graphiti/issues/1676), fixed by [graphiti#1699](https://github.com/getzep/graphiti/pull/1699)).
-Rejected: several episodes of one graph at once, because Graphiti resolves an episode's entities and facts against what its graph already holds, so two episodes extracted together can each create the same person; Graphiti's bulk import, which uses other prompts and previous-episode context and has not been evaluated; and a separate loop per graph, which would stop a long backlog from delaying other graphs' passes but adds lifecycle machinery while the graph with the longest backlog bounds a build either way.
+Rejected: several episodes of one graph at once, because Graphiti resolves an episode's entities and facts against what its graph already holds, so two episodes extracted together can each create the same person; Graphiti's bulk import, which uses other prompts and previous-episode context and has not been evaluated.
+Passes shared by all graphs were tried first and rejected on evidence: each pass waited for its slowest graph, so a build took the sum of each pass's slowest graph rather than the longest graph's own backlog.
+On the same deployment, a rebuild after raising the generation had three of four graphs idle for over an hour, with hundreds of their conversations still waiting, while one graph extracted a single long conversation.
+The assumption that the graph with the longest backlog bounds a build either way held only if that graph was also the slowest in every pass.
+Each graph therefore runs its passes back to back on its own, and a graph whose pass added nothing is looked at again every `interval_seconds`.
+
+### A generation number starts graphs over without a restart
+
+Rebuilding graphs, for example after extraction or naming changes, meant stopping MindRoom and deleting `knowledge_graph/`: the database keeps every graph in memory, and the ingestion worker saves each graph's progress after every episode, so it would write the old progress back for a graph whose files were removed under it, and that graph would never be filled again.
+`knowledge_graph.generation` joins the embedder in naming graphs, as an embedder change already did, and a change under `knowledge_graph` restarts no agent, so a hot config change takes effect at the next pass; even an agent in a voice call keeps running and finishes the call with lookups on the settings it joined with, as a reply in progress does.
+Rejected: deleting old graphs automatically, because a name is a one-way hash of settings that may be gone and replies started before the change can still read them; and a reset command inside the runtime, which would have to coordinate with a running pass for the same result.
 
 ## Ingestion invariants
 
@@ -215,9 +225,9 @@ Rejected: several episodes of one graph at once, because Graphiti resolves an ep
 
 ## Limitations
 
-- Redacting or deleting a message does not remove facts already extracted from it; deleting the `knowledge_graph/` storage directory rebuilds the graph from the remaining conversations of the last `backfill_days`.
-- A config reload that changes the embedder during a pass can add that pass's remaining episodes to the old graph.
-- A pass waits for its slowest graph, so while one graph works through a long backlog, new turns in the others wait until that pass finishes, including any graphs still waiting for a free place.
+- Redacting or deleting a message does not remove facts already extracted from it; raising `knowledge_graph.generation` rebuilds the graphs from the remaining conversations of the last `backfill_days`, and the previous graphs, which replies and voice calls already running finish on, keep their data until `knowledge_graph/` is deleted with MindRoom stopped.
+- A config reload that changes the embedder or the generation during a graph's pass can add that pass's remaining episodes to the old graph while the graph that replaces it is already filling.
+- More graphs than can be filled at once take turns pass by pass, so with many private instances a graph can wait for others' passes before each of its own.
 - Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.
 
 ## Open questions

@@ -91,7 +91,6 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
             config,
             paths,
             owner,
-            session_id=owner.session_id,
             history_storage=storage,
             include_interactive_questions=False,
         )

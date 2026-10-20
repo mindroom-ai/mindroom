@@ -1015,7 +1015,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Memory backend** - inherit the global backend or override it per agent (`mem0`, `file`, or `none`)
 - **Tools** - configured tools (green badge) and tools that need no setup
 - **Learning** and **Learning mode** (`always` or `agentic`); see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/)
-- **Lazy tool loading** - open a checked tool's settings and enable **Load lazily** (`defer`) or **Load at session start** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
+- **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
 
 ### Teams
@@ -1451,7 +1451,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `debug` | Provider request logging | [Debug Logging](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging) |
 | `mindroom_user` | Internal MindRoom user account | [Internal User](https://docs.mindroom.chat/matrix/#internal-user) |
 
-Optional tools that agents load on demand are configured as described in [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/), and skills in [Skills](https://docs.mindroom.chat/skills/).
+Tools that stay out of the model's context until the agent searches for them are configured as described in [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/), and skills in [Skills](https://docs.mindroom.chat/skills/).
 
 ## Splitting the Configuration Into Multiple Files
 
@@ -2255,6 +2255,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
+MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
 
 ## Azure OpenAI
 
@@ -2329,6 +2330,8 @@ Common options include:
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., [OpenRouter provider routing](#openrouter-provider-routing))
+
+When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
 Some models reject sampling controls:
 
@@ -2932,7 +2935,7 @@ If that reply is still streaming, the edit stops it first and the regenerated an
 A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
 Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
 While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
-Edits by agents never trigger regeneration.
+Edits by agents never trigger regeneration, and an agent's message edited while it still waits is answered with its original text.
 When another agent's reply finishes with a mention of this agent, it reaches this agent as a new message.
 
 # History & Compaction
@@ -3152,6 +3155,8 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
+| `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
+| `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
 
 ```yaml
 memory:
@@ -3184,7 +3189,26 @@ memory:
 ```
 
 MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
-Changing the embedder provider, model, host, or dimensions switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
+
+Some models expect a prompt in front of each text, different for queries and documents.
+With a local `sentence_transformers` model, knowledge, file-memory and knowledge-graph searches get the model's own prompts automatically, while Mem0 embeds without them.
+For the same model behind an OpenAI-compatible server such as llama.cpp, set the prompts as prefixes; the `openai` provider applies them everywhere, Mem0 included.
+For EmbeddingGemma 2:
+
+```yaml
+memory:
+  embedder:
+    provider: openai
+    config:
+      model: embeddinggemma-2
+      host: http://localhost:8080/v1
+      dimensions: 768
+      query_prefix: "task: search result | query: "
+      document_prefix: "title: none | text: "
+```
+
+Knowledge-graph texts all get the query prefix, because Graphiti embeds names, facts and searches through the same calls.
+Changing the embedder provider, model, host, dimensions, or prefixes switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
 
 The `openai` embedder takes its API key from the first of these that is set:
 
@@ -3315,7 +3339,7 @@ Auto-flush periodically turns the new turns of file-backed agents' conversations
 It applies only to agents whose effective backend is `file`, including each requester's private instance.
 
 1. Every `flush_interval_seconds`, a background worker looks for conversations with new finished turns that have been quiet for `idle_seconds`.
-2. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
+2. The agent's own model, or `extractor.model` when set, reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
 3. When the model answers with the `no_reply_token`, nothing is written.
 4. Results are appended to `memory/YYYY-MM-DD.md`, and a retry never appends the same result twice.
 
@@ -3349,6 +3373,7 @@ memory:
 | `max_retry_cooldown_seconds` | `300` (min 1) | Upper bound for the growing retry wait |
 | `batch.max_sessions_per_cycle` | `10` (min 1) | Conversations flushed per pass, across all agents |
 | `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Conversations flushed per pass for one agent or private instance |
+| `extractor.model` | none | A key of `models` that runs extraction instead of the agent's own model; set a fast model when extractions time out |
 | `extractor.no_reply_token` | `NO_REPLY` | Reply meaning nothing should be saved |
 | `extractor.max_messages_per_flush` | `20` (min 1) | New messages read per extraction; a longer backlog is read over later passes |
 | `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters read per extraction |
@@ -3513,7 +3538,8 @@ knowledge_bases:
 | `description` | string | `""` | What the base contains; shown to agents in the `search_knowledge_base` tool description and in files-mode instructions so they know when to use it |
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to workspace-aware agents |
 | `path` | string | `./knowledge_docs` | Folder path, relative to the config file directory or absolute |
-| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex; dashboard/API uploads and deletes still trigger a refresh |
+| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex unless `poll_interval_seconds` is set; dashboard/API uploads and deletes still trigger a refresh |
+| `poll_interval_seconds` | int | `null` | Schedule a background refresh of the local folder this often (minimum `5`), for folders that another host writes to; see [Folders Written by Another Host](#folders-written-by-another-host). Unset means no polling. Semantic mode only, so `mode: files` bases reject it. Git-backed bases use `git.poll_interval_seconds` instead, and setting both is rejected |
 | `require_content_before_publish` | bool | `false` | Keep a new semantic index in the initializing state until at least one source file exists, instead of publishing an empty index |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
@@ -3543,6 +3569,24 @@ Temporary embedding failures (timeouts, connection errors, HTTP 408, 429, and 5x
 Knowledge base configuration hot-reloads.
 After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
+
+### Folders Written by Another Host
+
+Writes from another host, such as a job writing to an NFS share, produce no filesystem events.
+With `watch: true`, MindRoom notices them only when an agent searches the base, at most every five minutes, and that search still uses the previous index.
+With `watch: false`, MindRoom never notices them.
+Set `poll_interval_seconds` on the base to refresh on a timer instead.
+
+```yaml
+knowledge_bases:
+  synced_docs:
+    path: /mnt/shared/synced_docs
+    poll_interval_seconds: 300
+```
+
+The first poll runs one interval after startup and after each config reload.
+Each poll reads every file to detect changes, so choose an interval suited to the folder size.
+Polling works with `watch` on or off, and private agent knowledge is not polled.
 
 ### Indexing Performance
 
@@ -3917,20 +3961,23 @@ Extraction needs a model with reliable structured output; small local models oft
 | Field | Default | Description |
 |---|---|---|
 | `knowledge_graph.model` | none | A key of `models` that extracts entities and facts; required once any agent enables the graph |
-| `knowledge_graph.extraction_instructions` | empty | Text with your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards |
-| `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time to wait after an ingestion pass that added nothing; a pass that added something is followed at once |
+| `knowledge_graph.extraction_instructions` | empty | Text with your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards, or to the last `backfill_days` of conversations once you raise `knowledge_graph.generation` |
+| `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | How often MindRoom looks for new turns in a graph whose last ingestion pass added nothing; a pass that added something is followed at once |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations each graph adds per pass; the rest wait for the next |
 | `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once; a single longer message is cut to this length |
 | `knowledge_graph.ingest.max_tool_result_chars` | `4000` (min 100, at most half of `max_episode_chars`) | Characters kept from each tool result |
 | `knowledge_graph.ingest.backfill_days` | `7` (min 0) | A new graph starts from conversations active within this many days |
 | `knowledge_graph.aliases` | `{}` | The one name the graph uses for a person, agent, or thing, mapped to its other names; see [Names](#names) |
+| `knowledge_graph.generation` | `0` (integer, min 0) | Raise it to start every graph over without restarting MindRoom |
 
 With the defaults, new turns reach the graph 2 to 12 minutes after a conversation goes quiet, plus extraction time, and later when many conversations are waiting.
-Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once.
+Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once; graphs take turns for those places pass by pass, so one graph's long backlog does not hold up the others.
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
-Changing the embedder starts a new, empty graph that fills again from conversations active within `backfill_days`; the old graph is no longer read but keeps its memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory.
+Changing the embedder or raising `knowledge_graph.generation` starts new, empty graphs that fill again from conversations active within `backfill_days`, which pays for that extraction again, charged to each conversation's requester.
+Replies and voice calls already running when you raise the generation keep reading the old graphs until they finish, and setting an earlier generation again reads that generation's graphs as they were left.
+The old graphs keep their memory until you stop MindRoom and delete `knowledge_graph/` in the storage directory, which also starts the current graphs over.
 
 ## What Goes Into the Graph
 
@@ -3949,7 +3996,7 @@ Each fact keeps its sources: `conversation` means someone said it, `tool_results
 When later evidence contradicts a fact, the fact is marked superseded with the date it stopped holding instead of being deleted.
 Facts are extracted by a model, so they can be wrong; check a fact's source before relying on it.
 A message redacted before its conversation is added stays out of the graph, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
-Redacting a message later does not remove facts already extracted from it; to forget them, stop MindRoom and delete `knowledge_graph/` in the storage directory, and the graph rebuilds from the remaining conversations of the last `backfill_days`, without redacted messages.
+Redacting a message later does not remove facts already extracted from it; to stop new replies and calls from reading them, raise `knowledge_graph.generation`, or, to delete them too, instead stop MindRoom and delete `knowledge_graph/` in the storage directory, and either way the graphs rebuild from the remaining conversations of the last `backfill_days`, without redacted messages.
 
 ## Names
 
@@ -3974,7 +4021,7 @@ Every other alias is a plain name that extraction maps to the entry's name and t
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
-Entities extracted earlier under other names, such as a Matrix ID, stay separate.
+Entities extracted earlier under other names, such as a Matrix ID, stay separate until you raise `knowledge_graph.generation`, which merges them in the graphs rebuilt from the last `backfill_days`.
 
 ## The `knowledge_graph` Tool
 
@@ -4047,8 +4094,8 @@ metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
 A skill without any frontmatter still loads with the name and description fallbacks, but frontmatter gives clearer listings.
 Keep each skill focused on one capability, give it a descriptive name such as `code-review`, and declare its dependencies with `metadata.openclaw.requires`.
 
-Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures.
-A workspace skill that breaks these limits is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+A workspace skill whose frontmatter is not valid YAML, for example because an unquoted `description` contains `: `, or breaks these limits is skipped with a warning.
 
 ## Installing and managing skills
 
@@ -4100,6 +4147,7 @@ Being able to write workspace skills does not make an agent create them.
 To have agents save reusable workflows on their own, add that guidance to the agent's instructions, or enable [automatic skill learning](#automatic-skill-learning).
 
 MindRoom loads at most 256 workspace skills per agent, skips a skill whose `SKILL.md` exceeds 1 MiB or whose name exceeds 64 characters, and truncates descriptions to 1,024 characters, logging a warning in each case.
+Until the file is fixed, the owning agent's system prompt names each workspace skill skipped for its frontmatter or name, and why.
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -4120,10 +4168,10 @@ Agents see their available skills in the system prompt and load details with the
 
 - `get_skill_instructions(skill_name)` loads the full instructions for a skill
 - `get_skill_reference(skill_name, reference_path)` reads a reference document
-- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` reads or executes a script
+- `get_skill_script(skill_name, script_path)` reads a script
 
-Workspace skill scripts can be read with `get_skill_script`, but not executed through it.
-Agents with shell or file execution tools can still run workspace files through those tools.
+`get_skill_script` never runs a script, whichever skill it comes from.
+Agents with a shell tool run scripts with it, where their shell commands run.
 
 Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
 A workspace skill created during a turn becomes available on the next agent run, not in the same response.
@@ -4486,6 +4534,7 @@ A run waits rather than proceeding when membership cannot be confirmed.
 ## Persistence and Missed Runs
 
 Schedules are stored in Matrix room state and survive restarts.
+In a room MindRoom did not create, a room admin may need to raise the router's power level to the room's state-event level, usually 50, before schedules can be saved; raising the router is enough for every agent, and the error names the account and the level to grant.
 MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
@@ -5243,7 +5292,7 @@ With `cascaded` and `live`, the agent tells the caller to use text chat for them
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart also drops it from the call, and so does any configuration change applied while the agent is in a call.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
@@ -5649,6 +5698,7 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
 
 Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
 
@@ -5698,7 +5748,7 @@ Opening a page that uses a library tells jsDelivr the viewer's IP address and wh
 
 ## What the user sees
 
-Each canvas appears in the conversation as a notice with an **Open canvas** button.
+Each canvas appears in the conversation as its title with an **Open canvas** button.
 Chat opens the panel by itself under the same conditions as other [Chat UI actions](https://docs.mindroom.chat/tools/chat-ui/#what-the-user-sees); otherwise the user chooses **Open canvas**.
 The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
 The room header's **Canvas** button lists the conversation's canvases, newest update first, and reopens one after the user closed it.
@@ -5711,7 +5761,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 | Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
-Other people in the room, and other Matrix clients, see only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+Other people in the room who use MindRoom Chat on the agent's homeserver see the title without the button; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
 ### Find a canvas again
 
@@ -6220,6 +6270,8 @@ agents:
     tools:
       - usage_stats
 ```
+
+`mindroom config init` and newly provisioned hosted instances give the starter Mind agent these self-service functions.
 
 Enable `get_all_usage()` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
 
@@ -7047,10 +7099,11 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
+- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files and Excel ranges through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
-- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Keep rarely used tools out of the model's context until the agent searches for them.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
 
@@ -7451,18 +7504,18 @@ If the tools changed, the agents and teams that use the server restart to pick t
 
 # Dynamic Tools
 
-Dynamic tools keep an agent's rarely used tools out of the model's tool list until the agent needs them, which saves context on every request.
+Dynamic tools keep the definitions of an agent's rarely used tools out of the model's context until the agent searches for them, which saves context on every request.
 Use them for agents with many optional tools.
-Each authored entry in an agent's `tools:` list loads or unloads as one unit.
 
 ## Configuration
 
 | Field | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `defer` | bool | `false` | Hide the tool until the agent loads it for the current session. |
-| `initial` | bool | `false` | Load a deferred tool at session start and keep it loaded; requires `defer: true`. |
+| `defer` | bool | `false` | Keep the tool's function definitions out of the model's context until the agent searches for them. |
+| `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
+The starter Mind agent from `mindroom config init` keeps `shell`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -7481,37 +7534,36 @@ agents:
 These configurations fail validation:
 
 - `initial: true` without `defer: true` fails with `Tool entry initial=true requires defer=true`.
-- Lazy loading is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
+- Deferral is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
 - Presets such as [`openclaw_compat`](https://docs.mindroom.chat/openclaw/) cannot be deferred; set the flags on the individual member tools instead.
 - The control-plane tools `delegate`, `dynamic_tools`, `external_trigger_manager`, `invite_router`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
 
 ## Native Server-Side Tool Search
 
-Standard-mode agents on these models use the provider's own tool search instead of MindRoom's loading tools:
+Standard-mode agents on these models use the provider's own tool search instead of [MindRoom's](#mindroom-tool-search):
 
 - Claude Opus 4.5, Sonnet 4.5, Haiku 4.5, and newer on the `anthropic` and `vertexai_claude` providers.
 - GPT 5.4 and newer on `openai`, `codex`, and `openai_codex`.
 
-For `openai`, an explicit `api: chat_completions` or a custom endpoint selects runtime loading instead.
+For `openai`, an explicit `api: chat_completions` or a custom endpoint selects MindRoom's tool search instead.
 The endpoint is a non-empty `extra_kwargs.base_url`, otherwise `OPENAI_BASE_URL`; native search applies only when it is unset or `https://api.openai.com/v1`.
 
 On this path, deferred tools stay out of the model's context until the model searches for them, and discovering a tool does not invalidate the prompt cache.
 The system prompt names the deferred toolkits and tells the model to search them before concluding that a tool is unavailable.
-Discovered tools are called directly, so there is nothing to load or unload.
-Tools with `initial: true` are ordinary always-visible tools.
+Discovered tools are called directly.
 Toolkit instructions are omitted from the system prompt when every function in the toolkit is deferred and not `initial`.
 
-## Runtime Loading
+## MindRoom Tool Search
 
-On other models, an agent with at least one deferred tool gets the `dynamic_tools` toolkit, with `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
-`tool_search` matches keywords and exact names only.
-Tools with `initial: true` cannot be unloaded.
-
-A loaded tool becomes callable in the agent's next tool-call step, not in the same parallel batch as `load_tool()`.
-The agent continues the same response with the updated tools and the loaded toolkit's instructions, without waiting for another message.
-
-Loaded tools are tracked per agent and per conversation session, so two agents in the same Matrix thread do not share them.
-This state is held in memory, so a restart returns each session to its `initial` tools.
+On every other model, an agent with at least one deferred tool gets the `dynamic_tools` toolkit, with `tool_search(query, max_results)` and `call_tool(name, arguments)`.
+Voice calls and subagent personas with their own tool list send deferred tools as ordinary tools instead.
+The system prompt lists the deferred toolkits with their descriptions.
+`tool_search` matches function names, toolkit names, and keywords in descriptions and parameter names, and returns the full definitions of up to `max_results` functions (default 5, at most 20) with the instructions they and their toolkit would otherwise add to the system prompt.
+Without a query, `tool_search` lists each deferred function's name, toolkit, and description, without definitions; when they do not fit in one result it leaves out the descriptions, and if the names still do not fit it says how many functions it left out.
+The agent then calls a function with `call_tool`, passing its arguments as a JSON object; approval rules, hooks, and the chat display treat the call as a call of that function.
+Discovering and calling deferred tools never changes the tool list or the system prompt, so it does not invalidate the provider's prompt cache.
+Found definitions stay in the conversation until compaction summarizes them, after which the agent searches again.
+When two toolkits define a function with the same name, the one listed first in `tools:` provides it; if that one is deferred, the function stays hidden until the agent searches for it, so list the eager toolkit first to keep it visible.
 
 ## Minimal Mode
 
@@ -8781,7 +8833,7 @@ When an agent has a workspace, it is the working directory (`base_dir`) of `file
 Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
 The path must name a file inside the workspace; absolute paths, `..`, paths that start with `~` or contain `$` or `%`, symlinks, and paths inside a `.git` directory are refused.
-Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, and a preview.
+Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, a preview, and a note to read the file in parts, because reading it whole would only save it again.
 `MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` sets the largest output either kind of save writes (default 64 MiB).
 
 ```yaml
@@ -11919,8 +11971,7 @@ apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 - `plan()`, `add_todo()` without an assignee, and template items without an assignee assign the work to the calling agent, so that agent is [auto-poked](#auto-poke) about it.
 - `update_todo()` changes the title, priority, status, dependencies, or assignee, and `list_todos(show_all=True)` includes finished items.
 - Assigning work to an agent, or changing work already assigned to one, is refused unless the requester may address that agent in this room under its [`access`](https://docs.mindroom.chat/authorization/#responder-access) policy.
-- Each item remembers the requester, human or agent, who wrote its title.
-- Reassigning an item without rewriting its title also requires that the title's author may address the new agent.
+- The assigned agent works on an item as the requester, human or agent, who last added or changed it.
 
 ### Templates
 
@@ -11965,10 +12016,10 @@ A pending scheduled task for the same thread suppresses the poke.
 Changed work is poked again after a cooldown, and unchanged work gets at most three more pokes, one hour apart.
 The poke mentions only the assigned agent and quotes todo titles as plain text.
 
-Work written by a human is poked on that human's behalf, so the agent applies its normal reply access and tool authorization to that human.
-Work written by an agent, team, or the router is poked as the assigned agent's own turn.
-Work is not poked when its author is a human the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
-Items whose author was never recorded are skipped and logged once as `todo_poke_requester_unrecorded` until someone allowed to address the assigned agent updates them.
+Work whose requester is a human is poked on that human's behalf, so the agent applies its normal reply access and tool authorization to that human.
+Work whose requester is an agent, team, or the router is poked as the assigned agent's own turn.
+Work is not poked when its requester is a human, agent, team, or router the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
+Items whose requester was never recorded are skipped and logged once as `todo_poke_requester_unrecorded` until someone allowed to address the assigned agent updates them.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |
@@ -12491,6 +12542,161 @@ Other Atlassian errors keep Atlassian's message with URLs removed.
 - [Plugins](https://docs.mindroom.chat/plugins/)
 - [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
 
+# Microsoft 365
+
+The Microsoft 365 tools reach OneDrive and SharePoint through Microsoft Graph as the person who asked.
+Each requester connects their own Microsoft account, so agents see and change only what that person can.
+OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
+
+| Tool | What it covers | Provider ID | Delegated Graph permissions |
+| --- | --- | --- | --- |
+| `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
+
+Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
+
+## Set Up The Microsoft Entra App
+
+An administrator registers one app in Microsoft Entra for the MindRoom installation, and every Microsoft 365 tool uses it.
+
+1. In the [Microsoft Entra admin center](https://entra.microsoft.com), open **App registrations** and choose **New registration**.
+2. Under **Supported account types**, choose your organization only, any organization's accounts if people from several tenants connect, or also personal Microsoft accounts if people use those.
+3. Add a **Web** redirect URI for each tool you enable, such as `https://mindroom.example.com/api/oauth/microsoft_files/callback`, replacing the origin with your public MindRoom origin.
+4. Under **Certificates & secrets**, create a client secret and copy its value.
+5. Under **API permissions**, add the **Delegated** Microsoft Graph permissions from the table above for the tools you enable, plus `User.Read` and `offline_access`, and choose **Grant admin consent** if your tenant does not let users consent themselves.
+6. On **Overview**, copy the application (client) ID and the directory (tenant) ID.
+
+For a local installation, the redirect URI is `http://localhost:8765/api/oauth/microsoft_files/callback`.
+A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
+Do not add application permissions; the tools only use delegated permissions, which act as the signed-in user.
+
+Store the client ID and secret in the `microsoft_oauth_client` credential service through the dashboard credentials page.
+For non-interactive deployments, seed it at startup with a [credential seed](https://docs.mindroom.chat/oauth-framework/#credential-seeds):
+
+```json
+[
+  {
+    "service": "microsoft_oauth_client",
+    "credentials": {
+      "client_id": {"env": "MICROSOFT_CLIENT_ID"},
+      "client_secret": {"env": "MICROSOFT_CLIENT_SECRET"}
+    }
+  }
+]
+```
+
+To use a different app for one tool, store its credentials in that tool's `<provider ID>_oauth_client` service, such as `microsoft_files_oauth_client`, which takes precedence over `microsoft_oauth_client`.
+
+Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
+It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
+Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive but not SharePoint.
+Changing the tenant makes existing connections ask their users to connect again.
+
+## Configure
+
+Add the tools to an agent:
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - microsoft_files
+```
+
+| Option | Tool | Type | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
+
+The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
+
+## Connect An Account
+
+When a requester has not connected a tool's service yet, each of its functions returns `oauth_connection_required: true` with a `connect_url` for that requester.
+The requester opens the link, signs in to Microsoft, approves the requested permissions, and retries the request.
+Users can also connect and disconnect from the dashboard Integrations page, where each service is a separate connection.
+
+Tokens belong to the requester and are never shared with other users or stored globally.
+A call without a concrete requester always asks for a connection instead of using another account.
+Microsoft ends a connection that has not been used for 90 days, and the requester then connects again.
+
+## Files
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `microsoft_files_search` | no | Search the OneDrive and SharePoint files the requester can open, by name and content, up to 50 results. |
+| `microsoft_files_list_folder` | no | List a folder's files and folders, or the requester's OneDrive root, up to 200 entries. |
+| `microsoft_files_get_file` | no | Read a file's details, including its `etag`, web link, size, and last editor. |
+| `microsoft_files_download_file` | no | Save a file, up to 100 MB, into the workspace's `microsoft-files-downloads/` directory. |
+| `microsoft_files_replace_file` | yes | Replace a file's contents with a workspace file, up to 250 MB, given the `etag` the edit started from. |
+| `microsoft_files_upload_file` | yes | Upload a workspace file, up to 250 MB, as a new file in a folder or the requester's OneDrive root. |
+| `microsoft_files_excel_list_worksheets` | no | List the worksheets of an Excel workbook. |
+| `microsoft_files_excel_read_range` | no | Read a worksheet range, or its used range, up to 10,000 cells. |
+| `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells. |
+
+Functions name a file or folder by its Graph item path, `/drives/{drive-id}/items/{item-id}`, which search, listing, and details return, or by a OneDrive or SharePoint link the requester can open.
+Uploads read from the agent's workspace and follow its [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting, and downloads always land in the workspace.
+
+To edit a document, the agent downloads it, saves its edited copy under a new name outside `microsoft-files-downloads/`, and replaces the original with the `etag` from the download.
+The replace then fails with `etag_mismatch` if someone changed the file in the meantime, and the file's version history keeps the replaced version.
+A later download of the same name overwrites the copy in `microsoft-files-downloads/`.
+Uploads never overwrite an existing file; a name that already exists returns `name_conflict`.
+
+Excel functions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
+They take a worksheet name and an address such as `B2` or `A1:C10` without a worksheet prefix, and written values must have the shape of the address.
+A written string that starts with `=` becomes a formula.
+
+Search uses Microsoft Search, which covers work and school accounts.
+Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
+
+## Approvals For Writes
+
+The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
+
+```yaml
+tool_approval:
+  rules:
+    - match: microsoft_files_replace_file
+      action: require_approval
+    - match: microsoft_files_upload_file
+      action: require_approval
+    - match: microsoft_files_excel_update_range
+      action: require_approval
+```
+
+To give an agent read access only, set `write: false` on the tool.
+
+## Troubleshooting
+
+| Result | Cause and fix |
+| --- | --- |
+| `AADSTS50011` on the Microsoft sign-in page | The redirect URI is not registered on the app; add the exact URI from [Set Up The Microsoft Entra App](#set-up-the-microsoft-entra-app). |
+| `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent; an administrator grants it on the app's **API permissions** page. |
+| `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
+| `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
+| `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
+| `not_found` | The item does not exist or the connected account cannot see it. |
+| `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
+| `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
+| `locked` | The file is checked out or locked; try again later. |
+| `name_conflict` | A file with that name already exists in the folder; replace it or choose another name. |
+| `too_large` | The file or range exceeds a limit above. |
+| `throttled` | Microsoft Graph is limiting requests; retry after `retry_after_seconds`. |
+| `download_rejected` | SharePoint refused the download link Microsoft Graph returned; retry the download. |
+
+When Microsoft rejects the connection's access token, the result includes a reconnect link.
+
+## Security Notes
+
+- The tools run in the primary MindRoom runtime, so worker containers never receive the app client configuration or user tokens.
+- Tokens are sent only to Microsoft Graph, never to another host, including the SharePoint hosts that serve downloads.
+- Request logs never contain tokens or pre-authenticated download links.
+- Error results never contain tokens or raw response bodies.
+
+## Related Docs
+
+- [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/)
+- [Tool Approval](https://docs.mindroom.chat/tool-approval/)
+
 # Calendar & Scheduling
 
 Use these tools to give an agent access to Google Calendar, Google Tasks, or Cal.com bookings, or to let it schedule its own future work in MindRoom.
@@ -12846,7 +13052,7 @@ The runtime guidance every agent gets still follows, such as its tool execution 
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent with `delegate` can author further copies only within its own `tools`, `skills`, and `knowledge` lists: a copy that omits `tools` inherits its tools, except `delegate` at the maximum depth, one that also omits `skills` or `knowledge` inherits those, and an authored subagent with any of these lists cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools, skills, and knowledge.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
-A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, a kept configured skill can run its scripts, and file tools can still read `files`-mode knowledge bases.
+A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, and file tools can still read `files`-mode knowledge bases.
 
 ```python
 run_subagent(
@@ -12912,7 +13118,7 @@ Tools that can run as background jobs accept an optional `background_after` argu
 It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
 The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
-Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
+Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
 Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
 
@@ -13072,7 +13278,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
-    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads or runs a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
+    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     A participant used by several steps continues one session.
@@ -13220,6 +13426,7 @@ If the dashboard frontend and the Python backend sit behind separate upstreams, 
 
 `config_manager` is the full configuration control plane: it reads and patches any authored config field and creates or updates agents and teams.
 It can change every agent and team, so give it only to agents that administrators drive; use [`self_config`](#self_config) for narrow self-tuning.
+The starter configuration from `mindroom config init` or a new hosted instance gives it to Mind, with [tool approval](https://docs.mindroom.chat/tool-approval/) rules that make each `manage_config` patch, `manage_agent` create or update, and `manage_team` call wait for the requester's approval.
 
 ```yaml
 agents:
@@ -13926,9 +14133,12 @@ Defaults:
 - Only managed room keys grant membership; raw Matrix room IDs or aliases in `rooms` grant nothing, and `members_of_rooms` entries that are not managed room keys fail validation.
 - The router defaults to `current_room_members: true`.
 
-Platform administrators and MindRoom's own internal identities pass every responder's `access` check.
+Platform administrators pass every responder's `access` check, and every agent, team, and the router admits its own account.
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
+
+Work no person started, such as a shared agent's [automation](https://docs.mindroom.chat/scheduling/#automations) run and the delegations, todos, mentions, and schedules that mention another agent it makes, runs as that agent's Matrix account, so another agent or team takes it on only when its own `access` admits that account.
+The default `access` admits an agent joined to one of the responder's rooms; otherwise list the agent's Matrix ID in `access.users`.
 
 A team's `access` covers requests to the team as a whole, so someone the team admits reaches every member agent through the team, even members whose own `access` would not admit them directly.
 
@@ -13991,11 +14201,12 @@ bot_accounts:
 
 ## Dashboard configuration
 
-Dashboard access follows deployment authentication, not the Matrix `administrators` list.
+Dashboard access follows deployment authentication; the Matrix `administrators` list matters only in the cases noted below.
 
 - Standalone: `MINDROOM_API_KEY` protects the dashboard and its API; without it, access is unauthenticated, so set it before exposing an instance beyond a trusted local network.
 - Hosted (Supabase): the user's platform sign-in is validated, and the instance owner account is enforced when configured.
 - [Trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/): every gateway-authenticated user may change configuration unless Connections is enabled, which adds an `administrators` check; see its [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary).
+- [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat): with the Connections portal enabled, a user in `administrators` who opens Connections from Chat also reaches the dashboard without the API key, but only outside hosted platform mode and when the homeserver binds OpenID tokens to this deployment; everyone else keeps the authentication above.
 
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so dashboard requests made with the API key act as the owner's Matrix identity for credential management.
 Browser changes made with a dashboard sign-in or trusted upstream identity must come from the dashboard's own origin; see [Browser Mutation Protection](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#browser-mutation-protection).
@@ -14011,7 +14222,7 @@ Pages from any other origin fail with `Origin '<origin>' is not allowed without 
 A reverse proxy in front of an unauthenticated dashboard or `/v1` API must pass the browser's `Host` header through unchanged, for example nginx `proxy_set_header Host $host;` or Apache `ProxyPreserveHost On`.
 A proxy that rewrites `Host` to its upstream address, as nginx `proxy_pass` and Apache `mod_proxy` do by default, makes every request look addressed to an IP address and disables this protection; in that case set `MINDROOM_API_KEY`, and `OPENAI_COMPAT_API_KEYS` for `/v1`.
 
-These host checks do not apply to requests authenticated by an API key, a platform session, or trusted upstream auth, or to routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
+These host checks do not apply to requests authenticated by an API key, a platform session, trusted upstream auth, or a Connections session that may open the dashboard, or to routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 
 ## Platform and credential authority
 
@@ -14073,6 +14284,8 @@ tool_approval:
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
+
+[`config_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#config_manager) calls that only read configuration, `manage_config(operation="inspect")` and `manage_agent(operation="validate")`, never ask for approval, even when a rule matches them or `default` is `require_approval`.
 
 ## Approving and Denying
 
@@ -14232,13 +14445,13 @@ Standalone installs identify the dashboard user through `MINDROOM_OWNER_USER_ID`
 Room-independent access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply, because a browser request has no current room or team.
 Managing a personal connection grants no general dashboard access and no authority over shared credentials.
 With the Connections portal enabled, eligible users manage their connections there, and under trusted upstream auth ordinary dashboard routes require administrator authority.
-A portal session from Matrix sign-in covers only the portal, the OAuth callback for flows it starts, and the OAuth success page, so it never reaches dashboard routes.
+A portal session from Matrix sign-in covers the portal, the OAuth callback for flows it starts, and the OAuth success page, and reaches dashboard routes only for an administrator whose token the homeserver bound to this deployment ([Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat)).
 Unauthorized connect, authorize, status, disconnect, and callback requests return HTTP 403 before any credential is exposed or changed.
 See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-credential-authority) for administrators and credential managers.
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub and Atlassian, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, and Microsoft 365, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -14249,7 +14462,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub and Google OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, and Microsoft 365 OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -14258,6 +14471,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](https://docs.mindroom.chat/tools/project-management/#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
+| Microsoft 365 (OneDrive and SharePoint) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.
@@ -14586,6 +14800,8 @@ Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_d
 
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question governed by access policy and requester authorization.
 An agent or team mentioned in another entity's reply acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
+Work no person started, such as a shared agent's automation run and the delegations, todos, mentions, and schedules that mention another agent it makes, acts as that agent's own account, which every other agent and team admits only through its own `access`.
+When an agent-created schedule that mentions no agent reaches one of several responders through a router hand-off, the hand-off drops the managed requester, so the target checks the router's account, which the default `access` admits because the router joins every managed room.
 
 ## Protecting the primary from worker code
 
@@ -14660,7 +14876,7 @@ It writes an approved proposal into `memory/` from bytes worker code staged, whi
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
 That check covers only the workspace's final path component, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
@@ -14678,12 +14894,13 @@ Reads of worker-controlled files are capped per surface.
 | `prompt_curation` snapshots of `MEMORY.md` and context files | 1 MiB per file | Refused, so the check is skipped with a warning or verify reports the file as unreadable |
 | `dreaming` memory files, staging copies, reports, and verdicts | 1 MiB per file | A memory file is left out of the run, a staged file stops the run, and a report or verdict counts as missing, so the run stops or the proposal is rejected |
 | `dreaming` thread-export `index.json` | 8 MiB per room | Ignored, so that room's conversations are aged by file modification time |
-| Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions and the reason a skill did not load 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description, listing, or reason is truncated, and skills beyond the budget or count are skipped, each with a warning; the agent's system prompt names each skill refused for its frontmatter or name with the reason, which can quote that frontmatter; entries past the first 1,024 in directory order are not examined |
 | Workspace subagent profiles (`subagents/*.md`) | 64 KiB per file; names 64 characters; descriptions 1024 characters; the listing reads at most 256 profiles and 1 MiB; 1,024 examined entries in `subagents/` | An oversized or unreadable file is listed as invalid and cannot run, and profiles past the listing limits are left out of it but still load by name |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads, sandbox files that `e2b` downloads or reads, and `e2b` command and code output | 64 MiB | Refused with a tool error; `stream_command()` returns its first 64 MiB |
+| `microsoft_files` uploads | 250 MB, Microsoft Graph's single-request limit | Refused with a tool error before any request |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
@@ -14716,7 +14933,7 @@ Every tool, including plugin tools, must declare one of these file access classe
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, edits, deletes, and every file a `file` content search reads refuse replaced workspace roots and swapped files, while listing and the other searches walk by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
@@ -14744,6 +14961,12 @@ The cookie is browser-wide, so a second sign-in in another tab replaces it.
 To keep a stale tab from acting as the new account, the Connections pages send the Matrix ID they show in the `X-MindRoom-Connections-User` header on every `/api/connections` request.
 MindRoom answers 401 when that header names a different account than the request authenticates as, whether by a session or by trusted upstream.
 Requests without the header, such as OAuth popup navigations, still work.
+At sign-in, MindRoom also records in the signed cookie whether the session may open the dashboard.
+It may only when the user is in `administrators`, `MINDROOM_PUBLIC_URL` is set, and the homeserver's `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true`, which MindRoom's Tuwunel fork does while it binds tokens.
+Under binding, a token that verified with this deployment's audience was requested for this deployment, so another deployment's operator cannot replay it here; without binding they could, and the dashboard is full control.
+MindRoom verifies the token a second time after reading `/versions`, because `/versions` shows only the setting after the first verification: if binding came on in between, the second verification refuses the unbound token, and if it went off, the first one already proved the token bound to this deployment.
+The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.
+Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
 
 ## Known gaps
 
@@ -14765,10 +14988,10 @@ Do not report or "fix" these; they are deliberate.
 - An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
-- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, and Google Drive may still use every file in the agent workspace.
+- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, and Microsoft Files may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries on, through the addresses it requests, so agents should only show pages they wrote; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
-- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
-- `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, and Microsoft Files take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
+- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
@@ -14780,13 +15003,14 @@ Do not report or "fix" these; they are deliberate.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
+- `config_manager`'s `manage_config(operation="inspect")` and `manage_agent(operation="validate")` calls never ask for approval, even under a matching rule or `tool_approval.default: require_approval`, because they only read configuration.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
-- Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so deleting the `knowledge_graph/` storage directory rebuilds the graph without them; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
+- Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so raising `knowledge_graph.generation` rebuilds the graphs without them; replies and voice calls already running finish on the old graphs, which stay stored until `knowledge_graph/` is deleted with MindRoom stopped; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
@@ -14805,7 +15029,9 @@ Do not report or "fix" these; they are deliberate.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 - The Connections portal signs users in either through trusted upstream strict JWT auth or, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists MindRoom Chat origins, through a Matrix OpenID token that Chat hands to the portal window.
-  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates only the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page; it never grants dashboard or administrator access, even to an administrator.
+  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page.
+  It also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
+  Binding is proven by the homeserver's `/_matrix/client/versions` and a second verification of the token after reading it, so turning binding on or off once during a sign-in cannot promote an unbound token; turning it on and off again within that one sign-in is not covered.
   An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust.
   On a homeserver that does not bind tokens to one deployment, a backend that Chat opens could replay a user's token to another deployment on the same homeserver until it expires; [audience binding](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat) closes that where the homeserver supports it.
   The `/connections` page shell is served without authentication, while every API stays protected.
@@ -17917,6 +18143,7 @@ Install proxied plugin tools in the runner image, or mount only the plugin direc
 Use this to run the primary runtime on the host, including with `uvx mindroom run`, and give each worker key its own persistent Docker container, without Kubernetes.
 A container is reused until its launch configuration changes.
 Idle containers keep running unless `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is set to a positive interval, which then stops containers idle longer than `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`.
+When MindRoom shuts down, it removes its worker containers but keeps each worker's files, and the worker's next call starts a new container.
 
 MindRoom installs the optional `docker` extra the first time this backend is used.
 If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
@@ -18328,7 +18555,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host `config.yaml` from which each worker's projected config is built | Resolved `MINDROOM_CONFIG_PATH` when it exists |
 | `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle time before a worker container may be cleaned up | `1800` |
 | `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for a new worker to become ready | `60` |
-| `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix for worker container names | `mindroom-worker` |
+| `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix for worker container names, which use it lowercased, with each run of characters other than letters, digits, and `-` replaced by one `-`, and cut to 38 characters; a longer prefix logs a warning | `mindroom-worker` |
 | `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` | Host interface for published worker ports | `127.0.0.1` |
 | `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST` | Hostname the primary runtime uses to reach published worker ports | Value of `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` |
 | `MINDROOM_DOCKER_WORKER_USER` | Container user, or empty for the image default | Current host uid:gid on POSIX, image default otherwise |
@@ -19387,7 +19614,7 @@ agents:
 Users sign in to the portal in one of two ways, and both can be enabled together:
 
 - **Trusted upstream:** [strict JWT mode](#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
-- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway and leaves dashboard authentication unchanged.
+- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway, and the dashboard keeps its own authentication except for administrators on a homeserver that binds tokens.
 
 Portal API requests without a valid sign-in return `401`.
 Connect and disconnect requests also require `MINDROOM_PUBLIC_URL`, or the request URL when unset, to be an HTTPS origin, and the browser's `Origin` header to match it.
@@ -19455,15 +19682,19 @@ The session lasts one hour.
 A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
 
-A session authenticates only these paths:
+Apart from the dashboard rule below, a session authenticates only these paths:
 
 - `/connections` and its sub-paths.
 - `/api/connections` and its sub-paths.
 - The OAuth callback, `/api/oauth/{provider}/callback`, for flows started under the session.
 - The OAuth success page, `/api/oauth/{provider}/success`.
 
-It never grants dashboard or administrator access, even to an administrator.
-Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth, which the dashboard keeps using, and alongside trusted upstream sign-in.
+For a user listed in `administrators`, the session also opens the dashboard and its APIs, with no API key, when the homeserver binds tokens: MindRoom's Tuwunel fork with `mindroom_openid_audience` on, which MindRoom detects from `/_matrix/client/versions` at sign-in.
+Without binding, a token could have been replayed from another deployment on the same homeserver, and the dashboard is full control of this one.
+So the session reaches the dashboard only when it was started while the homeserver bound tokens and `MINDROOM_PUBLIC_URL` was set, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
+The Connections header links the dashboard for administrators only.
+Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
+Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 `GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
 
 ## Helm Charts
@@ -19498,7 +19729,7 @@ Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
 With the Connections portal enabled, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the portal and the OAuth callback, success, and reset pages keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
-A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) never reaches dashboard routes, so it needs no administrator check.
+A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
 Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.
 A personal OAuth link opened by a browser signed in as anyone other than the requester who received it fails with `403`; see [Connect An Account](https://docs.mindroom.chat/oauth-framework/#connect-an-account) for link rules.
@@ -19534,6 +19765,7 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, and fix any invalid entry because one disables the whole list |
 | `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
+| An administrator's Dashboard link from Connections asks for the API key | Check that `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true` and `MINDROOM_PUBLIC_URL` is set; the warning `Could not check whether the homeserver binds OpenID tokens` means MindRoom could not read `/versions`, and `Dashboard access check failed after the binding probe` means the second token check failed. Open Connections from Chat again afterwards, because the session records dashboard access at sign-in |
 | `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
 | `403 Connections require a configured private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent` |
 | `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |

@@ -52,6 +52,10 @@ class IncompleteResponsesStreamError(ModelProviderError):
     """A Responses stream cannot safely reuse accumulated output in a retry."""
 
 
+class ModelOutputLimitError(RuntimeError):
+    """A run's model responses kept stopping at the output limit before their tool calls were complete."""
+
+
 class MinimalModeUnavailableError(RuntimeError):
     """Minimal mode cannot serve a turn; the message already names its recovery command."""
 

@@ -87,6 +87,12 @@ def _call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
 
 
+def _deferred_call(call_id: str, function_name: str, **arguments: object) -> dict[str, object]:
+    """Call a deferred function through the call_tool wrapper a model without native tool search sees."""
+    wrapped = json.dumps({"name": function_name, "arguments": arguments})
+    return {"id": call_id, "type": "function", "function": {"name": "call_tool", "arguments": wrapped}}
+
+
 def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
     """Supply the saved journal calls when a test drives delegation without Matrix publication."""
     calls = []

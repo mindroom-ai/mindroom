@@ -22,7 +22,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
-from mindroom.api.connections_session_cookie import CONNECTIONS_SESSION_COOKIE, connections_session_user
+from mindroom.api.connections_session_cookie import CONNECTIONS_SESSION_COOKIE, read_connections_session
 from mindroom.api.open_access import open_access_rejection
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
@@ -997,16 +997,26 @@ def _connections_session_path_honored(request: Request) -> bool:
 
 
 def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
-    """Return the Connections session identity, honored only on portal paths while the portal is enabled."""
+    """Return the Connections session identity while the portal is enabled.
+
+    It is honored on portal paths, and on dashboard routes for an administrator whose sign-in the homeserver bound
+    to this deployment, outside hosted platform mode and never on OAuth callbacks.
+    """
     snapshot = _bind_authenticated_request_snapshot(request)
-    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") or not _connections_session_path_honored(
-        request,
-    ):
+    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return None
     token = request.cookies.get(CONNECTIONS_SESSION_COOKIE)
-    matrix_user_id = connections_session_user(token, now=time.time()) if token else None
-    if matrix_user_id is None:
+    session = read_connections_session(token, now=time.time()) if token else None
+    if session is None:
         return None
+    if not _connections_session_path_honored(request) and not (
+        session.dashboard
+        and not _is_oauth_popup_path(request.scope["path"], frozenset({"callback"}))
+        and cast("ApiAuthState", snapshot.auth_state).supabase_auth is None
+        and is_administrator(session.matrix_user_id, snapshot)
+    ):
+        return None
+    matrix_user_id = session.matrix_user_id
     return {"user_id": matrix_user_id, "email": None, "matrix_user_id": matrix_user_id, "auth_source": "matrix_openid"}
 
 

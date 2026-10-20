@@ -741,6 +741,32 @@ async def test_matrix_api_get_state_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_accepts_a_room_version_12_room_id() -> None:
+    """Room version 12 room IDs have no server name, and an explicit one still reaches its room."""
+    room_id = "!nZYmvV0rQMLKHh5sSEhvOzXFF3rOsPDxzWkbWBAdZDM"
+    tool = MatrixApiTools()
+    ctx = _make_context(room_id=room_id)
+    ctx.client.room_get_state_event.return_value = _state_response(
+        content={"enabled": True},
+        event_type="com.example.state",
+        room_id=room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(action="get_state", room_id=room_id, event_type="com.example.state"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == room_id
+    ctx.client.room_get_state_event.assert_awaited_once_with(
+        room_id=room_id,
+        event_type="com.example.state",
+        state_key="",
+    )
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_put_state_happy_path() -> None:
     """put_state should write state and return the resulting event id."""
     tool = MatrixApiTools()
@@ -2136,8 +2162,8 @@ def test_matrix_rate_limit_helper_preserves_matrix_api_budget_message() -> None:
         (123, "non-empty Matrix room ID string"),
         (False, "non-empty Matrix room ID string"),
         ("   ", "non-empty Matrix room ID string"),
-        ("#lobby:localhost", "!room:server form"),
-        ("lobby", "!room:server form"),
+        ("#lobby:localhost", "starting with !"),
+        ("lobby", "starting with !"),
     ],
 )
 async def test_matrix_api_rejects_invalid_room_id(room_id: object, expected_message: str) -> None:

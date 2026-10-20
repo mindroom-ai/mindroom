@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -68,6 +68,14 @@ class _MemoryEmbedderConfig(BaseModel):
         description="Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
     )
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
+
+    @model_validator(mode="after")
+    def _prefixes_need_openai_provider(self) -> Self:
+        """Reject prefixes that the configured provider would silently ignore."""
+        if self.provider != "openai" and (self.config.query_prefix or self.config.document_prefix):
+            msg = "memory.embedder.config.query_prefix and document_prefix apply only to the openai provider"
+            raise ValueError(msg)
+        return self
 
 
 class _MemoryLLMConfig(BaseModel):
@@ -143,6 +151,10 @@ class _MemoryAutoFlushContextConfig(BaseModel):
 class _MemoryAutoFlushExtractorConfig(BaseModel):
     """Extraction limits for one background memory flush job."""
 
+    model: str | None = Field(
+        default=None,
+        description="Model config that runs extraction instead of the agent's own model",
+    )
     no_reply_token: str = Field(
         default="NO_REPLY",
         description="Token indicating no durable memory should be written",

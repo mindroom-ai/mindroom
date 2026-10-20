@@ -1,4 +1,4 @@
-"""Matrix OpenID verification at the configured homeserver, shared by Computers and the Connections portal."""
+"""Matrix OpenID verification and token-binding detection at the configured homeserver."""
 
 import json
 from typing import Literal
@@ -8,11 +8,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
+from mindroom.logging_config import get_logger
 from mindroom.origins import normalized_origin
 from mindroom.requester_identity import runtime_matrix_domain
 
 # MindRoom's Tuwunel fork binds tokens to this audience (`io.mindroom.openid_audience`); other homeservers ignore it.
 _AUDIENCE_PARAM = "io.mindroom.audience"
+# The fork lists this in `/_matrix/client/versions` `unstable_features` while it binds tokens.
+_BINDING_FEATURE = "io.mindroom.openid_audience"
+_BINDING_CHECK_FAILED = "Could not check whether the homeserver binds OpenID tokens"
+
+logger = get_logger(__name__)
 
 
 class MatrixOpenIDToken(BaseModel):
@@ -34,6 +40,11 @@ class MatrixOpenIDError(Exception):
         super().__init__(detail)
 
 
+def openid_audience(paths: RuntimePaths) -> str | None:
+    """Return the audience MindRoom asks the homeserver to enforce: the normalized origin of `MINDROOM_PUBLIC_URL`."""
+    return normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL"))
+
+
 async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
     """Verify only at the configured homeserver with no redirects or URL logging.
 
@@ -46,7 +57,7 @@ async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) ->
         raise MatrixOpenIDError(401, "OpenID server does not match the configured Matrix server.")
     url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/federation/v1/openid/userinfo"
     params = {"access_token": token.access_token}
-    audience = normalized_origin(paths.env_value("MINDROOM_PUBLIC_URL"))
+    audience = openid_audience(paths)
     if audience is not None:
         params[_AUDIENCE_PARAM] = audience
     try:
@@ -73,3 +84,25 @@ async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) ->
     if not localpart or subject_domain != domain or len(subject) > 255:
         raise MatrixOpenIDError(401, "Invalid Matrix OpenID subject.")
     return subject
+
+
+async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
+    """Return whether the configured homeserver binds OpenID tokens to the audience they were requested for.
+
+    While it does, a token that `verify_matrix_openid` accepts was requested for this deployment's origin. Anything
+    other than a small, direct JSON answer listing the feature as `true` counts as no binding.
+    """
+    url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/client/versions"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as client:  # noqa: SIM117 - own the client until response cleanup completes
+            async with client.get(url, allow_redirects=False) as response:
+                if response.status != 200:
+                    logger.warning(_BINDING_CHECK_FAILED, status=response.status)
+                    return False
+                body = await collect_bounded_bytes(response.content.iter_chunked(4096), max_bytes=16384)
+        payload = json.loads(body)
+    except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError, ValueError, UnicodeError) as exc:
+        logger.warning(_BINDING_CHECK_FAILED, error=type(exc).__name__)
+        return False
+    features = payload.get("unstable_features") if isinstance(payload, dict) else None
+    return isinstance(features, dict) and features.get(_BINDING_FEATURE) is True

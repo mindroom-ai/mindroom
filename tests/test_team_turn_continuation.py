@@ -1,4 +1,4 @@
-"""Tests for dynamic-tool same-turn continuation on the team paths."""
+"""Tests for same-turn continuation on the team paths."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import teams as teams_module
 from mindroom.config.models import ModelConfig
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.message_target import MessageTarget
@@ -24,7 +23,6 @@ from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
     _build_team_runtime_db_callbacks,
-    _materialize_team_members,
     _TeamTurnHolder,
     materialize_exact_team_members,
     team_response,
@@ -37,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
@@ -48,20 +47,23 @@ if TYPE_CHECKING:
     from agno.team import Team as AgnoTeam
 
 
-def _load_tool_execution(tool_name: str = "sleep") -> ToolExecution:
+def _continuing_tool_execution() -> ToolExecution:
+    """Return a next-turn model switch, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-load",
-        tool_name="load_tool",
-        tool_args={"tool_name": tool_name},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": tool_name}),
+        tool_call_id="call-switch-next-turn",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": "next-turn"},
+        result=json.dumps(
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+        ),
         stop_after_tool_call=True,
     )
 
 
-def _dynamic_tool_team_output() -> TeamRunOutput:
+def _continuing_team_output() -> TeamRunOutput:
     return TeamRunOutput(
         content="",
-        member_responses=[RunOutput(agent_name="GeneralAgent", content="", tools=[_load_tool_execution()])],
+        member_responses=[RunOutput(agent_name="GeneralAgent", content="", tools=[_continuing_tool_execution()])],
     )
 
 
@@ -125,17 +127,17 @@ def _team_patches(mock_team: AgnoTeam) -> list[AbstractContextManager[object]]:
 
 
 @pytest.mark.asyncio
-async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
-    """A member dynamic-tool load should rerun the team turn with a continuation prompt."""
+async def test_team_response_continues_after_member_model_switch() -> None:
+    """A member model switch should rerun the team turn with a continuation prompt."""
     orchestrator, _config = _make_orchestrator()
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         side_effect=[
-            _dynamic_tool_team_output(),
-            TeamRunOutput(content="Used the loaded tool."),
+            _continuing_team_output(),
+            TeamRunOutput(content="Finished the task."),
         ],
     )
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
     run_ids: list[str] = []
 
     patches = _team_patches(mock_team)
@@ -143,7 +145,7 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Load the sleep tool and use it.",
+            message="Switch to the large model and finish the task.",
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
@@ -151,24 +153,24 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
             run_id_callback=run_ids.append,
         )
 
-    assert "Used the loaded tool." in response
+    assert "Finished the task." in response
     assert mock_team.arun.await_count == 2
-    # The continuation rebuilds member agents so the loaded tool's schema is baked in.
+    # The continuation rebuilds member agents for its second attempt.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.await_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     assert "Continue the same task" in second_prompt[-1].content
     assert run_ids[0] == "run-1"
     assert len(run_ids) == 2
     assert run_ids[1] != "run-1"
     assert recorder.outcome == "completed"
-    assert "Used the loaded tool." in recorder.assistant_text
-    # The turn-level trace still carries the first attempt's dynamic tool call.
-    assert any(entry.tool_name == "load_tool" for entry in recorder.completed_tools)
+    assert "Finished the task." in recorder.assistant_text
+    # The turn-level trace still carries the first attempt's model-switch call.
+    assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
 
 @pytest.mark.asyncio
-async def test_team_dynamic_continuation_pins_member_model_for_whole_turn() -> None:
+async def test_team_continuation_pins_member_model_for_whole_turn() -> None:
     """A room-default change mid-turn must not switch rebuilt team members."""
     orchestrator, config = _make_orchestrator()
     config.models["large"] = ModelConfig(provider="openai", id="large-model")
@@ -199,8 +201,8 @@ async def test_team_dynamic_continuation_pins_member_model_for_whole_turn() -> N
                 room_id=room_id,
                 model_name="default",
             )
-            return _dynamic_tool_team_output()
-        return TeamRunOutput(content="Used the loaded tool.")
+            return _continuing_team_output()
+        return TeamRunOutput(content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(side_effect=run_team)
@@ -213,14 +215,14 @@ async def test_team_dynamic_continuation_pins_member_model_for_whole_turn() -> N
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Load the sleep tool and use it.",
-            turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+            message="Switch to the large model and finish the task.",
+            turn_recorder=TurnRecorder(user_message="Switch to the large model and finish the task."),
             orchestrator=orchestrator,
             execution_identity=identity,
             ctx=make_turn_context(session_id=None, room_id=room_id),
         )
 
-    assert "Used the loaded tool." in response
+    assert "Finished the task." in response
     assert [call.kwargs["active_model_name"] for call in mock_create.call_args_list] == ["large", "large"]
 
 
@@ -370,47 +372,47 @@ async def test_team_uses_latest_successful_nested_switch_when_later_call_is_reje
 
 
 @pytest.mark.asyncio
-async def test_team_response_returns_limit_message_after_dynamic_tool_limit() -> None:
-    """Repeated dynamic-tool calls without an answer should surface the limit message."""
+async def test_team_response_returns_limit_message_after_continuation_limit() -> None:
+    """Repeated model switches without an answer should surface the limit message."""
     orchestrator, _config = _make_orchestrator()
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        side_effect=[_dynamic_tool_team_output() for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1)],
+        side_effect=[_continuing_team_output() for _ in range(TURN_CONTINUATION_LIMIT + 1)],
     )
-    recorder = TurnRecorder(user_message="Keep loading tools.")
+    recorder = TurnRecorder(user_message="Keep switching models.")
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2]:
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Keep loading tools.",
+            message="Keep switching models.",
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(session_id=None),
         )
 
-    assert mock_team.arun.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+    assert mock_team.arun.await_count == TURN_CONTINUATION_LIMIT + 1
     assert "did not produce a final answer" in response
     assert recorder.outcome == "completed"
     assert "did not produce a final answer" in recorder.assistant_text
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_continues_after_terminal_dynamic_tool_output() -> None:
-    """A terminal fallback output carrying a member dynamic-tool load continues the turn."""
+async def test_team_response_stream_continues_after_terminal_continuing_output() -> None:
+    """A terminal fallback output carrying a member model switch continues the turn."""
     orchestrator, config = _make_orchestrator()
 
     async def first_stream() -> AsyncIterator[object]:
-        yield _dynamic_tool_team_output()
+        yield _continuing_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Used the loaded tool.")
+        yield TeamRunOutput(content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
 
     patches = _team_patches(mock_team)
     with patches[0] as mock_create, patches[1], patches[2]:
@@ -419,7 +421,7 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
+                message="Switch to the large model and finish the task.",
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
@@ -431,34 +433,34 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
     # The streamed continuation rebuilds member agents like the blocking path.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.call_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Used the loaded tool." in rendered
+    assert "Finished the task." in rendered
     # The superseded first attempt's fallback document must not leak.
     assert "No team response generated." not in rendered
     assert recorder.outcome == "completed"
-    assert "Used the loaded tool." in recorder.assistant_text
+    assert "Finished the task." in recorder.assistant_text
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_continues_after_streamed_member_dynamic_tool() -> None:
-    """A streamed member dynamic-tool completion (no terminal output) continues the turn."""
+async def test_team_response_stream_continues_after_streamed_member_model_switch() -> None:
+    """A streamed member model-switch completion (no terminal output) continues the turn."""
     orchestrator, config = _make_orchestrator()
 
     async def first_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Loading the tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Switching models.")
         yield AgentToolCallCompletedEvent(
             agent_id="general",
             agent_name="GeneralAgent",
-            tool=_load_tool_execution(),
+            tool=_continuing_tool_execution(),
         )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Used the loaded tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
     first_agent = _make_test_agent("GeneralAgent")
     second_agent = _make_test_agent("GeneralAgent")
 
@@ -472,7 +474,7 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
+                message="Switch to the large model and finish the task.",
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
@@ -487,16 +489,16 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
     assert mock_instance.call_args_list[0].kwargs["agents"] == [first_agent]
     assert mock_instance.call_args_list[1].kwargs["agents"] == [second_agent]
     second_prompt = mock_team.arun.call_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Used the loaded tool." in rendered
+    assert "Finished the task." in rendered
     assert recorder.outcome == "completed"
-    assert "Used the loaded tool." in recorder.assistant_text
-    assert any(entry.tool_name == "load_tool" for entry in recorder.completed_tools)
+    assert "Finished the task." in recorder.assistant_text
+    assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() -> None:
+async def test_team_response_stream_continues_from_hidden_member_model_switch() -> None:
     """A tools-only attempt with hidden tool calls still continues the turn."""
     orchestrator, config = _make_orchestrator()
 
@@ -504,15 +506,15 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
         yield AgentToolCallCompletedEvent(
             agent_id="general",
             agent_name="GeneralAgent",
-            tool=_load_tool_execution(),
+            tool=_continuing_tool_execution(),
         )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Used the loaded tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
 
     patches = _team_patches(mock_team)
     with patches[0] as mock_create, patches[1], patches[2]:
@@ -521,7 +523,7 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
+                message="Switch to the large model and finish the task.",
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
@@ -533,7 +535,7 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
     assert mock_team.arun.call_count == 2
     assert mock_create.call_count == 2
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Used the loaded tool." in rendered
+    assert "Finished the task." in rendered
     assert recorder.outcome == "completed"
 
 
@@ -565,8 +567,8 @@ def test_release_attempt_members_resets_snapshot_state() -> None:
     assert holder.tool_tracker is not stale_tracker
 
 
-def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
-    """Callers without a continuation-capable driver keep load/unload non-truncating."""
+def test_materialize_exact_team_members_defaults_to_no_native_approval() -> None:
+    """Callers without a pause-capable driver build members that hide approval-gated functions."""
     config = _build_test_config()
     fake_agent = _make_test_agent("GeneralAgent")
     with (
@@ -578,33 +580,9 @@ def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
-            session_id="session-1",
         )
 
-    assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is False
     assert mock_create.call_args.kwargs["supports_native_tool_approval"] is False
-
-
-def test_team_members_are_built_with_dynamic_tool_continuation() -> None:
-    """Materialized team members opt into same-turn dynamic-tool continuation."""
-    orchestrator, _config = _make_orchestrator()
-    fake_agent = _make_test_agent("GeneralAgent")
-    with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create,
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-    ):
-        _materialize_team_members(
-            ["general"],
-            orchestrator,
-            None,
-            session_id="session-1",
-            unavailable_bases={},
-            reason_prefix="Team request",
-            configured_team_name=None,
-        )
-
-    assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is True
-    assert mock_create.call_args.kwargs["supports_native_tool_approval"] is True
 
 
 @pytest.mark.asyncio
@@ -614,8 +592,8 @@ async def test_team_response_logs_continuation_prompt_in_request_log_context() -
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         side_effect=[
-            _dynamic_tool_team_output(),
-            TeamRunOutput(content="Used the loaded tool."),
+            _continuing_team_output(),
+            TeamRunOutput(content="Finished the task."),
         ],
     )
     logged_prompts: list[object] = []
@@ -635,15 +613,15 @@ async def test_team_response_logs_continuation_prompt_in_request_log_context() -
         await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Load the sleep tool and use it.",
-            turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+            message="Switch to the large model and finish the task.",
+            turn_recorder=TurnRecorder(user_message="Switch to the large model and finish the task."),
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(run_id="run-1", session_id=None),
         )
 
-    assert logged_prompts[0] == "Load the sleep tool and use it."
-    assert "DYNAMIC TOOL CALL COMPLETED" in str(logged_prompts[1])
+    assert logged_prompts[0] == "Switch to the large model and finish the task."
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in str(logged_prompts[1])
 
 
 @pytest.mark.asyncio
@@ -652,10 +630,10 @@ async def test_team_response_stream_logs_continuation_prompt_in_request_log_cont
     orchestrator, config = _make_orchestrator()
 
     async def first_stream() -> AsyncIterator[object]:
-        yield _dynamic_tool_team_output()
+        yield _continuing_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Used the loaded tool.")
+        yield TeamRunOutput(content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
@@ -678,13 +656,13 @@ async def test_team_response_stream_logs_continuation_prompt_in_request_log_cont
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
-                turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+                message="Switch to the large model and finish the task.",
+                turn_recorder=TurnRecorder(user_message="Switch to the large model and finish the task."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 ctx=make_turn_context(session_id=None),
             )
         ]
 
-    assert logged_prompts[0] == "Load the sleep tool and use it."
-    assert "DYNAMIC TOOL CALL COMPLETED" in str(logged_prompts[1])
+    assert logged_prompts[0] == "Switch to the large model and finish the task."
+    assert "MODEL SWITCH TOOL CALL COMPLETED" in str(logged_prompts[1])

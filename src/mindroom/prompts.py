@@ -25,7 +25,6 @@ __all__ = [
     "DREAMING_PROMPT_TEMPLATE",
     "DREAMING_VERIFY_TEMPLATE",
     "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
-    "DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS",
     "EXPLORATION_PROMPT_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
@@ -152,7 +151,7 @@ Step-by-step instructions...
 
 Do not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.
 A workspace skill you create or edit becomes available on your next run, without any config change.
-Workspace skill scripts cannot be executed through get_skill_script; run them with your shell tools if you have them.
+get_skill_script only reads skill scripts; run a script with your shell tools if you have them.
 """
 
 HIDDEN_TOOL_CALLS_PROMPT = """Your tool calls are not visible to the user in the chat. They only see your text responses.
@@ -184,15 +183,13 @@ CONTEXT_TRUNCATION_MARKER_TEMPLATE = (
 )
 CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE = "[Truncated - {omitted_chars} chars omitted. Read {title} for the rest.]"
 
-DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Dynamic Tools
-Deferred tools are available by exact name and can be loaded for this session.
+DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Deferred Tools
+These toolkits are available, but the definitions of their functions are not included:
 <available-deferred-tools>
 {tool_catalog}
 </available-deferred-tools>
-Use load_tool(tool_name) to load one by exact name.
-Use tool_search(query) for keyword lookup across deferred tools.
-A loaded tool becomes callable once it appears in your available tools; do not call it in the same parallel tool-call batch as load_tool.
-In team conversations, each member manages its own dynamic tool state."""
+Use tool_search(query) to get the definitions of matching functions, or tool_search() with no query to list the deferred functions, then call one with call_tool(name, arguments), passing its arguments as a JSON object.
+Search before concluding that a capability is unavailable."""
 
 NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
 Deferred capability domains available through native tool search: {tool_domains}.
@@ -670,12 +667,6 @@ Avoid childish, sticker-like, or overly decorative designs.
 Make each room instantly recognizable at small sizes."""
 
 CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
-DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS = (
-    "Manage deferred tools for this session. "
-    "Use list_tools() or tool_search() when unsure. "
-    "A tool loaded with load_tool() becomes callable once it appears in your available tools, and "
-    "unload_tool() removes one. Do not call a newly loaded tool in the same parallel tool-call batch as load_tool()."
-)
 DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
 {agent_descriptions}
 

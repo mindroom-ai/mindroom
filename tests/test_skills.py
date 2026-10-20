@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.tools.function import FunctionCall
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.skills as skills_module
@@ -23,7 +24,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.skill_learning import library
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
-from mindroom.tool_system.skills import build_agent_skills
+from mindroom.tool_system.skills import RefusedWorkspaceSkill, build_agent_skills
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -103,10 +104,10 @@ def _skill_names(skills: Skills | None) -> list[str]:
     return skills.get_skill_names() if skills is not None else []
 
 
-def _get_skill_script(skills: Skills, skill_name: str, script_path: str, *, execute: bool) -> dict[str, object]:
+def _get_skill_script(skills: Skills, skill_name: str, script_path: str) -> dict[str, object]:
     script_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_script")
     assert script_tool.entrypoint is not None
-    return json.loads(script_tool.entrypoint(skill_name, script_path, execute=execute))
+    return json.loads(script_tool.entrypoint(skill_name, script_path))
 
 
 def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
@@ -530,29 +531,68 @@ def test_malformed_workspace_skill_is_skipped(tmp_path: Path) -> None:
     assert _skill_names(skills) == ["good"]
 
 
-def test_workspace_skill_script_read_allowed_but_execute_blocked(tmp_path: Path) -> None:
-    """Workspace skill scripts can be read but not executed through skill tools."""
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "output-files"])
+@pytest.mark.parametrize("workspace_skill", [True, False], ids=["workspace", "configured"])
+def test_skill_scripts_are_read_and_never_run(tmp_path: Path, workspace_skill: bool, wrapped: bool) -> None:
+    """get_skill_script reads a listed script from any skill root, and a call that asks to run it runs nothing."""
     storage = tmp_path / "storage"
-    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_root = agent_workspace_root_path(storage, "code")
+    workspace_skills = workspace_root / "skills"
     workspace_skills.mkdir(parents=True)
-    skill_path = _write_skill(workspace_skills, "scripted", "Scripted workspace skill")
-    _write_skill_script(skill_path.parent, "hello.sh", "#!/bin/sh\necho workspace\n")
+    skill_path = _write_skill(
+        workspace_skills if workspace_skill else tmp_path / "global",
+        "scripted",
+        "Scripted skill",
+    )
+    marker = tmp_path / "script-ran"
+    _write_skill_script(skill_path.parent, "hello.sh", f"#!/bin/sh\ntouch {marker}\n")
 
     skills = build_agent_skills(
         "code",
-        _base_config([]),
+        _base_config([] if workspace_skill else ["scripted"]),
         _runtime_paths(storage),
         skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+        output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root) if wrapped else None,
+    )
+    assert skills is not None
+    script_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_script")
+    script_tool.process_entrypoint()
+    schema = script_tool.to_dict()
+
+    assert set(schema["parameters"]["properties"]) == {"skill_name", "script_path"} | (
+        {"mindroom_output_path"} if wrapped else set()
+    )
+    assert "execut" not in json.dumps(schema).lower()
+    read = FunctionCall(function=script_tool, arguments={"skill_name": "scripted", "script_path": "hello.sh"})
+    assert read.execute().status == "success"
+    assert json.loads(str(read.result))["content"] == f"#!/bin/sh\ntouch {marker}\n"
+    arguments = {"skill_name": "scripted", "script_path": "hello.sh", "execute": True}
+    assert FunctionCall(function=script_tool, arguments=arguments).execute().status == "failure"
+    assert not marker.exists()
+
+
+def test_the_skills_prompt_describes_get_skill_script_as_read_only(tmp_path: Path) -> None:
+    """The skills prompt offers get_skill_script only for reading, with the arguments it takes."""
+    global_root = tmp_path / "global"
+    skill_path = _write_skill(global_root, "scripted", "Scripted skill")
+    _write_skill_script(skill_path.parent, "hello.sh", "#!/bin/sh\necho global\n")
+    skills = build_agent_skills(
+        "code",
+        _base_config(["scripted"]),
+        _runtime_paths(tmp_path / "storage"),
+        skill_roots=[global_root],
         env_vars={},
         credential_keys=set(),
     )
     assert skills is not None
 
-    read_result = _get_skill_script(skills, "scripted", "hello.sh", execute=False)
-    assert read_result["content"] == "#!/bin/sh\necho workspace\n"
+    snippet = skills.get_system_prompt_snippet()
 
-    execute_result = _get_skill_script(skills, "scripted", "hello.sh", execute=True)
-    assert execute_result["error"] == "Workspace skill scripts cannot be executed through get_skill_script"
+    assert "`get_skill_script(skill_name, script_path)`" in snippet
+    assert "execute" not in snippet
+    assert "never runs" in snippet
 
 
 def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
@@ -602,7 +642,7 @@ def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
 
     assert _skill_names(skills) == ["own"]
     assert skills is not None
-    assert "error" in _get_skill_script(skills, "linked", "hello.sh", execute=True)
+    assert "error" in _get_skill_script(skills, "linked", "hello.sh")
 
 
 @pytest.mark.parametrize("layout", ["linked_skills_dir", "linked_skill_file", "fifo_skill_file", "huge_skill_file"])
@@ -662,28 +702,6 @@ def test_workspace_skill_references_are_read_without_following_links(tmp_path: P
     assert "victim-only note" not in json.dumps(swapped)
     assert "error" in swapped
     assert "error" in _get_skill_reference(skills, "docs", "planted.md")
-
-
-def test_non_workspace_skill_script_execute_unchanged(tmp_path: Path) -> None:
-    """Configured non-workspace skill scripts keep Agno execute behavior."""
-    global_root = tmp_path / "global"
-    global_root.mkdir()
-    skill_path = _write_skill(global_root, "scripted", "Scripted global skill")
-    _write_skill_script(skill_path.parent, "hello.sh", "#!/bin/sh\necho global\n")
-
-    skills = build_agent_skills(
-        "code",
-        _base_config(["scripted"]),
-        _runtime_paths(tmp_path / "storage"),
-        skill_roots=[global_root],
-        env_vars={},
-        credential_keys=set(),
-    )
-    assert skills is not None
-
-    execute_result = _get_skill_script(skills, "scripted", "hello.sh", execute=True)
-    assert execute_result["stdout"] == "global\n"
-    assert execute_result["returncode"] == 0
 
 
 def test_workspace_skills_reload_after_dir_created_late(tmp_path: Path) -> None:
@@ -997,11 +1015,12 @@ def test_workspace_skills_that_fail_to_load_still_spend_the_budget(
         (broken / "SKILL.md").write_text("---\n- not a mapping\n---\n" + "x" * (900 << 10), encoding="utf-8")
     _write_skill(workspace_skills, "valid", "Sorted after every broken skill")
     parse = skills_module._parse_skill_frontmatter
-    parsed_paths: set[str] = set()
+    parse_count = 0
 
-    def recording_parse(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
-        parsed_paths.add(path)
-        return parse(content, path=path, allow_missing=allow_missing)
+    def recording_parse(content: str, *, allow_missing: bool) -> tuple[dict[str, Any], str]:
+        nonlocal parse_count
+        parse_count += 1
+        return parse(content, allow_missing=allow_missing)
 
     monkeypatch.setattr(skills_module, "_parse_skill_frontmatter", recording_parse)
 
@@ -1009,7 +1028,7 @@ def test_workspace_skills_that_fail_to_load_still_spend_the_budget(
         skills = _load_workspace_only(tmp_path, storage)
 
     assert _skill_names(skills) == []
-    assert len(parsed_paths) < 10
+    assert 0 < parse_count < 10
     assert any("budget" in entry["event"] for entry in logs if entry["log_level"] == "warning")
 
 
@@ -1065,6 +1084,88 @@ def test_workspace_skill_frontmatter_nested_too_deep_is_refused(tmp_path: Path) 
 
     assert _skill_names(skills) == ["plain"]
     assert any("nest" in str(entry.get("error", "")) for entry in logs if entry["log_level"] == "warning")
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "reason"),
+    [
+        ("name: xl_check\ndescription: Use when: the task needs an xlsx check", "line 3, column 22"),
+        (f"name: {'x' * 65}\ndescription: Check a workbook", "64 characters"),
+    ],
+)
+def test_refused_workspace_skills_are_reported_with_why(tmp_path: Path, frontmatter: str, reason: str) -> None:
+    """A SKILL.md that does not load is reported by its workspace path and reason, while its quoted twin loads."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "xl_check").mkdir()
+    (workspace_skills / "xl_check" / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n\n# Body\n", encoding="utf-8")
+    (workspace_skills / "xl_quoted").mkdir()
+    (workspace_skills / "xl_quoted" / "SKILL.md").write_text(
+        '---\nname: xl_quoted\ndescription: "Use when: the task needs an xlsx check"\n---\n\n# Body\n',
+        encoding="utf-8",
+    )
+    refused: list[RefusedWorkspaceSkill] = []
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+        refused=refused,
+    )
+
+    assert _skill_names(skills) == ["xl_quoted"]
+    assert [skill.path for skill in refused] == ["skills/xl_check/SKILL.md"]
+    assert reason in refused[0].reason
+    assert "\n" not in refused[0].reason
+
+
+def test_a_workspace_skills_directory_that_is_one_refused_skill_is_reported(tmp_path: Path) -> None:
+    """A workspace whose skills/SKILL.md cannot load is reported at that path."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "SKILL.md").write_text("---\n- not a mapping\n---\n\n# Body\n", encoding="utf-8")
+    refused: list[RefusedWorkspaceSkill] = []
+
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+        refused=refused,
+    )
+
+    assert skills is None
+    assert [(skill.path, skill.reason) for skill in refused] == [
+        ("skills/SKILL.md", "Skill frontmatter must be a mapping"),
+    ]
+
+
+def test_refusal_reasons_cannot_bloat_the_prompt(tmp_path: Path) -> None:
+    """A parse error that quotes planted frontmatter is cut to a description's length before it reaches a prompt."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "tagged").mkdir()
+    (workspace_skills / "tagged" / "SKILL.md").write_text(
+        f"---\nname: tagged\ndescription: !<tag:example.com,2026:{'t' * 100_000}> planted\n---\n\n# Body\n",
+        encoding="utf-8",
+    )
+    refused: list[RefusedWorkspaceSkill] = []
+
+    build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+        refused=refused,
+    )
+
+    assert [skill.path for skill in refused] == ["skills/tagged/SKILL.md"]
+    assert "constructor" in refused[0].reason
+    assert len(refused[0].reason) <= skills_module.MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS
 
 
 @pytest.mark.parametrize("oversized", ["names", "scripts"])

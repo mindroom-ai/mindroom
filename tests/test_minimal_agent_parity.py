@@ -51,7 +51,6 @@ from mindroom.memory import search_agent_memories
 from mindroom.providers import stream_retry as provider_stream_retry
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -467,7 +466,7 @@ async def test_generated_tools_actual_minimal_response(response_harness, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_dynamic_load_unload_rebuild_keeps_one_bash(response_harness) -> None:
+async def test_deferred_toolkit_is_callable_through_bash_without_loading(response_harness) -> None:
 
     h = response_harness
     h.runtime.config.agents["helper"] = AgentConfig(
@@ -476,26 +475,12 @@ async def test_dynamic_load_unload_rebuild_keeps_one_bash(response_harness) -> N
         memory_backend="file",
         tools=["shell", {"calculator": {"defer": True}}],
     )
-    result = await h.respond(
-        [
-            _bash_call("dynamic_tools", "load_tool", {"tool_name": "calculator"}),
-            _bash_call("calculator", "add", {"a": 2, "b": 3}),
-            _bash_call("dynamic_tools", "unload_tool", {"tool_name": "calculator"}),
-            "done",
-        ],
-    )
+    result = await h.respond([_bash_call("calculator", "add", {"a": 2, "b": 3}), "done"])
     assert "done" in str(result)
-    assert len(h.shell.receipts) == 3
-    assert '"result": 5' in h.shell.receipts[1]["outcome"]
-    assert all(receipt["status"] == "completed" for receipt in h.shell.receipts)
-    assert len(h.shell.tokens) == 1
-    assert len(h.provider.requests) == 4
+    assert len(h.shell.receipts) == 1
+    assert '"result": 5' in h.shell.receipts[0]["outcome"]
+    assert len(h.provider.requests) == 2
     assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
-    assert not get_loaded_tools_for_session(
-        agent_name="helper",
-        config=h.runtime.config,
-        session_id=h.runtime.session_id,
-    )
 
 
 @pytest.mark.asyncio

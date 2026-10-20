@@ -32,6 +32,8 @@ _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
 class _StrictOpenAIEmbedder(Protocol):
     def get_embedding(self, text: str) -> list[float]: ...
 
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]: ...
+
     def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]: ...
 
 
@@ -62,9 +64,12 @@ class _Mem0StrictOpenAIEmbedder:
         text: str,
         memory_action: Literal["add", "search", "update"] | None = None,
     ) -> list[float]:
-        del memory_action
+        text = text.replace("\n", " ")
         try:
-            return self.embedder.get_embedding(text.replace("\n", " "))
+            # Stored memories are documents; anything else is a search query.
+            if memory_action in {"add", "update"}:
+                return self.embedder.get_embedding_and_usage(text)[0]
+            return self.embedder.get_embedding(text)
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
@@ -137,6 +142,8 @@ def _memory_collection_name(config: Config) -> str:
             embedder_config.model,
             host=embedder_config.host,
             dimensions=embedder_config.dimensions,
+            query_prefix=embedder_config.query_prefix,
+            document_prefix=embedder_config.document_prefix,
         ),
     )
     digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8]

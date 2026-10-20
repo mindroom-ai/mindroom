@@ -16,14 +16,15 @@ import pytest
 from aiohttp import web
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from mindroom.api import auth, connections_session, frontend, main
 from mindroom.api.connections_session_cookie import (
     CONNECTIONS_SESSION_COOKIE,
-    connections_session_user,
     issue_connections_session,
+    read_connections_session,
 )
-from mindroom.matrix_openid import MatrixOpenIDError, verify_matrix_openid
+from mindroom.matrix_openid import MatrixOpenIDError, homeserver_binds_openid_audience, verify_matrix_openid
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
     _trusted_upstream_jwks,
@@ -62,6 +63,8 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
 
     verifier = AsyncMock(side_effect=verify)
     monkeypatch.setattr(connections_session, "verify_matrix_openid", verifier)
+    binds = AsyncMock(return_value=False)
+    monkeypatch.setattr(connections_session, "homeserver_binds_openid_audience", binds)
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
@@ -99,6 +102,7 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         "payload": payload,
         "provider": provider,
         "verifier": verifier,
+        "binds": binds,
     }
 
 
@@ -156,9 +160,72 @@ def test_sign_in_sets_portal_session_cookie(signin: dict[str, Any]) -> None:
     assert response.headers["referrer-policy"] == "no-referrer"
     token = signin["client"].cookies.get(CONNECTIONS_SESSION_COOKIE)
     assert token is not None
-    assert connections_session_user(token, now=time.time()) == "@alice:example.org"
+    assert read_connections_session(token, now=time.time()) == ("@alice:example.org", False)
     assert signin["verifier"].await_args.args[0].access_token == "alice"  # noqa: S105
     assert signin["verifier"].await_args.args[1] == signin["paths"]
+
+
+def _session_of(client: TestClient) -> tuple[str, bool] | None:
+    """Read the portal session cookie the client holds."""
+    token = client.cookies.get(CONNECTIONS_SESSION_COOKIE)
+    return read_connections_session(token, now=time.time()) if token else None
+
+
+def _with_admin(signin: dict[str, Any], admin: str = "@alice:example.org", **env: str) -> None:
+    _serve(signin, {**signin["payload"], "administrators": [admin]}, **env)
+
+
+def test_admin_sign_in_on_binding_homeserver_gets_dashboard_bit(signin: dict[str, Any]) -> None:
+    """An administrator whose token the homeserver bound to this deployment may open the dashboard."""
+    _with_admin(signin)
+    signin["binds"].return_value = True
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", True)
+
+
+@pytest.mark.parametrize(
+    ("admin", "binds"),
+    [("@bob:example.org", True), ("@alice:example.org", False)],
+    ids=["not-an-administrator", "homeserver-does-not-bind"],
+)
+def test_dashboard_bit_needs_admin_and_binding(signin: dict[str, Any], admin: str, binds: bool) -> None:
+    """Without both administrator authority and token binding, the session stays portal-only."""
+    _with_admin(signin, admin)
+    signin["binds"].return_value = binds
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+
+
+def test_dashboard_bit_needs_public_url(signin: dict[str, Any]) -> None:
+    """Without MINDROOM_PUBLIC_URL no audience was sent, so the token was never bound to this deployment."""
+    _with_admin(signin, MINDROOM_PUBLIC_URL="")
+    signin["binds"].return_value = True
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+
+
+def test_failed_check_after_binding_probe_logs_why_dashboard_was_refused(signin: dict[str, Any]) -> None:
+    """A token check that fails after the binding probe leaves a warning for the administrator to find."""
+    _with_admin(signin)
+    signin["binds"].return_value = True
+    signin["verifier"].side_effect = [
+        "@alice:example.org",
+        MatrixOpenIDError(503, "Matrix OpenID verifier is unavailable."),
+    ]
+    with capture_logs() as logs:
+        assert sign_in(signin["client"], "alice").status_code == 200
+    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+    assert [
+        log.get("detail") for log in logs if log["event"] == "Dashboard access check failed after the binding probe"
+    ] == [
+        "Matrix OpenID verifier is unavailable.",
+    ]
+
+
+def test_binding_probe_runs_only_for_administrators(signin: dict[str, Any]) -> None:
+    """Signing in an ordinary user never contacts the homeserver's versions endpoint."""
+    assert sign_in(signin["client"], "alice").status_code == 200
+    assert signin["binds"].await_count == 0
 
 
 def test_sign_in_refuses_user_without_visible_agents(signin: dict[str, Any]) -> None:
@@ -384,6 +451,110 @@ def test_session_ignored_on_dashboard_routes(signin: dict[str, Any]) -> None:
     assert client.get("/api/config/agents", headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
 
 
+def _admin_dashboard_client(signin: dict[str, Any]) -> TestClient:
+    """Return a browser signed in from Chat as administrator alice on a homeserver that binds tokens."""
+    _with_admin(signin)
+    signin["binds"].return_value = True
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    return client
+
+
+def test_admin_dashboard_session_reaches_dashboard_api(signin: dict[str, Any]) -> None:
+    """An administrator signed in with a bound token uses the dashboard API without the API key."""
+    client = _admin_dashboard_client(signin)
+    assert client.get("/api/config/agents").status_code == 200
+
+
+def test_admin_dashboard_session_loads_dashboard_page(
+    signin: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard shell loads instead of redirecting the administrator to the API-key login."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("administrator dashboard")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
+    client = _admin_dashboard_client(signin)
+
+    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 200
+    assert response.text == "administrator dashboard"
+
+
+def test_session_without_dashboard_bit_keeps_api_key_rule(signin: dict[str, Any]) -> None:
+    """An administrator whose sign-in was not proven bound still needs the API key for the dashboard."""
+    _with_admin(signin)
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    assert client.get("/api/config/agents").status_code == 401
+    assert client.get("/api/config/agents", headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
+
+
+def test_removed_admin_loses_dashboard_access_next_request(signin: dict[str, Any]) -> None:
+    """Administrator authority is read on every request, not frozen into the session."""
+    client = _admin_dashboard_client(signin)
+    _serve(signin)
+    assert client.get("/api/config/agents").status_code == 401
+
+
+def test_dashboard_session_ignored_in_platform_mode(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hosted platform dashboards keep their account ownership check, so the session never authenticates them."""
+    _admin_dashboard_client(signin)
+    token = signin["client"].cookies.get(CONNECTIONS_SESSION_COOKIE)
+    monkeypatch.setattr(auth, "_init_supabase_auth", lambda _paths, _settings: object())
+    _with_admin(signin)
+
+    def session_user(path: str) -> dict[str, Any] | None:
+        request = Request(
+            {
+                "type": "http",
+                "app": main.app,
+                "method": "GET",
+                "scheme": "https",
+                "server": ("portal.example.org", 443),
+                "path": path,
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"portal.example.org"),
+                    (b"cookie", f"{CONNECTIONS_SESSION_COOKIE}={token}".encode()),
+                ],
+            },
+        )
+        return auth._connections_session_auth_user(request)
+
+    assert session_user("/api/config/agents") is None
+    assert session_user("/api/connections/session") is not None
+
+
+def test_dashboard_session_cannot_finish_api_key_started_flow(signin: dict[str, Any]) -> None:
+    """A flow started with the API key cannot be finished by an administrator's dashboard session."""
+    dashboard = _dashboard_client()
+    state = _dashboard_connect_state(dashboard)
+    portal = _admin_dashboard_client(signin)
+
+    rejected = portal.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 401
+
+    _complete_callback(dashboard, state)
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@owner:example.org") is not None
+    assert stored(requester_id="@alice:example.org") is None
+
+
+def test_dashboard_session_mutation_requires_same_origin(signin: dict[str, Any]) -> None:
+    """Dashboard changes made with the session keep the same-origin rule."""
+    client = _admin_dashboard_client(signin)
+    connect = partial(client.post, "/api/oauth/google_drive/connect", params={"agent_name": "personal"})
+    assert connect(headers={"Origin": "https://evil.example"}).status_code == 403
+    assert connect(headers={"Origin": PORTAL_ORIGIN}).status_code == 200
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [
@@ -449,7 +620,7 @@ def test_session_cookie_ignored_for_admin_on_dashboard_routes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Even an administrator's portal session never opens administrator routes; their signed upstream identity does."""
+    """Without token binding, an administrator's portal session never opens administrator routes."""
     payload = {**signin["payload"], "administrators": ["@alice:example.org"]}
     client, upstream = _serve_with_strict_upstream(signin, tmp_path, monkeypatch, payload)
 
@@ -484,7 +655,7 @@ def test_expired_session_is_rejected(signin: dict[str, Any]) -> None:
     """A session stops authenticating once its fixed lifetime ends."""
     client = signin["client"]
     for issued_at, status in ((time.time(), 200), (time.time() - 3600, 401)):
-        token = issue_connections_session("@alice:example.org", now=issued_at)
+        token = issue_connections_session("@alice:example.org", now=issued_at, dashboard=False)
         client.cookies.set(CONNECTIONS_SESSION_COOKIE, token)
         assert client.get("/api/connections").status_code == status
 
@@ -696,3 +867,53 @@ def test_sign_in_never_takes_the_audience_from_the_request(
     assert response.status_code == 401
     assert "set-cookie" not in response.headers
     assert binding_homeserver.userinfo_audiences == [None]
+
+
+def test_binding_switched_on_during_sign_in_grants_no_dashboard(
+    signin: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unbound token verified just before the homeserver starts binding never becomes a dashboard session.
+
+    The fake homeserver accepts the unbound token while binding is off and switches binding on as `/versions` is read,
+    which is the replay window a separate capability check alone would leave open.
+    """
+    binding = {"on": False}
+
+    async def userinfo(request: web.Request) -> web.Response:
+        if binding["on"] and request.query.get("io.mindroom.audience") is not None:
+            return web.json_response({"errcode": "M_UNKNOWN_TOKEN"}, status=401)
+        return web.json_response({"sub": "@alice:example.org"})
+
+    async def versions(_request: web.Request) -> web.Response:
+        binding["on"] = True
+        return web.json_response({"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": True}})
+
+    upstream = web.Application()
+    upstream.router.add_get("/_matrix/federation/v1/openid/userinfo", userinfo)
+    upstream.router.add_get("/_matrix/client/versions", versions)
+    runner = web.AppRunner(upstream, access_log=None)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    def run(coroutine: Coroutine[Any, Any, Any]) -> None:
+        asyncio.run_coroutine_threadsafe(coroutine, loop).result(timeout=10)
+
+    run(runner.setup())
+    run(web.TCPSite(runner, "127.0.0.1", 0).start())
+    try:
+        monkeypatch.setattr(connections_session, "verify_matrix_openid", verify_matrix_openid)
+        monkeypatch.setattr(connections_session, "homeserver_binds_openid_audience", homeserver_binds_openid_audience)
+        homeserver = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        _with_admin(signin, MATRIX_HOMESERVER=homeserver, MATRIX_SERVER_NAME="example.org")
+
+        assert sign_in(signin["client"], "alice").status_code == 200
+        assert binding["on"] is True
+        assert _session_of(signin["client"]) == ("@alice:example.org", False)
+        assert signin["client"].get("/api/config/agents").status_code == 401
+    finally:
+        run(runner.cleanup())
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=10)
+        loop.close()

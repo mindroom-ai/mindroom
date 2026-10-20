@@ -1,15 +1,21 @@
 """Tests for shared Matrix OpenID verification."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from aiohttp import web
+from structlog.testing import capture_logs
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
+from mindroom.matrix_openid import (
+    MatrixOpenIDError,
+    MatrixOpenIDToken,
+    homeserver_binds_openid_audience,
+    verify_matrix_openid,
+)
 from tests.computer_helpers import ComputerPeer
 
 AUDIENCE = "https://portal.example.org"
@@ -130,3 +136,111 @@ async def test_no_audience_without_a_usable_public_url(
     peer, paths = homeserver
     assert await verify_matrix_openid(TOKEN, _with_public_url(paths, public_url)) == "@alice:example.org"
     assert peer.userinfo_audiences == [None]
+
+
+_VersionsServer = Callable[[web.Response], Awaitable[RuntimePaths]]
+_BINDING_CHECK_FAILED = "Could not check whether the homeserver binds OpenID tokens"
+
+
+def _warnings(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {key: value for key, value in log.items() if key != "log_level"}
+        for log in logs
+        if log["log_level"] == "warning"
+    ]
+
+
+@pytest_asyncio.fixture
+async def versions_server(tmp_path: Path) -> AsyncIterator[_VersionsServer]:
+    """Serve one fixed `/_matrix/client/versions` answer over real HTTP."""
+    runners: list[web.AppRunner] = []
+
+    async def serve(answer: web.Response) -> RuntimePaths:
+        async def versions(_request: web.Request) -> web.Response:
+            return answer
+
+        upstream = web.Application()
+        upstream.router.add_get("/_matrix/client/versions", versions)
+        runner = web.AppRunner(upstream, access_log=None)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        runners.append(runner)
+        return resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={"MATRIX_HOMESERVER": f"http://127.0.0.1:{runner.addresses[0][1]}"},
+        )
+
+    try:
+        yield serve
+    finally:
+        for runner in runners:
+            await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_binding_probe_true_when_versions_advertises_the_flag(versions_server: _VersionsServer) -> None:
+    """The fork advertises binding in `unstable_features` while `mindroom_openid_audience` is on."""
+    paths = await versions_server(
+        web.json_response({"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": True}}),
+    )
+    assert await homeserver_binds_openid_audience(paths) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unstable_features",
+    [{"io.mindroom.openid_audience": False}, {}, ["io.mindroom.openid_audience"]],
+    ids=["flag-false", "flag-absent", "not-an-object"],
+)
+async def test_binding_probe_false_without_the_flag(
+    versions_server: _VersionsServer,
+    unstable_features: object,
+) -> None:
+    """Only an explicit `true` counts as binding; binding switched off is normal and logs no warning."""
+    paths = await versions_server(web.json_response({"versions": ["v1.11"], "unstable_features": unstable_features}))
+    with capture_logs() as logs:
+        assert await homeserver_binds_openid_audience(paths) is False
+    assert _warnings(logs) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        (lambda: web.Response(status=500), {"status": 500}),
+        (
+            lambda: web.Response(status=302, headers={"Location": "https://elsewhere.example/_matrix/client/versions"}),
+            {"status": 302},
+        ),
+        (lambda: web.Response(text="not json"), {"error": "JSONDecodeError"}),
+        (
+            lambda: web.json_response({"unstable_features": {"io.mindroom.openid_audience": True}, "pad": "x" * 20000}),
+            {"error": "ByteLimitExceededError"},
+        ),
+    ],
+    ids=["server-error", "redirect", "not-json", "oversized"],
+)
+async def test_binding_probe_false_on_bad_responses(
+    versions_server: _VersionsServer,
+    answer: Callable[[], web.Response],
+    why: dict[str, object],
+) -> None:
+    """Any answer that is not a small, direct JSON confirmation means no binding, with a warning saying why."""
+    paths = await versions_server(answer())
+    with capture_logs() as logs:
+        assert await homeserver_binds_openid_audience(paths) is False
+    assert _warnings(logs) == [{"event": _BINDING_CHECK_FAILED, **why}]
+
+
+@pytest.mark.asyncio
+async def test_binding_probe_false_when_homeserver_unreachable(tmp_path: Path) -> None:
+    """A homeserver that cannot be reached is not assumed to bind tokens."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "http://127.0.0.1:9"},
+    )
+    with capture_logs() as logs:
+        assert await homeserver_binds_openid_audience(paths) is False
+    assert _warnings(logs) == [{"event": _BINDING_CHECK_FAILED, "error": "ClientConnectorError"}]

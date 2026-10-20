@@ -63,7 +63,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import runtime_paths_for, test_runtime_paths
+from tests.conftest import make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.scheduling_helpers import joined_member_state
@@ -1427,7 +1427,7 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
     final_status: str,
 ) -> None:
     """The runner arms the exact unchanged task; a send the requester denied never fires."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state = AsyncMock()
     workflow = ScheduledWorkflow(
@@ -1491,7 +1491,7 @@ async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
     withdraws: bool,
 ) -> None:
     """A suppressed or failed fire withdraws its armed approval, so no other call can use it."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state = AsyncMock()
     workflow = ScheduledWorkflow(
@@ -1615,7 +1615,7 @@ async def test_tasks_fire_without_an_armed_approval(
     armed: bool,
 ) -> None:
     """Plain reminders never touch call approvals, and a failed arming still fires a scheduled call."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state = AsyncMock()
     workflow = ScheduledWorkflow(

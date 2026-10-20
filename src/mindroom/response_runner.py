@@ -478,15 +478,10 @@ def _reply_authorization_entity_names(
     return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
 
 
-def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
+def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
     """Return whether one agent can issue Matrix message actions."""
     try:
-        surface = visible_tool_surface(
-            agent_name=agent_name,
-            config=config,
-            session_id=session_id,
-            enable_dynamic_tools_manager=False,
-        )
+        surface = visible_tool_surface(agent_name=agent_name, config=config)
     except ValueError:
         return False
     return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
@@ -3905,7 +3900,6 @@ class ResponseRunner:
             matrix_message_available=_agent_has_matrix_messaging_tool(
                 self.deps.runtime.config,
                 self.deps.agent_name,
-                runtime.session_id,
             ),
             runtime=self.deps.runtime,
         )
@@ -4689,8 +4683,7 @@ class ResponseRunner:
         matrix_target_item = _matrix_message_target_item(
             resolved_target,
             matrix_message_available=any(
-                _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
-                for name in agent_names
+                _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
             ),
             runtime=self.deps.runtime,
         )

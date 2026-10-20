@@ -296,6 +296,8 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
             embedder_config.model,
             host=embedder_config.host,
             dimensions=embedder_config.dimensions,
+            query_prefix=embedder_config.query_prefix,
+            document_prefix=embedder_config.document_prefix,
         )
         chunk_size = str(base_config.chunk_size)
         chunk_overlap = str(base_config.chunk_overlap)

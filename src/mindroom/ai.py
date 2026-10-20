@@ -97,12 +97,12 @@ from mindroom.response_turn import (
     BlockingAttemptResolution,
     BlockingTurnAdapter,
     CompletedAttempt,
-    DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
@@ -223,9 +223,9 @@ def _initial_agent_continuation(
     current_prompt_is_structured: bool,
     current_event_id: str | None,
     run_id: str | None,
-) -> DynamicContinuationRunState:
+) -> TurnContinuationRunState:
     """Build the initial continuation state for one agent response turn."""
-    return DynamicContinuationRunState.initial(
+    return TurnContinuationRunState.initial(
         prompt=prompt,
         model_prompt=model_prompt,
         current_timestamp_ms=current_timestamp_ms,
@@ -1054,7 +1054,9 @@ def _minimal_turn_enrichment(
     agent.system_message = agent.bootstrap_message
     if required_system:
         agent.system_message += "\n" + _render_system_enrichment_context(required_system)
-    return render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required])
+    return render_transient_context(
+        (render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required]),),
+    )
 
 
 async def _prepare_turn_memory(
@@ -1130,7 +1132,6 @@ async def _prepare_agent_and_prompt(
                 agent_name,
                 config,
                 runtime_paths,
-                session_id=ctx.session_id,
                 history_storage=scope_context.storage if scope_context is not None else None,
                 active_model_name=runtime_model.model_name,
                 knowledge=knowledge,
@@ -1140,7 +1141,6 @@ async def _prepare_agent_and_prompt(
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                dynamic_tool_continuation=True,
                 supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
@@ -1555,7 +1555,8 @@ async def ai_response(  # noqa: C901, PLR0915
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
-        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`;
+            models with native tool search keep native deferral.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
@@ -1635,7 +1636,7 @@ async def ai_response(  # noqa: C901, PLR0915
 
     async def _run_blocking_attempt(  # noqa: C901
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> BlockingAttemptResolution:
         """Run one prepared agent attempt."""
         try:
@@ -2089,7 +2090,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
-        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`;
+            models with native tool search keep native deferral.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
@@ -2151,7 +2153,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0915
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:

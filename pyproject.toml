@@ -310,6 +310,7 @@ mem0 = [
   "mem0ai>=0.1.115",
 ]
 memory = []
+microsoft_files = []
 modelslabs = [
   "requests",
 ]

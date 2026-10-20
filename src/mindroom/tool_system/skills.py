@@ -9,7 +9,7 @@ import platform
 import re
 import shutil
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from itertools import islice
 from pathlib import Path
@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
 # The functions Agno generates for an agent's skills; none has an owning toolkit.
-# The first two only read a skill, while get_skill_script can also run its scripts.
+# All three only read a skill; Dynamic Workflow participants get get_skill_script only through an operator rule.
 SKILL_READ_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference"})
 SKILL_FUNCTION_NAMES = SKILL_READ_FUNCTION_NAMES | {"get_skill_script"}
 _WORKSPACE_SKILLS_DIRNAME = "skills"
@@ -56,6 +56,20 @@ MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 # Worker code can plant any number of entries, so a workspace skill listing examines only this many.
 _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES = 1024
+_GET_SKILL_SCRIPT_DESCRIPTION = (
+    "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
+)
+# Agno's skills prompt lines that describe get_skill_script as running scripts, and what MindRoom offers instead.
+_SCRIPT_PROMPT_LINES = (
+    (
+        "`get_skill_script(skill_name, script_path, execute=False)` - Read or run scripts",
+        "`get_skill_script(skill_name, script_path)` - Read scripts",
+    ),
+    (
+        "Use `get_skill_script` to read or execute scripts from a skill",
+        "Use `get_skill_script` to read scripts from a skill; it never runs them",
+    ),
+)
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -121,14 +135,25 @@ class _MindroomSkillsLoader(SkillLoader):
         return [skill for root in _unique_paths(self.roots) for skill in _load_root_skills(root)]
 
 
+@dataclass(frozen=True)
+class RefusedWorkspaceSkill:
+    """A workspace ``SKILL.md`` that did not load, by its path in the workspace, and why."""
+
+    path: str
+    reason: str
+
+
 @dataclass(kw_only=True)
 class _WorkspaceSkillsLoader(_MindroomSkillsLoader):
     """Load one workspace's ``skills`` directory through no-follow descriptors."""
 
     workspace_root: Path
+    # The workspace skills the last load refused.
+    refused: list[RefusedWorkspaceSkill] = field(default_factory=list)
 
     def _candidate_skills(self) -> list[Skill]:
-        return _load_workspace_skills(self.workspace_root)
+        self.refused = []
+        return _load_workspace_skills(self.workspace_root, self.refused)
 
 
 class _MindroomSkills(Skills):
@@ -146,9 +171,29 @@ class _MindroomSkills(Skills):
         self._only = None if only is None else frozenset(only)
         super().__init__(loaders=loaders)
 
+    # AGNO_COMPAT: Skills runs a skill script in the process that holds the Skills object.
+    # Reason: Agno 3.0.9 Skills._get_skill_script with execute=True runs a script as a subprocess of the primary
+    #   process, outside the worker, hooks, and approval rules of the agent's shell, and its tool description,
+    #   parameter docs, and skills prompt offer that; MindRoom's get_skill_script, below, takes no execute
+    #   argument and only reads scripts, and its description and the skills prompt say so.
+    # Upstream issue: Tracking gap; no issue for offering read-only skill scripts has been identified.
+    # Upstream PR: None identified.
+    # Remove when: Skills lets an application leave script execution out of its tool and prompt.
+    # Coverage: tests/test_skills.py::test_skill_scripts_are_read_and_never_run;
+    #   tests/test_skills.py::test_the_skills_prompt_describes_get_skill_script_as_read_only.
+    def get_system_prompt_snippet(self) -> str:
+        """Return Agno's skills prompt, describing get_skill_script as the read-only function MindRoom offers."""
+        snippet = super().get_system_prompt_snippet()
+        for agno_line, line in _SCRIPT_PROMPT_LINES:
+            snippet = snippet.replace(agno_line, line)
+        return snippet
+
     def get_tools(self) -> list[Function]:
         """Return skill access tools with MindRoom's reserved output-path argument."""
         tools = super().get_tools()
+        for tool in tools:
+            if tool.name == "get_skill_script":
+                tool.description = _GET_SKILL_SCRIPT_DESCRIPTION
         if self._output_file_policy is None:
             return tools
         return [wrap_function_for_output_files(tool, self._output_file_policy) for tool in tools]
@@ -224,32 +269,16 @@ class _MindroomSkills(Skills):
             return super()._get_skill_reference(skill_name, reference_path)
         return json.dumps({"skill_name": skill_name, "reference_path": reference_path, **content})
 
-    def _get_skill_script(
+    # Read-only on purpose; see the AGNO_COMPAT note on get_system_prompt_snippet.
+    def _get_skill_script(  # ty: ignore[invalid-method-override]  # MindRoom offers no execute, args, or timeout
         self,
         skill_name: str,
         script_path: str | None = None,
-        execute: bool = False,
-        args: list[str] | None = None,
-        timeout: int = 30,
     ) -> str:
-        if execute and skill_name in self._workspace_roots_by_skill:
-            return json.dumps(
-                {
-                    "error": "Workspace skill scripts cannot be executed through get_skill_script",
-                    "skill_name": skill_name,
-                    "script_path": script_path,
-                },
-            )
-        content = None if execute else self._read_workspace_skill_file(skill_name, "scripts", script_path)
+        content = self._read_workspace_skill_file(skill_name, "scripts", script_path)
         if content is not None:
             return json.dumps({"skill_name": skill_name, "script_path": script_path, **content})
-        return super()._get_skill_script(
-            skill_name=skill_name,
-            script_path=script_path,
-            execute=execute,
-            args=args,
-            timeout=timeout,
-        )
+        return super()._get_skill_script(skill_name=skill_name, script_path=script_path)
 
     def _read_workspace_skill_file(
         self,
@@ -290,8 +319,12 @@ def build_agent_skills(
     credential_keys: set[str] | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: Collection[str] | None = None,
+    refused: list[RefusedWorkspaceSkill] | None = None,
 ) -> Skills | None:
-    """Build an Agno Skills object for a specific agent, narrowed to the skill names in ``only`` when set."""
+    """Build an Agno Skills object for a specific agent, narrowed to the skill names in ``only`` when set.
+
+    ``refused`` collects the workspace skills that did not load, also when no skill loads.
+    """
     if only is not None and not only:
         return None
     agent_config = config.get_agent(agent_name)
@@ -330,6 +363,8 @@ def build_agent_skills(
         loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
 
     skills = _MindroomSkills(loaders=loaders, output_file_policy=output_file_policy, only=only)
+    if refused is not None:
+        refused.extend(workspace_loader.refused)
     # A narrowed set with no surviving skill offers nothing, even beside configured skills.
     if skills.get_skill_names() or (agent_config.skills and only is None):
         return skills
@@ -533,7 +568,8 @@ def parse_skill_markdown(
         msg = "Skill missing frontmatter"
         raise SkillMarkdownError(msg)
     try:
-        frontmatter = load_yaml(match.group(1)) or {}
+        # Leading line breaks keep the lines YAML errors name at their lines in SKILL.md.
+        frontmatter = load_yaml("\n" * content.count("\n", 0, match.start(1)) + match.group(1)) or {}
     except Exception as exc:
         msg = f"Failed to parse skill frontmatter: {exc}"
         raise SkillMarkdownError(msg) from exc
@@ -546,18 +582,13 @@ def parse_skill_markdown(
 def _parse_skill_frontmatter(
     content: str,
     *,
-    path: str,
     allow_missing: bool,
     load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
-) -> tuple[dict[str, Any], str] | None:
-    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, or warn and return None."""
+) -> tuple[dict[str, Any], str]:
+    """Split one ``SKILL.md`` like ``parse_skill_markdown``, reading one without frontmatter as all instructions."""
     if allow_missing and not _match_skill_frontmatter(content):
         return {}, content
-    try:
-        return parse_skill_markdown(content, load_yaml=load_yaml)
-    except SkillMarkdownError as exc:
-        logger.warning("Refused skill frontmatter", path=path, error=str(exc))
-        return None
+    return parse_skill_markdown(content, load_yaml=load_yaml)
 
 
 def _read_skill_frontmatter(
@@ -571,13 +602,11 @@ def _read_skill_frontmatter(
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
     # Only operator skill roots are listed here, and agents load them with Agno's plain YAML loader, so parse alike.
-    parsed = _parse_skill_frontmatter(
-        content,
-        path=str(skill_path),
-        allow_missing=allow_missing,
-        load_yaml=yaml_io.safe_load,
-    )
-    return None if parsed is None else parsed[0]
+    try:
+        return _parse_skill_frontmatter(content, allow_missing=allow_missing, load_yaml=yaml_io.safe_load)[0]
+    except SkillMarkdownError as exc:
+        logger.warning("Refused skill frontmatter", path=str(skill_path), error=str(exc))
+        return None
 
 
 def _normalize_skill_identity(
@@ -701,16 +730,21 @@ def _read_workspace_skill_markdown(skill_fd: int, source_path: Path) -> str | No
         return None
 
 
-def _load_workspace_skill(skill_fd: int, source_path: Path, content: str) -> Skill | None:
-    """Build one workspace skill from its ``SKILL.md`` text and descriptor reads below its pinned directory."""
-    parsed = _parse_skill_frontmatter(content, path=str(source_path), allow_missing=True)
-    if parsed is None:
-        return None
-    frontmatter, instructions = parsed
+def _load_workspace_skill(skill_fd: int, source_path: Path, content: str) -> Skill | str:
+    """Build one workspace skill from its ``SKILL.md`` text and descriptor reads below its pinned directory.
+
+    Returns why the skill does not load instead when its frontmatter is unreadable or its name too long.
+    """
+    try:
+        frontmatter, instructions = _parse_skill_frontmatter(content, allow_missing=True)
+    except SkillMarkdownError as exc:
+        logger.warning("Refused skill frontmatter", path=str(source_path), error=str(exc))
+        # The reason reaches the agent's prompt, and a parse error can quote planted frontmatter.
+        return " ".join(str(exc).split())[:MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS]
     name = frontmatter.get("name", source_path.name)
     if isinstance(name, str) and len(name) > MAX_WORKSPACE_SKILL_NAME_CHARS:
         logger.warning("Refused a workspace skill whose name is too long", path=str(source_path / SKILL_FILENAME))
-        return None
+        return f"Skill name exceeds {MAX_WORKSPACE_SKILL_NAME_CHARS} characters"
     description = frontmatter.get("description", "")
     if isinstance(description, str) and len(description) > MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS:
         logger.warning("Truncated a workspace skill description", path=str(source_path / SKILL_FILENAME))
@@ -729,8 +763,11 @@ def _load_workspace_skill(skill_fd: int, source_path: Path, content: str) -> Ski
     )
 
 
-def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
-    """Read one workspace's skills through no-follow descriptors; files are reread the same way on use."""
+def _load_workspace_skills(workspace_root: Path, refused: list[RefusedWorkspaceSkill]) -> list[Skill]:
+    """Read one workspace's skills through no-follow descriptors, adding those that do not load to ``refused``.
+
+    Skill files are reread the same way on use.
+    """
     skills_root = workspace_root / _WORKSPACE_SKILLS_DIRNAME
     try:
         with open_directory_within_root(workspace_root, _WORKSPACE_SKILLS_DIRNAME) as skills_fd:
@@ -741,6 +778,9 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
             else:
                 content = _read_workspace_skill_markdown(skills_fd, skills_root)
                 skill = None if content is None else _load_workspace_skill(skills_fd, skills_root, content)
+                if isinstance(skill, str):
+                    refused.append(RefusedWorkspaceSkill(f"{_WORKSPACE_SKILLS_DIRNAME}/{SKILL_FILENAME}", skill))
+                    return []
                 return [] if skill is None else [skill]
             skill_names = workspace_entry_names(skills_fd, directories=True).names
             if len(skill_names) > _MAX_WORKSPACE_SKILLS:
@@ -751,7 +791,7 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
                     found=len(skill_names),
                 )
                 skill_names = skill_names[:_MAX_WORKSPACE_SKILLS]
-            return _load_workspace_skill_directories(skills_fd, skills_root, skill_names)
+            return _load_workspace_skill_directories(skills_fd, skills_root, skill_names, refused)
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -759,7 +799,12 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
         return []
 
 
-def _load_workspace_skill_directories(skills_fd: int, skills_root: Path, skill_names: list[str]) -> list[Skill]:
+def _load_workspace_skill_directories(
+    skills_fd: int,
+    skills_root: Path,
+    skill_names: list[str],
+    refused: list[RefusedWorkspaceSkill],
+) -> list[Skill]:
     """Load the named skill directories in order until their ``SKILL.md`` files and listings exceed the budget."""
     skills: list[Skill] = []
     loaded_bytes = 0
@@ -777,7 +822,8 @@ def _load_workspace_skill_directories(skills_fd: int, skills_root: Path, skill_n
         except OSError as exc:
             logger.warning("Refused a workspace skill", path=str(skills_root / skill_name), error=type(exc).__name__)
             continue
-        if skill is None:
+        if isinstance(skill, str):
+            refused.append(RefusedWorkspaceSkill(f"{_WORKSPACE_SKILLS_DIRNAME}/{skill_name}/{SKILL_FILENAME}", skill))
             continue
         loaded_bytes += len("".join((*skill.scripts, *skill.references)).encode())
         if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:

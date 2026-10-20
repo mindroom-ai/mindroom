@@ -35,11 +35,16 @@ from mindroom.history.types import HistoryScope
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import TeamMode, _attach_team_pause_presentation, continue_paused_team_run
-from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import (
+    DelegationModel,
+    _call,
+    _deferred_call,
+    _delegate_runtime_context,
+    _runtime_paths,
+)
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_delegation_direct_audit import _identity
@@ -95,8 +100,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
     child_model = DelegationModel(
         id="test-child",
         responses=[
-            ModelResponse(tool_calls=[_call("load_tool", "load", tool_name="calculator")]),
-            ModelResponse(tool_calls=[_call("add", "child-add", a=2, b=3)]),
+            ModelResponse(tool_calls=[_deferred_call("child-add", "add", a=2, b=3)]),
             ModelResponse(content="Child finished."),
         ],
     )
@@ -194,14 +198,6 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
                 expires_at_ns=2**62,
                 arguments_digest=approval_arguments_digest(paused.tools[0].tool_args),
             )
-            if not gate:
-                child = DelegationState.from_metadata(response.metadata).children[0]
-                dynamic_toolkits.save_loaded_tools_for_session(
-                    agent_name=child_name,
-                    session_id=child.session_id,
-                    loaded_tools=[],
-                )
-            dynamic_toolkits._loaded_tools.clear()
             if decision.endswith("removed"):
                 config.agents[child_name].tools = []
             if decision == "rewrite_gate":

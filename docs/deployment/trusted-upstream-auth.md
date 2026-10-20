@@ -110,7 +110,7 @@ agents:
 Users sign in to the portal in one of two ways, and both can be enabled together:
 
 - **Trusted upstream:** [strict JWT mode](#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
-- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway and leaves dashboard authentication unchanged.
+- **Matrix sign-in from MindRoom Chat:** [see below](#matrix-sign-in-from-mindroom-chat); it needs no identity gateway, and the dashboard keeps its own authentication except for administrators on a homeserver that binds tokens.
 
 Portal API requests without a valid sign-in return `401`.
 Connect and disconnect requests also require `MINDROOM_PUBLIC_URL`, or the request URL when unset, to be an HTTPS origin, and the browser's `Origin` header to match it.
@@ -178,15 +178,19 @@ The session lasts one hour.
 A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication while the portal is enabled, and every API route stays protected.
 
-A session authenticates only these paths:
+Apart from the dashboard rule below, a session authenticates only these paths:
 
 - `/connections` and its sub-paths.
 - `/api/connections` and its sub-paths.
 - The OAuth callback, `/api/oauth/{provider}/callback`, for flows started under the session.
 - The OAuth success page, `/api/oauth/{provider}/success`.
 
-It never grants dashboard or administrator access, even to an administrator.
-Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth, which the dashboard keeps using, and alongside trusted upstream sign-in.
+For a user listed in `administrators`, the session also opens the dashboard and its APIs, with no API key, when the homeserver binds tokens: MindRoom's Tuwunel fork with `mindroom_openid_audience` on, which MindRoom detects from `/_matrix/client/versions` at sign-in.
+Without binding, a token could have been replayed from another deployment on the same homeserver, and the dashboard is full control of this one.
+So the session reaches the dashboard only when it was started while the homeserver bound tokens and `MINDROOM_PUBLIC_URL` was set, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
+The Connections header links the dashboard for administrators only.
+Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
+Matrix sign-in works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 `GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
 
 ## Helm Charts
@@ -221,7 +225,7 @@ Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
 With the Connections portal enabled, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the portal and the OAuth callback, success, and reset pages keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
-A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) never reaches dashboard routes, so it needs no administrator check.
+A [Matrix sign-in session](#matrix-sign-in-from-mindroom-chat) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
 Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.
 A personal OAuth link opened by a browser signed in as anyone other than the requester who received it fails with `403`; see [Connect An Account](../oauth-framework.md#connect-an-account) for link rules.
@@ -257,6 +261,7 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, and fix any invalid entry because one disables the whole list |
 | `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
+| An administrator's Dashboard link from Connections asks for the API key | Check that `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true` and `MINDROOM_PUBLIC_URL` is set; the warning `Could not check whether the homeserver binds OpenID tokens` means MindRoom could not read `/versions`, and `Dashboard access check failed after the binding probe` means the second token check failed. Open Connections from Chat again afterwards, because the session records dashboard access at sign-in |
 | `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
 | `403 Connections require a configured private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent` |
 | `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |

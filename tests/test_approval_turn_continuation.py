@@ -1,4 +1,4 @@
-"""Approved runs finish their task after rebuilding dynamically changed tools."""
+"""Approved runs finish their task, including after a same-turn continuation rebuilds the agent."""
 
 from __future__ import annotations
 
@@ -59,10 +59,24 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 
-def _call(name: str, call_id: str, **arguments: object) -> ModelResponse:
+def _continue_call(call_id: str) -> ModelResponse:
+    """Return a next-turn switch to the current model, which ends the step and continues the same turn."""
+    return _call("switch_thread_model", call_id, model_name="default", when="next-turn")
+
+
+def _deferred_call(call_id: str, function_name: str, **arguments: object) -> ModelResponse:
+    """Return a call of a deferred function through the call_tool wrapper the provider sees."""
+    return _call("call_tool", call_id, name=function_name, arguments=arguments)
+
+
+def _call(function_name: str, call_id: str, **arguments: object) -> ModelResponse:
     return ModelResponse(
         tool_calls=[
-            {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}},
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": function_name, "arguments": json.dumps(arguments)},
+            },
         ],
     )
 
@@ -102,13 +116,13 @@ class _ScriptedModel(SyntheticModel):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [False, True])
-async def test_disabled_dynamic_load_does_not_seed_discarded_tools_into_approval(
+async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     show_tool_calls: bool,
 ) -> None:
-    """A rebuilt ordinary call keeps its own visible numbering when background jobs are off."""
+    """An approval-gated deferred function called through call_tool pauses and is shown as itself."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
         Config.model_validate(
@@ -122,14 +136,14 @@ async def test_disabled_dynamic_load_does_not_seed_discarded_tools_into_approval
         ),
         paths,
     )
-    responses = [_call("load_tool", "loader", tool_name="calculator"), _call("add", "sum", a=2, b=3)]
+    responses = [_deferred_call("sum", "add", a=2, b=3)]
     monkeypatch.setattr(
         "mindroom.agents._load_agent_model_instance",
         lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await ai_response(
-            make_turn_context("general", session_id="load-approval"),
+            make_turn_context("general", session_id="deferred-approval"),
             prompt="Add two and three.",
             config=config,
             runtime_paths=paths,
@@ -138,9 +152,9 @@ async def test_disabled_dynamic_load_does_not_seed_discarded_tools_into_approval
         )
     paused = raised.value.paused
     assert not responses
-    assert [entry.tool_name for entry in paused.tools] == ["add"]
+    assert [(entry.tool_name, entry.tool_args) for entry in paused.tools] == [("add", {"a": 2, "b": 3})]
     assert [entry.tool_name for entry in paused.tool_trace] == ["add"]
-    assert "load_tool" not in paused.response_text
+    assert "call_tool" not in paused.response_text
     if show_tool_calls:
         assert "`add` [1]" in paused.response_text
 
@@ -161,14 +175,14 @@ async def test_disabled_dynamic_load_does_not_seed_discarded_tools_into_approval
         "switch_next",
     ],
 )
-async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR0915
+async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     show_tool_calls: bool,
     outcome: str,
 ) -> None:
-    """A fresh schema step retains history and may pause again without replaying approved work."""
+    """A fresh continuation attempt retains history and may pause again without replaying approved work."""
     switch_when = {"switch_after": "after-toolcall", "switch_next": "next-turn"}.get(outcome)
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -182,7 +196,7 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
                 "agents": {
                     "general": {
                         "display_name": "General",
-                        "tools": ["calculator", {"sleep": {"defer": True}}, *(["thread_model"] if switch_when else [])],
+                        "tools": ["calculator", {"sleep": {"defer": True}}, "thread_model"],
                     },
                 },
                 "models": {
@@ -215,17 +229,20 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
     )
     responses: list[ModelResponse | RuntimeError] = [
         _call("add", "approved", a=2, b=3),
-        _call("load_tool", "loader", tool_name="sleep"),
+        _continue_call("continue"),
         *(
-            [_call("load_tool", f"loader-{index}", tool_name="sleep") for index in range(4)]
+            [_continue_call(f"continue-{index}") for index in range(4)]
             if outcome == "limit"
-            else [_call("sleep", "sleeper", seconds=0), ModelResponse(content="Finished the calculation and wait.")]
+            else [
+                _deferred_call("sleeper", "sleep", seconds=0),
+                ModelResponse(content="Finished the calculation and wait."),
+            ]
         ),
     ]
     if outcome == "error":
         responses[2:] = [RuntimeError("Provider continuation failed")]
     if outcome == "pause_limit":
-        responses[3:] = [_call("load_tool", f"reload-{index}", tool_name="sleep") for index in range(4)]
+        responses[3:] = [_continue_call(f"continue-again-{index}") for index in range(4)]
     if outcome == "immediate_pause":
         responses[1:1] = [_call("add", "approved-again", a=4, b=5)]
     if switch_when:
@@ -269,12 +286,10 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
         config,
         paths,
         identity,
-        session_id=identity.session_id,
         history_storage=storage,
-        dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
     )
-    prompt = "Calculate the sum, load the wait tool, and finish."
+    prompt = "Calculate the sum, wait, and finish."
     try:
         paused = await actor.arun(prompt, session_id=identity.session_id, user_id=identity.requester_id)
         assert paused.status == RunStatus.paused
@@ -313,24 +328,22 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
-    dispatch = ToolDispatchContext(execution_identity=identity)
-    if switch_when:
-        context = execution.tool_runtime.build_context(
-            MessageTarget(
-                identity.room_id,
-                identity.thread_id,
-                identity.resolved_thread_id,
-                "$source",
-                identity.session_id,
-            ),
-            user_id=identity.requester_id,
-            active_model_name="default",
-        )
-        assert context is not None
-        dispatch = LiveToolDispatchContext(
-            execution_identity=identity,
-            runtime_context=replace(context, config=config, config_provider=None, runtime_paths=paths),
-        )
+    context = execution.tool_runtime.build_context(
+        MessageTarget(
+            identity.room_id,
+            identity.thread_id,
+            identity.resolved_thread_id,
+            "$source",
+            identity.session_id,
+        ),
+        user_id=identity.requester_id,
+        active_model_name="default",
+    )
+    assert context is not None
+    dispatch = LiveToolDispatchContext(
+        execution_identity=identity,
+        runtime_context=replace(context, config=config, config_provider=None, runtime_paths=paths),
+    )
     trace: list[ToolTraceEntry] = []
     run_ids: list[str] = []
     paused_answer = PausedAnswer()
@@ -365,7 +378,7 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
         return
     if outcome == "limit":
         assert isinstance(result, CompletedApprovalRun)
-        assert "Dynamic tool calls did not produce a final answer" in result.response_text
+        assert "Model switching did not produce a final answer" in result.response_text
         assert "need confirmation" not in result.response_text
         assert len(run_ids) == 4
         assert executed == ["add"]
@@ -402,7 +415,7 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
         result = await resume()
     if outcome == "pause_limit":
         assert isinstance(result, CompletedApprovalRun)
-        assert "Dynamic tool calls did not produce a final answer" in result.response_text
+        assert "Model switching did not produce a final answer" in result.response_text
         assert "need confirmation" not in result.response_text
         assert len(run_ids) == 4
         assert executed == ["add", "sleep"]
@@ -417,8 +430,8 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
     assert models[-1] == ("alternate" if switch_when == "after-toolcall" else "default")
     assert not responses
     assert any(message.role == "tool" and message.tool_call_id == "approved" for message in requests[-1])
-    assert any(message.role == "tool" and message.tool_call_id == "loader" for message in requests[-1])
-    expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "load_tool", "sleep"]
+    assert any(message.role == "tool" and message.tool_call_id == "continue" for message in requests[-1])
+    expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
 
 
@@ -571,11 +584,13 @@ async def test_approval_settlement_uses_typed_status(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["history", "child", "projected_child"])
 async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: str) -> None:
-    """Only newly completed parent tools can request another parent schema step."""
+    """Only newly completed parent tools can request another parent continuation attempt."""
     tool = ToolExecution(
-        tool_call_id="old-loader",
-        tool_name="load_tool",
-        result=json.dumps({"tool": "dynamic_tools", "status": "loaded", "tool_name": "sleep"}),
+        tool_call_id="old-continue",
+        tool_name="switch_thread_model",
+        result=json.dumps(
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+        ),
     )
     presentation = CollectedStreamPresentation(show_tool_calls=False)
 
@@ -584,7 +599,7 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
         if source == "child":
             yield ToolCallCompletedEvent(run_id="child", parent_run_id="parent", tool=tool)
         elif source == "projected_child":
-            projected = replace(tool, tool_call_id="delegate:old-loader")
+            projected = replace(tool, tool_call_id="delegate:old-continue")
             yield ToolCallCompletedEvent(run_id="parent", tool=projected)
             parent_tools = [ToolExecution(tool_call_id="delegate", tool_name="run_subagent", result="Child finished.")]
         yield RunCompletedEvent(run_id="parent", content="Final parent answer.")
@@ -654,9 +669,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         config,
         paths,
         identity,
-        session_id=identity.session_id,
         history_storage=storage,
-        dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
     )
     try:

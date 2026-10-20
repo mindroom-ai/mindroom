@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
     from agno.run.agent import RunOutput
 
-    from mindroom.response_turn import DynamicContinuationRunState
+    from mindroom.response_turn import TurnContinuationRunState
 
 
 class _ResultObservedBarrierModel(DelegationModel):
@@ -169,7 +169,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
 
         async def interrupted_attempt(
             _run: TurnRunState,
-            state: DynamicContinuationRunState,
+            state: TurnContinuationRunState,
         ) -> CompletedAttempt:
             response = await interrupted_actor.arun(
                 state.active_prompt,

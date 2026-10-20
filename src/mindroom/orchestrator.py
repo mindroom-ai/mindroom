@@ -87,6 +87,7 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
+from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
@@ -1534,9 +1535,12 @@ class _MultiAgentOrchestrator:
         room_id: str,
         event_ids: tuple[str, ...],
     ) -> frozenset[str] | None:
-        """Return which of a room's events one running managed entity saw redacted, or None when not running."""
+        """Return which of a room's events one managed entity saw redacted, or None until it is running and synced.
+
+        Redactions made while the entity was stopped reach its journal only with its first sync.
+        """
         bot = self.agent_bots.get(entity_name)
-        if bot is None or not bot.running:
+        if bot is None or not bot.running or not bot.first_sync_complete:
             return None
         return await bot.redacted_event_ids(room_id, event_ids)
 
@@ -3049,6 +3053,7 @@ async def _finish_runtime_shutdown(
         reset_matrix_sync_health()
         reset_runtime_state()
         shutdown_primary_worker_manager()
+        await aclose_model_http_client()
 
 
 async def _wait_for_runtime_shutdown_cleanup(

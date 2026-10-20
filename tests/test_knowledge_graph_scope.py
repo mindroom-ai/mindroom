@@ -76,6 +76,31 @@ def test_embedder_change_changes_the_graph_name(tmp_path: Path) -> None:
     assert before != after
 
 
+def test_embedder_prefixes_change_the_graph_name(tmp_path: Path) -> None:
+    """Prefixed graph vectors cannot share a graph with unprefixed ones."""
+    paths = _paths(tmp_path)
+    names = {
+        graph_scope("mind", config, paths, None).graph_name
+        for config in (_config(), _config(query_prefix="q: "), _config(query_prefix="q: ", document_prefix="d: "))
+    }
+    assert len(names) == 3
+
+
+def test_a_new_generation_names_new_graphs(tmp_path: Path) -> None:
+    """Raising the generation starts every graph over under a new name, and the first one keeps existing graphs."""
+    paths = _paths(tmp_path)
+    first = graph_scope("mind", _config(), paths, None).graph_name
+    rebuilt = _config()
+    rebuilt.knowledge_graph.generation = 1
+
+    second = graph_scope("mind", rebuilt, paths, None).graph_name
+    rebuilt.knowledge_graph.generation = 2
+
+    # The name every graph had before generations existed, so upgrading does not start graphs over.
+    assert first == "kg_73840b33d9c5004c75e430fc"
+    assert len({first, second, graph_scope("mind", rebuilt, paths, None).graph_name}) == 3
+
+
 def test_local_embedder_graph_is_separate_from_graphs_without_prompts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

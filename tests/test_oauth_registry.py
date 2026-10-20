@@ -67,6 +67,15 @@ def test_builtin_oauth_registry_includes_github() -> None:
     assert providers["github"].tool_config_service == "github"
 
 
+def test_builtin_oauth_registry_includes_microsoft_files() -> None:
+    """Microsoft files shares the Microsoft app client config but keeps its own token and settings services."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["microsoft_files"].credential_service == "microsoft_files_oauth"
+    assert providers["microsoft_files"].tool_config_service == "microsoft_files"
+    assert providers["microsoft_files"].shared_client_config_services == ("microsoft_oauth_client",)
+
+
 def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:
     """Dashboard-editable provider settings cannot use the reserved OAuth token suffix."""
     with pytest.raises(ValueError, match=r"tool_config_service.*must not end with '_oauth'"):

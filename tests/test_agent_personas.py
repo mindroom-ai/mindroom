@@ -239,7 +239,7 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
     """A minimal persona's mindroom-agent catalog offers neither unnamed deferred toolkits nor the deferred-tool manager."""
     runtime = _runtime(tmp_path, tools=["shell", {"file": {"defer": True}}])
 
-    agent = _child(runtime, ["shell"], session_id="session-1", agent_mode="minimal")
+    agent = _child(runtime, ["shell"], agent_mode="minimal")
 
     assert isinstance(agent, MinimalAgent)
     assert [deferred.name for deferred in agent.deferred_toolkits] == []
@@ -372,6 +372,27 @@ async def test_persona_inherits_its_callers_skills_without_the_authoring_note(tm
 
 
 @pytest.mark.asyncio
+async def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tmp_path: Path) -> None:
+    """A workspace skill that does not load is named to the agent that owns it, not to a persona borrowing its skills."""
+    runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    _write_skills(runtime, "scripted")
+    broken = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "broken"
+    broken.mkdir()
+    (broken / "SKILL.md").write_text("---\nname: broken\ndescription: Use when: it breaks\n---\n\nbody\n")
+    options = {"persist_runtime_state": False}
+
+    configured = await _system_prompt(
+        agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity, **options),
+    )
+    authored = await _system_prompt(_child(runtime, None, execution_identity=identity))
+
+    assert "skills/broken/SKILL.md" in configured
+    assert "skills/broken/SKILL.md" not in authored
+    assert "scripted" in authored
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("skills", "listed"),
     [(["scripted"], {"scripted"}), ([], set()), (["scripted", "removed"], {"scripted"})],
@@ -480,14 +501,14 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
     assert not any(document.startswith("other\n") for document in documents)
 
 
-def test_persona_with_tools_gets_no_deferred_loading_guidance(tmp_path: Path) -> None:
-    """An explicit tool list loads its toolkits up front, so the prompt never points at load_tool."""
+def test_persona_with_tools_gets_no_tool_search_guidance(tmp_path: Path) -> None:
+    """An explicit tool list loads its toolkits up front, so the prompt never points at tool_search."""
     runtime = _runtime(tmp_path, tools=["file", {"calculator": {"defer": True}}])
 
-    agent = _child(runtime, ["file"], session_id="session-1")
+    agent = _child(runtime, ["file"])
 
     instructions = "\n".join(str(item) for item in agent.instructions or [])
-    assert "load_tool" not in instructions
+    assert "tool_search" not in instructions
     assert "calculator" not in instructions
 
 
@@ -495,7 +516,7 @@ def test_minimal_persona_roster_lists_the_toolkits_it_built(tmp_path: Path) -> N
     """A minimal persona's bootstrap lists the toolkits it can call, deferred ones it named included."""
     runtime = _runtime(tmp_path, tools=["shell", "file", {"calculator": {"defer": True}}])
 
-    agent = _child(runtime, ["shell", "calculator"], session_id="session-1", agent_mode="minimal")
+    agent = _child(runtime, ["shell", "calculator"], agent_mode="minimal")
 
     assert isinstance(agent, MinimalAgent)
     [roster] = [line for line in agent.system_message.splitlines() if line.startswith("Toolkits callable")]

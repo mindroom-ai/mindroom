@@ -34,6 +34,7 @@ from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     sync_shared_credentials_to_worker,
 )
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import (
@@ -147,6 +148,8 @@ if TYPE_CHECKING:
         NotFound: type[Exception]
 
 
+logger = get_logger(__name__)
+
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _CONTAINER_LOG_EXCERPT_MAX_CHARS = 4096
 
@@ -191,6 +194,10 @@ _LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 # Containers that mount only workspaces; earlier releases mounted whole state roots.
 LABEL_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
 LABEL_STORAGE_LAYOUT_VALUE = "workspaces"
+
+# A worker container name is the prefix, a dash, and a digest, in at most 63 characters.
+_CONTAINER_NAME_DIGEST_LENGTH = 24
+_CONTAINER_NAME_PREFIX_MAX_LENGTH = 63 - 1 - _CONTAINER_NAME_DIGEST_LENGTH
 
 _DOCKER_DEPENDENCIES = ["docker"]
 _DOCKER_EXTRA = "docker"
@@ -240,14 +247,14 @@ def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
     return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
 
 
+def _container_name_prefix(prefix: str) -> str:
+    """Return the prefix every worker container name starts with: the normalized prefix, cut to the name cap."""
+    return normalize_docker_name_prefix(prefix)[:_CONTAINER_NAME_PREFIX_MAX_LENGTH].rstrip("-")
+
+
 def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespace: str) -> str:
-    digest = hashlib.sha256(f"{runtime_namespace}:{worker_key}".encode()).hexdigest()[:24]
-    normalized_prefix = normalize_docker_name_prefix(prefix)
-    max_prefix_length = 63 - len(digest) - 1
-    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
-    if not safe_prefix:
-        safe_prefix = normalize_docker_name_prefix("mindroom-worker")[:max_prefix_length].rstrip("-") or "worker"
-    return f"{safe_prefix}-{digest}"
+    digest = hashlib.sha256(f"{runtime_namespace}:{worker_key}".encode()).hexdigest()[:_CONTAINER_NAME_DIGEST_LENGTH]
+    return f"{_container_name_prefix(prefix)}-{digest}"
 
 
 def _host_config_contents_hash(host_config_path: Path | None) -> str:
@@ -519,6 +526,13 @@ class DockerWorkerBackend:
             backend_name="Docker",
             extra_reserved_names=DOCKER_RESERVED_EXTRA_ENV_NAMES,
         )
+
+        if len(normalize_docker_name_prefix(config.name_prefix)) > _CONTAINER_NAME_PREFIX_MAX_LENGTH:
+            logger.warning(
+                "MINDROOM_DOCKER_WORKER_NAME_PREFIX is too long, so worker container names start with only part of it",
+                max_length=_CONTAINER_NAME_PREFIX_MAX_LENGTH,
+                container_name_prefix=_container_name_prefix(config.name_prefix),
+            )
 
         self.config = config
         self.auth_token = auth_token

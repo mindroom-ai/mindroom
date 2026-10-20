@@ -90,9 +90,12 @@ Defaults:
 - Only managed room keys grant membership; raw Matrix room IDs or aliases in `rooms` grant nothing, and `members_of_rooms` entries that are not managed room keys fail validation.
 - The router defaults to `current_room_members: true`.
 
-Platform administrators and MindRoom's own internal identities pass every responder's `access` check.
+Platform administrators pass every responder's `access` check, and every agent, team, and the router admits its own account.
 [Bridge aliases](#bridge-aliases) are resolved before matching.
 The same check covers every way of reaching a responder: messages, media, calls, reactions, approvals, external triggers, background scripts, delegation, attachments, and scheduled resumes.
+
+Work no person started, such as a shared agent's [automation](https://docs.mindroom.chat/scheduling/#automations) run and the delegations, todos, mentions, and schedules that mention another agent it makes, runs as that agent's Matrix account, so another agent or team takes it on only when its own `access` admits that account.
+The default `access` admits an agent joined to one of the responder's rooms; otherwise list the agent's Matrix ID in `access.users`.
 
 A team's `access` covers requests to the team as a whole, so someone the team admits reaches every member agent through the team, even members whose own `access` would not admit them directly.
 
@@ -155,11 +158,12 @@ bot_accounts:
 
 ## Dashboard configuration
 
-Dashboard access follows deployment authentication, not the Matrix `administrators` list.
+Dashboard access follows deployment authentication; the Matrix `administrators` list matters only in the cases noted below.
 
 - Standalone: `MINDROOM_API_KEY` protects the dashboard and its API; without it, access is unauthenticated, so set it before exposing an instance beyond a trusted local network.
 - Hosted (Supabase): the user's platform sign-in is validated, and the instance owner account is enforced when configured.
 - [Trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/): every gateway-authenticated user may change configuration unless Connections is enabled, which adds an `administrators` check; see its [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary).
+- [Matrix sign-in from MindRoom Chat](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-sign-in-from-mindroom-chat): with the Connections portal enabled, a user in `administrators` who opens Connections from Chat also reaches the dashboard without the API key, but only outside hosted platform mode and when the homeserver binds OpenID tokens to this deployment; everyone else keeps the authentication above.
 
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so dashboard requests made with the API key act as the owner's Matrix identity for credential management.
 Browser changes made with a dashboard sign-in or trusted upstream identity must come from the dashboard's own origin; see [Browser Mutation Protection](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#browser-mutation-protection).
@@ -175,7 +179,7 @@ Pages from any other origin fail with `Origin '<origin>' is not allowed without 
 A reverse proxy in front of an unauthenticated dashboard or `/v1` API must pass the browser's `Host` header through unchanged, for example nginx `proxy_set_header Host $host;` or Apache `ProxyPreserveHost On`.
 A proxy that rewrites `Host` to its upstream address, as nginx `proxy_pass` and Apache `mod_proxy` do by default, makes every request look addressed to an IP address and disables this protection; in that case set `MINDROOM_API_KEY`, and `OPENAI_COMPAT_API_KEYS` for `/v1`.
 
-These host checks do not apply to requests authenticated by an API key, a platform session, or trusted upstream auth, or to routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
+These host checks do not apply to requests authenticated by an API key, a platform session, trusted upstream auth, or a Connections session that may open the dashboard, or to routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 
 ## Platform and credential authority
 

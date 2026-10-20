@@ -80,7 +80,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `debug` | Provider request logging | [Debug Logging](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging) |
 | `mindroom_user` | Internal MindRoom user account | [Internal User](https://docs.mindroom.chat/matrix/#internal-user) |
 
-Optional tools that agents load on demand are configured as described in [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/), and skills in [Skills](https://docs.mindroom.chat/skills/).
+Tools that stay out of the model's context until the agent searches for them are configured as described in [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/), and skills in [Skills](https://docs.mindroom.chat/skills/).
 
 ## Splitting the Configuration Into Multiple Files
 

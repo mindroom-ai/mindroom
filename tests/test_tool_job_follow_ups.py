@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent, PrincipalStore
-    from mindroom.response_turn import DynamicContinuationRunState, TurnRunState
+    from mindroom.response_turn import TurnContinuationRunState, TurnRunState
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -603,7 +603,7 @@ async def test_a_reply_never_waits(tmp_path: Path) -> None:
         handle.leaves_work = None
         token = _current_slot.set(SpanSlot(handle=handle))
 
-        async def attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+        async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> CompletedAttempt:
             return CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True)
 
         try:
@@ -633,7 +633,7 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
     coordinator = job_coordinator(tmp_path, runtime, bot)
     attempts = 0
 
-    async def attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+    async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> CompletedAttempt:
         nonlocal attempts
         attempts += 1
         return CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True)
