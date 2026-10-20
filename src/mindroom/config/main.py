@@ -1701,7 +1701,7 @@ class Config(BaseModel):
         return effective_entries
 
     def _agent_available_tools(self, agent_name: str) -> list[str]:
-        """Get all tools the agent may use after dynamic loading."""
+        """Get all tools the agent may use, initial and deferred."""
         agent_config = self.get_agent(agent_name)
         explicit_names = [name for name in agent_config.tool_names if self._tool_name_is_available(name)]
         if agent_config.include_default_tools:

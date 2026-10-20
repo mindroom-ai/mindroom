@@ -1249,8 +1249,9 @@ def _resolve_agent_dynamic_tool_selection(
     include_matrix_room_runtime_tools: bool,
     required_tool_names: tuple[str, ...],
 ) -> VisibleToolSurface:
-    # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the
-    # toolkits a saved approval needs; every other runtime attaches them all and keeps them off the wire.
+    # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
+    # saved approval needs; every other runtime attaches them all and keeps deferred ones off the wire unless it sends
+    # them eagerly, as voice calls and personas with their own tool list do.
     return visible_tool_surface(
         agent_name=agent_name,
         config=config,

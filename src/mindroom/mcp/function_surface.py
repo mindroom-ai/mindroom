@@ -1,8 +1,8 @@
 """Pure collision policy for immutable MCP function surfaces.
 
 No provider surface may contain the same function name twice.
-Static discovery invalidates conflicting catalogs, dynamic loading rejects the newly requested surface, and final agent
-construction hides any collision that appears between those validation boundaries.
+Static discovery invalidates conflicting catalogs, and final agent construction hides any collision that appears after
+discovery.
 """
 
 from __future__ import annotations

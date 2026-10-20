@@ -205,7 +205,7 @@ async def required_approval_tool_names(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
 ) -> tuple[str, ...]:
-    """Restore only recorded toolkit origins, without changing session selection."""
+    """Return the toolkits a saved approval recorded, after checking that the agent may still use each."""
     if not calls:
         return ()
     if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):

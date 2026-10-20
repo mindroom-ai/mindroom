@@ -81,4 +81,16 @@ Every request on this change read the whole previous request from the cache, whi
 This change sends more input tokens in total, because search results carry full definitions and the model searched again on each turn, but less than half as many uncached ones.
 Rerunning the identical conversation reuses the earlier run's cache, so only each side's first run is a clean measurement.
 OpenAI rejects function tools on Chat Completions while reasoning is enabled, so both runs set `reasoning_effort: none`.
-A comparison on OpenRouter models (DeepSeek V4.1 Flash, GLM-5.3, Qwen) is pending.
+
+The stock `mindroom config init --provider openrouter` Mind agent, with its 15 deferred tools, ran three thread turns (tag the thread, remove one of the tags, search the web) on DeepSeek V4.1 Flash, GLM-5.3, and Qwen3.8-27B through OpenRouter on October 20, 2026, once on `main` and once on this change:
+
+| | `main` | this change |
+| --- | --- | --- |
+| Completed turns | 9 of 9 | 9 of 9 |
+| Distinct tool lists per run | 3 | 1 |
+| Distinct system prompts per run | 3 | 1 |
+| GLM-5.3 uncached input tokens | 95,785 | 50,610 |
+
+GLM-5.3 is the clean cache comparison, because OpenRouter served both of its runs from the same upstream.
+OpenRouter spread the DeepSeek and Qwen runs over two to four upstreams with separate caches, so their token counts measure routing rather than this change.
+On this change the cached prefix broke only at turn boundaries, where the per-turn transient context that history replay drops differs; `main` breaks there too ([#3002](https://github.com/mindroom-ai/mindroom/issues/3002)).
