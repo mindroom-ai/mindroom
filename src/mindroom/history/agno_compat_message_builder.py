@@ -228,12 +228,7 @@ def _send_turn_context_after_prompt(messages: list[Message]) -> None:
     if len(messages) < 2:
         return
     context, prompt = messages[-2:]
-    if (
-        context.role == "user"
-        and not context.add_to_agent_memory
-        and not context.from_history
-        and prompt.role == "user"
-    ):
+    if context.role == "user" and not context.add_to_agent_memory and prompt.role == "user":
         messages[-2:] = [prompt, context]
 
 
