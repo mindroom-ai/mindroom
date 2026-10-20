@@ -178,7 +178,8 @@ The description of an online meeting cannot be replaced, because that would remo
 | `microsoft_todo_delete_task` | yes | Delete a task. |
 
 The lists include the requester's default Tasks list and the list of flagged Outlook messages.
-Due dates are calendar dates without a time of day.
+New and changed due dates take a calendar date.
+Listed tasks return the due date, time, and zone Graph reports; a due date set in a To Do app is midnight in that person's zone, which Graph usually reports in UTC, so the agent converts it to the requester's zone before naming the day.
 List and task listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Updating a task's notes replaces them completely.
 
