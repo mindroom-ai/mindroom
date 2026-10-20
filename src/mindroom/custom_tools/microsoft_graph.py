@@ -174,6 +174,19 @@ def checked_upload_source(
     return source
 
 
+def read_upload_source(source: AuthorizedFile, max_bytes: int) -> bytes:
+    """Return a checked workspace file's bytes, refusing it when it became unreadable or grew past `max_bytes`."""
+    try:
+        with source.open() as handle:
+            content = handle.read(max_bytes + 1)
+    except OSError as exc:
+        raise _unreadable(source, exc) from None
+    if len(content) > max_bytes:
+        msg = f"{source.display_path} grew past the {max_bytes}-byte limit."
+        raise MicrosoftGraphError(code="too_large", message=msg)
+    return content
+
+
 def _unreadable(source: AuthorizedFile, exc: OSError) -> MicrosoftGraphError:
     # A file or workspace replaced by a link after the check is refused here, without following it.
     reason = exc.strerror or type(exc).__name__

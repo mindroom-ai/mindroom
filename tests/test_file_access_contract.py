@@ -42,7 +42,8 @@ from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
-from mindroom.oauth.microsoft import microsoft_files_oauth_provider
+from mindroom.custom_tools.outlook_mail import OutlookMailTools
+from mindroom.oauth.microsoft import microsoft_files_oauth_provider, outlook_mail_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -344,6 +345,35 @@ async def _upload_to_microsoft_files(
     return result["status"] == "ok" and [request.content for request in graph.requests] == [_PNG]
 
 
+async def _attach_with_outlook_mail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    graph = FakeGraph(lambda _request: httpx.Response(201, json={"id": "draft-1", "isDraft": True})).install(
+        monkeypatch,
+    )
+    paths = microsoft_runtime_paths(tmp_path)
+    manager = save_microsoft_client_config(paths)
+    publish_microsoft_grant(outlook_mail_oauth_provider(), manager)
+    tool = OutlookMailTools(
+        runtime_paths=paths,
+        credentials_manager=manager,
+        worker_target=microsoft_worker_target(),
+        tool_output_workspace_root=workspace,
+        file_access=file_access,
+    )
+    result = json.loads(tool.outlook_mail_create_draft(["sam@example.org"], "Report", "Attached.", attachments=[raw_path]))
+    attached = [
+        base64.b64decode(attachment["contentBytes"])
+        for request in graph.requests
+        for attachment in json.loads(request.content)["attachments"]
+    ]
+    return result["status"] == "ok" and attached == [_PNG]
+
+
 _PROBES = (
     _ToolProbe("attachments", "register_attachment", _register_attachment, attachments_module),
     _ToolProbe("attachments", "view_file", _view_file, media_delivery_module),
@@ -351,6 +381,7 @@ _PROBES = (
     _ToolProbe("gmail", "attachments", _stage_gmail_attachment, gmail_module),
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
     _ToolProbe("microsoft_files", "upload_file", _upload_to_microsoft_files, microsoft_graph_module),
+    _ToolProbe("outlook_mail", "attachments", _attach_with_outlook_mail, microsoft_graph_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
     _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),
