@@ -76,7 +76,7 @@ import {
   SiX,
   SiZoom,
 } from "react-icons/si";
-import { TbBrain, TbBrandOnedrive } from "react-icons/tb";
+import { TbBrandTeams, TbBrain, TbBrandOnedrive } from "react-icons/tb";
 import { WiDaySunny } from "react-icons/wi";
 import { AwsRedshift } from "./awsIcons";
 import {
@@ -198,6 +198,7 @@ export const iconMap: Record<
   SiReddit,
   SiX,
   SiZoom,
+  TbBrandTeams,
   TbBrain,
   TbBrandOnedrive,
   WiDaySunny,

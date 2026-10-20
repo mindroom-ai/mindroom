@@ -19,6 +19,7 @@ __all__ = [
     "GRAPH_ME_URL",
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
+    "microsoft_teams_oauth_provider",
     "microsoft_todo_oauth_provider",
     "microsoft_token_url",
     "outlook_calendar_oauth_provider",
@@ -161,4 +162,20 @@ def microsoft_todo_oauth_provider() -> OAuthProvider:
         display_name="Microsoft To Do",
         scopes=("Tasks.ReadWrite",),
         status_capabilities=("list, create, update, and delete Microsoft To Do tasks",),
+    )
+
+
+def microsoft_teams_oauth_provider() -> OAuthProvider:
+    """Return the Teams channels and chats provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_teams",
+        display_name="Microsoft Teams",
+        scopes=(
+            "Team.ReadBasic.All",
+            "Channel.ReadBasic.All",
+            "ChannelMessage.Read.All",
+            "ChannelMessage.Send",
+            "Chat.ReadWrite",
+        ),
+        status_capabilities=("read and send Teams channel and chat messages",),
     )
