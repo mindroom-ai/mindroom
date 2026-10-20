@@ -601,6 +601,7 @@ def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, t
             "<table><tr><th>Name</th><th>Value</th></tr>\n<tr><td> Alpha </td> <td>1</td><td></td><td>x</td></tr></table>",
             "Name | Value\nAlpha | 1 | | x",
         ),
+        ('<p>see</p><img src="https://graph.microsoft.com/x" alt="chart">', "see\n[image]"),
         ('<p>Ship it <emoji id="1f44d_thumbsup" alt="\U0001f44d" title="Thumbs up"></emoji></p>', "Ship it \U0001f44d"),
         (
             '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1616965872000">'
