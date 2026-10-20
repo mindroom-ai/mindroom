@@ -1282,6 +1282,21 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
     }
 
 
+def _assert_poller_lifecycle_logged(
+    logs: list[dict[str, object]],
+    *,
+    base_id: str,
+    poll_interval_seconds: float,
+    git: bool,
+) -> None:
+    """Operators grep these events, so pin their names and fields."""
+    expected_fields = {"base_id": base_id, "poll_interval_seconds": poll_interval_seconds, "git": git}
+    for event in ("Knowledge poller started", "Knowledge poller stopped"):
+        matching = [entry for entry in logs if entry["event"] == event]
+        assert len(matching) == 1
+        assert {field: matching[0][field] for field in expected_fields} == expected_fields
+
+
 @pytest.mark.asyncio
 async def test_git_knowledge_polling_waits_before_startup_refresh(tmp_path: Path) -> None:
     """Shared Git bases should not burst refresh work immediately when runtime support starts."""
@@ -1298,13 +1313,15 @@ async def test_git_knowledge_polling_waits_before_startup_refresh(tmp_path: Path
     refresh_scheduler = MagicMock()
     source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
 
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
-    try:
-        await asyncio.sleep(0)
-    finally:
-        await source_watcher.shutdown()
+    with capture_logs() as logs:
+        await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+        try:
+            await asyncio.sleep(0)
+        finally:
+            await source_watcher.shutdown()
 
     refresh_scheduler.schedule_refresh.assert_not_called()
+    _assert_poller_lifecycle_logged(logs, base_id="docs", poll_interval_seconds=5.0, git=True)
 
 
 @pytest.mark.asyncio
@@ -1359,6 +1376,159 @@ async def test_git_knowledge_polling_repeats_after_poll_interval(
     assert refresh_scheduler.schedule_refresh.call_count == 2
     assert wait_calls >= 2
     assert [call.args for call in refresh_scheduler.schedule_refresh.call_args_list] == [("docs",), ("docs",)]
+
+
+@pytest.mark.asyncio
+async def test_local_knowledge_polling_repeats_after_poll_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared local bases with a poll interval keep scheduling refreshes, so writes from other hosts get indexed."""
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        poll_intervals={"docs": 5},
+        watch=False,
+    )
+    runtime_paths = runtime_paths_for(config)
+    second_schedule = asyncio.Event()
+    refresh_scheduler = MagicMock()
+
+    def _record_schedule(*_args: object, **_kwargs: object) -> None:
+        if refresh_scheduler.schedule_refresh.call_count == 2:
+            second_schedule.set()
+
+    refresh_scheduler.schedule_refresh.side_effect = _record_schedule
+    wait_calls = 0
+
+    async def _fake_wait_for(awaitable: Coroutine[object, object, object], **kwargs: object) -> object:
+        nonlocal wait_calls
+        assert kwargs == {"timeout": 5.0}
+        wait_calls += 1
+        if wait_calls <= 2:
+            awaitable.close()
+            raise TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _fake_wait_for)
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    try:
+        for _attempt in range(50):
+            if second_schedule.is_set():
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("Local poller did not schedule refresh after interval")
+    finally:
+        await source_watcher.shutdown()
+
+    assert refresh_scheduler.schedule_refresh.call_count >= 2
+    assert wait_calls >= 2
+    assert {call.args for call in refresh_scheduler.schedule_refresh.call_args_list} == {("docs",)}
+
+
+@pytest.mark.asyncio
+async def test_local_knowledge_polling_waits_before_startup_refresh(tmp_path: Path) -> None:
+    """A local poller waits one interval first, so runtime start-up does not burst refresh work."""
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        poll_intervals={"docs": 5},
+        watch=False,
+    )
+    runtime_paths = runtime_paths_for(config)
+    refresh_scheduler = MagicMock()
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+
+    with capture_logs() as logs:
+        await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+        try:
+            await asyncio.sleep(0)
+        finally:
+            await source_watcher.shutdown()
+
+    refresh_scheduler.schedule_refresh.assert_not_called()
+    _assert_poller_lifecycle_logged(logs, base_id="docs", poll_interval_seconds=5.0, git=False)
+
+
+@pytest.mark.asyncio
+async def test_local_knowledge_without_poll_interval_starts_no_poller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without poll_interval_seconds a local base starts no poller, even once the wait would time out."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=False)
+    runtime_paths = runtime_paths_for(config)
+    refresh_scheduler = MagicMock()
+
+    async def _timeout_immediately(awaitable: Coroutine[object, object, object], **_kwargs: object) -> object:
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _timeout_immediately)
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    try:
+        for _attempt in range(10):
+            await asyncio.sleep(0)
+    finally:
+        await source_watcher.shutdown()
+
+    refresh_scheduler.schedule_refresh.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_local_knowledge_polling_tolerates_missing_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poller for a folder that does not exist yet still schedules refreshes, so the first writer can create it."""
+    docs_path = tmp_path / "not-yet-created" / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        poll_intervals={"docs": 5},
+        watch=False,
+    )
+    runtime_paths = runtime_paths_for(config)
+    first_schedule = asyncio.Event()
+    refresh_scheduler = MagicMock()
+    refresh_scheduler.schedule_refresh.side_effect = lambda *_args, **_kwargs: first_schedule.set()
+    wait_calls = 0
+
+    async def _fake_wait_for(awaitable: Coroutine[object, object, object], **kwargs: object) -> object:
+        nonlocal wait_calls
+        assert kwargs == {"timeout": 5.0}
+        wait_calls += 1
+        if wait_calls == 1:
+            awaitable.close()
+            raise TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _fake_wait_for)
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    try:
+        for _attempt in range(50):
+            if first_schedule.is_set():
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("Local poller did not schedule refresh for a missing directory")
+    finally:
+        await source_watcher.shutdown()
+
+    assert refresh_scheduler.schedule_refresh.call_count >= 1
 
 
 @pytest.mark.asyncio
@@ -1928,6 +2098,15 @@ def test_knowledge_base_config_rejects_parent_traversal_patterns() -> None:
     """Config validation is the first containment layer, so the guard is never reached this way."""
     with pytest.raises(ValidationError):
         KnowledgeBaseConfig(path="./docs", include_patterns=["../*.md"])
+
+
+def test_local_poll_interval_is_rejected_on_git_bases() -> None:
+    """Git bases keep their own interval, so the local field must not be set beside git."""
+    with pytest.raises(ValidationError, match=r"use git\.poll_interval_seconds"):
+        KnowledgeBaseConfig(
+            poll_interval_seconds=60,
+            git=KnowledgeGitConfig(repo_url="https://example.com/x.git"),
+        )
 
 
 def test_tracked_path_listing_rejects_directories_and_missing_paths(tmp_path: Path) -> None:
