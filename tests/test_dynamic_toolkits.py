@@ -1,4 +1,4 @@
-"""Tests for per-tool dynamic loading."""
+"""Tests for deferred tool configuration and visible tool surfaces."""
 
 from __future__ import annotations
 
@@ -163,7 +163,7 @@ def _runtime_tool_configs(
 
 
 def test_config_accepts_inline_deferred_tool_flags(tmp_path: Path) -> None:
-    """Inline tool entries should carry dynamic loading flags and preserve overrides."""
+    """Inline tool entries should carry deferred tool flags and preserve overrides."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         "shell",
@@ -251,7 +251,7 @@ def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: 
     ],
 )
 def test_config_rejects_deferred_tool_presets(tmp_path: Path, lazy_flags: dict[str, object]) -> None:
-    """Presets are bundles and must not be dynamic-loading units."""
+    """Presets are bundles and must not be deferred units."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"openclaw_compat": lazy_flags}]  # type: ignore[index]
 

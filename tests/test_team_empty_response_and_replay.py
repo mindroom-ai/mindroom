@@ -337,8 +337,8 @@ async def test_team_empty_retry_shares_budget_with_continuations() -> None:
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Keep loading tools.",
-            turn_recorder=TurnRecorder(user_message="Keep loading tools."),
+            message="Keep switching models.",
+            turn_recorder=TurnRecorder(user_message="Keep switching models."),
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(session_id="session-1"),

@@ -501,14 +501,14 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
     assert not any(document.startswith("other\n") for document in documents)
 
 
-def test_persona_with_tools_gets_no_deferred_loading_guidance(tmp_path: Path) -> None:
-    """An explicit tool list loads its toolkits up front, so the prompt never points at load_tool."""
+def test_persona_with_tools_gets_no_tool_search_guidance(tmp_path: Path) -> None:
+    """An explicit tool list loads its toolkits up front, so the prompt never points at tool_search."""
     runtime = _runtime(tmp_path, tools=["file", {"calculator": {"defer": True}}])
 
     agent = _child(runtime, ["file"])
 
     instructions = "\n".join(str(item) for item in agent.instructions or [])
-    assert "load_tool" not in instructions
+    assert "tool_search" not in instructions
     assert "calculator" not in instructions
 
 

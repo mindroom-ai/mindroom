@@ -2111,7 +2111,7 @@ class TestUserIdPassthrough:
         second_agent.add_history_to_context = False
 
         switch_execution = ToolExecution(
-            tool_call_id="call-load",
+            tool_call_id="call-switch",
             tool_name="switch_thread_model",
             tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
@@ -2127,7 +2127,7 @@ class TestUserIdPassthrough:
         first_agent.arun = AsyncMock(return_value=first_run_output)
 
         second_run_output = MagicMock()
-        second_run_output.content = "Used the loaded tool."
+        second_run_output.content = "Finished on the new model."
         second_run_output.tools = []
         second_run_output.status = RunStatus.completed
         second_agent.arun = AsyncMock(return_value=second_run_output)
@@ -2150,7 +2150,7 @@ class TestUserIdPassthrough:
                 tool_trace_collector=tool_trace,
             )
 
-        assert response == "Used the loaded tool."
+        assert response == "Finished on the new model."
         assert mock_prepare.await_count == 2
         assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
         assert mock_prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
@@ -2332,7 +2332,7 @@ class TestUserIdPassthrough:
         second_agent.add_history_to_context = False
 
         switch_execution = ToolExecution(
-            tool_call_id="call-load",
+            tool_call_id="call-switch",
             tool_name="switch_thread_model",
             tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
@@ -2403,7 +2403,7 @@ class TestUserIdPassthrough:
         second_agent.add_history_to_context = False
 
         switch_execution = ToolExecution(
-            tool_call_id="call-load",
+            tool_call_id="call-switch",
             tool_name="switch_thread_model",
             tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
@@ -2417,8 +2417,8 @@ class TestUserIdPassthrough:
             yield RunCompletedEvent(content=None)
 
         async def second_stream() -> AsyncIterator[object]:
-            yield RunContentEvent(content="Used the loaded tool.")
-            yield RunCompletedEvent(content="Used the loaded tool.")
+            yield RunContentEvent(content="Finished on the new model.")
+            yield RunCompletedEvent(content="Finished on the new model.")
 
         first_agent.arun = MagicMock(return_value=first_stream())
         second_agent.arun = MagicMock(return_value=second_stream())
@@ -2442,7 +2442,9 @@ class TestUserIdPassthrough:
                 )
             ]
 
-        assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == ["Used the loaded tool."]
+        assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == [
+            "Finished on the new model."
+        ]
         assert mock_prepare.await_count == 2
         assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
         assert mock_prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
@@ -2476,7 +2478,7 @@ class TestUserIdPassthrough:
         second_agent.add_history_to_context = False
 
         switch_execution = ToolExecution(
-            tool_call_id="call-load",
+            tool_call_id="call-switch",
             tool_name="switch_thread_model",
             tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(

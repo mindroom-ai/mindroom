@@ -38,7 +38,13 @@ from mindroom.teams import TeamMode, _attach_team_pause_presentation, continue_p
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import (
+    DelegationModel,
+    _call,
+    _deferred_call,
+    _delegate_runtime_context,
+    _runtime_paths,
+)
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_delegation_direct_audit import _identity
@@ -94,8 +100,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
     child_model = DelegationModel(
         id="test-child",
         responses=[
-            ModelResponse(tool_calls=[_call("load_tool", "load", tool_name="calculator")]),
-            ModelResponse(tool_calls=[_call("add", "child-add", a=2, b=3)]),
+            ModelResponse(tool_calls=[_deferred_call("child-add", "add", a=2, b=3)]),
             ModelResponse(content="Child finished."),
         ],
     )

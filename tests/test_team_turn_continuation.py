@@ -134,10 +134,10 @@ async def test_team_response_continues_after_member_model_switch() -> None:
     mock_team.arun = AsyncMock(
         side_effect=[
             _continuing_team_output(),
-            TeamRunOutput(content="Used the loaded tool."),
+            TeamRunOutput(content="Finished on the new model."),
         ],
     )
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
     run_ids: list[str] = []
 
     patches = _team_patches(mock_team)
@@ -145,7 +145,7 @@ async def test_team_response_continues_after_member_model_switch() -> None:
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Load the sleep tool and use it.",
+            message="Switch to the large model and finish the task.",
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
@@ -153,9 +153,9 @@ async def test_team_response_continues_after_member_model_switch() -> None:
             run_id_callback=run_ids.append,
         )
 
-    assert "Used the loaded tool." in response
+    assert "Finished on the new model." in response
     assert mock_team.arun.await_count == 2
-    # The continuation rebuilds member agents so the loaded tool's schema is baked in.
+    # The continuation rebuilds member agents so they run on the switched model.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.await_args_list[1].args[0]
     assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
@@ -164,7 +164,7 @@ async def test_team_response_continues_after_member_model_switch() -> None:
     assert len(run_ids) == 2
     assert run_ids[1] != "run-1"
     assert recorder.outcome == "completed"
-    assert "Used the loaded tool." in recorder.assistant_text
+    assert "Finished on the new model." in recorder.assistant_text
     # The turn-level trace still carries the first attempt's model-switch call.
     assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
@@ -202,7 +202,7 @@ async def test_team_continuation_pins_member_model_for_whole_turn() -> None:
                 model_name="default",
             )
             return _continuing_team_output()
-        return TeamRunOutput(content="Used the loaded tool.")
+        return TeamRunOutput(content="Finished on the new model.")
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(side_effect=run_team)
@@ -215,14 +215,14 @@ async def test_team_continuation_pins_member_model_for_whole_turn() -> None:
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Load the sleep tool and use it.",
-            turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+            message="Switch to the large model and finish the task.",
+            turn_recorder=TurnRecorder(user_message="Switch to the large model and finish the task."),
             orchestrator=orchestrator,
             execution_identity=identity,
             ctx=make_turn_context(session_id=None, room_id=room_id),
         )
 
-    assert "Used the loaded tool." in response
+    assert "Finished on the new model." in response
     assert [call.kwargs["active_model_name"] for call in mock_create.call_args_list] == ["large", "large"]
 
 
@@ -379,14 +379,14 @@ async def test_team_response_returns_limit_message_after_continuation_limit() ->
     mock_team.arun = AsyncMock(
         side_effect=[_continuing_team_output() for _ in range(TURN_CONTINUATION_LIMIT + 1)],
     )
-    recorder = TurnRecorder(user_message="Keep loading tools.")
+    recorder = TurnRecorder(user_message="Keep switching models.")
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2]:
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Keep loading tools.",
+            message="Keep switching models.",
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
@@ -408,11 +408,11 @@ async def test_team_response_stream_continues_after_terminal_continuing_output()
         yield _continuing_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Used the loaded tool.")
+        yield TeamRunOutput(content="Finished on the new model.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
 
     patches = _team_patches(mock_team)
     with patches[0] as mock_create, patches[1], patches[2]:
@@ -421,7 +421,7 @@ async def test_team_response_stream_continues_after_terminal_continuing_output()
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
+                message="Switch to the large model and finish the task.",
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
@@ -435,11 +435,11 @@ async def test_team_response_stream_continues_after_terminal_continuing_output()
     second_prompt = mock_team.arun.call_args_list[1].args[0]
     assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Used the loaded tool." in rendered
+    assert "Finished on the new model." in rendered
     # The superseded first attempt's fallback document must not leak.
     assert "No team response generated." not in rendered
     assert recorder.outcome == "completed"
-    assert "Used the loaded tool." in recorder.assistant_text
+    assert "Finished on the new model." in recorder.assistant_text
 
 
 @pytest.mark.asyncio
@@ -448,7 +448,7 @@ async def test_team_response_stream_continues_after_streamed_member_model_switch
     orchestrator, config = _make_orchestrator()
 
     async def first_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Loading the tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Switching models.")
         yield AgentToolCallCompletedEvent(
             agent_id="general",
             agent_name="GeneralAgent",
@@ -456,11 +456,11 @@ async def test_team_response_stream_continues_after_streamed_member_model_switch
         )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Used the loaded tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished on the new model.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
     first_agent = _make_test_agent("GeneralAgent")
     second_agent = _make_test_agent("GeneralAgent")
 
@@ -474,7 +474,7 @@ async def test_team_response_stream_continues_after_streamed_member_model_switch
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
+                message="Switch to the large model and finish the task.",
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
@@ -491,9 +491,9 @@ async def test_team_response_stream_continues_after_streamed_member_model_switch
     second_prompt = mock_team.arun.call_args_list[1].args[0]
     assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Used the loaded tool." in rendered
+    assert "Finished on the new model." in rendered
     assert recorder.outcome == "completed"
-    assert "Used the loaded tool." in recorder.assistant_text
+    assert "Finished on the new model." in recorder.assistant_text
     assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
 
@@ -510,11 +510,11 @@ async def test_team_response_stream_continues_from_hidden_member_model_switch() 
         )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Used the loaded tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished on the new model.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
-    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+    recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
 
     patches = _team_patches(mock_team)
     with patches[0] as mock_create, patches[1], patches[2]:
@@ -523,7 +523,7 @@ async def test_team_response_stream_continues_from_hidden_member_model_switch() 
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
+                message="Switch to the large model and finish the task.",
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
@@ -535,7 +535,7 @@ async def test_team_response_stream_continues_from_hidden_member_model_switch() 
     assert mock_team.arun.call_count == 2
     assert mock_create.call_count == 2
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Used the loaded tool." in rendered
+    assert "Finished on the new model." in rendered
     assert recorder.outcome == "completed"
 
 
@@ -593,7 +593,7 @@ async def test_team_response_logs_continuation_prompt_in_request_log_context() -
     mock_team.arun = AsyncMock(
         side_effect=[
             _continuing_team_output(),
-            TeamRunOutput(content="Used the loaded tool."),
+            TeamRunOutput(content="Finished on the new model."),
         ],
     )
     logged_prompts: list[object] = []
@@ -613,14 +613,14 @@ async def test_team_response_logs_continuation_prompt_in_request_log_context() -
         await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Load the sleep tool and use it.",
-            turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+            message="Switch to the large model and finish the task.",
+            turn_recorder=TurnRecorder(user_message="Switch to the large model and finish the task."),
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(run_id="run-1", session_id=None),
         )
 
-    assert logged_prompts[0] == "Load the sleep tool and use it."
+    assert logged_prompts[0] == "Switch to the large model and finish the task."
     assert "MODEL SWITCH TOOL CALL COMPLETED" in str(logged_prompts[1])
 
 
@@ -633,7 +633,7 @@ async def test_team_response_stream_logs_continuation_prompt_in_request_log_cont
         yield _continuing_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Used the loaded tool.")
+        yield TeamRunOutput(content="Finished on the new model.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
@@ -656,13 +656,13 @@ async def test_team_response_stream_logs_continuation_prompt_in_request_log_cont
             async for chunk in team_response_stream(
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
-                message="Load the sleep tool and use it.",
-                turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+                message="Switch to the large model and finish the task.",
+                turn_recorder=TurnRecorder(user_message="Switch to the large model and finish the task."),
                 orchestrator=orchestrator,
                 execution_identity=None,
                 ctx=make_turn_context(session_id=None),
             )
         ]
 
-    assert logged_prompts[0] == "Load the sleep tool and use it."
+    assert logged_prompts[0] == "Switch to the large model and finish the task."
     assert "MODEL SWITCH TOOL CALL COMPLETED" in str(logged_prompts[1])

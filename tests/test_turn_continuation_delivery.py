@@ -245,7 +245,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
         # No stream finalization may happen between attempts.
         assert not finalize_requests
         if len(attempts) == 1:
-            yield "loading tool… "
+            yield "switching models… "
             yield AttemptResolved(
                 CompletedAttempt(
                     response_text="first-attempt terminal text",
@@ -300,10 +300,10 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     assert len(attempts) == 2
     assert "MODEL SWITCH TOOL CALL COMPLETED" in attempts[1]
     # The first attempt's terminal text is superseded by the rerun and never delivered.
-    assert streamed_chunks == ["loading tool… ", "final answer"]
+    assert streamed_chunks == ["switching models… ", "final answer"]
     assert len(finalize_requests) == 1
     transport = finalize_requests[0].stream_transport_outcome
     assert "first-attempt terminal text" not in transport.visible_body_text
-    assert transport.visible_body_text == "loading tool… final answer"
+    assert transport.visible_body_text == "switching models… final answer"
     assert events == ["deliver_stream", "attempt:1", "attempt:2", "finalize"]
     assert generation.delivery.event_id == "$stream"

@@ -1767,7 +1767,7 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         prompts.append(continuation.active_prompt)
         if len(prompts) == 1:
-            yield "loading tool"
+            yield "switching models"
             yield AttemptResolved(
                 CompletedAttempt(
                     attempt_run_id="run-1",
@@ -1790,7 +1790,7 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
         ),
     )
 
-    assert chunks == ["loading tool", "final answer"]
+    assert chunks == ["switching models", "final answer"]
     assert len(prompts) == 2
     assert "MODEL SWITCH TOOL CALL COMPLETED" in prompts[1]
     assert log.released == 1
