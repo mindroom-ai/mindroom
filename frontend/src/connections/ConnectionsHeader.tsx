@@ -58,10 +58,9 @@ export function ConnectionsHeader({
   const [identity, setIdentity] = useState<ConnectionsIdentity | null>(null);
   const [explaining, setExplaining] = useState(false);
   const [notice, setNotice] = useState(noticeFromAddress);
-  const links = LINKS.filter(({ page }) =>
-    page === "keys"
-      ? current === "keys" || identity?.egress_enabled
-      : current === "agents" || identity?.portal_enabled !== false,
+  const links = LINKS.filter(
+    ({ page }) =>
+      page !== "keys" || current === "keys" || identity?.egress_enabled,
   );
 
   useEffect(() => {

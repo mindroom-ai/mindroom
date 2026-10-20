@@ -73,8 +73,6 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
     });
     if (response.status === 401) return blocked(OPEN_FROM_CHAT);
     if (response.status === 403) return blocked(NOT_AVAILABLE);
-    // The portal is off, so only the Agent Keys page is served, and it relies on trusted-upstream sign-in.
-    if (response.status === 404) return { state: "ready" };
     return response.ok ? signedIn(response) : blocked(RELOAD);
   }
   const answer = await askOpener(opener, signal);
