@@ -121,6 +121,7 @@ def page_path(page_token: object, collection_suffix: str) -> str:
 
     Graph may phrase a next link differently from the first request, for example by drive instead of `/me`,
     so a token is checked by shape: a relative Graph path ending in the collection, with a query and no `..`.
+    httpx sends a path's percent escapes unchanged and Graph may decode `%2e` to a dot, so the path may hold none.
     """
     token = page_token if isinstance(page_token, str) else ""
     path, _, query = token.partition("?")
@@ -130,6 +131,7 @@ def page_path(page_token: object, collection_suffix: str) -> str:
         or path.startswith("//")
         or not path.endswith(collection_suffix)
         or ".." in path
+        or "%2e" in path.lower()
         or any(character in "#\\ " or ord(character) < 32 for character in token)
     ):
         msg = "page_token must be the next_page_token this function returned."

@@ -40,6 +40,7 @@ FOREIGN_PAGE_TOKENS = [
     "/me/planner/tasks?$top=50",
     f"{GRAPH}{NEXT_TASKS}",
     f"/me/todo/lists/{LIST}/tasks/../../../../me/messages/tasks?x=1",
+    "/me/todo/lists/%2e%2e/%2e%2e/planner/tasks?x=1",
     f"/me/todo/lists/{LIST}/tasks",
     "",
 ]

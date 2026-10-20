@@ -19,6 +19,7 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_tool_result,
     html_to_text,
     next_page_token,
+    page_path,
     path_segment,
     read_upload_source,
     share_id,
@@ -604,6 +605,37 @@ def test_a_download_into_an_inaccessible_directory_is_reported(
 )
 def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, token: str | None) -> None:
     assert next_page_token({"@odata.nextLink": link} if link else {}) == token
+
+
+@pytest.mark.parametrize(
+    ("page_token", "suffix"),
+    [
+        ("/me/drive/root/children?$skiptoken=a", "/children"),
+        ("/me/todo/lists/AAMk-1=/tasks?$skip=50&$filter=a%2Eb", "/tasks"),
+    ],
+)
+def test_page_paths_continue_their_own_collection(page_token: str, suffix: str) -> None:
+    assert page_path(page_token, suffix) == page_token
+
+
+@pytest.mark.parametrize(
+    "page_token",
+    [
+        "/me/todo/lists/../../planner/tasks?x=1",
+        "/me/todo/lists/%2e%2e/%2e%2e/planner/tasks?x=1",
+        "/me/todo/lists/%2E%2e/%2e%2E/planner/tasks?x=1",
+        "/me/todo/lists/.%2E/x/tasks?x=1",
+        "/me/todo/lists/AAMk-1=/tasks",
+        "//evil.example.com/tasks?x=1",
+        "https://graph.microsoft.com/v1.0/me/todo/lists/AAMk-1=/tasks?x=1",
+        "",
+    ],
+)
+def test_page_paths_refuse_tokens_that_can_leave_the_collection(page_token: str) -> None:
+    with pytest.raises(MicrosoftGraphError) as excinfo:
+        page_path(page_token, "/tasks")
+
+    assert excinfo.value.code == "invalid_page_token"
 
 
 @pytest.mark.parametrize(
