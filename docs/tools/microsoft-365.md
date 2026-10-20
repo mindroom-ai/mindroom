@@ -4,7 +4,7 @@ icon: fontawesome/brands/microsoft
 
 # Microsoft 365
 
-The Microsoft 365 tools reach OneDrive, SharePoint, and Outlook mail through Microsoft Graph as the person who asked.
+The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail, and Outlook calendars through Microsoft Graph as the person who asked.
 Each requester connects their own Microsoft account, so agents see and change only what that person can.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](../oauth-framework.md).
 
@@ -12,6 +12,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | --- | --- | --- | --- |
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
 | `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
+| `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -63,12 +64,14 @@ agents:
     tools:
       - microsoft_files
       - outlook_mail
+      - outlook_calendar
 ```
 
 | Option | Tool | Type | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
 | `write` | `outlook_mail` | `boolean` | `true` | Allows creating and sending drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
+| `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 
@@ -138,6 +141,26 @@ Each attached file may be at most 3 MB, and all attachments of one message toget
 Only file attachments can be downloaded, not attached Outlook items such as forwarded messages or invitations, and not cloud links.
 A later download of the same attachment name overwrites the copy in `outlook-mail-attachments/`.
 
+## Calendar
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `outlook_calendar_list_calendars` | no | List the requester's calendars, whether the requester can edit each, and which one is the default. |
+| `outlook_calendar_list_events` | no | List events between two moments in the default calendar or another, in start order, up to 50, with attendees and their responses and the online meeting link. |
+| `outlook_calendar_get_event` | no | Read an event with its description as plain text, up to 20,000 characters. |
+| `outlook_calendar_create_event` | yes | Create an event, optionally with attendees, a location, a description, and an online meeting; Outlook emails each attendee an invitation. |
+| `outlook_calendar_update_event` | yes | Change an event's subject, start, end, location, or description; attendees of a meeting the requester organizes receive the update. |
+| `outlook_calendar_delete_event` | yes | Delete an event; for a meeting the requester organizes, Outlook sends every attendee a cancellation. |
+| `outlook_calendar_respond_to_event` | yes | Accept, tentatively accept, or decline a meeting invitation, optionally with a comment to the organizer. |
+
+Event times in results are in UTC, and the agent converts them to the requester's time zone.
+A listing window may span at most 366 days.
+New and changed events take local times plus a time zone, either a Windows name such as `W. Europe Standard Time` or an IANA name Outlook accepts such as `Europe/Berlin`.
+Each occurrence of a recurring meeting has its own ID, and changing or deleting an occurrence affects only that occurrence.
+Deleting a meeting the requester only attends removes it from their calendar without telling the organizer; declining it tells the organizer.
+A new event can invite at most 100 attendees.
+The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
+
 ## Approvals For Writes
 
 The tools run without approval unless you add [tool approval](../tool-approval.md) rules, which show a Matrix approval card before each change:
@@ -157,10 +180,19 @@ tool_approval:
       action: require_approval
     - match: outlook_mail_reply
       action: require_approval
+    - match: outlook_calendar_create_event
+      action: require_approval
+    - match: outlook_calendar_update_event
+      action: require_approval
+    - match: outlook_calendar_delete_event
+      action: require_approval
+    - match: outlook_calendar_respond_to_event
+      action: require_approval
 ```
 
 Sent mail cannot be recalled, so require approval at least for `outlook_mail_send`, `outlook_mail_send_draft`, and `outlook_mail_reply`.
 `outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the requester's own mailbox, where they can be undone.
+Every calendar write can email invitations, updates, cancellations, or responses to other people.
 
 To give an agent read access only, set `write: false` on the tool.
 
@@ -175,8 +207,9 @@ To give an agent read access only, set `write: false` on the tool.
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
 | `not_found` | The item does not exist or the connected account cannot see it. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
-| `invalid_argument` | An ID, folder, email address, or other argument is malformed, or a message names more than 50 recipients. |
+| `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
 | `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
+| `online_meeting_body` | The update tried to replace an online meeting's description; change the other fields, or edit the description in Outlook. |
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
 | `locked` | The file is checked out or locked; try again later. |
@@ -184,6 +217,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `too_large` | The file, range, attachment, or message exceeds a limit above; send a OneDrive link instead of a large attachment. |
 | `throttled` | Microsoft Graph is limiting requests; retry after `retry_after_seconds`. |
 | `download_rejected` | SharePoint refused the download link Microsoft Graph returned; retry the download. |
+| `graph_error` | Microsoft Graph refused the request, such as a time zone Outlook does not support or a response to a meeting the requester organizes; `graph_code` names the reason. |
 
 When Microsoft rejects the connection's access token, the result includes a reconnect link.
 
