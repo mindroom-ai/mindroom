@@ -7080,7 +7080,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
-- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, Outlook mail and calendars, and To Do tasks through Microsoft Graph.
+- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, Outlook mail and calendars, To Do tasks, and Teams channels and chats through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
@@ -12525,7 +12525,7 @@ Other Atlassian errors keep Atlassian's message with URLs removed.
 
 # Microsoft 365
 
-The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, and Microsoft To Do through Microsoft Graph as the person who asked.
+The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, Microsoft To Do, and Teams through Microsoft Graph as the person who asked.
 Each requester connects their own Microsoft account, so agents see and change only what that person can.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
@@ -12535,6 +12535,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
+| `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -12548,6 +12549,8 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 4. Under **Certificates & secrets**, create a client secret and copy its value.
 5. Under **API permissions**, add the **Delegated** Microsoft Graph permissions from the table above for the tools you enable, plus `User.Read` and `offline_access`, and choose **Grant admin consent** if your tenant does not let users consent themselves.
 6. On **Overview**, copy the application (client) ID and the directory (tenant) ID.
+
+`ChannelMessage.Read.All`, which `microsoft_teams` requests, always needs administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
 
 For a local installation, the redirect URIs are `http://localhost:8765/api/oauth/<provider ID>/callback`, such as `http://localhost:8765/api/oauth/microsoft_files/callback`.
 A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
@@ -12573,7 +12576,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive but not SharePoint.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive but not SharePoint or Teams.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -12588,6 +12591,7 @@ agents:
       - outlook_mail
       - outlook_calendar
       - microsoft_todo
+      - microsoft_teams
 ```
 
 | Option | Tool | Type | Default | Notes |
@@ -12596,6 +12600,7 @@ agents:
 | `write` | `outlook_mail` | `boolean` | `true` | Allows creating and sending drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
+| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 
@@ -12696,6 +12701,23 @@ The lists include the requester's default Tasks list and the list of flagged Out
 Due dates are calendar dates without a time of day.
 Updating a task's notes replaces them completely.
 
+## Teams
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `microsoft_teams_list_teams` | no | List the teams the requester is a member of. |
+| `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see. |
+| `microsoft_teams_list_channel_messages` | no | List up to 50 top-level posts of one channel, without their replies, most recently active thread first. |
+| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names. |
+| `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
+| `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
+| `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
+| `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
+
+Messages come back as plain text, up to 4,000 characters each.
+Sent messages appear under the requester's name and are plain text of up to 28,000 bytes, so HTML in the text is not rendered as formatting.
+The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
+
 ## Approvals For Writes
 
 The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
@@ -12729,9 +12751,15 @@ tool_approval:
       action: require_approval
     - match: microsoft_todo_delete_task
       action: require_approval
+    - match: microsoft_teams_send_channel_message
+      action: require_approval
+    - match: microsoft_teams_reply_to_channel_message
+      action: require_approval
+    - match: microsoft_teams_send_chat_message
+      action: require_approval
 ```
 
-Sent mail cannot be recalled, so require approval at least for `outlook_mail_send`, `outlook_mail_send_draft`, and `outlook_mail_reply`.
+Sent mail cannot be recalled, so require approval at least for `outlook_mail_send`, `outlook_mail_send_draft`, and `outlook_mail_reply`, and likewise for the Teams send functions, whose messages everyone in the channel or chat sees at once.
 `outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the requester's own mailbox, where they can be undone.
 Every calendar write can email invitations, updates, cancellations, or responses to other people.
 
@@ -12742,7 +12770,7 @@ To give an agent read access only, set `write: false` on the tool.
 | Result | Cause and fix |
 | --- | --- |
 | `AADSTS50011` on the Microsoft sign-in page | The redirect URI is not registered on the app; add the exact URI from [Set Up The Microsoft Entra App](#set-up-the-microsoft-entra-app). |
-| `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent; an administrator grants it on the app's **API permissions** page. |
+| `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent, which Teams always does; an administrator grants it on the app's **API permissions** page. |
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
 | `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
@@ -14545,7 +14573,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](https://docs.mindroom.chat/tools/project-management/#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
-| Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, and To Do) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
+| Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, and Teams) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.
