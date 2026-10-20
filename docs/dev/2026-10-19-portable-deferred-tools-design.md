@@ -54,4 +54,15 @@ Inference servers that constrain tool names to the declared list (vLLM and llama
 
 ## Evidence
 
-A live comparison between `main` and this change on OpenRouter models is pending: a three-turn conversation that discovers and calls two deferred tools, recording `cached_tokens` per request and whether each deferred call succeeds.
+A live three-turn conversation on `gemini-3.8-flash` (provider `google`) on October 19, 2026 computed with the deferred `calculator` toolkit twice, then called the deferred `sleep` toolkit, once on `main` and once on this change:
+
+| | `main` | this change |
+| --- | --- | --- |
+| Correct replies | 3 of 3 | 3 of 3 |
+| Distinct tool lists sent | 3 (4, 12, then 13 tools) | 1 (`call_tool`, `tool_search`) |
+| Provider requests | 8 | 9 |
+| Input tokens on the last request | 3011 | 2624 |
+
+Gemini accepted the free-form `arguments` object of `call_tool`, which its schema conversion sends as an object without properties, and every deferred call went through `call_tool`.
+Neither run reported cached tokens, because Gemini's implicit cache did not engage at these prompt sizes.
+A comparison on OpenRouter models that report cache reads (DeepSeek V4.1 Flash, GLM-5.3, Qwen) is pending.

@@ -2064,7 +2064,9 @@ def create_agent(  # noqa: PLR0915
         agent=agent_name,
         model_class=model.__class__.__name__,
         model_id=model.id,
-        deferred_tool_search="portable" if portable_deferred_tools else "native" if native_deferred_tools else None,
+        deferred_tool_search=("portable" if portable_deferred_tools else "native")
+        if tool_assembly.deferred_wire_tool_names
+        else None,
         deferred_tools=sorted(tool_assembly.deferred_wire_tool_names),
     )
 

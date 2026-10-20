@@ -56,7 +56,7 @@ The system prompt lists the deferred toolkits with their descriptions.
 The agent then calls a function with `call_tool`, passing its arguments as a JSON object; approval rules, hooks, and the chat display treat the call as a call of that function.
 Discovering and calling deferred tools never changes the tool list or the system prompt, so it does not invalidate the provider's prompt cache.
 Found definitions stay in the conversation until compaction summarizes them, after which the agent searches again.
-When two toolkits define a function with the same name, the one listed first in `tools:` provides it, so an eager toolkit listed after a deferred one with the same function name reaches that function only through search.
+When two toolkits define a function with the same name, the one listed first in `tools:` provides it; if that one is deferred, the function stays hidden until the agent searches for it, so list the eager toolkit first to keep it visible.
 
 ## Minimal Mode
 
