@@ -270,7 +270,10 @@ def test_list_channel_messages_returns_plain_text_newest_first(
             "<p>Yes, after the review.</p>",
             "> Sam Example\n> Can we ship today?\nYes, after the review.",
         ),
-        ("<blockquote>outer<blockquote>inner</blockquote>after</blockquote>reply", "> outer\n> > inner\n> after\nreply"),
+        (
+            "<blockquote>outer<blockquote>inner</blockquote>after</blockquote>reply",
+            "> outer\n> > inner\n> after\nreply",
+        ),
     ],
 )
 def test_html_bodies_become_plain_text(
@@ -370,7 +373,10 @@ def test_deleted_messages_and_system_events_are_labeled_without_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    deleted = {**_message(content="<p>gone</p>", content_type="html", message_id="2"), "deletedDateTime": "2026-10-20T11:00:00Z"}
+    deleted = {
+        **_message(content="<p>gone</p>", content_type="html", message_id="2"),
+        "deletedDateTime": "2026-10-20T11:00:00Z",
+    }
     event = {
         **_message(content="<systemEventMessage/>", content_type="html", message_id="3"),
         "messageType": "systemEventMessage",
@@ -423,7 +429,12 @@ _PAGED_CALLS: list[tuple[str, Callable[[MicrosoftTeamsTools, object], str], str,
     ),
     (
         "channel_message_replies",
-        lambda tools, token: tools.microsoft_teams_list_channel_message_replies(TEAM, CHANNEL, MESSAGE, page_token=token),
+        lambda tools, token: tools.microsoft_teams_list_channel_message_replies(
+            TEAM,
+            CHANNEL,
+            MESSAGE,
+            page_token=token,
+        ),
         NEXT_REPLIES,
         NEXT_CHANNEL_MESSAGES,
     ),
