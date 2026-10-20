@@ -1113,6 +1113,10 @@ async def test_graphs_that_cannot_be_listed_are_reported_and_looked_for_again(tm
         task = asyncio.create_task(worker.run())
         try:
             await asyncio.wait_for(reported.wait(), timeout=10)
+            # The worker keeps running and lists the graphs again at its next look.
+            reported.clear()
+            wake_knowledge_graph_ingestion(after_seconds=0)
+            await asyncio.wait_for(reported.wait(), timeout=10)
             assert not task.done()
         finally:
             task.cancel()
