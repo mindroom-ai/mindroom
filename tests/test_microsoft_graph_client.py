@@ -601,6 +601,17 @@ def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, t
             "<table><tr><th>Name</th><th>Value</th></tr>\n<tr><td> Alpha </td> <td>1</td><td></td><td>x</td></tr></table>",
             "Name | Value\nAlpha | 1 | | x",
         ),
+        ('<p>Ship it <emoji id="1f44d_thumbsup" alt="\U0001f44d" title="Thumbs up"></emoji></p>', "Ship it \U0001f44d"),
+        (
+            '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1616965872000">'
+            '<strong itemprop="mri">Sam Example</strong><p itemprop="preview">Can we ship today?</p></blockquote>'
+            "<p>Yes, after the review.</p>",
+            "> Sam Example\n> Can we ship today?\nYes, after the review.",
+        ),
+        (
+            "<blockquote>outer<blockquote>inner</blockquote>after</blockquote>reply",
+            "> outer\n> > inner\n> after\nreply",
+        ),
     ],
 )
 def test_html_to_text_keeps_readable_text_and_line_breaks(html: str, text: str) -> None:

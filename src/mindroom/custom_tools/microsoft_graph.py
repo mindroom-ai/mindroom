@@ -151,19 +151,24 @@ _HTML_CELL_BREAK = "\t"
 
 
 class _HtmlText(HTMLParser):
-    """Collect an HTML fragment's visible text, breaking lines at `br`, rows, and block elements and marking cells."""
+    """Collect an HTML fragment's visible text.
+
+    Lines break at `br`, rows, and block elements, cells on a row are marked apart, emoji keep their alt text,
+    and quoted lines start with `> ` for each quote level.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self._line_start = True
         self._hidden = 0
+        self._quote_depth = 0
 
     def _break_line(self) -> None:
         self.parts.append("\n")
         self._line_start = True
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:  # noqa: ARG002
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _HTML_HIDDEN_TAGS:
             self._hidden += 1
         elif tag == "body":
@@ -173,12 +178,19 @@ class _HtmlText(HTMLParser):
             self._break_line()
         elif tag in _HTML_CELL_TAGS and not self._line_start:
             self.parts.append(_HTML_CELL_BREAK)
+        elif tag == "emoji":
+            # Teams sends an emoji as an empty element whose alt attribute is the emoji itself.
+            self.handle_data(dict(attrs).get("alt") or "")
+        if tag == "blockquote":
+            self._quote_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _HTML_HIDDEN_TAGS:
             self._hidden = max(self._hidden - 1, 0)
         elif tag in _HTML_BLOCK_TAGS and not self._line_start:
             self._break_line()
+        if tag == "blockquote":
+            self._quote_depth = max(self._quote_depth - 1, 0)
 
     def handle_data(self, data: str) -> None:
         # Source whitespace, line breaks included, renders as one space, and none at the start of a line.
@@ -186,12 +198,15 @@ class _HtmlText(HTMLParser):
         if self._line_start:
             text = text.lstrip()
         if not self._hidden and text:
-            self.parts.append(text)
+            self.parts.append("> " * self._quote_depth + text if self._line_start else text)
             self._line_start = False
 
 
 def html_to_text(html: str) -> str:
-    """Return the readable text of an HTML body: tags dropped, entities decoded, line breaks kept, cells split by `|`."""
+    """Return the readable text of an HTML body: tags dropped, entities decoded, line breaks and quotes kept.
+
+    Cells on a table row are separated by ` | `, and quoted lines start with `> ` for each quote level.
+    """
     parser = _HtmlText()
     parser.feed(html)
     parser.close()
