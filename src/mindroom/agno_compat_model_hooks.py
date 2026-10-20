@@ -7,6 +7,7 @@ them to the Agno methods that currently expose the required lifecycle stages.
 from __future__ import annotations
 
 from contextlib import aclosing, contextmanager
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
@@ -455,7 +456,8 @@ def install_stream_invocation_hooks(
 # Upstream PR: None identified.
 # Remove when: Agno exposes a public hook that rewrites an assistant message's parsed tool calls before every
 # response loop resolves them to functions; the call_tool wrapper itself remains MindRoom's.
-# Coverage: tests/test_portable_tool_search.py::test_installed_model_routes_call_tool_and_keeps_real_names_in_history.
+# Coverage: tests/test_portable_tool_search.py::test_installed_model_routes_call_tool_and_keeps_real_names_in_history and
+# tests/test_portable_tool_search.py::test_rewrite_keeps_the_bound_method_shape_other_bindings_wrap.
 def install_tool_call_rewrite(
     model: Model,
     *,
@@ -467,18 +469,20 @@ def install_tool_call_rewrite(
     if model_dict.get(marker) is True:
         return
     model_dict[marker] = True
-    original = model.get_function_calls_to_run
+    # Bind as a method, like the CLI checkpoint capture, so a deepcopied model calls itself and other wrappers can unwrap this one.
+    original_function = model.get_function_calls_to_run.__func__
 
     def get_function_calls_to_run(
+        rewritten_model: Model,
         assistant_message: Message,
         messages: list[Message],
         functions: dict[str, Function] | None = None,
     ) -> list[FunctionCall]:
         if assistant_message.tool_calls:
             assistant_message.tool_calls = rewrite(assistant_message.tool_calls, functions or {})
-        return original(assistant_message=assistant_message, messages=messages, functions=functions)
+        return original_function(rewritten_model, assistant_message, messages, functions)
 
-    model_dict["get_function_calls_to_run"] = get_function_calls_to_run
+    model_dict["get_function_calls_to_run"] = MethodType(get_function_calls_to_run, model)
 
 
 # AGNO_COMPAT: Final provider requests lack an attempt-scoped hook.
