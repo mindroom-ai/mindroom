@@ -40,14 +40,21 @@ if TYPE_CHECKING:
 _WALL_NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
 
 
-def _config(tmp_path: Path, *, git: KnowledgeGitConfig | None = None) -> Config:
+def _config(
+    tmp_path: Path,
+    *,
+    git: KnowledgeGitConfig | None = None,
+    poll_interval_seconds: int | None = None,
+) -> Config:
     docs_path = tmp_path / "docs"
     docs_path.mkdir(exist_ok=True)
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
             models={},
-            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), git=git)},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path=str(docs_path), git=git, poll_interval_seconds=poll_interval_seconds),
+            },
         ),
         test_runtime_paths(tmp_path),
     )
@@ -172,6 +179,41 @@ def test_git_poll_interval_boundary_is_exact(tmp_path: Path, age_seconds: int, e
     assert (trigger is not None) is expected_due
     effective = ready_index_effective_availability(lookup, config, wall_now=_WALL_NOW)
     assert (effective is KnowledgeAvailability.STALE) is expected_due
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "expected_due"),
+    [(59, False), (60, True), (61, True)],
+)
+def test_local_poll_interval_boundary_is_exact(tmp_path: Path, age_seconds: int, expected_due: bool) -> None:
+    """A local base with a poll interval turns STALE exactly at its boundary, like a Git base."""
+    config = _config(tmp_path, poll_interval_seconds=60)
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(
+        config,
+        runtime_paths,
+        availability=KnowledgeAvailability.READY,
+        schedule_refresh_on_access=True,
+        last_refresh_age=timedelta(seconds=age_seconds),
+    )
+
+    effective = ready_index_effective_availability(lookup, config, wall_now=_WALL_NOW)
+    assert (effective is KnowledgeAvailability.STALE) is expected_due
+
+
+def test_local_base_without_poll_interval_stays_ready(tmp_path: Path) -> None:
+    """A local base that sets no poll interval never turns STALE from age alone."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(
+        config,
+        runtime_paths,
+        availability=KnowledgeAvailability.READY,
+        schedule_refresh_on_access=True,
+        last_refresh_age=timedelta(days=30),
+    )
+
+    assert ready_index_effective_availability(lookup, config, wall_now=_WALL_NOW) is KnowledgeAvailability.READY
 
 
 def test_git_poll_interval_replaces_the_default_cooldown(tmp_path: Path) -> None:

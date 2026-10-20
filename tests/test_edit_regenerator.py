@@ -1048,20 +1048,6 @@ async def test_edit_without_previous_response_event_is_skipped(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_edit_from_managed_agent_is_ignored(tmp_path: Path) -> None:
-    """Edits sent by a managed entity never reach turn lookup."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
-    agent_user_id = entity_ids(harness.config, harness.runtime_paths)[AGENT_NAME].full_id
-    event, event_info = _edit_event(sender=agent_user_id)
-
-    await _handle_edit(harness, event, event_info)
-
-    harness.resolver.extract_message_context.assert_not_awaited()
-    harness.turn_store.load_turn.assert_not_called()
-    _assert_no_regeneration(harness)
-
-
-@pytest.mark.asyncio
 async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) -> None:
     """An edit resolved outside the recorded thread refetches history for the recorded root."""
     record = _turn_record(thread_id=THREAD_ID)

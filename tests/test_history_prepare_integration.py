@@ -932,19 +932,19 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
     second_request = recorded_requests[1]
     third_request = recorded_requests[2]
 
-    assert stable_serialize(second_request[:-2]) == stable_serialize(third_request[: len(second_request) - 2])
+    assert stable_serialize(second_request[:-1]) == stable_serialize(third_request[: len(second_request) - 1])
     session_preamble = "[File memory entrypoint (agent)]\nStable MEMORY.md"
     assert [message["content"] for message in recorded_requests[0]] == [
         session_preamble,
-        render_transient_context(("turn context one",)),
         "First prompt",
+        render_transient_context(("turn context one",)),
     ]
     assert [message["content"] for message in second_request] == [
         session_preamble,
         "First prompt",
         "ok",
-        render_transient_context(("turn context two",)),
         "Second prompt",
+        render_transient_context(("turn context two",)),
     ]
     assert [message["content"] for message in third_request] == [
         session_preamble,
@@ -952,11 +952,11 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
         "ok",
         "Second prompt",
         "ok",
-        render_transient_context(("turn context three",)),
         "Third prompt",
+        render_transient_context(("turn context three",)),
     ]
-    assert third_request[-2]["add_to_agent_memory"] is False
-    assert third_request[-1]["add_to_agent_memory"] is True
+    assert third_request[-2]["add_to_agent_memory"] is True
+    assert third_request[-1]["add_to_agent_memory"] is False
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
@@ -1062,15 +1062,15 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     second_request = recorded_requests[1]
     third_request = recorded_requests[2]
 
-    assert stable_serialize(second_request[:-2]) == stable_serialize(third_request[: len(second_request) - 2])
-    assert third_request[-2] == {
+    assert stable_serialize(second_request[:-1]) == stable_serialize(third_request[: len(second_request) - 1])
+    assert third_request[-1] == {
         "role": "user",
         "content": render_transient_context(("turn context three",)),
         "add_to_agent_memory": False,
     }
-    assert third_request[-1]["content"] == (
+    assert third_request[-2]["content"] == (
         'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:17 PDT"><![CDATA['
         "Third prompt\n\n"
         "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
     )
-    assert third_request[-1]["add_to_agent_memory"] is True
+    assert third_request[-2]["add_to_agent_memory"] is True

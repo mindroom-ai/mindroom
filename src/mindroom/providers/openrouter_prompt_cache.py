@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.hooks.enrichment import is_transient_context
 from mindroom.providers.claude_prompt_cache import (
     MAX_CACHE_MARKERS,
     MESSAGE_RUNG_COUNT,
@@ -47,31 +46,6 @@ def openrouter_prompt_cache_control(
     if not cache_system_prompt or not model_id.startswith(_ANTHROPIC_MODEL_PREFIXES):
         return None
     return prompt_cache_control(extended_cache_time=extended_cache_time)
-
-
-def _is_transient_user_message(message: dict[str, Any]) -> bool:
-    return message.get("role") == "user" and is_transient_context(message.get("content"))
-
-
-def _move_transient_context_after_user_turn(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Move transient user messages after the durable user messages they precede.
-
-    Anthropic merges consecutive user messages into one turn; keeping generated
-    per-request context at the end of that turn keeps the durable prompt in
-    the prefix that later requests replay.
-    """
-    reordered: list[dict[str, Any]] = []
-    run_start = 0
-    for index, message in enumerate([*messages, None]):
-        if message is not None and message.get("role") == "user":
-            continue
-        user_run = messages[run_start:index]
-        reordered.extend(user_message for user_message in user_run if not _is_transient_user_message(user_message))
-        reordered.extend(user_message for user_message in user_run if _is_transient_user_message(user_message))
-        if message is not None:
-            reordered.append(message)
-        run_start = index + 1
-    return reordered
 
 
 def _with_marked_system_prompt(message: dict[str, Any], cache_control: dict[str, str]) -> dict[str, Any]:
@@ -115,7 +89,7 @@ def _request_kwargs_with_prompt_cache(
         _contains_cache_marker(request_kwargs.get(key)) for key in ("messages", "tools", "extra_body")
     ):
         return request_kwargs
-    prepared = _move_transient_context_after_user_turn(messages)
+    prepared = messages.copy()
     budget = MAX_CACHE_MARKERS
     system_count = 0
     while system_count < len(prepared) and prepared[system_count].get("role") in _SYSTEM_ROLES:

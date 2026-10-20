@@ -25,6 +25,7 @@ Use it to pick a tool, configure its credentials, and understand why a tool is u
 | [`zoom`](#zoom) | Scheduling, listing, inspecting, and deleting Zoom meetings and reading recordings | Server-to-Server OAuth app |
 
 For Amazon SES email, see `aws_ses` in [Automation & Platforms](automation-and-platforms.md).
+For Outlook mail, see `outlook_mail` in [Microsoft 365](microsoft-365.md).
 
 ## Credentials
 
