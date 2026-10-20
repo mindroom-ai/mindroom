@@ -65,4 +65,20 @@ A live three-turn conversation on `gemini-3.8-flash` (provider `google`) on Octo
 
 Gemini accepted the free-form `arguments` object of `call_tool`, which its schema conversion sends as an object without properties, and every deferred call went through `call_tool`.
 Neither run reported cached tokens, because Gemini's implicit cache did not engage at these prompt sizes.
-A comparison on OpenRouter models that report cache reads (DeepSeek V4.1 Flash, GLM-5.3, Qwen) is pending.
+
+The same conversation on `gpt-6-luna` through OpenAI Chat Completions (`api: chat_completions`, which takes the portable path), on October 20, 2026, measured the cache directly:
+
+| | `main` | this change |
+| --- | --- | --- |
+| Correct replies | 3 of 3 | 3 of 3 |
+| Provider requests | 8 | 9 |
+| Input tokens over all requests | 16,326 | 20,677 |
+| Cached input tokens | 10,410 (64%) | 17,852 (86%) |
+| Uncached input tokens | 5,916 | 2,825 |
+| Requests after the first that read nothing from the cache | 2, each right after a `load_tool` | 0 |
+
+Every request on this change read the whole previous request from the cache, while on `main` the request after each `load_tool` read none of it.
+This change sends more input tokens in total, because search results carry full definitions and the model searched again on each turn, but less than half as many uncached ones.
+Rerunning the identical conversation reuses the earlier run's cache, so only each side's first run is a clean measurement.
+OpenAI rejects function tools on Chat Completions while reasoning is enabled, so both runs set `reasoning_effort: none`.
+A comparison on OpenRouter models (DeepSeek V4.1 Flash, GLM-5.3, Qwen) is pending.
