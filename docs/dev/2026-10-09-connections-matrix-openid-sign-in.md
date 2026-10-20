@@ -30,7 +30,7 @@ The local rule never applies to a portal on a public address, and `[]` still tur
 
 ### Allow plain HTTP on local addresses
 
-A local Docker stack serves Matrix and Chat over plain HTTP, so requiring HTTPS for the portal alone protected nothing there; the rule matches the one Chat applies to Computers URLs.
+A local Docker stack serves Matrix and Chat over plain HTTP, so requiring HTTPS for the portal alone protected nothing there; like Chat for Computers URLs, MindRoom accepts it on `localhost`, loopback, RFC 1918, and IPv6 unique-local addresses.
 Browsers refuse `Secure` cookies over HTTP, so the session cookie drops the `__Host-` prefix there, and an HTTPS portal ignores that plain name so a sibling host cannot plant a session.
 
 ### Sign a process-local cookie instead of storing sessions

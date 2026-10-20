@@ -83,6 +83,8 @@ def test_parse_browser_origin_accepts(value: str, expected: str) -> None:
         "",
         "http://app.example",
         "http://100.64.0.1",
+        "http://169.254.1.1",
+        "http://[fe80::1]",
         "http://8.8.8.8",
         "ftp://app.example",
         "capacitor://localhost",

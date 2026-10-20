@@ -364,7 +364,7 @@ def test_connections_static_shell_is_public(
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
 ) -> None:
-    """The enabled portal shell holds no data and signs itself in, so it loads without credentials."""
+    """The portal shell holds no data and signs itself in, so it loads without credentials."""
     (tmp_path / "connections").mkdir()
     (tmp_path / "connections" / "index.html").write_text("connections")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
@@ -408,7 +408,7 @@ def test_signed_administrator_can_load_dashboard_html(
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
-    """The enabled portal must preserve configured administrator HTML access."""
+    """The portal must preserve configured administrator HTML access."""
     (tmp_path / "index.html").write_text("administrator dashboard")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     response = connections_auth_client().get("/", headers=signed_connections_headers("owner"))

@@ -14,6 +14,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+# The private networks MindRoom Chat also accepts over plain HTTP: RFC 1918 and IPv6 unique-local addresses.
+_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
 _HOSTED_CHAT_ORIGIN = "https://chat.mindroom.chat"
 
 
@@ -40,7 +44,7 @@ def normalized_origin(url: str | None) -> str | None:
 
 
 def _is_local_host(host: str) -> bool:
-    """Return whether a URL host is `localhost` or a loopback or private IP literal, where plain HTTP is accepted.
+    """Return whether a URL host is `localhost` or a loopback or private-network IP literal, where plain HTTP is accepted.
 
     DNS names other than `localhost` need HTTPS even when they resolve to a private address, as in MindRoom Chat.
     """
@@ -48,7 +52,7 @@ def _is_local_host(host: str) -> bool:
         return True
     with suppress(ValueError):
         address = ipaddress.ip_address(host)
-        return address.is_loopback or address.is_private
+        return address.is_loopback or any(address in network for network in _PRIVATE_NETWORKS)
     return False
 
 
