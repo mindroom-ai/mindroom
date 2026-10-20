@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.tools import Toolkit
 
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
@@ -21,9 +23,7 @@ from mindroom.oauth.microsoft import microsoft_todo_oauth_provider
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _WRITE_FUNCTIONS = frozenset(
