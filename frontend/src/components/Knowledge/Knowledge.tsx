@@ -1331,6 +1331,7 @@ export function Knowledge() {
                       onClick={() =>
                         updateSettings({
                           git: defaultGitSettings(settings.git),
+                          poll_interval_seconds: undefined,
                         })
                       }
                       disabled={savingSettings}
@@ -1382,6 +1383,7 @@ export function Knowledge() {
                               ? ""
                               : settings.path,
                           watch: false,
+                          poll_interval_seconds: undefined,
                         })
                       }
                       disabled={savingSettings}

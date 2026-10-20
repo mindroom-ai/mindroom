@@ -2935,7 +2935,7 @@ If that reply is still streaming, the edit stops it first and the regenerated an
 A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
 Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
 While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
-Edits by agents never trigger regeneration.
+Edits by agents never trigger regeneration, and an agent's message edited while it still waits is answered with its original text.
 When another agent's reply finishes with a mention of this agent, it reaches this agent as a new message.
 
 # History & Compaction
@@ -3538,7 +3538,8 @@ knowledge_bases:
 | `description` | string | `""` | What the base contains; shown to agents in the `search_knowledge_base` tool description and in files-mode instructions so they know when to use it |
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to workspace-aware agents |
 | `path` | string | `./knowledge_docs` | Folder path, relative to the config file directory or absolute |
-| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex; dashboard/API uploads and deletes still trigger a refresh |
+| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex unless `poll_interval_seconds` is set; dashboard/API uploads and deletes still trigger a refresh |
+| `poll_interval_seconds` | int | `null` | Schedule a background refresh of the local folder this often (minimum `5`), for folders that another host writes to; see [Folders Written by Another Host](#folders-written-by-another-host). Unset means no polling. Semantic mode only, so `mode: files` bases reject it. Git-backed bases use `git.poll_interval_seconds` instead, and setting both is rejected |
 | `require_content_before_publish` | bool | `false` | Keep a new semantic index in the initializing state until at least one source file exists, instead of publishing an empty index |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
@@ -3568,6 +3569,24 @@ Temporary embedding failures (timeouts, connection errors, HTTP 408, 429, and 5x
 Knowledge base configuration hot-reloads.
 After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
+
+### Folders Written by Another Host
+
+Writes from another host, such as a job writing to an NFS share, produce no filesystem events.
+With `watch: true`, MindRoom notices them only when an agent searches the base, at most every five minutes, and that search still uses the previous index.
+With `watch: false`, MindRoom never notices them.
+Set `poll_interval_seconds` on the base to refresh on a timer instead.
+
+```yaml
+knowledge_bases:
+  synced_docs:
+    path: /mnt/shared/synced_docs
+    poll_interval_seconds: 300
+```
+
+The first poll runs one interval after startup and after each config reload.
+Each poll reads every file to detect changes, so choose an interval suited to the folder size.
+Polling works with `watch` on or off, and private agent knowledge is not polled.
 
 ### Indexing Performance
 
@@ -11566,6 +11585,7 @@ Use it to pick a tool, configure its credentials, and understand why a tool is u
 | [`zoom`](#zoom) | Scheduling, listing, inspecting, and deleting Zoom meetings and reading recordings | Server-to-Server OAuth app |
 
 For Amazon SES email, see `aws_ses` in [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/).
+For Outlook mail, see `outlook_mail` in [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/).
 
 ## Credentials
 
@@ -12572,7 +12592,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive but not SharePoint.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail, and Outlook calendars but not SharePoint.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -12633,6 +12653,7 @@ They take a worksheet name and an address such as `B2` or `A1:C10` without a wor
 A written string that starts with `=` becomes a formula.
 
 Search uses Microsoft Search, which covers work and school accounts.
+Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
 
 ## Mail
 
@@ -12644,12 +12665,14 @@ Search uses Microsoft Search, which covers work and school accounts.
 | `outlook_mail_create_draft` | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
 | `outlook_mail_send_draft` | yes, sends mail | Send an existing draft. |
 | `outlook_mail_send` | yes, sends mail | Send a new plain-text message at once, optionally with workspace files attached. |
-| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original. |
+| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
 | `outlook_mail_mark_read` | yes | Mark a message read or unread. |
 | `outlook_mail_move` | yes | Move a message to a folder. |
 
-Search takes Outlook search syntax, such as `from:sam@example.com subject:invoice hasAttachments:true`.
-Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID.
+Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
+Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
+A search with `query` stops after its first 1,000 matches, so a narrower query finds the rest.
+Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID, such as a message's `parent_folder_id`.
 Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
 A new message takes at most 50 email addresses across To and Cc.
 To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook.
@@ -12673,8 +12696,11 @@ A later download of the same attachment name overwrites the copy in `outlook-mai
 
 Event times in results are in UTC, and the agent converts them to the requester's time zone.
 A listing window may span at most 366 days.
+Calendar and event listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 New and changed events take local times plus a time zone, either a Windows name such as `W. Europe Standard Time` or an IANA name Outlook accepts such as `Europe/Berlin`.
 Each occurrence of a recurring meeting has its own ID, and changing or deleting an occurrence affects only that occurrence.
+Responding to the series master, whose ID each occurrence carries as `series_master_id`, answers the whole series.
+Changing or deleting the series master changes or deletes every occurrence.
 Deleting a meeting the requester only attends removes it from their calendar without telling the organizer; declining it tells the organizer.
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
@@ -12727,6 +12753,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
 | `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
+| `online_meeting_unavailable` | The calendar has no default online meeting provider, such as Teams, so the event cannot get a join link; create it without an online meeting. |
 | `online_meeting_body` | The update tried to replace an online meeting's description; change the other fields, or edit the description in Outlook. |
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |

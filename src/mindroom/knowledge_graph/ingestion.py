@@ -172,6 +172,10 @@ class KnowledgeGraphIngestionWorker:
     _clean: dict[str, bool] = field(default_factory=dict, init=False)
     # Graphs a look found still in a pass, which take one more pass before they stop, so a wake is never lost.
     _looked_again: set[str] = field(default_factory=set, init=False)
+    # The graphs the latest look listed, by name, and the config it listed them under, which passes reuse, since
+    # listing reads every private instance's records.
+    _listed: dict[str, GraphScope] = field(default_factory=dict, init=False)
+    _listed_config: Config | None = field(default=None, init=False)
 
     async def run(self) -> None:
         """Start a pass loop for every maintained graph that is not filling, every interval or wake, until cancelled."""
@@ -207,8 +211,8 @@ class KnowledgeGraphIngestionWorker:
     async def _fill(self, graph_name: str) -> None:
         """Run one graph's passes back to back, so a long backlog in another graph never holds it up.
 
-        Stop after a pass that added nothing, unless a look arrived during it, or once the graph is no longer maintained,
-        for example after an embedder or generation change, leaving the next look to ``run``.
+        Stop after a pass that added nothing, unless a look arrived during it, or once the config changes, leaving the
+        next look to ``run``, which starts the graph again if the new config still maintains it.
         """
         while True:
             async with self._slots:
@@ -217,14 +221,10 @@ class KnowledgeGraphIngestionWorker:
                 config = self.config_provider()
                 if config is None:
                     return
-                try:
-                    scopes = await self._maintained_graphs(config)
-                except Exception as exc:
-                    _report_failure("Knowledge graph ingestion pass failed", exc)
-                    return
-                scope = next((scope for scope in scopes if scope.graph_name == graph_name), None)
+                # The latest look's graphs hold only for the config it listed them under.
+                scope = self._listed.get(graph_name) if config is self._listed_config else None
                 if scope is None:
-                    # The config that replaced this graph maintains another, such as its next generation, which starts.
+                    # The next look starts what the new config maintains, such as this graph's next generation.
                     self._wake_event.set()
                     return
                 progressed = await self._ingest_graph(config, scope, now=time.time())
@@ -240,8 +240,9 @@ class KnowledgeGraphIngestionWorker:
             # Until a listing succeeds, so a clean pass of a graph listed earlier cannot clear the failure.
             self._clean[_LISTING] = False
             raise
-        names = {scope.graph_name for scope in scopes}
-        self._clean = {name: clean for name, clean in self._clean.items() if name in names}
+        self._listed = {scope.graph_name: scope for scope in scopes}
+        self._listed_config = config
+        self._clean = {name: clean for name, clean in self._clean.items() if name in self._listed}
         return scopes
 
     def _hold_failure(self, scope: GraphScope, message: str, exc: Exception) -> None:
