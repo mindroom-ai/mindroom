@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import platform
@@ -12,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.tools.function import FunctionCall
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.skills as skills_module
@@ -531,11 +531,13 @@ def test_malformed_workspace_skill_is_skipped(tmp_path: Path) -> None:
     assert _skill_names(skills) == ["good"]
 
 
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "output-files"])
 @pytest.mark.parametrize("workspace_skill", [True, False], ids=["workspace", "configured"])
-def test_skill_scripts_are_read_and_never_run(tmp_path: Path, workspace_skill: bool) -> None:
-    """get_skill_script reads a listed script from any skill root and offers no way to run it."""
+def test_skill_scripts_are_read_and_never_run(tmp_path: Path, workspace_skill: bool, wrapped: bool) -> None:
+    """get_skill_script reads a listed script from any skill root, and a call that asks to run it runs nothing."""
     storage = tmp_path / "storage"
-    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
+    workspace_root = agent_workspace_root_path(storage, "code")
+    workspace_skills = workspace_root / "skills"
     workspace_skills.mkdir(parents=True)
     skill_path = _write_skill(
         workspace_skills if workspace_skill else tmp_path / "global",
@@ -552,14 +554,22 @@ def test_skill_scripts_are_read_and_never_run(tmp_path: Path, workspace_skill: b
         skill_roots=[tmp_path / "global"],
         env_vars={},
         credential_keys=set(),
+        output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root) if wrapped else None,
     )
     assert skills is not None
     script_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_script")
+    script_tool.process_entrypoint()
+    schema = script_tool.to_dict()
 
-    assert _get_skill_script(skills, "scripted", "hello.sh")["content"] == f"#!/bin/sh\ntouch {marker}\n"
-    assert list(inspect.signature(script_tool.entrypoint).parameters) == ["skill_name", "script_path"]
-    assert "execut" not in (script_tool.description or "").lower()
-    assert "run" not in (inspect.getdoc(script_tool.entrypoint) or "").split("Args:")[-1].lower()
+    assert set(schema["parameters"]["properties"]) == {"skill_name", "script_path"} | (
+        {"mindroom_output_path"} if wrapped else set()
+    )
+    assert "execut" not in json.dumps(schema).lower()
+    read = FunctionCall(function=script_tool, arguments={"skill_name": "scripted", "script_path": "hello.sh"})
+    assert read.execute().status == "success"
+    assert json.loads(str(read.result))["content"] == f"#!/bin/sh\ntouch {marker}\n"
+    arguments = {"skill_name": "scripted", "script_path": "hello.sh", "execute": True}
+    assert FunctionCall(function=script_tool, arguments=arguments).execute().status == "failure"
     assert not marker.exists()
 
 

@@ -173,8 +173,9 @@ class _MindroomSkills(Skills):
 
     # AGNO_COMPAT: Skills runs a skill script in the process that holds the Skills object.
     # Reason: Agno 3.0.9 Skills._get_skill_script with execute=True runs a script as a subprocess of the primary
-    #   process, outside the agent's worker, tool hooks, and approval rules, and its tool description, parameter
-    #   docs, and skills prompt offer that; MindRoom's get_skill_script only reads scripts, and says so in all three.
+    #   process, outside the worker, hooks, and approval rules of the agent's shell, and its tool description,
+    #   parameter docs, and skills prompt offer that; MindRoom's get_skill_script, below, takes no execute
+    #   argument and only reads scripts, and its description and the skills prompt say so.
     # Upstream issue: Tracking gap; no issue for offering read-only skill scripts has been identified.
     # Upstream PR: None identified.
     # Remove when: Skills lets an application leave script execution out of its tool and prompt.
@@ -268,20 +269,12 @@ class _MindroomSkills(Skills):
             return super()._get_skill_reference(skill_name, reference_path)
         return json.dumps({"skill_name": skill_name, "reference_path": reference_path, **content})
 
+    # Read-only on purpose; see the AGNO_COMPAT note on get_system_prompt_snippet.
     def _get_skill_script(  # ty: ignore[invalid-method-override]  # MindRoom offers no execute, args, or timeout
         self,
         skill_name: str,
         script_path: str | None = None,
     ) -> str:
-        """Read a script from a skill.
-
-        Agno builds the parameter descriptions from this docstring.
-
-        Args:
-            skill_name: The name of the skill.
-            script_path: The filename of the script.
-
-        """
         content = self._read_workspace_skill_file(skill_name, "scripts", script_path)
         if content is not None:
             return json.dumps({"skill_name": skill_name, "script_path": script_path, **content})

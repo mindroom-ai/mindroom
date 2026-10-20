@@ -129,7 +129,7 @@ The runtime guidance every agent gets still follows, such as its tool execution 
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent with `delegate` can author further copies only within its own `tools`, `skills`, and `knowledge` lists: a copy that omits `tools` inherits its tools, except `delegate` at the maximum depth, one that also omits `skills` or `knowledge` inherits those, and an authored subagent with any of these lists cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools, skills, and knowledge.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
-A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, a kept configured skill can run its scripts, and file tools can still read `files`-mode knowledge bases.
+A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, and file tools can still read `files`-mode knowledge bases.
 
 ```python
 run_subagent(
