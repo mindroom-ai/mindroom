@@ -85,6 +85,11 @@ class DynamicToolsToolkit(Toolkit):
         }
         if not matches:
             payload["message"] = "No deferred function matched. Try other keywords or a toolkit name from the list."
+        elif len(scored) > len(matches):
+            payload["message"] = (
+                f"{len(scored)} functions matched; these are the best {len(matches)}. "
+                "Raise max_results or use more specific keywords to see the others."
+            )
         return self._payload("ok", **payload)
 
     def call_tool(self, name: str = "", arguments: object = None, **_extra: object) -> str:

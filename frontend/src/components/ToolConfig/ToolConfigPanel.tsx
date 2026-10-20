@@ -453,7 +453,7 @@ export function ToolConfigPanel({
               htmlFor={`${lazyId}-defer`}
               className="cursor-pointer text-sm"
             >
-              Load lazily
+              Defer until searched
             </Label>
           </div>
           <p className="pl-6 text-xs text-muted-foreground">
@@ -474,7 +474,7 @@ export function ToolConfigPanel({
                 deferEnabled ? "" : "text-muted-foreground"
               }`}
             >
-              Load at session start
+              Send on every request
             </Label>
           </div>
         </div>

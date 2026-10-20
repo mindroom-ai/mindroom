@@ -1429,6 +1429,19 @@ def test_tool_search_clamps_max_results() -> None:
     assert len(_tool_payload(toolkit.tool_search("crm", max_results=99))["matches"]) == 2
 
 
+def test_tool_search_says_when_more_functions_matched_than_it_returned() -> None:
+    """A cut-off result names how many functions matched so the model can widen or narrow its search."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    truncated = _tool_payload(toolkit.tool_search("crm", max_results=1))
+    complete = _tool_payload(toolkit.tool_search("crm", max_results=2))
+
+    assert len(truncated["matches"]) == 1
+    assert "2 functions matched" in truncated["message"]
+    assert "max_results" in truncated["message"]
+    assert "message" not in complete
+
+
 def test_tool_search_without_matches_suggests_other_keywords() -> None:
     """An empty result tells the model how to search again."""
     toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
