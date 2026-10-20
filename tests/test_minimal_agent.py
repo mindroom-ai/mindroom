@@ -37,6 +37,7 @@ from mindroom.error_handling import MinimalModeUnavailableError, get_user_friend
 from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, agent_static_token_estimator
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.hooks import EnrichmentItem
+from mindroom.hooks.enrichment import is_transient_context
 from mindroom.memory.functions import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -519,7 +520,8 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
         execution_identity=build_execution_identity_from_runtime_context(runtime),
     )
     assert "actual current user request" in prepared.prompt_text
-    assert "required current target" in prepared.prompt_text
+    turn_context = next(message for message in prepared.messages if "required current target" in str(message.content))
+    assert is_transient_context(turn_context.content)
     assert "optional memory" not in prepared.prompt_text
     assert "optional plugin" not in prepared.prompt_text
     assert "optional system" not in prepared.agent.system_message

@@ -366,7 +366,8 @@ def resolve_knowledge_binding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
-            # Shared Git bases poll through STALE scheduling after their interval, not READY access scheduling.
+            # Polled shared bases (Git, or local with poll_interval_seconds) refresh through STALE scheduling
+            # after their interval; Git bases never use READY access scheduling.
             incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
         )
 

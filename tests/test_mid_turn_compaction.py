@@ -643,8 +643,9 @@ async def test_unseen_thread_context_is_folded_and_transient_context_kept(
 
     compacted = _first_compacted(model)
     assert "u" * 6000 not in compacted.contents
-    assert compacted.contents[-3:-1] == ["transient turn context", "Do the task"]
-    assert is_compaction_summary(compacted.messages[-1])
+    assert compacted.contents[-3] == "Do the task"
+    assert is_compaction_summary(compacted.messages[-2])
+    assert compacted.contents[-1] == "transient turn context"
     assert "u" * 100 in summary_calls.inputs[0]
     assert "transient turn context" not in summary_calls.inputs[0]
 
