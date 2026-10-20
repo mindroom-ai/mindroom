@@ -12,7 +12,7 @@ from mindroom.api.auth import require_same_origin
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
-from mindroom.origins import normalized_origin
+from mindroom.origins import deployment_origin, is_local_origin
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
@@ -40,10 +40,13 @@ def require_connections_same_origin(
     detail: str = "Connection changes require a same-origin request",
 ) -> None:
     """Reject mutations from another origin (shared helper for connections and egress routes)."""
-    public_url = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
-    expected = normalized_origin(public_url)
-    if expected is None or not expected.startswith("https://"):
-        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
+    expected = deployment_origin(runtime_paths, str(request.base_url))
+    if expected is None or not (expected.startswith("https://") or is_local_origin(expected)):
+        raise HTTPException(
+            403,
+            "Connections require an HTTPS public origin, or HTTP on a local address",
+            headers=CONNECTIONS_HEADERS,
+        )
     require_same_origin(
         request,
         expected,
@@ -101,13 +104,10 @@ def resolve_connection_user(
     """Resolve current agent eligibility without constructing execution targets."""
     paths = snapshot.runtime_paths
     agent_name = (paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
-    if not agent_name:
-        raise HTTPException(404, "Connections are not enabled", headers=CONNECTIONS_HEADERS)
     config = snapshot.runtime_config
     if config is None:
         raise HTTPException(503, "Connections are unavailable", headers=CONNECTIONS_HEADERS)
-    agent = config.agents.get(agent_name)
-    if agent is None or agent.private is None or agent.private.per not in {"user", "user_agent"}:
+    if agent_name and (agent_name not in config.agents or config.agents[agent_name].private is None):
         raise HTTPException(403, "Connections require a configured private agent", headers=CONNECTIONS_HEADERS)
     if try_parse_historical_matrix_user_id(authenticated_user_id) is None:
         raise HTTPException(
@@ -117,19 +117,19 @@ def resolve_connection_user(
         )
     requester_id = resolve_human_requester_alias(authenticated_user_id, config, paths)
     memberships = membership_index if membership_index is not None else AgentReplyMembershipIndex()
-    candidates = (agent_name, *(name for name, candidate in config.agents.items() if candidate.private is None))
     usable = tuple(
         name
-        for name in candidates
+        for name in config.agents
         if is_sender_allowed_for_responder(requester_id, name, None, config, paths, memberships)
     )
     personal_agent_name = agent_name if agent_name in usable else None
+    # A private agent's connections hold only its requester's own credentials; shared ones need explicit authority.
     managed = tuple(
         name
-        for name in candidates
-        if name == personal_agent_name
+        for name, agent in config.agents.items()
+        if (agent.private is not None and name in usable)
         or (
-            config.agents[name].private is None
+            agent.private is None
             and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
         )
     )

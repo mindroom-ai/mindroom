@@ -204,20 +204,33 @@ def test_personal_scope_rejects_nonprivate_agent(personal_snapshot: ApiSnapshot)
     assert error.value.status_code == 403
 
 
-@pytest.mark.parametrize(("mode", "status"), [("disabled", 404), ("missing_config", 503)])
-def test_personal_scope_fails_closed_without_configuration(
-    personal_snapshot: ApiSnapshot,
-    mode: str,
-    status: int,
-) -> None:
-    """Missing selection or configuration cannot fall back to another agent."""
-    if mode == "disabled":
-        personal_snapshot = replace(
-            personal_snapshot,
-            runtime_paths=replace(personal_snapshot.runtime_paths, process_env={}),
-        )
-    else:
-        personal_snapshot = replace(personal_snapshot, runtime_config=None)
+def test_connection_user_fails_closed_without_configuration(personal_snapshot: ApiSnapshot) -> None:
+    """A snapshot without a loaded configuration lists nothing."""
     with pytest.raises(HTTPException) as error:
-        connection_agents.resolve_connection_user(personal_snapshot, "@alice:example.org")
-    assert error.value.status_code == status
+        connection_agents.resolve_connection_user(replace(personal_snapshot, runtime_config=None), "@alice:example.org")
+    assert error.value.status_code == 503
+
+
+def test_every_usable_private_agent_is_listed_without_a_named_agent(personal_snapshot: ApiSnapshot) -> None:
+    """Without `MINDROOM_CONNECTIONS_AGENT`, each private agent a user may use is theirs to connect; others stay hidden."""
+    config = personal_snapshot.runtime_config
+    assert config is not None
+    config.agents["other"] = AgentConfig.model_validate(
+        {
+            "display_name": "Other private agent",
+            "role": "Private assistant",
+            "tools": ["calculator"],
+            "private": {"per": "user"},
+            "access": {"users": ["@bob:example.org"]},
+            "credential_managers": ["@alice:example.org"],
+        },
+    )
+    snapshot = replace(personal_snapshot, runtime_paths=replace(personal_snapshot.runtime_paths, process_env={}))
+    alice = connection_agents.resolve_connection_user(snapshot, "@alice:example.org")
+    assert (alice.agent_names, alice.credential_agent_names, alice.personal_agent_name) == (
+        ("personal",),
+        ("personal",),
+        None,
+    )
+    bob = connection_agents.resolve_connection_user(snapshot, "@bob:example.org")
+    assert bob.agent_names == bob.credential_agent_names == bob.gateway_agent_names == ("personal", "other")

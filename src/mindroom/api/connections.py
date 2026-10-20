@@ -111,14 +111,12 @@ class ConnectionsIdentity(BaseModel):
     """Who the Connections pages are open for, and whether the administrator dashboard is open to them too.
 
     `egress_enabled` says whether the egress broker is on, so the pages link the Agent Keys page only then.
-    `portal_enabled` says whether the Agents page is served: the Agent Keys page can be served without it.
     """
 
     matrix_user_id: str
     email: str | None
     is_administrator: bool
     egress_enabled: bool
-    portal_enabled: bool
 
 
 class _EmptyMutation(BaseModel):
@@ -136,10 +134,6 @@ class _Connections:
 
 async def _connection_user(request: Request, response: Response) -> ConnectionUserContext:
     response.headers.update(CONNECTIONS_HEADERS)
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    agent_name = (snapshot.runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
-    if not agent_name:
-        raise HTTPException(404, "Connections are not enabled", headers=CONNECTIONS_HEADERS)
     auth_user = await require_connections_user(request)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if request.query_params:
@@ -345,7 +339,6 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
         email=email if isinstance(email, str) and email else None,
         is_administrator=is_administrator(matrix_user_id, snapshot),
         egress_enabled=egress_broker_enabled(snapshot.runtime_paths),
-        portal_enabled=bool((snapshot.runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()),
     )
 
 
