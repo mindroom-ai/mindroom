@@ -1442,6 +1442,26 @@ def test_tool_search_says_when_more_functions_matched_than_it_returned() -> None
     assert "message" not in complete
 
 
+def test_tool_search_at_the_result_limit_suggests_only_narrower_keywords() -> None:
+    """A cut-off result at the result limit does not suggest raising max_results, which cannot return more."""
+
+    def bulk_function(index: int) -> Function:
+        return Function(name=f"bulk_{index}", description="Bulk operation.", entrypoint=lambda: "ok")
+
+    bulk = Toolkit(name="bulk")
+    for index in range(25):
+        bulk.functions[f"bulk_{index}"] = bulk_function(index)
+    toolkit = _search_toolkit(_deferred(bulk, "Bulk operations"))
+
+    below_limit = _tool_payload(toolkit.tool_search("bulk", max_results=19))
+    at_limit = _tool_payload(toolkit.tool_search("bulk", max_results=99))
+
+    assert "max_results" in below_limit["message"]
+    assert len(at_limit["matches"]) == 20
+    assert "25 functions matched" in at_limit["message"]
+    assert "max_results" not in at_limit["message"]
+
+
 def test_tool_search_without_matches_suggests_other_keywords() -> None:
     """An empty result tells the model how to search again."""
     toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))

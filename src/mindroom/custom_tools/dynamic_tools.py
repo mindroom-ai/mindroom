@@ -59,7 +59,7 @@ class DynamicToolsToolkit(Toolkit):
 
         Args:
             query: Function name, toolkit name, or keywords describing the needed capability.
-            max_results: Maximum number of function definitions to return.
+            max_results: Maximum number of function definitions to return, at most 20.
 
         """
         raw_query = query.strip().lower()
@@ -86,10 +86,13 @@ class DynamicToolsToolkit(Toolkit):
         if not matches:
             payload["message"] = "No deferred function matched. Try other keywords or a toolkit name from the list."
         elif len(scored) > len(matches):
-            payload["message"] = (
-                f"{len(scored)} functions matched; these are the best {len(matches)}. "
-                "Raise max_results or use more specific keywords to see the others."
-            )
+            if len(matches) < _MAX_RESULTS_LIMIT:
+                hint = (
+                    f"Raise max_results (at most {_MAX_RESULTS_LIMIT}) or use more specific keywords to see the others."
+                )
+            else:
+                hint = "Use more specific keywords to see the others."
+            payload["message"] = f"{len(scored)} functions matched; these are the best {len(matches)}. {hint}"
         return self._payload("ok", **payload)
 
     def call_tool(self, name: str = "", arguments: object = None, **_extra: object) -> str:
