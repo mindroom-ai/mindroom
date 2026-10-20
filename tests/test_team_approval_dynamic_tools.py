@@ -327,7 +327,7 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
 ) -> None:
-    """Persist a delegated member pause, then restore only its owner after losing selection."""
+    """Persist a delegated member pause, then restore only its owner from the saved approval ownership."""
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config.model_validate(

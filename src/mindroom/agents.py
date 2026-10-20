@@ -1250,8 +1250,9 @@ def _resolve_agent_dynamic_tool_selection(
     required_tool_names: tuple[str, ...],
 ) -> VisibleToolSurface:
     # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
-    # saved approval needs; every other runtime attaches them all and keeps deferred ones off the wire unless it sends
-    # them eagerly, as voice calls and personas with their own tool list do.
+    # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
+    # deferred, portable tool search keeps them off the wire, and personas with their own tool list, plus voice calls
+    # on models without native tool search, send them as ordinary tools.
     return visible_tool_surface(
         agent_name=agent_name,
         config=config,
@@ -1927,8 +1928,9 @@ def create_agent(  # noqa: PLR0915
             passed through to delegated child agents.
         supports_native_tool_approval: Whether the caller can persist and resume
             Agno confirmation pauses. Gated functions are hidden when false.
-        eager_deferred_tools: Whether to send every deferred toolkit as an ordinary tool, for a runtime that
-            exposes every tool from the start.
+        eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`,
+            for a runtime that exposes every tool from the start; models with native tool search keep native
+            deferral.
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.

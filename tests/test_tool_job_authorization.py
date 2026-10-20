@@ -410,7 +410,7 @@ def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.Monkey
     )
 
 
-def test_deferred_job_policy_survives_unloading_but_rejects_new_filters_and_origin(
+def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Historical reads use authored grants and provenance without constructing tools."""

@@ -1827,7 +1827,7 @@ def test_streaming_continuation_limit_yields_limit_message() -> None:
 
 @pytest.mark.parametrize(("saved_count", "expected_attempts"), [(0, 4), (2, 2), (4, 0)])
 def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_attempts: int) -> None:
-    """Restoring a schema boundary cannot reset the logical turn budget or leak stale text."""
+    """Restoring a model-switch continuation cannot reset the logical turn budget or leak stale text."""
     log = _AdapterLog()
     prompts: list[str] = []
     completed: list[CompletedAttempt] = []
