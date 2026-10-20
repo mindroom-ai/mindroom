@@ -110,6 +110,7 @@ from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
 from mindroom.tools.openweather import openweather_tools
+from mindroom.tools.outlook_calendar import outlook_calendar_tools
 from mindroom.tools.outlook_mail import outlook_mail_tools
 from mindroom.tools.oxylabs import oxylabs_tools
 from mindroom.tools.pandas import pandas_tools
@@ -251,6 +252,7 @@ __all__ = [
     "openai_tools",
     "openbb_tools",
     "openweather_tools",
+    "outlook_calendar_tools",
     "outlook_mail_tools",
     "oxylabs_tools",
     "pandas_tools",
