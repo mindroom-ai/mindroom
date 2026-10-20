@@ -82,6 +82,8 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
+| `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
+| `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
 
 ```yaml
 memory:
@@ -114,7 +116,26 @@ memory:
 ```
 
 MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
-Changing the embedder provider, model, host, or dimensions switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
+It embeds queries and documents with the model's own prompts.
+
+Some models expect a prompt in front of each text, different for queries and documents.
+A local `sentence_transformers` model gets them automatically; for the same model behind an OpenAI-compatible server such as llama.cpp, set them as prefixes.
+For EmbeddingGemma 2:
+
+```yaml
+memory:
+  embedder:
+    provider: openai
+    config:
+      model: embeddinggemma-2
+      host: http://localhost:8080/v1
+      dimensions: 768
+      query_prefix: "task: search result | query: "
+      document_prefix: "title: none | text: "
+```
+
+Knowledge-graph texts all get the query prefix, because Graphiti embeds names, facts and searches through the same calls.
+Changing the embedder provider, model, host, dimensions, or prefixes switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
 
 The `openai` embedder takes its API key from the first of these that is set:
 

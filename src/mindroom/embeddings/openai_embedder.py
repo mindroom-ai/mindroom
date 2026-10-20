@@ -68,6 +68,8 @@ def _validated_embeddings(
 class MindRoomOpenAIEmbedder(OpenAIEmbedderWithHooks):
     """Avoid forcing OpenAI defaults onto arbitrary OpenAI-compatible hosts."""
 
+    query_prefix: str | None = None
+    document_prefix: str | None = None
     _dimensions_explicit: bool = field(init=False, default=False, repr=False)
     health_recorder: EmbedderHealthRecorder = field(default_factory=capture_embedder_health_recorder, repr=False)
 
@@ -80,13 +82,18 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedderWithHooks):
     def _should_send_dimensions(self) -> bool:
         return self.dimensions is not None and (self._dimensions_explicit or self.id in OPENAI_EMBEDDING_DIMENSIONS)
 
-    def embedding_request_parameters(self, input_value: str | list[str]) -> dict[str, Any]:
-        """Build a text-only request with the configured dimensions and overrides."""
+    def _request_text(self, text: str, *, query: bool) -> str:
+        prefix = self.query_prefix if query else self.document_prefix
+        text = f"{prefix}{text}" if prefix else text
         # LiteLLM reserves files/... for Gemini file references; MindRoom inputs are text.
+        return f" {text}" if text.startswith("files/") else text
+
+    def embedding_request_parameters(self, input_value: str | list[str], *, query: bool) -> dict[str, Any]:
+        """Build a text-only request with the configured prefix, dimensions and overrides."""
         if isinstance(input_value, str):
-            request_input = f" {input_value}" if input_value.startswith("files/") else input_value
+            request_input: str | list[str] = self._request_text(input_value, query=query)
         else:
-            request_input = [f" {text}" if text.startswith("files/") else text for text in input_value]
+            request_input = [self._request_text(text, query=query) for text in input_value]
         request: dict[str, Any] = {
             "input": request_input,
             "model": self.id,
@@ -113,9 +120,9 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedderWithHooks):
         return _validated_embeddings(response, expected_count, self.health_recorder)
 
     def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Request a synchronous batch for adapters that support batch embedding."""
+        """Request a synchronous batch of document embeddings for adapters that support batch embedding."""
         try:
-            response = self.client.embeddings.create(**self.embedding_request_parameters(texts))
+            response = self.client.embeddings.create(**self.embedding_request_parameters(texts, query=False))
         except Exception as exc:
             raise self.embedding_request_error(exc) from None
         return self.validate_embedding_response(response, len(texts))

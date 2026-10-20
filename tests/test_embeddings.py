@@ -456,6 +456,43 @@ def test_local_knowledge_signature_marks_prompted_vectors_and_leaves_mem0_unchan
     assert knowledge == ("sentence_transformers", f"{SENTENCE_TRANSFORMERS_DEFAULT}#query-document-prompts", "", "")
 
 
+def test_openai_prefixes_name_new_vectors_and_leave_unprefixed_signatures_unchanged() -> None:
+    """Prefixed vectors cannot be queried or reused as plain ones; configs without prefixes keep their indexes."""
+    plain = effective_knowledge_embedder_signature("openai", "embeddinggemma-2", host="http://local/v1", dimensions=768)
+    prefixed = effective_knowledge_embedder_signature(
+        "openai",
+        "embeddinggemma-2",
+        host="http://local/v1",
+        dimensions=768,
+        query_prefix="q: ",
+        document_prefix="d: ",
+    )
+    other_query = effective_knowledge_embedder_signature(
+        "openai",
+        "embeddinggemma-2",
+        host="http://local/v1",
+        dimensions=768,
+        query_prefix="other: ",
+        document_prefix="d: ",
+    )
+
+    assert plain == ("openai", "embeddinggemma-2", "http://local/v1", "768")
+    assert prefixed[2:] == plain[2:]
+    assert len({plain, prefixed, other_query}) == 3
+    # Mem0 embeds through the same prefixed client, so its collections follow the prefixes too.
+    assert (
+        effective_mem0_embedder_signature(
+            "openai",
+            "embeddinggemma-2",
+            host="http://local/v1",
+            dimensions=768,
+            query_prefix="q: ",
+            document_prefix="d: ",
+        )
+        == prefixed
+    )
+
+
 def test_mem0_openai_signature_separates_implicit_and_explicit_dimensions() -> None:
     """Implicit OpenAI dimensions and explicit shortened dimensions should not share collections."""
     assert effective_mem0_embedder_signature("openai", OPENAI_EMBEDDING_LARGE) != effective_mem0_embedder_signature(

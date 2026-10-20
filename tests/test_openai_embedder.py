@@ -268,3 +268,61 @@ async def test_async_success_clears_recorded_failure() -> None:
 
     assert await embedder.async_get_embedding("hello") == [1.0, 2.0]
     assert get_embedder_failure() is None
+
+
+QUERY_PREFIX = "task: search result | query: "
+DOCUMENT_PREFIX = "title: none | text: "
+
+
+def _prefixed_embedder(
+    client: MagicMock | None = None,
+    async_client: MagicMock | None = None,
+) -> MindRoomOpenAIEmbedder:
+    return MindRoomOpenAIEmbedder(
+        id="embeddinggemma-2",
+        api_key=SECRET,
+        base_url="http://llama.local/v1",
+        openai_client=client,
+        async_client=async_client,
+        query_prefix=QUERY_PREFIX,
+        document_prefix=DOCUMENT_PREFIX,
+    )
+
+
+def test_prefixes_mark_sync_queries_and_documents() -> None:
+    """Queries go through get_embedding; documents through the usage and batch paths."""
+    client = MagicMock()
+    client.embeddings.create.side_effect = [_success_response(), _success_response(), _success_response(count=2)]
+    embedder = _prefixed_embedder(client=client)
+
+    embedder.get_embedding("who is harry")
+    embedder.get_embedding_and_usage("files/notes.md")
+    embedder.get_embeddings_batch(["one", "two"])
+
+    query, document, batch = (call.kwargs["input"] for call in client.embeddings.create.call_args_list)
+    assert query == f"{QUERY_PREFIX}who is harry"
+    assert document == f"{DOCUMENT_PREFIX}files/notes.md"
+    assert batch == [f"{DOCUMENT_PREFIX}one", f"{DOCUMENT_PREFIX}two"]
+
+
+@pytest.mark.asyncio
+async def test_prefixes_mark_async_queries_and_documents() -> None:
+    """The async paths follow the same rule, and a batch can be embedded as queries."""
+    async_client = MagicMock()
+    async_client.embeddings.create = AsyncMock(
+        side_effect=[_success_response(), _success_response(), _success_response(count=2), _success_response(count=2)],
+    )
+    embedder = _prefixed_embedder(async_client=async_client)
+
+    await embedder.async_get_embedding("q")
+    await embedder.async_get_embedding_and_usage("d")
+    await embedder.async_get_embeddings_batch_and_usage(["d1", "d2"])
+    await embedder.async_get_embeddings_batch_and_usage(["q1", "q2"], query=True)
+
+    inputs = [call.kwargs["input"] for call in async_client.embeddings.create.await_args_list]
+    assert inputs == [
+        f"{QUERY_PREFIX}q",
+        f"{DOCUMENT_PREFIX}d",
+        [f"{DOCUMENT_PREFIX}d1", f"{DOCUMENT_PREFIX}d2"],
+        [f"{QUERY_PREFIX}q1", f"{QUERY_PREFIX}q2"],
+    ]

@@ -647,6 +647,20 @@ class EmbedderConfig(BaseModel):
         ge=1,
         description="Optional embedding dimension override for OpenAI-compatible providers",
     )
+    query_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Text prepended to search queries for OpenAI-compatible providers, for models that expect a query "
+            "prompt (EmbeddingGemma 2: 'task: search result | query: ')"
+        ),
+    )
+    document_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Text prepended to indexed documents for OpenAI-compatible providers, for models that expect a document "
+            "prompt (EmbeddingGemma 2: 'title: none | text: ')"
+        ),
+    )
 
     @field_validator("credentials_service")
     @classmethod

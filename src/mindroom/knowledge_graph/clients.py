@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.agent import Agent
-from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.run.base import RunStatus
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.driver.falkordb_driver import FalkorDriver
@@ -23,6 +22,7 @@ from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, ModelSize
 from pydantic import BaseModel
 
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_cardinality_mismatch
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.knowledge_graph.store import UnusableExtractionError, run_on_loop
 from mindroom.knowledge_graph.usage import current_usage_target
@@ -156,8 +156,10 @@ class MindRoomEmbedder(EmbedderClient):
     def __init__(self, embedder: Embedder) -> None:
         self._embedder = embedder
         # Cleared once the server answers a batch with the wrong number of vectors.
-        self._batches = isinstance(embedder, OpenAIEmbedder)
+        self._batches = isinstance(embedder, MindRoomOpenAIEmbedder)
 
+    # Graphiti embeds node names, facts and search queries through the same two calls, so it cannot say which a text
+    # is. Every graph text is embedded as a query, which keeps names, facts and searches comparable with each other.
     async def create(self, input_data: str | list[str] | Iterable[int] | Iterable[Iterable[int]]) -> list[float]:
         """Embed one text, which Graphiti passes as a one-element list."""
         if isinstance(input_data, list) and input_data and isinstance(input_data[0], str):
@@ -171,9 +173,12 @@ class MindRoomEmbedder(EmbedderClient):
         Graphiti passes every node name or fact of an episode at once, and one request per text then opened so many
         connections at the same moment that they timed out connecting.
         """
-        if self._batches and isinstance(self._embedder, OpenAIEmbedder):
+        if self._batches and isinstance(self._embedder, MindRoomOpenAIEmbedder):
             try:
-                embeddings, _usage = await self._embedder.async_get_embeddings_batch_and_usage(input_data_list)
+                embeddings, _usage = await self._embedder.async_get_embeddings_batch_and_usage(
+                    input_data_list,
+                    query=True,
+                )
             except EmbedderRequestError as exc:
                 # Some OpenAI-compatible servers accept an array but answer with one vector.
                 if not embedder_batch_cardinality_mismatch(exc):

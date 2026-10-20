@@ -3,6 +3,7 @@
 _.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_budgets  # Pydantic model validator (src/mindroom/config/main.py)
 _.validate_memory_auto_flush_model  # Pydantic model validator (src/mindroom/config/main.py)
+_._prefixes_need_openai_provider  # Pydantic model validator (src/mindroom/config/memory.py)
 _.validate_template  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.validate_cron  # Pydantic field validator (src/mindroom/config/automations.py)

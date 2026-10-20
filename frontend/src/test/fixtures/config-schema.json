@@ -2014,6 +2014,32 @@
           "default": null,
           "description": "Optional embedding dimension override for OpenAI-compatible providers",
           "title": "Dimensions"
+        },
+        "query_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text prepended to search queries for OpenAI-compatible providers, for models that expect a query prompt (EmbeddingGemma 2: 'task: search result | query: ')",
+          "title": "Query Prefix"
+        },
+        "document_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text prepended to indexed documents for OpenAI-compatible providers, for models that expect a document prompt (EmbeddingGemma 2: 'title: none | text: ')",
+          "title": "Document Prefix"
         }
       },
       "title": "EmbedderConfig",
@@ -3244,8 +3270,10 @@
               "api_key": null,
               "credentials_service": null,
               "dimensions": null,
+              "document_prefix": null,
               "host": null,
-              "model": "text-embedding-3-small"
+              "model": "text-embedding-3-small",
+              "query_prefix": null
             }
           },
           "description": "Embedder configuration for memory"
@@ -5006,7 +5034,9 @@
             "credentials_service": null,
             "api_key": null,
             "host": null,
-            "dimensions": null
+            "dimensions": null,
+            "query_prefix": null,
+            "document_prefix": null
           },
           "description": "Provider-specific config"
         }
@@ -5267,8 +5297,10 @@
             "api_key": null,
             "credentials_service": null,
             "dimensions": null,
+            "document_prefix": null,
             "host": null,
-            "model": "text-embedding-3-small"
+            "model": "text-embedding-3-small",
+            "query_prefix": null
           },
           "provider": "openai"
         },

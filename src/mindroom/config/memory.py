@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -68,6 +68,17 @@ class _MemoryEmbedderConfig(BaseModel):
         description="Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
     )
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
+
+    @model_validator(mode="after")
+    def _prefixes_need_openai_provider(self) -> Self:
+        """Reject prefixes that the configured provider would silently ignore."""
+        if self.provider != "openai" and (self.config.query_prefix or self.config.document_prefix):
+            msg = (
+                "memory.embedder.config.query_prefix and document_prefix apply only to the openai provider; "
+                "sentence_transformers applies the model's own prompts"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class _MemoryLLMConfig(BaseModel):

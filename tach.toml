@@ -9175,6 +9175,7 @@ visibility = ["mindroom.knowledge_graph.store"]
 path = "mindroom.knowledge_graph.clients"
 depends_on = [
     "mindroom.embeddings.errors",
+    "mindroom.embeddings.openai_embedder",
     "mindroom.helper_usage",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",

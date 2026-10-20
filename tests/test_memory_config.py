@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -461,6 +462,45 @@ class TestMemoryConfig:
         resolved_settings = resolve_embedder_settings(config, runtime_paths)
         assert "named-key" not in repr(resolved_settings)
 
+    def test_embedder_prefixes_reach_the_client_and_its_identity(self, tmp_path: Path) -> None:
+        """Changing a prefix builds a new client, since it changes every vector the client returns."""
+        runtime_paths = _runtime_paths(tmp_path)
+
+        def config_with(prefix: str | None) -> Config:
+            return Config(
+                memory={
+                    "embedder": {
+                        "provider": "openai",
+                        "config": {
+                            "model": "embeddinggemma-2",
+                            "host": "http://local/v1",
+                            "api_key": "sk-test",
+                            "query_prefix": prefix,
+                            "document_prefix": "d: ",
+                        },
+                    },
+                },
+                router=RouterConfig(model="default"),
+            )
+
+        embedder = cast("MindRoomOpenAIEmbedder", create_configured_embedder(config_with("q: "), runtime_paths))
+
+        assert (embedder.query_prefix, embedder.document_prefix) == ("q: ", "d: ")
+        assert (
+            resolve_embedder_settings(config_with("q: "), runtime_paths).client_signature
+            != resolve_embedder_settings(config_with("other: "), runtime_paths).client_signature
+        )
+
+    def test_embedder_prefixes_require_an_openai_compatible_provider(self) -> None:
+        """Other providers would ignore the prefixes, so configuring them there is an error."""
+        with pytest.raises(ValidationError, match="query_prefix and document_prefix"):
+            _MemoryEmbedderConfig.model_validate(
+                {
+                    "provider": "sentence_transformers",
+                    "config": {"model": "google/embeddinggemma-2", "query_prefix": "q: "},
+                },
+            )
+
     def test_keyless_local_endpoint_constructs_both_real_clients(
         self,
         tmp_path: Path,
@@ -594,7 +634,7 @@ class TestMemoryConfig:
         embedder = create_configured_embedder(config, runtime_paths)
         assert embedder.api_key == "openrouter-key"
         assert str(embedder.client.base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
-        assert embedder.embedding_request_parameters("hi")["dimensions"] == 1536
+        assert embedder.embedding_request_parameters("hi", query=True)["dimensions"] == 1536
 
     def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
         """Credential-backed Ollama host should override the embedder config host."""
@@ -892,6 +932,33 @@ class TestMemoryConfig:
 
         # Consuming the failure resets the next operation.
         adapter.raise_for_operation_failure()
+
+    def test_mem0_strict_adapter_embeds_searches_as_queries_and_memories_as_documents(self) -> None:
+        """Mem0 names the purpose of each embedding, so stored memories get the document prefix."""
+        client = MagicMock()
+        client.embeddings.create.side_effect = lambda **kwargs: SimpleNamespace(
+            data=[SimpleNamespace(embedding=[1.0])]
+            * (len(kwargs["input"]) if isinstance(kwargs["input"], list) else 1),
+            usage=None,
+        )
+        adapter = _Mem0StrictOpenAIEmbedder(
+            MindRoomOpenAIEmbedder(
+                id="embeddinggemma-2",
+                api_key="sk-test",
+                base_url="http://local/v1",
+                openai_client=client,
+                query_prefix="q: ",
+                document_prefix="d: ",
+            ),
+        )
+
+        adapter.embed("find\nme", "search")
+        adapter.embed("remember", "add")
+        adapter.embed("changed", "update")
+        adapter.embed_batch(["one", "two"])
+
+        inputs = [call.kwargs["input"] for call in client.embeddings.create.call_args_list]
+        assert inputs == ["q: find me", "d: remember", "d: changed", ["d: one", "d: two"]]
 
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""

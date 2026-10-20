@@ -47,6 +47,8 @@ def _graph_signature(config: Config) -> tuple[str, ...]:
         embedder.config.model,
         host=embedder.config.host,
         dimensions=embedder.config.dimensions,
+        query_prefix=embedder.config.query_prefix,
+        document_prefix=embedder.config.document_prefix,
     )
     generation = config.knowledge_graph.generation
     # LEGACY_COMPAT: Graph names derived from the scope and embedder alone.

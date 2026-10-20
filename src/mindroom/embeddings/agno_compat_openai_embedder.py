@@ -30,8 +30,8 @@ class OpenAIEmbedderWithHooks(OpenAIEmbedder, ABC):
     """Copied Agno invocation paths delegated to the owner's request/outcome policy."""
 
     @abstractmethod
-    def embedding_request_parameters(self, input_value: str | list[str]) -> dict[str, Any]:
-        """Build one embedding request under the owner's provider policy."""
+    def embedding_request_parameters(self, input_value: str | list[str], *, query: bool) -> dict[str, Any]:
+        """Build one embedding request under the owner's provider policy, for search queries or documents."""
         ...
 
     @abstractmethod
@@ -68,20 +68,30 @@ class OpenAIEmbedderWithHooks(OpenAIEmbedder, ABC):
             )
         return self.async_client
 
-    def response(self, text: str) -> CreateEmbeddingResponse:
+    # AGNO_COMPAT: Embedders cannot tell a search query from a document.
+    # Reason: Agno's Embedder has one embedding entry point for both, and models such as EmbeddingGemma 2 expect
+    # different query and document prompts. Like the local sentence-transformers embedder, the purpose follows from
+    # the method: Agno's vector stores and MindRoom's read path embed queries with ``get_embedding``, while
+    # ``Document.embed``, MindRoom's prefetch and batch paths embed documents.
+    # Upstream issue: tracking gap; searching agno-agi/agno issues and PRs found no query/document input type.
+    # Upstream PR: none identified.
+    # Remove when: Agno's Embedder exposes separate query and document embedding and its vector stores call them.
+    # Coverage: tests/test_openai_embedder.py::test_prefixes_mark_sync_queries_and_documents,
+    # tests/test_openai_embedder.py::test_prefixes_mark_async_queries_and_documents.
+    def response(self, text: str, *, query: bool = False) -> CreateEmbeddingResponse:
         """Request a single embedding synchronously."""
-        return self.client.embeddings.create(**self.embedding_request_parameters(text))
+        return self.client.embeddings.create(**self.embedding_request_parameters(text, query=query))
 
     def get_embedding(self, text: str) -> list[float]:
-        """Request one embedding; raise a classified error on failure."""
+        """Request one query embedding; raise a classified error on failure."""
         try:
-            response = self.response(text)
+            response = self.response(text, query=True)
         except Exception as exc:
             raise self.embedding_request_error(exc) from None
         return self.validate_embedding_response(response, 1)[0]
 
     def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-        """Request one embedding and its usage payload; raise a classified error on failure."""
+        """Request one document embedding and its usage payload; raise a classified error on failure."""
         try:
             response = self.response(text)
         except Exception as exc:
@@ -91,19 +101,19 @@ class OpenAIEmbedderWithHooks(OpenAIEmbedder, ABC):
         return embedding, usage.model_dump() if usage else None
 
     async def async_get_embedding(self, text: str) -> list[float]:
-        """Request a single embedding asynchronously; raise a classified error on failure."""
+        """Request a single query embedding asynchronously; raise a classified error on failure."""
         try:
             response: CreateEmbeddingResponse = await self.aclient.embeddings.create(
-                **self.embedding_request_parameters(text),
+                **self.embedding_request_parameters(text, query=True),
             )
         except Exception as exc:
             raise self.embedding_request_error(exc) from None
         return self.validate_embedding_response(response, 1)[0]
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-        """Request one embedding and its usage payload asynchronously; raise a classified error on failure."""
+        """Request one document embedding and its usage payload asynchronously; raise a classified error on failure."""
         try:
-            response = await self.aclient.embeddings.create(**self.embedding_request_parameters(text))
+            response = await self.aclient.embeddings.create(**self.embedding_request_parameters(text, query=False))
         except Exception as exc:
             raise self.embedding_request_error(exc) from None
         embedding = self.validate_embedding_response(response, 1)[0]
@@ -113,8 +123,10 @@ class OpenAIEmbedderWithHooks(OpenAIEmbedder, ABC):
     async def async_get_embeddings_batch_and_usage(
         self,
         texts: list[str],
+        *,
+        query: bool = False,
     ) -> tuple[list[list[float]], list[dict[str, Any] | None]]:
-        """Request embeddings for a batch of texts; raise a classified error on failure.
+        """Request document embeddings (or query embeddings) for a batch of texts; raise a classified error on failure.
 
         A failing batch fails the whole call instead of retrying per item:
         after a batch-wide auth failure every retry repeats the same rejected
@@ -128,7 +140,7 @@ class OpenAIEmbedderWithHooks(OpenAIEmbedder, ABC):
             batch_texts = texts[i : i + self.batch_size]
             try:
                 response: CreateEmbeddingResponse = await self.aclient.embeddings.create(
-                    **self.embedding_request_parameters(batch_texts),
+                    **self.embedding_request_parameters(batch_texts, query=query),
                 )
             except Exception as exc:
                 raise self.embedding_request_error(exc) from None
