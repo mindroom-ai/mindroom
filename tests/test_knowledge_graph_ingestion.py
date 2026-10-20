@@ -35,7 +35,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Coroutine, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -895,16 +895,39 @@ async def test_a_wake_does_not_start_a_second_pass_loop_for_a_graph_still_fillin
     at = int(time.time()) - 10
     for thread in ("$t1", "$t2"):
         _seed(config, paths, f"!room:x:{thread}", [f"r{thread}"], at=at)
-    task = asyncio.create_task(_worker(config, paths, store).run())
-    try:
-        await asyncio.wait_for(store.holding.wait(), timeout=10)
-        wake_knowledge_graph_ingestion(after_seconds=0)
-        # Long enough for a second pass loop to reach its first episode, were one started.
-        await asyncio.sleep(0.2)
-        assert store.most_in_flight == 1
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    worker = _worker(config, paths, store)
+    looks = 0
+    looked = asyncio.Event()
+    fills = 0
+    real_looks, real_fill = worker._maintained_graphs, worker._fill
+
+    async def counting_looks(config: Config) -> list[GraphScope]:
+        nonlocal looks
+        scopes = await real_looks(config)
+        looks += 1
+        looked.set()
+        return scopes
+
+    def counting_fill(graph_name: str) -> Coroutine[None, None, None]:
+        nonlocal fills
+        fills += 1
+        return real_fill(graph_name)
+
+    with patch.object(worker, "_maintained_graphs", counting_looks), patch.object(worker, "_fill", counting_fill):
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(store.holding.wait(), timeout=10)
+            before = looks
+            wake_knowledge_graph_ingestion(after_seconds=0)
+            while looks == before:
+                looked.clear()
+                await asyncio.wait_for(looked.wait(), timeout=10)
+            # The look the wake started returned, and the worker decides on new pass loops before it next waits.
+            await asyncio.sleep(0)
+            assert fills == 1
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     # Stopping the worker stops the graph's pass too, instead of leaving it extracting.
     assert store.in_flight == 0
@@ -959,6 +982,47 @@ async def test_one_graphs_clean_pass_does_not_clear_another_graphs_failure(tmp_p
     assert await worker._ingest_graph(config, pal, now=T0 + 40) is True
 
     assert store.sessions() == ["!room:x:$good"]
+    assert knowledge_graph_failure() is not None
+
+
+@dataclass
+class _HeldSessionStore(_FakeStore):
+    """Holds one conversation's episodes until released, while the others go through."""
+
+    held_session: str = ""
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    holding: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
+        if usage.session_id == self.held_session:
+            self.holding.set()
+            await self.release.wait()
+        await super().add_episode(scope, episode, usage)
+
+
+@pytest.mark.asyncio
+async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_path: Path) -> None:
+    """Another graph's clean pass ending meanwhile does not clear a failure from a pass that is still running."""
+    config = _config()
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths = _paths(tmp_path)
+    store = _HeldSessionStore(failing={"!room:x:$bad"}, held_session="!room:x:$slow")
+    _seed(config, paths, "!room:x:$bad", ["b1"], at=T0)
+    _seed(config, paths, "!room:x:$slow", ["s1"], at=T0 + 5)
+    _seed(config, paths, "!room:x:$good", ["g1"], agent="pal")
+    worker = _worker(config, paths, store)
+    mind = asyncio.create_task(worker._ingest_graph(config, graph_scope("mind", config, paths, None), now=T0 + 100))
+    try:
+        await asyncio.wait_for(store.holding.wait(), timeout=10)
+        assert knowledge_graph_failure() is not None
+
+        assert await worker._ingest_graph(config, graph_scope("pal", config, paths, None), now=T0 + 100) is True
+        assert knowledge_graph_failure() is not None
+    finally:
+        store.release.set()
+        await mind
+
+    assert sorted(store.sessions()) == ["!room:x:$good", "!room:x:$slow"]
     assert knowledge_graph_failure() is not None
 
 

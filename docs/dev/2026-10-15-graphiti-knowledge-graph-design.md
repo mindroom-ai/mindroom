@@ -172,7 +172,7 @@ Rejected: several episodes of one graph at once, because Graphiti resolves an ep
 Passes shared by all graphs were tried first and rejected on evidence: each pass waited for its slowest graph, so a build took the sum of each pass's slowest graph rather than the longest graph's own backlog.
 On the same deployment, a rebuild after raising the generation had three of four graphs idle for over an hour, with hundreds of their conversations still waiting, while one graph extracted a single long conversation.
 The assumption that the graph with the longest backlog bounds a build either way held only if that graph was also the slowest in every pass.
-Each graph therefore runs its passes back to back on its own and waits `interval_seconds` only after one of its own passes added nothing.
+Each graph therefore runs its passes back to back on its own, and a graph whose pass added nothing is looked at again every `interval_seconds`.
 
 ### A generation number starts graphs over without a restart
 
@@ -226,7 +226,7 @@ Rejected: deleting old graphs automatically, because a name is a one-way hash of
 ## Limitations
 
 - Redacting or deleting a message does not remove facts already extracted from it; raising `knowledge_graph.generation` rebuilds the graphs from the remaining conversations of the last `backfill_days`, and the previous graphs, which replies and voice calls already running finish on, keep their data until `knowledge_graph/` is deleted with MindRoom stopped.
-- A config reload that changes the embedder or the generation during a graph's pass can add that pass's remaining episodes to the old graph, and the graph that replaces it starts filling only after that pass ends.
+- A config reload that changes the embedder or the generation during a graph's pass can add that pass's remaining episodes to the old graph while the graph that replaces it is already filling.
 - More graphs than can be filled at once take turns pass by pass, so with many private instances a graph can wait for others' passes before each of its own.
 - Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.
 

@@ -226,6 +226,11 @@ class KnowledgeGraphIngestionWorker:
         self._clean = {name: clean for name, clean in self._clean.items() if name in names}
         return scopes
 
+    def _hold_failure(self, scope: GraphScope, message: str, exc: Exception) -> None:
+        """Report a graph's failure and keep health failing until its next clean pass, however others' passes end."""
+        self._clean[scope.graph_name] = False
+        _report_failure(message, exc, agent=scope.agent_name)
+
     async def _ingest_graph(self, config: Config, scope: GraphScope, *, now: float) -> bool:
         """Ingest up to ``max_sessions_per_cycle`` of one graph's idle conversations with new turns.
 
@@ -242,7 +247,16 @@ class KnowledgeGraphIngestionWorker:
                 names = entity_names(config, agent_keys)
                 budget = config.knowledge_graph.ingest.max_sessions_per_cycle
                 state = await asyncio.to_thread(self._load_state, scope.graph_name, now)
-                due, changed = await asyncio.to_thread(self._due_sessions, config, scope, state, now, budget)
+                due, changed, unreadable = await asyncio.to_thread(
+                    self._due_sessions,
+                    config,
+                    scope,
+                    state,
+                    now,
+                    budget,
+                )
+                for exc in unreadable:
+                    self._hold_failure(scope, "Knowledge graph ingestion could not read a conversation", exc)
                 if changed:
                     await self._persist(scope.graph_name, state)
                     # A conversation finished while listing is a clean outcome; one it could not read saved its failure.
@@ -260,7 +274,7 @@ class KnowledgeGraphIngestionWorker:
                 if any(entry["failures"] for entry in state["sessions"].values()):
                     outcomes.append(False)
             except Exception as exc:
-                _report_failure("Knowledge graph ingestion failed for an agent", exc, agent=scope.agent_name)
+                self._hold_failure(scope, "Knowledge graph ingestion failed for an agent", exc)
                 outcomes.append(False)
                 progressed = []
         # A pass that tried nothing says nothing about the graph, so it neither holds nor clears a failure.
@@ -281,8 +295,11 @@ class KnowledgeGraphIngestionWorker:
         state: _GraphState,
         now: float,
         limit: int,
-    ) -> tuple[list[_DueSession], bool]:
-        """Return up to ``limit`` idle conversations with new turns, and whether listing changed the state."""
+    ) -> tuple[list[_DueSession], bool, list[Exception]]:
+        """Return up to ``limit`` idle conversations with new turns, whether listing changed the state, and read errors.
+
+        The caller reports each conversation it could not read on the event loop, where its graph's health is held.
+        """
         settings = config.knowledge_graph.ingest
         storage = create_session_storage(
             scope.agent_name,
@@ -294,6 +311,7 @@ class KnowledgeGraphIngestionWorker:
             since = int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS
             due: list[_DueSession] = []
             changed = False
+            unreadable: list[Exception] = []
             for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=since):
                 if len(due) >= limit:
                     break
@@ -309,11 +327,7 @@ class KnowledgeGraphIngestionWorker:
                     runs = session_runs(storage, session_id)
                 except Exception as exc:
                     # One conversation that cannot be read must not stop the agent's others.
-                    _report_failure(
-                        "Knowledge graph ingestion could not read a conversation",
-                        exc,
-                        agent=scope.agent_name,
-                    )
+                    unreadable.append(exc)
                     _back_off(state["sessions"].setdefault(session_id, _new_session_state()), now)
                     changed = True
                     continue
@@ -324,7 +338,7 @@ class KnowledgeGraphIngestionWorker:
                     changed = True
                     continue
                 due.append(_DueSession(session_id, updated_at, runs))
-            return due, changed
+            return due, changed, unreadable
         finally:
             storage.close()
 
@@ -349,11 +363,7 @@ class KnowledgeGraphIngestionWorker:
             finished = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
         except Exception as exc:
             # One conversation whose redactions cannot be checked must not stop the agent's others.
-            _report_failure(
-                "Knowledge graph ingestion could not check a conversation for redactions",
-                exc,
-                agent=scope.agent_name,
-            )
+            self._hold_failure(scope, "Knowledge graph ingestion could not check a conversation for redactions", exc)
             _back_off(state["sessions"].setdefault(session.session_id, _new_session_state()), now)
             await self._persist(scope.graph_name, state)
             return None
@@ -433,7 +443,7 @@ class KnowledgeGraphIngestionWorker:
             # Only output the model got wrong counts here; a setup error such as a bad embedder waits like an outage.
             entry["bad_outputs"] = entry["bad_outputs"] + 1 if isinstance(exc, UnusableExtractionError) else 0
             entry["failing_since"] = entry["failing_since"] or now
-            _report_failure("Knowledge graph ingestion failed", exc, agent=scope.agent_name)
+            self._hold_failure(scope, "Knowledge graph ingestion failed", exc)
             if entry["bad_outputs"] < _MAX_BAD_OUTPUTS and now - entry["failing_since"] < _MAX_FAILING_SECONDS:
                 _back_off(entry, now)
                 await self._persist(scope.graph_name, state)

@@ -36,7 +36,7 @@ Extraction needs a model with reliable structured output; small local models oft
 |---|---|---|
 | `knowledge_graph.model` | none | A key of `models` that extracts entities and facts; required once any agent enables the graph |
 | `knowledge_graph.extraction_instructions` | empty | Text with your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards, or to the last `backfill_days` of conversations once you raise `knowledge_graph.generation` |
-| `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time a graph waits after an ingestion pass that added nothing; a pass that added something is followed at once |
+| `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | How often MindRoom looks for new turns in a graph whose last ingestion pass added nothing; a pass that added something is followed at once |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations each graph adds per pass; the rest wait for the next |
 | `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once; a single longer message is cut to this length |

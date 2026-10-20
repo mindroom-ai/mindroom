@@ -2532,7 +2532,7 @@
       "properties": {
         "interval_seconds": {
           "default": 600,
-          "description": "Seconds a graph waits after an ingestion pass that ingested nothing; one that did is followed at once",
+          "description": "How often to check a graph whose last ingestion pass ingested nothing; one that did is followed at once",
           "minimum": 30,
           "title": "Interval Seconds",
           "type": "integer"
