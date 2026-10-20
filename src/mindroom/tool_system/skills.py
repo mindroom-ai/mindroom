@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
 # The functions Agno generates for an agent's skills; none has an owning toolkit.
-# The first two only read a skill, while get_skill_script can also run its scripts.
+# All three only read a skill; Dynamic Workflow participants get get_skill_script only through an operator rule.
 SKILL_READ_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference"})
 SKILL_FUNCTION_NAMES = SKILL_READ_FUNCTION_NAMES | {"get_skill_script"}
 _WORKSPACE_SKILLS_DIRNAME = "skills"
@@ -56,6 +56,20 @@ MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 # Worker code can plant any number of entries, so a workspace skill listing examines only this many.
 _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES = 1024
+_GET_SKILL_SCRIPT_DESCRIPTION = (
+    "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
+)
+# Agno's skills prompt lines that describe get_skill_script as running scripts, and what MindRoom offers instead.
+_SCRIPT_PROMPT_LINES = (
+    (
+        "`get_skill_script(skill_name, script_path, execute=False)` - Read or run scripts",
+        "`get_skill_script(skill_name, script_path)` - Read scripts",
+    ),
+    (
+        "Use `get_skill_script` to read or execute scripts from a skill",
+        "Use `get_skill_script` to read scripts from a skill; it never runs them",
+    ),
+)
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -157,9 +171,29 @@ class _MindroomSkills(Skills):
         self._only = None if only is None else frozenset(only)
         super().__init__(loaders=loaders)
 
+    # AGNO_COMPAT: Skills runs a skill script in the process that holds the Skills object.
+    # Reason: Agno 3.0.9 Skills._get_skill_script with execute=True runs a script as a subprocess of the primary
+    #   process, outside the worker, hooks, and approval rules of the agent's shell, and its tool description,
+    #   parameter docs, and skills prompt offer that; MindRoom's get_skill_script, below, takes no execute
+    #   argument and only reads scripts, and its description and the skills prompt say so.
+    # Upstream issue: Tracking gap; no issue for offering read-only skill scripts has been identified.
+    # Upstream PR: None identified.
+    # Remove when: Skills lets an application leave script execution out of its tool and prompt.
+    # Coverage: tests/test_skills.py::test_skill_scripts_are_read_and_never_run;
+    #   tests/test_skills.py::test_the_skills_prompt_describes_get_skill_script_as_read_only.
+    def get_system_prompt_snippet(self) -> str:
+        """Return Agno's skills prompt, describing get_skill_script as the read-only function MindRoom offers."""
+        snippet = super().get_system_prompt_snippet()
+        for agno_line, line in _SCRIPT_PROMPT_LINES:
+            snippet = snippet.replace(agno_line, line)
+        return snippet
+
     def get_tools(self) -> list[Function]:
         """Return skill access tools with MindRoom's reserved output-path argument."""
         tools = super().get_tools()
+        for tool in tools:
+            if tool.name == "get_skill_script":
+                tool.description = _GET_SKILL_SCRIPT_DESCRIPTION
         if self._output_file_policy is None:
             return tools
         return [wrap_function_for_output_files(tool, self._output_file_policy) for tool in tools]
@@ -235,32 +269,16 @@ class _MindroomSkills(Skills):
             return super()._get_skill_reference(skill_name, reference_path)
         return json.dumps({"skill_name": skill_name, "reference_path": reference_path, **content})
 
-    def _get_skill_script(
+    # Read-only on purpose; see the AGNO_COMPAT note on get_system_prompt_snippet.
+    def _get_skill_script(  # ty: ignore[invalid-method-override]  # MindRoom offers no execute, args, or timeout
         self,
         skill_name: str,
         script_path: str | None = None,
-        execute: bool = False,
-        args: list[str] | None = None,
-        timeout: int = 30,
     ) -> str:
-        if execute and skill_name in self._workspace_roots_by_skill:
-            return json.dumps(
-                {
-                    "error": "Workspace skill scripts cannot be executed through get_skill_script",
-                    "skill_name": skill_name,
-                    "script_path": script_path,
-                },
-            )
-        content = None if execute else self._read_workspace_skill_file(skill_name, "scripts", script_path)
+        content = self._read_workspace_skill_file(skill_name, "scripts", script_path)
         if content is not None:
             return json.dumps({"skill_name": skill_name, "script_path": script_path, **content})
-        return super()._get_skill_script(
-            skill_name=skill_name,
-            script_path=script_path,
-            execute=execute,
-            args=args,
-            timeout=timeout,
-        )
+        return super()._get_skill_script(skill_name=skill_name, script_path=script_path)
 
     def _read_workspace_skill_file(
         self,

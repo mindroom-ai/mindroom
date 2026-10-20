@@ -151,7 +151,7 @@ Step-by-step instructions...
 
 Do not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.
 A workspace skill you create or edit becomes available on your next run, without any config change.
-Workspace skill scripts cannot be executed through get_skill_script; run them with your shell tools if you have them.
+get_skill_script only reads skill scripts; run a script with your shell tools if you have them.
 """
 
 HIDDEN_TOOL_CALLS_PROMPT = """Your tool calls are not visible to the user in the chat. They only see your text responses.

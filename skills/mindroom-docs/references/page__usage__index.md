@@ -207,6 +207,8 @@ agents:
       - usage_stats
 ```
 
+`mindroom config init` and newly provisioned hosted instances give the starter Mind agent these self-service functions.
+
 Enable `get_all_usage()` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
 
 ```yaml

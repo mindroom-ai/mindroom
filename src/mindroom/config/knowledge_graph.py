@@ -15,7 +15,7 @@ class KnowledgeGraphIngestConfig(BaseModel):
     interval_seconds: int = Field(
         default=600,
         ge=30,
-        description="Seconds to wait after an ingestion pass that ingested nothing; one that did is followed at once",
+        description="How often to check a graph whose last ingestion pass ingested nothing; one that did is followed at once",
     )
     # At least a second, so a conversation updated after a pass always carries a later update time than it had then.
     idle_seconds: int = Field(

@@ -3922,7 +3922,7 @@ Extraction needs a model with reliable structured output; small local models oft
 |---|---|---|
 | `knowledge_graph.model` | none | A key of `models` that extracts entities and facts; required once any agent enables the graph |
 | `knowledge_graph.extraction_instructions` | empty | Text with your own guidance for extraction, added after the built-in instructions, such as which topics, systems, or kinds of facts matter in your organization; it applies to what is added afterwards, or to the last `backfill_days` of conversations once you raise `knowledge_graph.generation` |
-| `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | Time to wait after an ingestion pass that added nothing; a pass that added something is followed at once |
+| `knowledge_graph.ingest.interval_seconds` | `600` (min 30) | How often MindRoom looks for new turns in a graph whose last ingestion pass added nothing; a pass that added something is followed at once |
 | `knowledge_graph.ingest.idle_seconds` | `120` (min 1) | How long a conversation must be quiet before its new turns are added |
 | `knowledge_graph.ingest.max_sessions_per_cycle` | `10` (min 1) | Conversations each graph adds per pass; the rest wait for the next |
 | `knowledge_graph.ingest.max_episode_chars` | `24000` (1000 to 60000) | Largest piece of a conversation sent for extraction at once; a single longer message is cut to this length |
@@ -3932,7 +3932,7 @@ Extraction needs a model with reliable structured output; small local models oft
 | `knowledge_graph.generation` | `0` (integer, min 0) | Raise it to start every graph over without restarting MindRoom |
 
 With the defaults, new turns reach the graph 2 to 12 minutes after a conversation goes quiet, plus extraction time, and later when many conversations are waiting.
-Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once.
+Up to four agents' graphs are filled at the same time, counting each requester of a private agent separately, so the extraction model can receive requests for four graphs at once; graphs take turns for those places pass by pass, so one graph's long backlog does not hold up the others.
 Facts are embedded with [`memory.embedder`](https://docs.mindroom.chat/memory/#embedder).
 The graph database runs inside MindRoom and keeps every graph in memory, so MindRoom's memory use grows with the graphs.
 Changing the embedder or raising `knowledge_graph.generation` starts new, empty graphs that fill again from conversations active within `backfill_days`, which pays for that extraction again, charged to each conversation's requester.
@@ -4128,10 +4128,10 @@ Agents see their available skills in the system prompt and load details with the
 
 - `get_skill_instructions(skill_name)` loads the full instructions for a skill
 - `get_skill_reference(skill_name, reference_path)` reads a reference document
-- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` reads or executes a script
+- `get_skill_script(skill_name, script_path)` reads a script
 
-Workspace skill scripts can be read with `get_skill_script`, but not executed through it.
-Agents with shell or file execution tools can still run workspace files through those tools.
+`get_skill_script` never runs a script, whichever skill it comes from.
+Agents with a shell tool run scripts with it, where their shell commands run.
 
 Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
 A workspace skill created during a turn becomes available on the next agent run, not in the same response.
@@ -5658,6 +5658,7 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
 
 Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
 
@@ -6229,6 +6230,8 @@ agents:
     tools:
       - usage_stats
 ```
+
+`mindroom config init` and newly provisioned hosted instances give the starter Mind agent these self-service functions.
 
 Enable `get_all_usage()` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
 
@@ -7471,6 +7474,7 @@ Use them for agents with many optional tools.
 | `initial` | bool | `false` | Send a deferred tool as an ordinary tool on every request; requires `defer: true`. |
 
 A tool with neither flag is eager and appears in every request.
+The starter Mind agent from `mindroom config init` keeps `shell`, `coding`, `memory`, `scheduler`, `update_awareness`, `todo`, and `matrix_message` eager and defers its other tools.
 
 ```yaml
 agents:
@@ -12851,7 +12855,7 @@ The runtime guidance every agent gets still follows, such as its tool execution 
 `system_prompt` is limited to 64 KiB, and `model`, `minimal`, and `continue_subagent` work as for other subagents.
 An authored subagent with `delegate` can author further copies only within its own `tools`, `skills`, and `knowledge` lists: a copy that omits `tools` inherits its tools, except `delegate` at the maximum depth, one that also omits `skills` or `knowledge` inherits those, and an authored subagent with any of these lists cannot start an unauthored copy of its caller; other agents it delegates to keep their own tools, skills, and knowledge.
 Typical uses are reading untrusted pages or email with only read tools, an independent critique without the caller's conversation, and a cheap specialist on a fast model.
-A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, a kept configured skill can run its scripts, and file tools can still read `files`-mode knowledge bases.
+A tool subset narrows what the child is offered, not what its principal can reach, so code-execution tools such as `shell` or `script` in a subset can still reach the caller's other tools, and file tools can still read `files`-mode knowledge bases.
 
 ```python
 run_subagent(
@@ -13077,7 +13081,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
-    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads or runs a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
+    Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
     A participant used by several steps continues one session.

@@ -172,14 +172,9 @@ class SkillTools:
         self,
         skill_name: str,
         script_path: str | None = None,
-        execute: bool = False,
-        args: list[str] | None = None,  # noqa: ARG002 - the agent's tool schema offers it
-        timeout: int = 30,  # noqa: ARG002, ASYNC109 - the agent's tool schema offers it
         mindroom_output_path: str | None = None,
     ) -> str:
-        """Load one file under a skill's scripts/; a review never runs scripts."""
-        if execute:
-            return _refusal("Scripts never run during a skill review; load the script without execute.")
+        """Load one file under a skill's scripts/."""
         return await self._view(skill_name, _support_path("scripts", script_path), mindroom_output_path)
 
     async def _view(self, skill_name: str, relative_path: str | None, output_path: str | None) -> str:
