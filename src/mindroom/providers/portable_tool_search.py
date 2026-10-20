@@ -158,16 +158,24 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
 
 
 def _json_object(value: object) -> dict[str, Any] | None:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            # Agno accepts Python-literal arguments on direct calls, so the wrapper does too.
+    """Return a JSON-serializable object parsed like Agno parses tool arguments, or None.
+
+    Model output can be malformed in many ways (unhashable literals, sets, deep nesting), so any failure means
+    "not an object" rather than an error that would fail the run.
+    """
+    try:
+        if isinstance(value, str):
             try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                # Agno accepts Python-literal arguments on direct calls, so the wrapper does too.
                 value = ast.literal_eval(value)
-            except (ValueError, SyntaxError):
-                return None
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
+        if not isinstance(value, dict):
+            return None
+        json.dumps(value)
+    except Exception:  # Agno's argument parsing likewise treats any failure as undecodable.
+        return None
+    return cast("dict[str, Any]", value)
 
 
 def _tool_name(tool: dict[str, Any]) -> object:

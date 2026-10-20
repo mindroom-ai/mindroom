@@ -148,6 +148,32 @@ def test_resolve_accepts_python_literal_arguments_like_agno() -> None:
     assert json.loads(resolved["function"]["arguments"]) == {"id": 7}
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{{"name": "crm_lookup"}}',
+        "{'name': 'crm_lookup', 'arguments': {'id': {1, 2}}}",
+        "[" * 100_000 + "]" * 100_000,
+    ],
+)
+def test_resolve_leaves_unparseable_or_non_json_arguments_for_the_fallback(arguments: str) -> None:
+    # Weak models emit these; they must reach the guidance fallback instead of failing the run.
+    call = _call("c1", "call_tool", arguments)
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert resolved is call
+
+
+def test_projection_wraps_unparseable_stored_arguments_as_empty() -> None:
+    # A stored call with malformed arguments must not break every later request in its thread.
+    assistant = Message(role="assistant", tool_calls=[_call("c1", "crm_lookup", '{{"id": 1}}')])
+
+    projected, _ = project_portable_request([assistant], None, DEFERRED)
+
+    assert json.loads(projected[0].tool_calls[0]["function"]["arguments"]) == {"name": "crm_lookup", "arguments": {}}
+
+
 def test_resolve_merges_top_level_extras_into_arguments() -> None:
     # Covers background_after on the wrapper and arguments a weaker model flattened beside the name.
     call = _call("c1", "call_tool", '{"name": "crm_lookup", "customer_id": 7, "background_after": 0}')

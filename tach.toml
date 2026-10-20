@@ -8025,6 +8025,7 @@ visibility = [
     "mindroom.providers.media_fallback",
     "mindroom.providers.stream_retry",
     "mindroom.providers.claude_prompt_cache",
+    "mindroom.providers.portable_tool_search",
     "mindroom.tool_call_budget",
     "mindroom.skill_learning.capture",
     "mindroom.skill_learning.reviewer",
@@ -8045,6 +8046,7 @@ expose = [
     "install_retry_cycle_hooks",
     "install_client_factories",
     "install_request_preparation",
+    "install_tool_call_rewrite",
 ]
 
 
