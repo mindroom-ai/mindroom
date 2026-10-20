@@ -52,7 +52,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail, and Outlook calendars but not SharePoint.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail and calendars, and Microsoft To Do but not SharePoint.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -179,6 +179,7 @@ The description of an online meeting cannot be replaced, because that would remo
 
 The lists include the requester's default Tasks list and the list of flagged Outlook messages.
 Due dates are calendar dates without a time of day.
+List and task listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Updating a task's notes replaces them completely.
 
 ## Approvals For Writes
@@ -231,7 +232,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
 | `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
-| `not_found` | The item does not exist, a task was looked up in another list, or the connected account cannot see it. |
+| `not_found` | The item does not exist or the connected account cannot see it. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
 | `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
