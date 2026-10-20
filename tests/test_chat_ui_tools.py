@@ -1571,21 +1571,27 @@ async def test_reading_a_canvas_state_decrypts_copies_in_encrypted_rooms(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_reading_a_large_canvas_state_follows_its_sidecar(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """State too large for one event arrives as a long-text sidecar."""
+async def test_reading_a_large_canvas_state_follows_its_sidecar(tmp_path: Path) -> None:
+    """State too large for one event arrives as a long-text sidecar, and its fields are read from the download."""
     context = _context(tmp_path)
     _serve_event(context, _canvas_source(context, share_state=True))
-    _serve_relations(context, _state_copy(msgtype="m.file", url="mxc://example.org/state"))
+    _serve_relations(
+        context,
+        _state_copy(
+            msgtype="m.file",
+            url="mxc://example.org/state",
+            **{"io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"}},
+        ),
+    )
+    payload = {"version": 1, "json": '{"notes":"long"}', "inputs": '{"#rate":"7"}'}
+    context.client.download = AsyncMock(
+        return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(payload).encode()),
+    )
 
-    async def resolved(source: dict[str, object], _client: object) -> dict[str, object]:
-        return {**source, "content": {"version": 1, "json": '{"notes":"long"}'}}
+    result = await _read(context)
 
-    monkeypatch.setattr("mindroom.custom_tools.chat_ui.resolve_event_source_content", resolved)
-
-    assert (await _read(context))["state"] == {"notes": "long"}
+    assert (result["state"], result["inputs"]) == ({"notes": "long"}, {"#rate": "7"})
+    context.client.download.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -140,6 +140,29 @@ _HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
 _UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
 _UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
 
+# The Matrix message fields readers of a stored message use. An attachment holds
+# whatever its uploader wrote, and what it resolves to is stored with every
+# message naming it, so only these and MindRoom's own namespaced metadata are kept.
+# A shown layer has no edit wrapper of its own, so ``m.new_content`` is not one.
+_STORED_MESSAGE_FIELDS = frozenset(
+    {
+        "msgtype",
+        "body",
+        "format",
+        "formatted_body",
+        "m.mentions",
+        "m.relates_to",
+        "url",
+        "file",
+        "info",
+        "filename",
+        "geo_uri",
+        "org.matrix.msc3245.voice",
+        "org.matrix.msc1767.audio",
+    },
+)
+_MINDROOM_KEY_PREFIXES = ("io.mindroom.", "com.mindroom.")
+
 
 class _HydrationError(RuntimeError):
     """A conversation could not be built from the server."""
@@ -1331,10 +1354,12 @@ class ConversationHydrator:
         resolved_content = resolved.get("content")
         if isinstance(resolved_content, dict) and not holds_unresolved_sidecar(resolved_content):
             # An edit's attachment holds the whole edit, so what the message
-            # shows is its new content, and a shown layer has no edit wrapper of
-            # its own, which is what settling an unreadable attachment keeps too.
-            shown = visible_content(resolved_content)
-            return {key: value for key, value in shown.items() if key != "m.new_content"}
+            # shows is its new content, as settling an unreadable one keeps too.
+            return {
+                key: value
+                for key, value in visible_content(resolved_content).items()
+                if key in _STORED_MESSAGE_FIELDS or key.startswith(_MINDROOM_KEY_PREFIXES)
+            }
         logger.info(
             "conversation_refresh_sidecar_unresolved",
             event_id=event_id,
