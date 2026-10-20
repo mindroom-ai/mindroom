@@ -14,6 +14,7 @@ describe("connection popup", () => {
     closed: boolean;
     close: ReturnType<typeof vi.fn>;
     location: { href: string };
+    document: Document;
   };
   let controller: AbortController;
   beforeEach(() => {
@@ -22,6 +23,7 @@ describe("connection popup", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     controller = new AbortController();
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
@@ -78,6 +80,28 @@ describe("connection popup", () => {
     // The page that answered closes itself.
     expect(popup.close).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("shows a themed placeholder until the authorization page replaces it", async () => {
+    document.documentElement.classList.add("dark");
+    let answer!: (value: typeof authorization) => void;
+    const operation = connectWithPopup(
+      "mail",
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      controller.signal,
+    );
+    document.documentElement.classList.remove("dark");
+    expect(popup.document.body.textContent).toBe("Opening sign-in…");
+    expect(popup.document.documentElement.style.colorScheme).toBe("dark");
+    expect(popup.location.href).toBe("about:blank");
+    answer(authorization);
+    await Promise.resolve();
+    expect(popup.location.href).toBe(authorization.auth_url);
+    say("connected");
+    await expect(operation).resolves.toBeUndefined();
   });
 
   it("rejects blocked popup without starting authorization", async () => {

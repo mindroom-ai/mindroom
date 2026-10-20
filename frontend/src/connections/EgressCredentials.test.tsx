@@ -172,6 +172,7 @@ describe("egress credentials page", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     vi.mocked(fetch).mockImplementation(async (input, options) => {
@@ -2011,6 +2012,7 @@ describe("who can change a shared agent's keys", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     } as unknown as Window);
     const google = {
       ...service,
